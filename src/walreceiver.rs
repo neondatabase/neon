@@ -21,7 +21,7 @@ pub fn thread_main() {
     println!("Starting WAL receiver");
 
     runtime.block_on( async {
-        walreceiver_main().await;
+        let _unused = walreceiver_main().await;
     });
 }
 

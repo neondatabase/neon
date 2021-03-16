@@ -17,7 +17,7 @@ fn main() -> Result<(), Error> {
         walreceiver::thread_main();
     });
 
-    handler.join();     // never returns.
+    let _unused = handler.join();     // never returns.
 
     Ok(())
 }
