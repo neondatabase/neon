@@ -6,6 +6,9 @@ mod walreceiver;
 
 use std::io::Error;
 
+#[macro_use]
+extern crate lazy_static;
+
 fn main() -> Result<(), Error> {
 
 
