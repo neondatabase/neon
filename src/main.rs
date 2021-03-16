@@ -1,10 +1,22 @@
+use std::thread;
 
-use postgres_protocol::message::backend::ReplicationMessage;
-use tokio_stream::StreamExt;
-use tokio_postgres::{connect_replication, Error, NoTls, ReplicationMode};
+mod page_cache;
+mod walreader;
+mod walreceiver;
 
-#[tokio::main] // By default, tokio_postgres uses the tokio crate as its runtime.
-async fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> {
+
+
+    // Launch the WAL receiver thread. It will try to connect to the WAL safekeeper,
+    // and stream the WAL. If the connection is lost, it will reconnect on its own.
+    // We just fire and forget it here.
+    let handler = thread::spawn(|| {
+        // thread code
+        walreceiver::thread_main();
+    });
+
+    handler.join();     // never returns.
+
     let conninfo = "host=localhost port=65432 user=stas dbname=postgres";
     // form replication connection
     let (mut rclient, rconnection) =

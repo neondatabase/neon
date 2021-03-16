@@ -333,6 +333,7 @@ checksum = "624a8340c38c1b80fd549087862da4ba43e08858af025b236e509b6649fc13d5"
 name = "pageserver"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "postgres-protocol",
  "tokio",
  "tokio-postgres",
