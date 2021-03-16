@@ -39,7 +39,7 @@ enum CacheEntry {
 
     PageImage {
         img: Bytes
-    }
+    },
 
     WALRecord {
         will_init: bool,
