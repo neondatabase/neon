@@ -1,7 +1,7 @@
 use std::thread;
 
 mod page_cache;
-mod walreader;
+mod waldecoder;
 mod walreceiver;
 
 use std::io::Error;
