@@ -96,8 +96,9 @@ pub fn test_get_page_at_lsn()
 
     println!("testing GetPage@LSN for block {}", tag.unwrap().blknum);
     match get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee) {
-        Ok(img) => {
-            println!("{:X?}", img);
+        Ok(_img) => {
+            // This prints out the whole page image.
+            //println!("{:X?}", img);
         },
         Err(error) => {
             println!("GetPage@LSN failed: {}", error);
