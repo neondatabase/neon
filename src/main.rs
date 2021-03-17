@@ -1,11 +1,13 @@
 use std::thread;
 
 mod page_cache;
+mod page_service;
 mod waldecoder;
 mod walreceiver;
-mod page_service;
+mod walredo;
 
 use std::io::Error;
+use std::time::Duration;
 
 fn main() -> Result<(), Error> {
     let mut threads = Vec::new();
@@ -25,11 +27,18 @@ fn main() -> Result<(), Error> {
     });
     threads.push(page_server_thread);
 
+    // Since the GetPage@LSN network interface isn't working yet, mock that
+    // by calling the GetPage@LSN function with a random block every 5 seconds.
+    loop {
+        thread::sleep(Duration::from_secs(5));
 
-    // never returns.
-    for t in threads {
-        t.join().unwrap()
+        page_cache::test_get_page_at_lsn();
     }
 
-    Ok(())
+    // never returns.
+    //for t in threads {
+    //    t.join().unwrap()
+    //}
+    //let _unused = handler.join();     // never returns.
+    //Ok(())
 }

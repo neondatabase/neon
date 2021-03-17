@@ -2,6 +2,8 @@ use tokio_stream::StreamExt;
 use tokio::runtime;
 
 use crate::waldecoder::WalStreamDecoder;
+use crate::page_cache;
+use crate::page_cache::BufferTag;
 
 use tokio_postgres::{connect_replication, NoTls, Error, ReplicationMode};
 use postgres_protocol::message::backend::ReplicationMessage;
@@ -69,16 +71,36 @@ pub async fn walreceiver_main() -> Result<(), Error> {
                 waldecoder.feed_bytes(xlog_data.data());
 
                 loop {
-                    let rec = waldecoder.poll_decode();
+                    if let Some((lsn, recdata)) = waldecoder.poll_decode() {
 
-                    if rec.is_none() {
+                        let decoded = crate::waldecoder::decode_wal_record(lsn, recdata.clone());
+                        println!("decoded record");
+
+                        // Put the WAL record to the page cache. We make a separate copy of
+                        // it for every block it modifes. (The actual WAL record is kept in
+                        // a Bytes, which uses a reference counter for the underlying buffer,
+                        // so having multiple copies of it doesn't cost that much)
+                        for blk in decoded.blocks.iter() {
+                            let tag = BufferTag {
+                                spcnode: blk.rnode_spcnode,
+                                dbnode: blk.rnode_dbnode,
+                                relnode: blk.rnode_relnode,
+                                forknum: blk.forknum as u32,
+                                blknum: blk.blkno
+                            };
+
+                            let rec = page_cache::WALRecord {
+                                lsn: lsn,
+                                will_init: blk.will_init || blk.apply_image,
+                                rec: recdata.clone()
+                            };
+
+                            page_cache::put_wal_record(tag, rec);
+                        }
+
+                    } else {
                         break;
                     }
-
-                    crate::waldecoder::decode_wal_record(&rec.unwrap());
-                    println!("decoded record");
-
-                    // TODO: Put the WAL record to the page cache
                 }
             }
             ReplicationMessage::PrimaryKeepAlive(_keepalive) => {

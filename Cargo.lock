@@ -343,6 +343,7 @@ dependencies = [
  "bytes",
  "lazy_static",
  "postgres-protocol",
+ "rand",
  "tokio",
  "tokio-postgres",
  "tokio-stream",

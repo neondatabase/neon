@@ -4,9 +4,7 @@
 //#![allow(dead_code)]
 //include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-use bytes::{Buf, BufMut, BytesMut};
-
-use crate::page_cache::WALRecord;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use std::cmp::min;
 
@@ -82,7 +80,7 @@ impl WalStreamDecoder {
         self.inputbuf.extend_from_slice(buf);
     }
 
-    pub fn poll_decode(&mut self) -> Option<WALRecord> {
+    pub fn poll_decode(&mut self) -> Option<(u64, Bytes)> {
 
         loop {
             // parse and verify page boundaries as we go
@@ -91,12 +89,12 @@ impl WalStreamDecoder {
             if self.lsn % WAL_SEGMENT_SIZE == 0 {
                 // parse long header
 
-                if self.inputbuf.remaining() < SizeOfXLogShortPHD {
+                if self.inputbuf.remaining() < SizeOfXLogLongPHD {
                     return None;
                 }
                 
                 self.decode_XLogLongPageHeaderData();
-                self.lsn += SizeOfXLogShortPHD as u64;
+                self.lsn += SizeOfXLogLongPHD as u64;
 
                 
                 // TODO: verify the fields in the header
@@ -105,12 +103,12 @@ impl WalStreamDecoder {
             } else if self.lsn % (XLOG_BLCKSZ as u64) == 0 {
                 // parse page header
 
-                if self.inputbuf.remaining() < SizeOfXLogLongPHD {
+                if self.inputbuf.remaining() < SizeOfXLogShortPHD {
                     return None;
                 }
 
                 self.decode_XLogPageHeaderData();
-                self.lsn += SizeOfXLogLongPHD as u64;
+                self.lsn += SizeOfXLogShortPHD as u64;
 
                 // TODO: verify the fields in the header
 
@@ -168,10 +166,7 @@ impl WalStreamDecoder {
                 if self.contlen == 0 {
                     let recordbuf = std::mem::replace(&mut self.recordbuf, BytesMut::new());
 
-                    let result = WALRecord {
-                        lsn: self.reclsn,
-                        rec: recordbuf.freeze(),
-                    };
+                    let result = (self.reclsn, recordbuf.freeze());
 
                     if self.lsn % 8 != 0 {
                         self.padlen = 8 - (self.lsn % 8) as u32;
@@ -194,7 +189,7 @@ impl WalStreamDecoder {
     #[allow(non_snake_case)]
     fn decode_XLogPageHeaderData(&mut self) -> XLogPageHeaderData {
 
-        let buf = &mut self.recordbuf;
+        let buf = &mut self.inputbuf;
         
         // FIXME: Assume little-endian
         
@@ -205,6 +200,11 @@ impl WalStreamDecoder {
             xlp_pageaddr: buf.get_u64_le(),
             xlp_rem_len: buf.get_u32_le()
         };
+        // 4 bytes of padding, on 64-bit systems
+        buf.advance(4);
+
+        // FIXME: check that hdr.xlp_rem_len matches self.contlen
+        //println!("next xlog page (xlp_rem_len: {})", hdr.xlp_rem_len);
 
         return hdr;
     }
@@ -214,7 +214,6 @@ impl WalStreamDecoder {
 
         let hdr : XLogLongPageHeaderData = XLogLongPageHeaderData {
             std: self.decode_XLogPageHeaderData(),
-            // FIXME: eat padding
             xlp_sysid: self.recordbuf.get_u64_le(),
             xlp_seg_size: self.recordbuf.get_u32_le(),
             xlp_xlog_blcksz: self.recordbuf.get_u32_le(),
@@ -241,7 +240,7 @@ const BKPBLOCK_FORK_MASK:u8 =	0x0F;
 const _BKPBLOCK_FLAG_MASK:u8 =	0xF0;
 const BKPBLOCK_HAS_IMAGE:u8 =	0x10;	/* block data is an XLogRecordBlockImage */
 const BKPBLOCK_HAS_DATA:u8 =	0x20;
-const _BKPBLOCK_WILL_INIT:u8 =	0x40;	/* redo will re-init the page */
+const BKPBLOCK_WILL_INIT:u8 =	0x40;	/* redo will re-init the page */
 const BKPBLOCK_SAME_REL:u8 =	0x80;	/* RelFileNode omitted, same as previous */
 
 /* Information stored in bimg_info */
@@ -250,23 +249,24 @@ const BKPIMAGE_IS_COMPRESSED:u8 =	0x02;	/* page image is compressed */
 const BKPIMAGE_APPLY:u8 =		0x04;	/* page image should be restored during replay */
 
 
-struct DecodedBkpBlock {
+pub struct DecodedBkpBlock {
     /* Is this block ref in use? */
     //in_use: bool,
 
     /* Identify the block this refers to */
-    rnode_spcnode: u32,
-    rnode_dbnode: u32,
-    rnode_relnode: u32,
-    forknum: u8,
-    blkno: u32,
+    pub rnode_spcnode: u32,
+    pub rnode_dbnode: u32,
+    pub rnode_relnode: u32,
+    pub forknum: u8,
+    pub blkno: u32,
 
     /* copy of the fork_flags field from the XLogRecordBlockHeader */
     flags: u8,
 
     /* Information on full-page image, if any */
     has_image: bool,		/* has image, even for consistency checking */
-    apply_image: bool,	/* has image that should be restored */
+    pub apply_image: bool,	/* has image that should be restored */
+    pub will_init: bool,
     //char	   *bkp_image;
     hole_offset: u16,
     hole_length: u16,
@@ -282,12 +282,19 @@ struct DecodedBkpBlock {
 #[allow(non_upper_case_globals)]
 const SizeOfXLogRecord:u32 = 24;
 
+pub struct DecodedWALRecord {
+    pub lsn: u64,
+    pub record: Bytes,       // raw XLogRecord
+
+    pub blocks: Vec<DecodedBkpBlock>
+}
+
 //
 // Routines to decode a WAL record and figure out which blocks are modified
 //
-pub fn decode_wal_record(rec: &WALRecord) {
+pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
 
-    let mut buf = rec.rec.clone();
+    let mut buf = rec.clone();
 
     // FIXME: assume little-endian here
     let xl_tot_len = buf.get_u32_le();
@@ -315,6 +322,7 @@ pub fn decode_wal_record(rec: &WALRecord) {
 
     let mut max_block_id = 0;
     let mut datatotal: u32 = 0;
+    let mut blocks: Vec<DecodedBkpBlock> = Vec::new();
     while buf.remaining() > datatotal as usize {
         let block_id = buf.get_u8();
 
@@ -355,6 +363,7 @@ pub fn decode_wal_record(rec: &WALRecord) {
                     flags: 0,
                     has_image: false,
                     apply_image: false,
+                    will_init: false,
                     hole_offset: 0,
                     hole_length: 0,
                     bimg_len: 0,
@@ -376,14 +385,12 @@ pub fn decode_wal_record(rec: &WALRecord) {
 		}
 		max_block_id = block_id;
 
-                //blk.in_use = true; // FIXME: pointless
-                //blk.apply_image = false;
-
                 fork_flags = buf.get_u8();
                 blk.forknum = fork_flags & BKPBLOCK_FORK_MASK;
                 blk.flags = fork_flags;
 		blk.has_image = (fork_flags & BKPBLOCK_HAS_IMAGE) != 0;
 		blk.has_data = (fork_flags & BKPBLOCK_HAS_DATA) != 0;
+		blk.will_init = (fork_flags & BKPBLOCK_WILL_INIT) != 0;
 
                 blk.data_len = buf.get_u16_le();
 		/* cross-check that the HAS_DATA flag is set iff data_length > 0 */
@@ -532,6 +539,8 @@ pub fn decode_wal_record(rec: &WALRecord) {
                 blk.blkno = buf.get_u32_le();
 
                 println!("this record affects {}/{}/{} blk {}",rnode_spcnode, rnode_dbnode, rnode_relnode, blk.blkno);
+
+                blocks.push(blk);
             }
 
             _ => {
@@ -551,5 +560,10 @@ pub fn decode_wal_record(rec: &WALRecord) {
      */
 
     // Since we don't care about the data payloads here, we're done.
-    
+
+    return DecodedWALRecord {
+        lsn: lsn,
+        record: rec,
+        blocks: blocks
+    }
 }
