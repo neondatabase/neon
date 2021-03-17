@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use bytes::Bytes;
+use lazy_static::lazy_static;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct BufferTag {
@@ -14,7 +15,6 @@ pub struct BufferTag {
 pub struct CacheKey {
     pub tag: BufferTag,
     pub lsn: u64
-
 }
 
 pub struct WALRecord {
