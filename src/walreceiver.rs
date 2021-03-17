@@ -1,5 +1,6 @@
 use tokio_stream::StreamExt;
 use tokio::runtime;
+use tokio::time::{sleep, Duration};
 
 use crate::waldecoder::WalStreamDecoder;
 use crate::page_cache;
@@ -23,7 +24,13 @@ pub fn thread_main() {
     println!("Starting WAL receiver");
 
     runtime.block_on( async {
-        let _unused = walreceiver_main().await;
+        loop {
+            let _res = walreceiver_main().await;
+
+            // TODO: print/log the error
+            println!("WAL streaming connection failed, retrying in 5 seconds...");
+            sleep(Duration::from_secs(5)).await;
+        }
     });
 }
 
@@ -109,6 +116,5 @@ pub async fn walreceiver_main() -> Result<(), Error> {
             _ => (),
         }
     }
-
     return Ok(());
 }
