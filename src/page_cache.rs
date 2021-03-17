@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::error::Error;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use rand::Rng;
@@ -93,19 +94,26 @@ pub fn test_get_page_at_lsn()
         }
     }
 
-    println!("testing GetPage@LSN: {}", tag.unwrap().blknum);
-    
-    get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee);
-    
+    println!("testing GetPage@LSN for block {}", tag.unwrap().blknum);
+    match get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee) {
+        Ok(img) => {
+            println!("{:X?}", img);
+        },
+        Err(error) => {
+            println!("GetPage@LSN failed: {}", error);
+        }
+    }
 }
 
 
 //
 // GetPage@LSN
 //
+// Returns an 8k page image
+//
 #[allow(dead_code)]
 #[allow(unused_variables)]
-pub fn get_page_at_lsn(tag: BufferTag, lsn: u64)
+pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>>
 {
     // TODO:
     //
@@ -149,13 +157,25 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64)
         }
     }
 
+    let page_img: Bytes;
+
     if !records.is_empty() {
         records.reverse();
 
-        walredo::apply_wal_records(tag, base_img, &records).expect("could not apply WAL records");
+        page_img = walredo::apply_wal_records(tag, base_img, &records)?;
 
         println!("applied {} WAL records to produce page image at LSN {}", records.len(), lsn);
+
+        // Here, we could put the new page image back to the page cache, to save effort if the
+        // same (or later) page version is requested again. It's a tradeoff though, as each
+        // page image consumes some memory
+    } else if base_img.is_some() {
+        page_img = base_img.unwrap();
+    } else {
+        return Err("could not find page image")?;
     }
+
+    return Ok(page_img);
 }
 
 //

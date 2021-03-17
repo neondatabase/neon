@@ -76,7 +76,6 @@ impl WalStreamDecoder {
     }
 
     pub fn feed_bytes(&mut self, buf: &[u8]) {
-        println!("feed_bytes called: {}", buf.len());
         self.inputbuf.extend_from_slice(buf);
     }
 
@@ -84,8 +83,6 @@ impl WalStreamDecoder {
 
         loop {
             // parse and verify page boundaries as we go
-            println!("parsing at {} {} (cont {} pad {})", self.lsn, self.lsn % 8192,
-                     self.contlen, self.padlen);
             if self.lsn % WAL_SEGMENT_SIZE == 0 {
                 // parse long header
 
@@ -137,8 +134,6 @@ impl WalStreamDecoder {
                 self.reclsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
                 self.lsn += 4;
-
-                println!("reading record with len {}", xl_tot_len);
 
                 self.recordbuf.clear();
                 self.recordbuf.reserve(xl_tot_len as usize);
@@ -310,8 +305,6 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
     if buf.remaining() != remaining as usize {
         //TODO error
     }
-
-    println!("rmgrid {}", _xl_rmid);
 
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
@@ -538,7 +531,7 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
                 
                 blk.blkno = buf.get_u32_le();
 
-                println!("this record affects {}/{}/{} blk {}",rnode_spcnode, rnode_dbnode, rnode_relnode, blk.blkno);
+                //println!("this record affects {}/{}/{} blk {}",rnode_spcnode, rnode_dbnode, rnode_relnode, blk.blkno);
 
                 blocks.push(blk);
             }
