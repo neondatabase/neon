@@ -191,6 +191,28 @@ pub fn advance_last_valid_lsn(lsn: u64)
     shared.last_valid_lsn = lsn;
 }
 
+//
+pub fn advance_first_valid_lsn(lsn: u64)
+{
+    let mut shared = PAGECACHE.lock().unwrap();
+
+    // Can't move backwards.
+    assert!(lsn >= shared.first_valid_lsn);
+
+    // Can't overtake last_valid_lsn (except when we're
+    // initializing the system and last_valid_lsn hasn't been set yet.
+    assert!(shared.last_valid_lsn == 0 || lsn < shared.last_valid_lsn);
+
+    shared.first_valid_lsn = lsn;
+}
+
+pub fn get_last_valid_lsn() -> u64
+{
+    let shared = PAGECACHE.lock().unwrap();
+
+    return shared.last_valid_lsn;
+}
+
 
 //
 // Simple test function for the WAL redo code:

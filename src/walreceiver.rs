@@ -60,16 +60,31 @@ async fn walreceiver_main() -> Result<(), Error> {
     let identify_system = rclient.identify_system().await?;
 
     //
-    // Start streaming the WAL.
+    // Start streaming the WAL, from where we left off previously.
     //
-    // TODO: currently, we start streaming at the primary's last insert location.
-    // We should start at the last LSN that we had streamed previously, instead.
+    // If this is the first time we start up, start streaming from the primary's
+    // current end of WAL.
     //
-    let mut physical_stream = rclient
-        .start_physical_replication(None, identify_system.xlogpos(), None)
-        .await.unwrap();
+    // TODO: We should persist the last valid LSN over page server restarts (and
+    // all the data, too, of course). And have some mechanism of bootstrapping.
+    //
+    let last_valid_lsn = page_cache::get_last_valid_lsn();
+    let startpoint = {
+        if last_valid_lsn != 0 {
+            tokio_postgres::types::Lsn::from(last_valid_lsn)
+        } else {
+            let primary_lsn = identify_system.xlogpos();
+            page_cache::advance_first_valid_lsn(u64::from(primary_lsn));
 
-    let mut waldecoder = WalStreamDecoder::new(u64::from(identify_system.xlogpos()));
+            primary_lsn
+        }
+    };
+
+    let mut physical_stream = rclient
+        .start_physical_replication(None, startpoint, None)
+        .await?;
+
+    let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
     
     while let Some(replication_message) = physical_stream.next().await {
         match replication_message? {

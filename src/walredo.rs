@@ -1,12 +1,15 @@
 //
 // WAL redo
 //
-// We rely on Postgres to perform WAL redo for us. We launch
-// a postgres process in special "wal redo" mode that's similar
-// to single-user mode. We then pass the WAL record and the previous
-// page image, if any, to the postgress process, and ask the
-// process to apply it. Then we get the page image back. Communication
-// with the process happens via stdin/stdout
+// We rely on Postgres to perform WAL redo for us. We launch a
+// postgres process in special "wal redo" mode that's similar to
+// single-user mode. We then pass the the previous page image, if any,
+// and all the WAL records we want to apply, to the postgress
+// process. Then we get the page image back. Communication with the
+// postgres process happens via stdin/stdout
+//
+// See src/backend/tcop/zenith_wal_redo.c for the other side of
+// this communication.
 //
 // TODO: Even though the postgres code runs in a separate process,
 // it's not a secure sandbox.
