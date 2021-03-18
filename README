@@ -1,0 +1,102 @@
+Page Server
+-----------
+
+The Page Server is responsible for all operations on a number of
+"chunks" of relation data. A chunk corresponds to a PostgreSQL
+relation segment (i.e. one max. 1 GB file in the data directory), but
+it holds all the different versions of every page in the segment that
+are still needed by the system.
+
+Determining which chunk each Page Server holds is handled elsewhere. (TODO:
+currently, there is only one Page Server which holds all chunks)
+
+The Page Server has a few different duties:
+
+- Respond to GetPage@LSN requests from the Compute Nodes
+- Receive WAL from WAL safekeeper
+- Replay WAL that's applicable to the chunks that the Page Server maintains
+- Backup to S3
+
+
+The Page Server consists of multiple threads that operate on a shared
+cache of page versions:
+
+
+                                           | WAL
+                                           V
+                                   +--------------+
+                                   |              |
+                                   | WAL receiver |
+                                   |              |
+                                   +--------------+
+                                                                                 +----+
+                  +---------+                              ..........            |    |
+                  |         |                              .        .            |    |
+ GetPage@LSN      |         |                              . backup .  ------->  | S3 |
+------------->    |  Page   |         page cache           .        .            |    |
+                  | Service |                              ..........            |    |
+   page           |         |                                                    +----+
+<-------------    |         |
+                  +---------+
+
+                             ...................................
+                             .                                 .
+                             . Garbage Collection / Compaction .
+                             ...................................
+
+Legend:
+
++--+
+|  |   A thread or multi-threaded service
++--+
+
+....
+.  .   Component that we will need, but doesn't exist at the moment. A TODO.
+....
+
+--->   Data flow
+<---
+
+
+Page Service
+------------
+
+The Page Service listens for GetPage@LSN requests from the Compute Nodes,
+and responds with pages from the page cache.
+
+
+WAL Receiver
+------------
+
+The WAL receiver connects to the external WAL safekeeping service (or
+directly to the primary) using PostgreSQL physical streaming
+replication, and continuously receives WAL. It decodes the WAL records,
+and stores them to the page cache.
+
+
+Page Cache
+----------
+
+The Page Cache is a data structure, to hold all the different page versions.
+It is accessed by all the other threads, to perform their duties.
+
+Currently, the page cache is implemented fully in-memory. TODO: Store it
+on disk. Define a file format.
+
+
+TODO: Garbage Collection / Compaction
+-------------------------------------
+
+Periodically, the Garbage Collection / Compaction thread runs
+and applies pending WAL records, and removes old page versions that
+are no longer needed.
+
+
+TODO: Backup service
+--------------------
+
+The backup service is responsible for periodically pushing the chunks to S3.
+
+TODO: How/when do restore from S3? Whenever we get a GetPage@LSN request for
+a chunk we don't currently have? Or when an external Control Plane tells us?
+

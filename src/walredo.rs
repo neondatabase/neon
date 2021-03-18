@@ -25,12 +25,8 @@ use crate::page_cache::WALRecord;
 // Apply given WAL records ('records') over an old page image. Returns
 // new page image.
 //
-//
-// FIXME: This is completely untested ATM. Will surely crash and burn.
-//
 pub fn apply_wal_records(tag: BufferTag, base_img: Option<Bytes>, records: &Vec<WALRecord>) -> Result<Bytes, Error>
 {
-
     //
     // Start postgres binary in special WAL redo mode.
     //
