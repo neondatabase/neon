@@ -30,15 +30,27 @@ enum BeMessage {
     CommandComplete
 }
 
+
 #[derive(Debug)]
 struct FeStartupMessage {
     version: u32,
-    body: Bytes
+    kind: StartupRequestCode,
+}
+
+#[derive(Debug)]
+enum StartupRequestCode {
+    Cancel,
+    NegotiateSsl,
+    NegotiateGss,
+    Normal
 }
 
 impl FeStartupMessage {
     pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>> {
         const MAX_STARTUP_PACKET_LENGTH: u32 = 10000;
+        const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
+        const NEGOTIATE_SSL_CODE: u32  = (1234 << 16) | 5679;
+        const NEGOTIATE_GSS_CODE: u32  = (1234 << 16) | 5680;
 
         if buf.len() < 4 {
             return Ok(None);
@@ -53,9 +65,16 @@ impl FeStartupMessage {
         }
 
         let version = BigEndian::read_u32(&buf[4..8]);
-        buf.advance(len as usize);
 
-        Ok(Some(FeMessage::StartupMessage(FeStartupMessage{ version, body: Bytes::new() })))
+        let kind = match version {
+            CANCEL_REQUEST_CODE => StartupRequestCode::Cancel,
+            NEGOTIATE_SSL_CODE => StartupRequestCode::NegotiateSsl,
+            NEGOTIATE_GSS_CODE => StartupRequestCode::NegotiateGss,
+            _ => StartupRequestCode::Normal
+        };
+
+        buf.advance(len as usize);
+        Ok(Some(FeMessage::StartupMessage(FeStartupMessage{ version, kind})))
     }
 }
 
@@ -256,15 +275,24 @@ impl Connection {
     async fn run(&mut self) -> Result<()> {
 
         loop {
-            let message = self.read_message().await?;
 
-            match message {
-                // TODO: support ssl request
+            match self.read_message().await? {
                 Some(FeMessage::StartupMessage(m)) => {
                     println!("got message {:?}", m);
-                    self.write_message_noflush(&BeMessage::AuthenticationOk).await?;
-                    self.write_message(&BeMessage::ReadyForQuery).await?;
-                    self.init_done = true;
+
+                    match m.kind {
+                        StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
+                            let mut b = Bytes::from("N");
+                            self.stream.write_buf(&mut b).await?;
+                            self.stream.flush().await?;
+                        }
+                        StartupRequestCode::Normal => {
+                            self.write_message_noflush(&BeMessage::AuthenticationOk).await?;
+                            self.write_message(&BeMessage::ReadyForQuery).await?;
+                            self.init_done = true;
+                        },
+                        StartupRequestCode::Cancel => return Ok(())
+                    }
                 },
                 Some(FeMessage::Query(m)) => {
                     self.write_message_noflush(&BeMessage::RowDescription).await?;
