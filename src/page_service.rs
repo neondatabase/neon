@@ -1,3 +1,7 @@
+//
+// The Page Service listens for client connections and serves their GetPage@LSN requests
+//
+
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::runtime;
@@ -113,6 +117,7 @@ impl FeMessage {
 
 pub fn thread_main() {
 
+    // Create a new thread pool
     let runtime = runtime::Runtime::new().unwrap();
 
     let listen_address = "127.0.0.1:5430";

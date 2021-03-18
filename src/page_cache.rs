@@ -1,6 +1,12 @@
+//
+// Page Cache holds all the different all the different page versions and WAL records
+//
+//
+//
+
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::error::Error;
+use std::sync::Mutex;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use rand::Rng;
@@ -56,56 +62,6 @@ lazy_static! {
 
 
 // Public interface functions
-
-
-//
-// Simple test function for the WAL redo code:
-//
-// 1. Pick a page from the page cache at random.
-// 2. Request that page with GetPage@LSN, using Max LSN (i.e. get the latest page version)
-//
-//
-pub fn test_get_page_at_lsn()
-{
-    // for quick testing of the get_page_at_lsn() funcion.
-    //
-    // Get a random page from the page cache. Apply all its WAL, by requesting
-    // that page at the highest lsn.
-
-    let mut tag: Option<BufferTag> = None;
-
-    {
-        let pagecache = PAGECACHE.lock().unwrap();
-
-        if pagecache.is_empty() {
-            println!("page cache is empty");
-            return;
-        }
-
-        // Find nth entry in the map, where
-        let n = rand::thread_rng().gen_range(0..pagecache.len());
-        let mut i = 0;
-        for (key, _e) in pagecache.iter() {
-            if i == n {
-                tag = Some(key.tag);
-                break;
-            }
-            i +=1;
-        }
-    }
-
-    println!("testing GetPage@LSN for block {}", tag.unwrap().blknum);
-    match get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee) {
-        Ok(_img) => {
-            // This prints out the whole page image.
-            //println!("{:X?}", img);
-        },
-        Err(error) => {
-            println!("GetPage@LSN failed: {}", error);
-        }
-    }
-}
-
 
 //
 // GetPage@LSN
@@ -180,7 +136,7 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
 }
 
 //
-// Add WAL record
+// Adds a WAL record to the page cache
 //
 #[allow(dead_code)]
 #[allow(unused_variables)]
@@ -197,4 +153,54 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
 
     let oldentry = pagecache.insert(key, entry);
     assert!(oldentry.is_none());
+}
+
+
+
+//
+// Simple test function for the WAL redo code:
+//
+// 1. Pick a page from the page cache at random.
+// 2. Request that page with GetPage@LSN, using Max LSN (i.e. get the latest page version)
+//
+//
+pub fn test_get_page_at_lsn()
+{
+    // for quick testing of the get_page_at_lsn() funcion.
+    //
+    // Get a random page from the page cache. Apply all its WAL, by requesting
+    // that page at the highest lsn.
+
+    let mut tag: Option<BufferTag> = None;
+
+    {
+        let pagecache = PAGECACHE.lock().unwrap();
+
+        if pagecache.is_empty() {
+            println!("page cache is empty");
+            return;
+        }
+
+        // Find nth entry in the map, where n is picked at random
+        let n = rand::thread_rng().gen_range(0..pagecache.len());
+        let mut i = 0;
+        for (key, _e) in pagecache.iter() {
+            if i == n {
+                tag = Some(key.tag);
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    println!("testing GetPage@LSN for block {}", tag.unwrap().blknum);
+    match get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee) {
+        Ok(_img) => {
+            // This prints out the whole page image.
+            //println!("{:X?}", img);
+        },
+        Err(error) => {
+            println!("GetPage@LSN failed: {}", error);
+        }
+    }
 }

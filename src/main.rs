@@ -1,3 +1,7 @@
+//
+// Main entry point for the Page Server executable
+//
+
 use std::thread;
 
 mod page_cache;
@@ -20,6 +24,9 @@ fn main() -> Result<(), Error> {
         walreceiver::thread_main();
     });
     threads.push(walreceiver_thread);
+
+    // GetPage@LSN requests are served by another thread. (It uses async I/O,
+    // but the code in page_service sets up it own thread pool for that)
 
     let page_server_thread = thread::spawn(|| {
         // thread code

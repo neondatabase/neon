@@ -1,3 +1,11 @@
+//
+// WAL receiver
+//
+// The WAL receiver connects to the WAL safekeeper service, and streams WAL.
+// For each WAL record, it decodes the record to figure out which data blocks
+// the record affects, and adds the records to the page cache.
+//
+
 use tokio_stream::StreamExt;
 use tokio::runtime;
 use tokio::time::{sleep, Duration};
@@ -12,16 +20,14 @@ use postgres_protocol::message::backend::ReplicationMessage;
 //
 // This is the entry point for the WAL receiver thread.
 //
-// TODO: if the connection is lost, reconnect.
-//
 pub fn thread_main() {
+
+    println!("Starting WAL receiver");
 
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap(); // FIXME don't unwrap
-
-    println!("Starting WAL receiver");
+        .unwrap();
 
     runtime.block_on( async {
         loop {
@@ -34,7 +40,7 @@ pub fn thread_main() {
     });
 }
 
-pub async fn walreceiver_main() -> Result<(), Error> {
+async fn walreceiver_main() -> Result<(), Error> {
 
     // Connect to the database in replication mode.
     println!("connecting...");
@@ -52,8 +58,6 @@ pub async fn walreceiver_main() -> Result<(), Error> {
     });
 
     let identify_system = rclient.identify_system().await?;
-
-    println!("identify_system");
 
     //
     // Start streaming the WAL.
