@@ -109,6 +109,10 @@ async fn walreceiver_main() -> Result<(), Error> {
                             page_cache::put_wal_record(tag, rec);
                         }
 
+                        // Now that this record has been handled, let the page cache know that
+                        // it is up-to-date to this LSN
+                        page_cache::advance_last_valid_lsn(lsn);
+
                     } else {
                         break;
                     }
