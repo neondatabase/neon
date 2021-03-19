@@ -27,13 +27,12 @@ How to test
     /home/heikki/zenith-install/bin/initdb -D /data/zenith-test-db --username=postgres
     /home/heikki/zenith-install/bin/postgres -D /data/zenith-test-db
 
-5. In another terminal, start the page server:
+5. In another terminal, start the page server.
 
-    cd pageserver
-    ./target/debug/pageserver
+    PGDATA=/data/zenith-dummy PATH=/home/heikki/zenith-install/bin:$PATH ./target/debug/pageserver
 
-6. The page server is now running, and should connect to the postgres instance using streaming replication.
-   It should print something like this:
+   It should connect to the postgres instance using streaming replication, and print something
+   like this:
 
     $ PGDATA=/data/zenith-dummy PATH=/home/heikki/zenith-install/bin:$PATH ./target/debug/pageserver
     Starting WAL receiver
@@ -42,7 +41,7 @@ How to test
     connected!
     page cache is empty
 
-7. You can now open another terminal and issue DDL commands. Generated WAL records will
+6. You can now open another terminal and issue DDL commands. Generated WAL records will
    be streamed to the page servers, and attached to blocks that they apply to in its
    page cache
 
@@ -56,7 +55,7 @@ How to test
     INSERT 0 100
     postgres=# 
 
-8. The GetPage@LSN interface to the compute nodes isn't working yet, but to simulate
+7. The GetPage@LSN interface to the compute nodes isn't working yet, but to simulate
    that, the page server generates a test GetPage@LSN call every 5 seconds on a random
    block that's in the page cache. In a few seconds, you should see output from that:
 
