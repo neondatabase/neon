@@ -1,5 +1,83 @@
 Page Server
+===========
+
+
+How to test
 -----------
+
+
+1. Compile and install Postgres from this repository (there are
+   modifications, so vanilla Postgres won't do)
+
+    ./configure --prefix=/home/heikki/zenith-install
+
+2. Compile the page server
+
+    cd pageserver
+    cargo build
+
+3. Create another "dummy" cluster that will be used by the page server when it applies
+   the WAL records. (shouldn't really need this, getting rid of it is a TODO):
+
+    /home/heikki/zenith-install/bin/initdb -D /data/zenith-dummy
+
+
+4. Initialize and start a new postgres cluster
+
+    /home/heikki/zenith-install/bin/initdb -D /data/zenith-test-db --username=postgres
+    /home/heikki/zenith-install/bin/postgres -D /data/zenith-test-db
+
+5. In another terminal, start the page server:
+
+    cd pageserver
+    ./target/debug/pageserver
+
+6. The page server is now running, and should connect to the postgres instance using streaming replication.
+   It should print something like this:
+
+    $ PGDATA=/data/zenith-dummy PATH=/home/heikki/zenith-install/bin:$PATH ./target/debug/pageserver
+    Starting WAL receiver
+    connecting...
+    Starting page server on 127.0.0.1:5430
+    connected!
+    page cache is empty
+
+7. You can now open another terminal and issue DDL commands. Generated WAL records will
+   be streamed to the page servers, and attached to blocks that they apply to in its
+   page cache
+
+    $ psql postgres -U postgres
+    psql (14devel)
+    Type "help" for help.
+    
+    postgres=# create table mydata (i int4);
+    CREATE TABLE
+    postgres=# insert into mydata select g from generate_series(1,100) g;
+    INSERT 0 100
+    postgres=# 
+
+8. The GetPage@LSN interface to the compute nodes isn't working yet, but to simulate
+   that, the page server generates a test GetPage@LSN call every 5 seconds on a random
+   block that's in the page cache. In a few seconds, you should see output from that:
+
+    testing GetPage@LSN for block 0
+    WAL record at LSN 23584576 initializes the page
+    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167DF40
+    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167DF80
+    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167DFC0
+    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E018
+    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E058
+    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E098
+    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E0D8
+    2021-03-19 11:03:13.792 EET [11439] LOG:  applied WAL record at 0/167E118
+    2021-03-19 11:03:13.792 EET [11439] LOG:  applied WAL record at 0/167E158
+    2021-03-19 11:03:13.792 EET [11439] LOG:  applied WAL record at 0/167E198
+    applied 10 WAL records to produce page image at LSN 18446744073709547246
+
+
+
+Architecture
+============
 
 The Page Server is responsible for all operations on a number of
 "chunks" of relation data. A chunk corresponds to a PostgreSQL

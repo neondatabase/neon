@@ -45,7 +45,7 @@ async fn walreceiver_main() -> Result<(), Error> {
     // Connect to the database in replication mode.
     println!("connecting...");
     let (mut rclient, connection) =
-        connect_replication("host=localhost user=heikki", NoTls, ReplicationMode::Physical).await?;
+        connect_replication("host=localhost user=postgres", NoTls, ReplicationMode::Physical).await?;
 
     println!("connected!");
     
