@@ -45,7 +45,7 @@ async fn walreceiver_main() -> Result<(), Error> {
     // Connect to the database in replication mode.
     println!("connecting...");
     let (mut rclient, connection) =
-        connect_replication("host=localhost user=postgres", NoTls, ReplicationMode::Physical).await?;
+        connect_replication("host=localhost user=stas dbname=postgres port=65432", NoTls, ReplicationMode::Physical).await?;
 
     println!("connected!");
     
@@ -111,7 +111,7 @@ async fn walreceiver_main() -> Result<(), Error> {
                                 spcnode: blk.rnode_spcnode,
                                 dbnode: blk.rnode_dbnode,
                                 relnode: blk.rnode_relnode,
-                                forknum: blk.forknum as u32,
+                                forknum: blk.forknum as u8,
                                 blknum: blk.blkno
                             };
 

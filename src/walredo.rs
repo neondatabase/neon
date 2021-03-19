@@ -78,7 +78,7 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes
     buf.put_u32(tag.spcnode);
     buf.put_u32(tag.dbnode);
     buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum);
+    buf.put_u32(tag.forknum as u32);
     buf.put_u32(tag.blknum);
 
     return buf.freeze();
@@ -95,7 +95,7 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes
     buf.put_u32(tag.spcnode);
     buf.put_u32(tag.dbnode);
     buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum);
+    buf.put_u32(tag.forknum as u32);
     buf.put_u32(tag.blknum);
     buf.put(base_img);
 
@@ -123,7 +123,7 @@ fn build_get_page_msg(tag: BufferTag, ) -> Bytes {
     buf.put_u32(tag.spcnode);
     buf.put_u32(tag.dbnode);
     buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum);
+    buf.put_u32(tag.forknum as u32);
     buf.put_u32(tag.blknum);
 
     return buf.freeze();

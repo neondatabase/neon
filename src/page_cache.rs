@@ -4,7 +4,7 @@
 //
 //
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::sync::Mutex;
 use bytes::Bytes;
@@ -13,12 +13,20 @@ use rand::Rng;
 
 use crate::walredo;
 
+#[derive(Eq, PartialEq, Hash, Clone, Copy)]
+pub struct RelTag {
+    pub spcnode: u32,
+    pub dbnode: u32,
+    pub relnode: u32,
+    pub forknum: u8,
+}
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct BufferTag {
     pub spcnode: u32,
     pub dbnode: u32,
     pub relnode: u32,
-    pub forknum: u32,
+    pub forknum: u8,
     pub blknum: u32,
 }
 
@@ -37,6 +45,13 @@ struct PageCacheShared {
     // The actual page cache
     pagecache: BTreeMap<CacheKey, CacheEntry>,
 
+    // Relation n_blocks cache
+    //
+    // This hashtable should be updated together with the pagecache. Now it is
+    // accessed unreasonably often through the smgr_nblocks(). It is better to just
+    // cache it in postgres smgr and ask only on restart.
+    relsize_cache: HashMap<RelTag, u32>,
+
     // What page versions do we hold in the cache? If we get GetPage with
     // LSN < first_valid_lsn, that's an error because we (no longer) hold that
     // page version. If we get a request > last_valid_lsn, we need to wait until
@@ -50,6 +65,7 @@ lazy_static! {
     static ref PAGECACHE: Mutex<PageCacheShared> = Mutex::new(
         PageCacheShared {
             pagecache: BTreeMap::new(),
+            relsize_cache: HashMap::new(),
             first_valid_lsn: 0,
             last_valid_lsn: 0,
         });
@@ -155,7 +171,9 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
     } else if base_img.is_some() {
         page_img = base_img.unwrap();
     } else {
-        return Err("could not find page image")?;
+        let zero_page = vec![0 as u8; 8192];
+        page_img = Bytes::from(zero_page);
+        /* return Err("could not find page image")?; */
     }
 
     return Ok(page_img);
@@ -174,9 +192,20 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
     let entry = CacheEntry::WALRecord(rec);
 
     let mut shared = PAGECACHE.lock().unwrap();
-    let pagecache = &mut shared.pagecache;
+    // let pagecache = &mut shared.pagecache;
 
-    let oldentry = pagecache.insert(key, entry);
+    let rel_tag = RelTag {
+        spcnode: tag.spcnode,
+        dbnode: tag.dbnode,
+        relnode: tag.relnode,
+        forknum: tag.forknum,
+    };
+    let rel_entry = shared.relsize_cache.entry(rel_tag).or_insert(0);
+    if tag.blknum >= *rel_entry {
+        *rel_entry = tag.blknum + 1;
+    }
+
+    let oldentry = shared.pagecache.insert(key, entry);
     assert!(oldentry.is_none());
 }
 
@@ -261,4 +290,30 @@ pub fn test_get_page_at_lsn()
             println!("GetPage@LSN failed: {}", error);
         }
     }
+}
+
+pub fn relsize_inc(rel: &RelTag, to: Option<u32>)
+{
+    let mut shared = PAGECACHE.lock().unwrap();
+    let entry = shared.relsize_cache.entry(*rel).or_insert(0);
+
+    if let Some(to) = to {
+        if to >= *entry {
+            *entry = to + 1;
+        }
+    }
+}
+
+pub fn relsize_get(rel: &RelTag) -> u32
+{
+    let mut shared = PAGECACHE.lock().unwrap();
+    let entry = shared.relsize_cache.entry(*rel).or_insert(0);
+    *entry
+}
+
+pub fn relsize_exist(rel: &RelTag) -> bool
+{
+    let shared = PAGECACHE.lock().unwrap();
+    let relsize_cache = &shared.relsize_cache;
+    relsize_cache.contains_key(rel)
 }

@@ -15,10 +15,13 @@ use tokio::runtime;
 use tokio::task;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, Bytes, BytesMut};
-use std::io::{self};
+use std::io;
+
+use crate::page_cache;
 
 type Result<T> = std::result::Result<T, io::Error>;
 
+#[derive(Debug)]
 enum FeMessage {
     StartupMessage(FeStartupMessage),
     Query(FeQueryMessage),
@@ -36,6 +39,7 @@ enum FeMessage {
     ZenithExtendRequest(ZenithRequest),
 }
 
+#[derive(Debug)]
 enum BeMessage {
     AuthenticationOk,
     ReadyForQuery,
@@ -53,23 +57,23 @@ enum BeMessage {
 
 #[derive(Debug)]
 struct ZenithRequest {
-    spc_node: i32,
-    db_node: i32,
-    rel_node: i32,
+    spcnode: u32,
+    dbnode: u32,
+    relnode: u32,
     forknum: u8,
-    blkno: i32,
+    blkno: u32,
 }
 
 #[derive(Debug)]
 struct ZenithStatusResponse {
     ok: bool,
-    n_blocks: i32,
+    n_blocks: u32,
 }
 
 #[derive(Debug)]
 struct ZenithReadResponse {
     ok: bool,
-    n_blocks: i32,
+    n_blocks: u32,
     page: Bytes
 }
 
@@ -165,11 +169,11 @@ impl FeMessage {
             b'd' => {
                 let smgr_tag = body.get_u8();
                 let zreq = ZenithRequest {
-                    spc_node: body.get_i32(),
-                    db_node: body.get_i32(),
-                    rel_node: body.get_i32(),
+                    spcnode: body.get_u32(),
+                    dbnode: body.get_u32(),
+                    relnode: body.get_u32(),
                     forknum: body.get_u8(),
-                    blkno: body.get_i32(),
+                    blkno: body.get_u32(),
                 };
 
                 // TODO: consider using protobuf or serde bincode for less error prone
@@ -329,19 +333,28 @@ impl Connection {
                 self.stream.write_buf(&mut b).await?;
             }
 
-            BeMessage::ZenithStatusResponse(resp) |
+            BeMessage::ZenithStatusResponse(resp) => {
+                self.stream.write_u8(b'd').await?;
+                self.stream.write_u32(4 + 1 + 1 + 4).await?;
+                self.stream.write_u8(100).await?; /* tag from pagestore_client.h */
+                self.stream.write_u8(resp.ok as u8).await?;
+                self.stream.write_u32(resp.n_blocks).await?;
+            }
+
             BeMessage::ZenithNblocksResponse(resp) => {
                 self.stream.write_u8(b'd').await?;
-                self.stream.write_i32(4 + 1 + 4).await?;
+                self.stream.write_u32(4 + 1 + 1 + 4).await?;
+                self.stream.write_u8(101).await?; /* tag from pagestore_client.h */
                 self.stream.write_u8(resp.ok as u8).await?;
-                self.stream.write_i32(resp.n_blocks).await?;
+                self.stream.write_u32(resp.n_blocks).await?;
             }
 
             BeMessage::ZenithReadResponse(resp) => {
                 self.stream.write_u8(b'd').await?;
-                self.stream.write_i32(4 + 1 + 4 + resp.page.len() as i32).await?;
+                self.stream.write_u32(4 + 1 + 1 + 4 + resp.page.len() as u32).await?;
+                self.stream.write_u8(102).await?; /* tag from pagestore_client.h */
                 self.stream.write_u8(resp.ok as u8).await?;
-                self.stream.write_i32(resp.n_blocks).await?;
+                self.stream.write_u32(resp.n_blocks).await?;
                 self.stream.write_buf(&mut resp.page.clone()).await?;
             }
         }
@@ -425,10 +438,24 @@ impl Connection {
         self.stream.flush().await?;
 
         loop {
-            match self.read_message().await? {
-                Some(FeMessage::ZenithExistsRequest(_)) => {
+            let message = self.read_message().await?;
+
+            // println!("query: {:?}", message);
+
+            match message {
+                Some(FeMessage::ZenithExistsRequest(req)) => {
+
+                    let tag = page_cache::RelTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                    };
+
+                    let exist = page_cache::relsize_exist(&tag);
+
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
+                        ok: exist,
                         n_blocks: 0
                     })).await?
                 }
@@ -444,27 +471,66 @@ impl Connection {
                         n_blocks: 0
                     })).await?
                 }
-                Some(FeMessage::ZenithNblocksRequest(_)) => {
+                Some(FeMessage::ZenithNblocksRequest(req)) => {
+
+                    let tag = page_cache::RelTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                    };
+
+                    let n_blocks = page_cache::relsize_get(&tag);
+
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
-                        n_blocks: 0
+                        n_blocks: n_blocks
                     })).await?
                 }
-                Some(FeMessage::ZenithReadRequest(_)) => {
-                    let zero_page = vec![0 as u8; 8192];
-                    self.write_message(&BeMessage::ZenithReadResponse(ZenithReadResponse {
+                Some(FeMessage::ZenithReadRequest(req)) => {
+                    let buf_tag = page_cache::BufferTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                        blknum: req.blkno
+                    };
+
+                    let inf_lsn = 0xffff_ffff_ffff_eeee;
+                    let msg = BeMessage::ZenithReadResponse(ZenithReadResponse {
                         ok: true,
                         n_blocks: 0,
-                        page: Bytes::from(zero_page),
-                    })).await?
+                        page: page_cache::get_page_at_lsn(buf_tag, inf_lsn).unwrap()
+                    });
+
+                    self.write_message(&msg).await?
+
                 }
-                Some(FeMessage::ZenithCreateRequest(_)) => {
+                Some(FeMessage::ZenithCreateRequest(req)) => {
+                    let tag = page_cache::RelTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                    };
+
+                    page_cache::relsize_inc(&tag, None);
+
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: true,
                         n_blocks: 0
                     })).await?
                 }
-                Some(FeMessage::ZenithExtendRequest(_)) => {
+                Some(FeMessage::ZenithExtendRequest(req)) => {
+                    let tag = page_cache::RelTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                    };
+
+                    page_cache::relsize_inc(&tag, Some(req.blkno));
+
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: true,
                         n_blocks: 0
