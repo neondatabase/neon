@@ -6,14 +6,20 @@ use std::thread;
 
 mod page_cache;
 mod page_service;
+mod restore_s3;
 mod waldecoder;
 mod walreceiver;
 mod walredo;
 
 use std::io::Error;
-use std::time::Duration;
 
 fn main() -> Result<(), Error> {
+
+    // First, restore the latest base backup from S3. (We don't persist anything
+    // to local disk at the moment, so we need to do this at every startup)
+    restore_s3::restore_main();
+    
+
     let mut threads = Vec::new();
 
     // Launch the WAL receiver thread. It will try to connect to the WAL safekeeper,
@@ -34,18 +40,9 @@ fn main() -> Result<(), Error> {
     });
     threads.push(page_server_thread);
 
-    // Since the GetPage@LSN network interface isn't working yet, mock that
-    // by calling the GetPage@LSN function with a random block every 5 seconds.
-    loop {
-        thread::sleep(Duration::from_secs(5));
-
-        page_cache::test_get_page_at_lsn();
-    }
-
     // never returns.
-    //for t in threads {
-    //    t.join().unwrap()
-    //}
-    //let _unused = handler.join();     // never returns.
-    //Ok(())
+    for t in threads {
+        t.join().unwrap()
+    }
+    Ok(())
 }

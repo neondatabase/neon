@@ -8,9 +8,12 @@ edition = "2018"
 
 [dependencies]
 rand = "0.8.3"
+regex = "1.4.5"
 bytes = "1.0.1"
 byteorder = "1.4.3"
+futures = "0.3.13"
 lazy_static = "1.4.0"
+rust-s3 = { git = "https://github.com/hlinnaka/rust-s3", features = ["no-verify-ssl"] }
 tokio = { version = "1.3.0", features = ["full"] }
 tokio-stream = { version = "0.1.4" }
 tokio-postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }

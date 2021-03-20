@@ -45,7 +45,7 @@ async fn walreceiver_main() -> Result<(), Error> {
     // Connect to the database in replication mode.
     println!("connecting...");
     let (mut rclient, connection) =
-        connect_replication("host=localhost user=stas dbname=postgres port=65432", NoTls, ReplicationMode::Physical).await?;
+        connect_replication("host=localhost user=zenith port=65432", NoTls, ReplicationMode::Physical).await?;
 
     println!("connected!");
     
@@ -57,28 +57,13 @@ async fn walreceiver_main() -> Result<(), Error> {
         }
     });
 
-    let identify_system = rclient.identify_system().await?;
+    let _identify_system = rclient.identify_system().await?;
 
     //
     // Start streaming the WAL, from where we left off previously.
     //
-    // If this is the first time we start up, start streaming from the primary's
-    // current end of WAL.
-    //
-    // TODO: We should persist the last valid LSN over page server restarts (and
-    // all the data, too, of course). And have some mechanism of bootstrapping.
-    //
     let last_valid_lsn = page_cache::get_last_valid_lsn();
-    let startpoint = {
-        if last_valid_lsn != 0 {
-            tokio_postgres::types::Lsn::from(last_valid_lsn)
-        } else {
-            let primary_lsn = identify_system.xlogpos();
-            page_cache::advance_first_valid_lsn(u64::from(primary_lsn));
-
-            primary_lsn
-        }
-    };
+    let startpoint = tokio_postgres::types::Lsn::from(last_valid_lsn);
 
     let mut physical_stream = rclient
         .start_physical_replication(None, startpoint, None)

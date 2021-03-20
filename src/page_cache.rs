@@ -210,6 +210,28 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
 }
 
 //
+//
+//
+pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
+{
+    let key = CacheKey {
+        tag: tag,
+        lsn: lsn
+    };
+
+    let entry = CacheEntry::PageImage(img);
+
+    let mut shared = PAGECACHE.lock().unwrap();
+    let pagecache = &mut shared.pagecache;
+
+    let oldentry = pagecache.insert(key, entry);
+    assert!(oldentry.is_none());
+
+    //println!("inserted page image for {}/{}/{}_{} blk {} at {}",
+    //         tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
+}
+
+//
 pub fn advance_last_valid_lsn(lsn: u64)
 {
     let mut shared = PAGECACHE.lock().unwrap();
@@ -221,7 +243,7 @@ pub fn advance_last_valid_lsn(lsn: u64)
 }
 
 //
-pub fn advance_first_valid_lsn(lsn: u64)
+pub fn _advance_first_valid_lsn(lsn: u64)
 {
     let mut shared = PAGECACHE.lock().unwrap();
 
@@ -233,6 +255,17 @@ pub fn advance_first_valid_lsn(lsn: u64)
     assert!(shared.last_valid_lsn == 0 || lsn < shared.last_valid_lsn);
 
     shared.first_valid_lsn = lsn;
+}
+
+pub fn init_valid_lsn(lsn: u64)
+{
+    let mut shared = PAGECACHE.lock().unwrap();
+
+    assert!(shared.first_valid_lsn == 0);
+    assert!(shared.last_valid_lsn == 0);
+
+    shared.first_valid_lsn = lsn;
+    shared.last_valid_lsn = lsn;
 }
 
 pub fn get_last_valid_lsn() -> u64
@@ -250,7 +283,7 @@ pub fn get_last_valid_lsn() -> u64
 // 2. Request that page with GetPage@LSN, using Max LSN (i.e. get the latest page version)
 //
 //
-pub fn test_get_page_at_lsn()
+pub fn _test_get_page_at_lsn()
 {
     // for quick testing of the get_page_at_lsn() funcion.
     //
