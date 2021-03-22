@@ -1036,6 +1036,7 @@ dependencies = [
  "bytes",
  "futures",
  "lazy_static",
+ "postgres",
  "postgres-protocol",
  "rand 0.8.3",
  "regex",
@@ -1149,6 +1150,19 @@ dependencies = [
  "log",
  "wepoll-sys",
  "winapi",
+]
+
+[[package]]
+name = "postgres"
+version = "0.19.0"
+source = "git+https://github.com/kelvich/rust-postgres?branch=replication_rebase#ba723d4a3c94c9ca9a6e52eef1c80291504bab30"
+dependencies = [
+ "bytes",
+ "fallible-iterator",
+ "futures",
+ "log",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]

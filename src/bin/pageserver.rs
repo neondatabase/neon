@@ -4,12 +4,9 @@
 
 use std::thread;
 
-mod page_cache;
-mod page_service;
-mod restore_s3;
-mod waldecoder;
-mod walreceiver;
-mod walredo;
+use pageserver::page_service;
+use pageserver::restore_s3;
+use pageserver::walreceiver;
 
 use std::io::Error;
 
