@@ -11,6 +11,7 @@ use std::env;
 use std::fmt;
 use regex::Regex;
 use bytes::{BytesMut, Buf};
+use log::*;
 
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
@@ -39,7 +40,7 @@ pub fn restore_main() {
         match result {
             Ok(_) => { return; },
             Err(err) => {
-                println!("S3 error: {}", err);
+                error!("S3 error: {}", err);
                 return;
             }
         }
@@ -70,7 +71,7 @@ async fn restore_chunk() -> Result<(), S3Error> {
         bucket: "zenith-testbucket".to_string()
     };
 
-    println!("Restoring from S3...");
+    info!("Restoring from S3...");
 
     // Create Bucket in REGION for BUCKET
     let bucket = Bucket::new_with_path_style(&backend.bucket, backend.region, backend.credentials)?;
@@ -101,7 +102,7 @@ async fn restore_chunk() -> Result<(), S3Error> {
 
                     slurp_futures.push(f);
                 }
-                Err(e) => { println!("unrecognized file: {} ({})", relpath, e); }
+                Err(e) => { warn!("unrecognized file: {} ({})", relpath, e); }
             };
         }
     }
@@ -111,10 +112,10 @@ async fn restore_chunk() -> Result<(), S3Error> {
     }
     page_cache::init_valid_lsn(oldest_lsn);
 
-    println!("{} files to read...", slurp_futures.len());
+    info!("{} files to read...", slurp_futures.len());
 
     future::join_all(slurp_futures).await;
-    println!("restored!");
+    info!("restored!");
 
     Ok(())
 }
@@ -271,7 +272,7 @@ async fn slurp_base_file(bucket: Bucket, s3path: String, parsed: ParsedBaseImage
     // the reqwest::Client object. But that requires changes to rust-s3 itself.
     let (data, code) = bucket.get_object(s3path.clone()).await.unwrap();
 
-    //println!("got response: {} on {}", code, &s3path);
+    trace!("got response: {} on {}", code, &s3path);
     assert_eq!(200, code);
 
     let mut bytes = BytesMut::from(data.as_slice()).freeze();

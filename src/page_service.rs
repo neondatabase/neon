@@ -16,6 +16,7 @@ use tokio::task;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, Bytes, BytesMut};
 use std::io;
+use log::*;
 
 use crate::page_cache;
 
@@ -210,7 +211,7 @@ pub fn thread_main() {
     let runtime = runtime::Runtime::new().unwrap();
 
     let listen_address = "127.0.0.1:5430";
-    println!("Starting page server on {}", listen_address);
+    info!("Starting page server on {}", listen_address);
 
     runtime.block_on(async {
         let _unused = page_service_main(listen_address).await;
@@ -228,7 +229,7 @@ async fn page_service_main(listen_address: &str) {
 
         task::spawn(async move {
             if let Err(err) = conn_handler.run().await {
-                println!("error: {}", err);
+                error!("error: {}", err);
             }
         });
     }
@@ -373,7 +374,7 @@ impl Connection {
 
             match self.read_message().await? {
                 Some(FeMessage::StartupMessage(m)) => {
-                    println!("got message {:?}", m);
+                    trace!("got message {:?}", m);
 
                     match m.kind {
                         StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
@@ -396,7 +397,7 @@ impl Connection {
                     break;
                 }
                 None => {
-                    println!("connection closed");
+                    info!("connection closed");
                     break;
                 }
                 _ => {
@@ -409,7 +410,7 @@ impl Connection {
     }
 
     async fn process_query(&mut self, q : &FeQueryMessage) -> Result<()> {
-        println!("got query {:?}", q.body);
+        trace!("got query {:?}", q.body);
 
         if q.body.starts_with(b"pagestream") {
             self.handle_pagerequests().await

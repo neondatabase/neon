@@ -3,6 +3,7 @@
 //
 
 use std::thread;
+use log::*;
 
 use pageserver::page_service;
 use pageserver::restore_s3;
@@ -11,6 +12,12 @@ use pageserver::walreceiver;
 use std::io::Error;
 
 fn main() -> Result<(), Error> {
+
+    stderrlog::new()
+        .verbosity(3)
+        .module("pageserver")
+        .init().unwrap();
+    info!("starting...");
 
     // First, restore the latest base backup from S3. (We don't persist anything
     // to local disk at the moment, so we need to do this at every startup)

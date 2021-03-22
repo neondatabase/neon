@@ -5,6 +5,7 @@
 // For each WAL record, it decodes the record to figure out which data blocks
 // the record affects, and adds the records to the page cache.
 //
+use log::*;
 
 use tokio_stream::StreamExt;
 use tokio::runtime;
@@ -22,7 +23,7 @@ use postgres_protocol::message::backend::ReplicationMessage;
 //
 pub fn thread_main() {
 
-    println!("Starting WAL receiver");
+    info!("Starting WAL receiver");
 
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
@@ -34,7 +35,7 @@ pub fn thread_main() {
             let _res = walreceiver_main().await;
 
             // TODO: print/log the error
-            println!("WAL streaming connection failed, retrying in 5 seconds...");
+            info!("WAL streaming connection failed, retrying in 5 seconds...");
             sleep(Duration::from_secs(5)).await;
         }
     });
@@ -43,17 +44,17 @@ pub fn thread_main() {
 async fn walreceiver_main() -> Result<(), Error> {
 
     // Connect to the database in replication mode.
-    println!("connecting...");
+    debug!("connecting...");
     let (mut rclient, connection) =
         connect_replication("host=localhost user=zenith port=65432", NoTls, ReplicationMode::Physical).await?;
 
-    println!("connected!");
-    
+    debug!("connected!");
+
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            error!("connection error: {}", e);
         }
     });
 
@@ -75,7 +76,7 @@ async fn walreceiver_main() -> Result<(), Error> {
         match replication_message? {
             ReplicationMessage::XLogData(xlog_data) => {
 
-                println!("received XLogData");
+                trace!("received XLogData");
 
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.
@@ -85,7 +86,6 @@ async fn walreceiver_main() -> Result<(), Error> {
                     if let Some((lsn, recdata)) = waldecoder.poll_decode() {
 
                         let decoded = crate::waldecoder::decode_wal_record(lsn, recdata.clone());
-                        println!("decoded record");
 
                         // Put the WAL record to the page cache. We make a separate copy of
                         // it for every block it modifes. (The actual WAL record is kept in
@@ -119,7 +119,8 @@ async fn walreceiver_main() -> Result<(), Error> {
                 }
             }
             ReplicationMessage::PrimaryKeepAlive(_keepalive) => {
-                println!("received PrimaryKeepAlive");
+                trace!("received PrimaryKeepAlive");
+                // FIXME: Reply, or the connection will time out
             }
             _ => (),
         }

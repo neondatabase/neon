@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use rand::Rng;
+use log::*;
 
 use crate::walredo;
 
@@ -150,7 +151,7 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
                 records.push(rec.clone());
 
                 if rec.will_init {
-                    println!("WAL record at LSN {} initializes the page", rec.lsn);
+                    debug!("WAL record at LSN {} initializes the page", rec.lsn);
                 }
             }
         }
@@ -163,7 +164,7 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
 
         page_img = walredo::apply_wal_records(tag, base_img, &records)?;
 
-        println!("applied {} WAL records to produce page image at LSN {}", records.len(), lsn);
+        debug!("applied {} WAL records to produce page image at LSN {}", records.len(), lsn);
 
         // Here, we could put the new page image back to the page cache, to save effort if the
         // same (or later) page version is requested again. It's a tradeoff though, as each
@@ -227,8 +228,8 @@ pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
     let oldentry = pagecache.insert(key, entry);
     assert!(oldentry.is_none());
 
-    //println!("inserted page image for {}/{}/{}_{} blk {} at {}",
-    //         tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
+    debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
+            tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
 }
 
 //
@@ -297,7 +298,7 @@ pub fn _test_get_page_at_lsn()
         let pagecache = &shared.pagecache;
 
         if pagecache.is_empty() {
-            println!("page cache is empty");
+            info!("page cache is empty");
             return;
         }
 
@@ -313,18 +314,22 @@ pub fn _test_get_page_at_lsn()
         }
     }
 
-    println!("testing GetPage@LSN for block {}", tag.unwrap().blknum);
+    info!("testing GetPage@LSN for block {}", tag.unwrap().blknum);
     match get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee) {
         Ok(_img) => {
             // This prints out the whole page image.
             //println!("{:X?}", img);
         },
         Err(error) => {
-            println!("GetPage@LSN failed: {}", error);
+            error!("GetPage@LSN failed: {}", error);
         }
     }
 }
 
+
+// FIXME: Shouldn't relation size also be tracked with an LSN?
+// If a replica is lagging behind, it needs to get the size as it was on
+// the replica's current replay LSN.
 pub fn relsize_inc(rel: &RelTag, to: Option<u32>)
 {
     let mut shared = PAGECACHE.lock().unwrap();
