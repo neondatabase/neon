@@ -10,7 +10,9 @@
 use std::{io::Write, net::{IpAddr, Ipv4Addr}};
 use std::process::{Command};
 use std::path::{Path, PathBuf};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
+use std::str;
+
 use postgres::{Client, NoTls};
 
 // //
@@ -89,7 +91,7 @@ impl ComputeControlPlane {
             panic!("initdb failed");
         }
 
-        // // allow local connections
+        // // allow local replication connections
         // node.append_conf("pg_hba.conf", format!("\
         //     host replication all {}/32 sspi include_realm=1 map=regress\n\
         // ", node.ip).as_str());
@@ -132,34 +134,69 @@ impl PostgresNode {
             .unwrap();
     }
 
-    pub fn start(&self) {
+    fn pg_ctl(&self, action: &str, check_ok: bool) {
         let pg_ctl_path = self.pg_install_dir.join("bin/pg_ctl");
         let pg_ctl = Command::new(pg_ctl_path)
             .args(&[
                 "-D", self.pgdata.to_str().unwrap(),
-                "-l", "logfile",
-                "start"
+                "-l", self.pgdata.join("log").to_str().unwrap(),
+                action
             ])
             .env_clear()
             .status()
             .expect("failed to execute pg_ctl");
 
-        if !pg_ctl.success() {
+        if check_ok && !pg_ctl.success() {
             panic!("pg_ctl failed");
         }
     }
 
-    pub fn restart() {}
-    pub fn stop() {}
-    pub fn destroy() {}
+    pub fn start(&self) {
+        self.pg_ctl("start", true);
+    }
+
+    pub fn restart(&self) {
+        self.pg_ctl("restart", true);
+    }
+
+    pub fn stop(&self) {
+        self.pg_ctl("stop", true);
+    }
+
+    // XXX: cache that in control plane
+    fn whoami(&self) -> String {
+        let output = Command::new("whoami")
+            .output()
+            .expect("failed to execute whoami");
+
+        if !output.status.success() {
+            panic!("whoami failed");
+        }
+
+        String::from_utf8(output.stdout).unwrap()
+    }
 
     pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<tokio_postgres::Row> {
-        let connstring = format!("host={} port={} dbname={} user=stas", self.ip, self.port, db);
+        // XXX: user!
+        let connstring = format!("host={} port={} dbname={} user={}",
+            self.ip, self.port, db, self.whoami());
         let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
         client.query(sql, &[]).unwrap()
     }
 
+    // TODO
     pub fn pg_bench() {}
     pub fn pg_regress() {}
+}
+
+impl Drop for PostgresNode {
+
+    // destructor to clean up state after test is done
+    // TODO: leave everything in place if test is failed
+    // TODO: put logs to a separate location to run `tail -F` on them
+    fn drop(&mut self) {
+        self.pg_ctl("stop", false);
+        fs::remove_dir_all(self.pgdata.clone()).unwrap();
+    }
 }
 
