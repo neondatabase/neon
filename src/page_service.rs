@@ -208,7 +208,9 @@ impl FeMessage {
 pub fn thread_main() {
 
     // Create a new thread pool
-    let runtime = runtime::Runtime::new().unwrap();
+    //let runtime = runtime::Runtime::new().unwrap();
+    let runtime = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
 
     let listen_address = "127.0.0.1:5430";
     info!("Starting page server on {}", listen_address);

@@ -1,18 +1,133 @@
 //
 // Page Cache holds all the different page versions and WAL records
 //
-//
+// The Page Cache is a BTreeMap, keyed by the RelFileNode an blocknumber, and the LSN.
+// The BTreeMap is protected by a Mutex, and each cache entry is protected by another
+// per-entry mutex.
 //
 
+use core::ops::Bound::Included;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use rand::Rng;
 use log::*;
 
-use crate::walredo;
+use crossbeam_channel::unbounded;
+use crossbeam_channel::{Sender, Receiver};
+
+pub struct PageCache {
+    shared: Mutex<PageCacheShared>,
+
+    // Channel for communicating with the WAL redo process here.
+    pub walredo_sender: Sender<Arc<CacheEntry>>,
+    pub walredo_receiver: Receiver<Arc<CacheEntry>>,
+}
+
+//
+// Shared data structure, holding page cache and related auxiliary information
+//
+struct PageCacheShared {
+
+    // The actual page cache
+    pagecache: BTreeMap<CacheKey, Arc<CacheEntry>>,
+
+    // Relation n_blocks cache
+    //
+    // This hashtable should be updated together with the pagecache. Now it is
+    // accessed unreasonably often through the smgr_nblocks(). It is better to just
+    // cache it in postgres smgr and ask only on restart.
+    relsize_cache: HashMap<RelTag, u32>,
+
+    // What page versions do we hold in the cache? If we get GetPage with
+    // LSN < first_valid_lsn, that's an error because we (no longer) hold that
+    // page version. If we get a request > last_valid_lsn, we need to wait until
+    // we receive all the WAL up to the request.
+    //
+    first_valid_lsn: u64,
+    last_valid_lsn: u64
+}
+
+lazy_static! {
+    pub static ref PAGECACHE : PageCache = init_page_cache();
+}
+fn init_page_cache() -> PageCache
+{
+    // Initialize the channel between the page cache and the WAL applicator
+    let (s, r) = unbounded();
+
+    PageCache {
+        shared: Mutex::new(
+            PageCacheShared {
+                pagecache: BTreeMap::new(),
+                relsize_cache: HashMap::new(),
+                first_valid_lsn: 0,
+                last_valid_lsn: 0,
+            }),
+
+        walredo_sender: s,
+        walredo_receiver: r,
+    }
+
+}
+
+
+//
+// We store two kinds of entries in the page cache:
+//
+// 1. Ready-made images of the block
+// 2. WAL records, to be applied on top of the "previous" entry
+//
+// Some WAL records will initialize the page from scratch. For such records,
+// the 'will_init' flag is set. They don't need the previous page image before
+// applying. The 'will_init' flag is set for records containing a full-page image,
+// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
+// stored directly in the cache entry in that you still need to run the WAL redo
+// routine to generate the page image.
+//
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct CacheKey {
+    pub tag: BufferTag,
+    pub lsn: u64
+}
+
+pub struct CacheEntry {
+    pub key: CacheKey,
+
+    pub content: Mutex<CacheEntryContent>,
+
+    // Condition variable used by the WAL redo service, to wake up
+    // requester.
+    //
+    // FIXME: this takes quite a lot of space. Consider using parking_lot::Condvar
+    // or something else.
+    pub walredo_condvar: Condvar
+}
+
+pub struct CacheEntryContent {
+    pub page_image: Option<Bytes>,
+    pub wal_record: Option<WALRecord>,
+    pub apply_pending: bool,
+}
+
+impl CacheEntry {
+    fn new(key: CacheKey) -> CacheEntry {
+        CacheEntry {
+            key: key,
+            content: Mutex::new(CacheEntryContent {
+                page_image: None,
+                wal_record: None,
+                apply_pending: false,
+            }),
+            walredo_condvar: Condvar::new(),
+        }
+    }
+}
+
 
 #[derive(Eq, PartialEq, Hash, Clone, Copy)]
 pub struct RelTag {
@@ -38,65 +153,6 @@ pub struct WALRecord {
     pub rec: Bytes
 }
 
-//
-// Shared data structure, holding page cache and related auxiliary information
-//
-struct PageCacheShared {
-
-    // The actual page cache
-    pagecache: BTreeMap<CacheKey, CacheEntry>,
-
-    // Relation n_blocks cache
-    //
-    // This hashtable should be updated together with the pagecache. Now it is
-    // accessed unreasonably often through the smgr_nblocks(). It is better to just
-    // cache it in postgres smgr and ask only on restart.
-    relsize_cache: HashMap<RelTag, u32>,
-
-    // What page versions do we hold in the cache? If we get GetPage with
-    // LSN < first_valid_lsn, that's an error because we (no longer) hold that
-    // page version. If we get a request > last_valid_lsn, we need to wait until
-    // we receive all the WAL up to the request.
-    //
-    first_valid_lsn: u64,
-    last_valid_lsn: u64
-}
-
-lazy_static! {
-    static ref PAGECACHE: Mutex<PageCacheShared> = Mutex::new(
-        PageCacheShared {
-            pagecache: BTreeMap::new(),
-            relsize_cache: HashMap::new(),
-            first_valid_lsn: 0,
-            last_valid_lsn: 0,
-        });
-}
-
-//
-// We store two kinds of entries in the page cache:
-//
-// 1. Ready-made images of the block
-// 2. WAL records, to be applied on top of the "previous" entry
-//
-// Some WAL records will initialize the page from scratch. For such records,
-// the 'will_init' flag is set. They don't need the previous page image before
-// applying. The 'will_init' flag is set for records containing a full-page image,
-// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
-// stored directly in the cache entry in that you still need to run the WAL redo
-// routine to generate the page image.
-//
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-pub struct CacheKey {
-    pub tag: BufferTag,
-    pub lsn: u64
-}
-
-#[derive(Clone)]
-enum CacheEntry {
-    PageImage(Bytes),
-
-    WALRecord(WALRecord)
-}
 
 // Public interface functions
 
@@ -120,65 +176,132 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
     };
     let maxkey = CacheKey {
         tag: tag,
-        lsn: lsn + 1
+        lsn: lsn
     };
 
-    let shared = PAGECACHE.lock().unwrap();
+    let entry_rc: Arc<CacheEntry>;
+    {
+        let shared = PAGECACHE.shared.lock().unwrap();
 
-    if lsn > shared.last_valid_lsn {
-        // TODO: Wait for the WAL receiver to catch up
-    }
-    if lsn < shared.first_valid_lsn {
-        return Err(format!("LSN {} has already been removed", lsn))?;
-    }
-
-    let pagecache = &shared.pagecache;
-    let entries = pagecache.range(&minkey .. &maxkey);
-
-    let mut records: Vec<WALRecord> = Vec::new();
-
-    let mut base_img: Option<Bytes> = None;
-    
-    for (_key, e) in entries.rev() {
-        match e {
-            CacheEntry::PageImage(img) => {
-                // We have a base image. No need to dig deeper into the list of
-                // records
-                base_img = Some(img.clone());
-                break;
-            }
-            CacheEntry::WALRecord(rec) => {
-                records.push(rec.clone());
-
-                if rec.will_init {
-                    debug!("WAL record at LSN {} initializes the page", rec.lsn);
-                }
-            }
+        if lsn > shared.last_valid_lsn {
+            // TODO: Wait for the WAL receiver to catch up
         }
+        if lsn < shared.first_valid_lsn {
+            return Err(format!("LSN {} has already been removed", lsn))?;
+        }
+
+        let pagecache = &shared.pagecache;
+
+        let mut entries = pagecache.range((Included(&minkey), Included(&maxkey)));
+
+        let entry_opt = entries.next_back();
+
+        if entry_opt.is_none() {
+            static ZERO_PAGE:[u8; 8192] = [0 as u8; 8192];
+            return Ok(Bytes::from_static(&ZERO_PAGE));
+            /* return Err("could not find page image")?; */
+        }
+        let (_key, entry) = entry_opt.unwrap();
+        entry_rc = entry.clone();
+
+        // Now that we have a reference to the cache entry, drop the lock on the map.
+        // It's important to do this before waiting on the condition variable below,
+        // and better to do it as soon as possible to maximize concurrency.
     }
 
-    let page_img: Bytes;
+    // Lock the cache entry and dig the page image out of it.
+    let page_img;
+    {
+        let mut entry_content = entry_rc.content.lock().unwrap();
 
-    if !records.is_empty() {
-        records.reverse();
+        if let Some(img) = &entry_content.page_image {
+            assert!(!entry_content.apply_pending);
+            page_img = img.clone();
+        } else if entry_content.wal_record.is_some() {
 
-        page_img = walredo::apply_wal_records(tag, base_img, &records)?;
+            //
+            // If this page needs to be reconstructed by applying some WAL,
+            // send a request to the WAL redo thread.
+            //
+            if !entry_content.apply_pending {
+                assert!(!entry_content.apply_pending);
+                entry_content.apply_pending = true;
 
-        debug!("applied {} WAL records to produce page image at LSN {}", records.len(), lsn);
+                let s = &PAGECACHE.walredo_sender;
+                s.send(entry_rc.clone())?;
+            }
 
-        // Here, we could put the new page image back to the page cache, to save effort if the
-        // same (or later) page version is requested again. It's a tradeoff though, as each
-        // page image consumes some memory
-    } else if base_img.is_some() {
-        page_img = base_img.unwrap();
-    } else {
-        let zero_page = vec![0 as u8; 8192];
-        page_img = Bytes::from(zero_page);
-        /* return Err("could not find page image")?; */
+            while entry_content.apply_pending {
+                entry_content = entry_rc.walredo_condvar.wait(entry_content).unwrap();
+            }
+            page_img = entry_content.page_image.as_ref().unwrap().clone();
+        } else {
+            // No base image, and no WAL record. Huh?
+            return Err(format!("no page image or WAL record for requested page"))?;
+        }
     }
 
     return Ok(page_img);
 }
+
+//
+// Collect all the WAL records that are needed to reconstruct a page
+// image for the given cache entry.
+//
+// Returns an old page image (if any), and a vector of WAL records to apply
+// over it.
+//
+pub fn collect_records_for_apply(entry: &CacheEntry) -> (Option<Bytes>, Vec<WALRecord>)
+{
+    // Scan the BTreeMap backwards, starting from the given entry.
+    let shared = PAGECACHE.shared.lock().unwrap();
+    let pagecache = &shared.pagecache;
+
+    let minkey = CacheKey {
+        tag: entry.key.tag,
+        lsn: 0
+    };
+    let maxkey = CacheKey {
+        tag: entry.key.tag,
+        lsn: entry.key.lsn
+    };
+    let entries = pagecache.range((Included(&minkey), Included(&maxkey)));
+
+    // the last entry in the range should be the CacheEntry we were given
+    //let _last_entry = entries.next_back();
+    //assert!(last_entry == entry);
+
+    let mut base_img: Option<Bytes> = None;
+    let mut records: Vec<WALRecord> = Vec::new();
+
+    // Scan backwards, collecting the WAL records, until we hit an
+    // old page image.
+    for (_key, e) in entries.rev() {
+        let e = e.content.lock().unwrap();
+
+        if let Some(img) = &e.page_image {
+            // We have a base image. No need to dig deeper into the list of
+            // records
+            base_img = Some(img.clone());
+            break;
+        } else if let Some(rec) = &e.wal_record {
+
+            records.push(rec.clone());
+
+            // If this WAL record initializes the page, no need to dig deeper.
+            if rec.will_init {
+                debug!("WAL record at LSN {} initializes the page", rec.lsn);
+                break;
+            }
+        } else {
+            panic!("no base image and no WAL record on cache entry");
+        }
+    }
+
+    records.reverse();
+    return (base_img, records);
+}
+
 
 //
 // Adds a WAL record to the page cache
@@ -190,10 +313,10 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
         lsn: rec.lsn
     };
 
-    let entry = CacheEntry::WALRecord(rec);
+    let entry = CacheEntry::new(key.clone());
+    entry.content.lock().unwrap().wal_record = Some(rec);
 
-    let mut shared = PAGECACHE.lock().unwrap();
-    // let pagecache = &mut shared.pagecache;
+    let mut shared = PAGECACHE.shared.lock().unwrap();
 
     let rel_tag = RelTag {
         spcnode: tag.spcnode,
@@ -206,12 +329,12 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
         *rel_entry = tag.blknum + 1;
     }
 
-    let oldentry = shared.pagecache.insert(key, entry);
+    let oldentry = shared.pagecache.insert(key, Arc::new(entry));
     assert!(oldentry.is_none());
 }
 
 //
-//
+// Memorize a full image of a page version
 //
 pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
 {
@@ -220,12 +343,13 @@ pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
         lsn: lsn
     };
 
-    let entry = CacheEntry::PageImage(img);
+    let entry = CacheEntry::new(key.clone());
+    entry.content.lock().unwrap().page_image = Some(img);
 
-    let mut shared = PAGECACHE.lock().unwrap();
+    let mut shared = PAGECACHE.shared.lock().unwrap();
     let pagecache = &mut shared.pagecache;
 
-    let oldentry = pagecache.insert(key, entry);
+    let oldentry = pagecache.insert(key, Arc::new(entry));
     assert!(oldentry.is_none());
 
     debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
@@ -235,7 +359,7 @@ pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
 //
 pub fn advance_last_valid_lsn(lsn: u64)
 {
-    let mut shared = PAGECACHE.lock().unwrap();
+    let mut shared = PAGECACHE.shared.lock().unwrap();
 
     // Can't move backwards.
     assert!(lsn >= shared.last_valid_lsn);
@@ -246,7 +370,7 @@ pub fn advance_last_valid_lsn(lsn: u64)
 //
 pub fn _advance_first_valid_lsn(lsn: u64)
 {
-    let mut shared = PAGECACHE.lock().unwrap();
+    let mut shared = PAGECACHE.shared.lock().unwrap();
 
     // Can't move backwards.
     assert!(lsn >= shared.first_valid_lsn);
@@ -260,7 +384,7 @@ pub fn _advance_first_valid_lsn(lsn: u64)
 
 pub fn init_valid_lsn(lsn: u64)
 {
-    let mut shared = PAGECACHE.lock().unwrap();
+    let mut shared = PAGECACHE.shared.lock().unwrap();
 
     assert!(shared.first_valid_lsn == 0);
     assert!(shared.last_valid_lsn == 0);
@@ -271,7 +395,7 @@ pub fn init_valid_lsn(lsn: u64)
 
 pub fn get_last_valid_lsn() -> u64
 {
-    let shared = PAGECACHE.lock().unwrap();
+    let shared = PAGECACHE.shared.lock().unwrap();
 
     return shared.last_valid_lsn;
 }
@@ -294,7 +418,7 @@ pub fn _test_get_page_at_lsn()
     let mut tag: Option<BufferTag> = None;
 
     {
-        let shared = PAGECACHE.lock().unwrap();
+        let shared = PAGECACHE.shared.lock().unwrap();
         let pagecache = &shared.pagecache;
 
         if pagecache.is_empty() {
@@ -332,7 +456,7 @@ pub fn _test_get_page_at_lsn()
 // the replica's current replay LSN.
 pub fn relsize_inc(rel: &RelTag, to: Option<u32>)
 {
-    let mut shared = PAGECACHE.lock().unwrap();
+    let mut shared = PAGECACHE.shared.lock().unwrap();
     let entry = shared.relsize_cache.entry(*rel).or_insert(0);
 
     if let Some(to) = to {
@@ -344,14 +468,14 @@ pub fn relsize_inc(rel: &RelTag, to: Option<u32>)
 
 pub fn relsize_get(rel: &RelTag) -> u32
 {
-    let mut shared = PAGECACHE.lock().unwrap();
+    let mut shared = PAGECACHE.shared.lock().unwrap();
     let entry = shared.relsize_cache.entry(*rel).or_insert(0);
     *entry
 }
 
 pub fn relsize_exist(rel: &RelTag) -> bool
 {
-    let shared = PAGECACHE.lock().unwrap();
+    let shared = PAGECACHE.shared.lock().unwrap();
     let relsize_cache = &shared.relsize_cache;
     relsize_cache.contains_key(rel)
 }
