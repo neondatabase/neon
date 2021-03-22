@@ -14,6 +14,7 @@ use tokio::time::{sleep, Duration};
 use crate::waldecoder::WalStreamDecoder;
 use crate::page_cache;
 use crate::page_cache::BufferTag;
+use crate::PageServerConf;
 
 use tokio_postgres::{connect_replication, NoTls, Error, ReplicationMode};
 use postgres_protocol::message::backend::ReplicationMessage;
@@ -21,7 +22,7 @@ use postgres_protocol::message::backend::ReplicationMessage;
 //
 // This is the entry point for the WAL receiver thread.
 //
-pub fn thread_main() {
+pub fn thread_main(conf: PageServerConf) {
 
     info!("Starting WAL receiver");
 
@@ -32,7 +33,7 @@ pub fn thread_main() {
 
     runtime.block_on( async {
         loop {
-            let _res = walreceiver_main().await;
+            let _res = walreceiver_main(&conf).await;
 
             // TODO: print/log the error
             info!("WAL streaming connection failed, retrying in 5 seconds...");
@@ -41,13 +42,16 @@ pub fn thread_main() {
     });
 }
 
-async fn walreceiver_main() -> Result<(), Error> {
+async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
 
     // Connect to the database in replication mode.
-    debug!("connecting...");
-    let (mut rclient, connection) =
-        connect_replication("host=localhost user=zenith port=65432", NoTls, ReplicationMode::Physical).await?;
-
+    let conn_str = format!("host={} user=zenith port={}", conf.wal_producer_ip, conf.wal_producer_port);
+    debug!("connecting to {}...", conn_str);
+    let (mut rclient, connection) = connect_replication(
+        conn_str.as_str(),
+        NoTls,
+        ReplicationMode::Physical
+    ).await?;
     debug!("connected!");
 
     // The connection object performs the actual communication with the database,
