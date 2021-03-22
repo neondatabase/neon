@@ -45,10 +45,10 @@ impl ComputeControlPlane {
     pub fn local() -> ComputeControlPlane {
         // postgres configure and `make temp-install` are using this path
         let pg_install_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../build/tmp_install/usr/local/pgsql");
+            .join("../tmp_install/");
 
         let work_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tmp_check/zenith");
+            .join("tmp_install/");
 
         ComputeControlPlane {
             pg_install_dir: pg_install_dir,
@@ -190,7 +190,6 @@ impl PostgresNode {
 }
 
 impl Drop for PostgresNode {
-
     // destructor to clean up state after test is done
     // TODO: leave everything in place if test is failed
     // TODO: put logs to a separate location to run `tail -F` on them
