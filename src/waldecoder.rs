@@ -8,6 +8,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use std::cmp::min;
 
+use log::*;
+
 const XLOG_BLCKSZ: u32 = 8192;
 
 // FIXME: this is configurable in PostgreSQL, 16 MB is the default
@@ -17,6 +19,7 @@ const WAL_SEGMENT_SIZE: u64 = 16*1024*1024;
 // From PostgreSQL headers
 
 #[repr(C)]
+#[derive(Debug)]
 struct XLogPageHeaderData
 {
     xlp_magic: u16,		/* magic value for correctness checks */
@@ -31,6 +34,7 @@ struct XLogPageHeaderData
 const SizeOfXLogShortPHD: usize = 2+2+4+8+4 + 4;
 
 #[repr(C)]
+#[derive(Debug)]
 struct XLogLongPageHeaderData
 {
     std: XLogPageHeaderData,	/* standard header fields */
@@ -209,9 +213,9 @@ impl WalStreamDecoder {
 
         let hdr : XLogLongPageHeaderData = XLogLongPageHeaderData {
             std: self.decode_XLogPageHeaderData(),
-            xlp_sysid: self.recordbuf.get_u64_le(),
-            xlp_seg_size: self.recordbuf.get_u32_le(),
-            xlp_xlog_blcksz: self.recordbuf.get_u32_le(),
+            xlp_sysid: self.inputbuf.get_u64_le(),
+            xlp_seg_size: self.inputbuf.get_u32_le(),
+            xlp_xlog_blcksz: self.inputbuf.get_u32_le(),
         };
 
         return hdr;
@@ -288,6 +292,8 @@ pub struct DecodedWALRecord {
 // Routines to decode a WAL record and figure out which blocks are modified
 //
 pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
+
+    trace!("decoding record at {:08X}/{:08X} ({} bytes)", lsn >> 32, lsn & 0xffff_ffff, rec.remaining());
 
     let mut buf = rec.clone();
 
