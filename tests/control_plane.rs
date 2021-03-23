@@ -1,4 +1,5 @@
 use pageserver::control_plane::ComputeControlPlane;
+use pageserver::control_plane::StorageControlPlane;
 
 #[test]
 fn test_actions() {

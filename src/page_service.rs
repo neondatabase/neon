@@ -19,6 +19,7 @@ use std::io;
 use log::*;
 
 use crate::page_cache;
+use crate::PageServerConf;
 
 type Result<T> = std::result::Result<T, io::Error>;
 
@@ -205,7 +206,7 @@ impl FeMessage {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-pub fn thread_main() {
+pub fn thread_main(conf: PageServerConf) {
 
     // Create a new thread pool
     //
@@ -214,11 +215,10 @@ pub fn thread_main() {
     //let runtime = runtime::Runtime::new().unwrap();
     let runtime = runtime::Builder::new_current_thread().enable_all().build().unwrap();
 
-    let listen_address = "127.0.0.1:5430";
-    info!("Starting page server on {}", listen_address);
+    info!("Starting page server on {}", conf.listen_addr);
 
     runtime.block_on(async {
-        let _unused = page_service_main(listen_address).await;
+        let _unused = page_service_main(conf.listen_addr.to_string().as_str()).await;
     });
 }
 

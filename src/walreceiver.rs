@@ -45,7 +45,7 @@ pub fn thread_main(conf: PageServerConf) {
 async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
 
     // Connect to the database in replication mode.
-    let conn_str = format!("host={} user=zenith port={}", conf.wal_producer_ip, conf.wal_producer_port);
+    let conn_str = format!("host={} user=zenith port={}", conf.wal_producer_addr.ip(), conf.wal_producer_addr.port());
     debug!("connecting to {}...", conn_str);
     let (mut rclient, connection) = connect_replication(
         conn_str.as_str(),

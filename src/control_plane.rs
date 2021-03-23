@@ -13,7 +13,7 @@ use std::process::Command;
 use std::str;
 use std::{
     io::Write,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
 use postgres::{Client, NoTls};
@@ -24,41 +24,96 @@ use postgres::{Client, NoTls};
 //
 pub struct StorageControlPlane {
     wal_acceptors: Vec<WalAcceptorNode>,
-    last_wal_acceptor_port: u32,
-    pager_servers: Vec<PageServerNode>,
-    last_page_server_port: u32,
+    page_servers: Vec<PageServerNode>,
 }
 
 impl StorageControlPlane {
     // postgres <-> page_server
-    // fn one_page_server(&mut self, pg_ip: IpAddr, pg_port: u32) -> StorageControlPlane {}
+    pub fn one_page_server(pg_addr: SocketAddr) -> StorageControlPlane {
+        let mut cplane = StorageControlPlane {
+            wal_acceptors: Vec::new(),
+            page_servers: Vec::new(),
+        };
+
+        let workdir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp_install/pageserver1");
+
+        fs::create_dir(workdir.clone()).unwrap();
+
+        let pserver = PageServerNode{
+            page_service_addr: "127.0.0.1:65200".parse().unwrap(),
+            wal_producer_addr: pg_addr,
+            data_dir: workdir
+        };
+        pserver.start();
+
+        cplane.page_servers.push(pserver);
+        cplane
+    }
 
     // // postgres <-> wal_acceptor x3 <-> page_server
     // fn local(&mut self) -> StorageControlPlane {
     // }
 
-    fn get_page_server_conn_info() {}
+    pub fn page_server_addr(&self) -> &SocketAddr {
+        &self.page_servers[0].page_service_addr
+    }
 
     fn get_wal_acceptor_conn_info() {}
 }
 
 pub struct PageServerNode {
-    page_service_ip: IpAddr,
-    page_service_port: u32,
-    wal_producer_ip: IpAddr,
-    wal_producer_port: u32,
+    page_service_addr: SocketAddr,
+    wal_producer_addr: SocketAddr,
     data_dir: PathBuf,
 }
 
 impl PageServerNode {
     // TODO: method to force redo on a specific relation
 
-    pub fn start() {}
+    fn binary_path(&self) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("./target/debug/pageserver")
+    }
+
+    pub fn start(&self) {
+        let status = Command::new(self.binary_path())
+            .args(&["-D", self.data_dir.to_str().unwrap()])
+            .args(&["-w", self.wal_producer_addr.to_string().as_str()])
+            .args(&["-l", self.page_service_addr.to_string().as_str()])
+            .arg("-d")
+            .arg("--skip-recovery")
+            .env_clear()
+            .status()
+            .expect("failed to execute initdb");
+
+        if !status.success() {
+            panic!("pageserver start failed");
+        }
+    }
+
+    pub fn stop(&self) {
+        let pifile = self.data_dir.join("pageserver.pid");
+        let pid = fs::read_to_string(pifile).unwrap();
+        let status = Command::new("kill")
+            .arg(pid)
+            .env_clear()
+            .status()
+            .expect("failed to execute kill");
+
+        if !status.success() {
+            panic!("kill start failed");
+        }
+    }
+}
+
+impl Drop for PageServerNode {
+    fn drop(&mut self) {
+        self.stop();
+        // fs::remove_dir_all(self.data_dir.clone()).unwrap();
+    }
 }
 
 pub struct WalAcceptorNode {
-    port: u32,
-    ip: IpAddr,
+    listen: SocketAddr,
     data_dir: PathBuf,
 }
 
@@ -72,7 +127,7 @@ impl WalAcceptorNode {}
 pub struct ComputeControlPlane {
     pg_install_dir: PathBuf,
     work_dir: PathBuf,
-    last_assigned_port: u32,
+    last_assigned_port: u16,
     nodes: Vec<PostgresNode>,
 }
 
@@ -92,7 +147,7 @@ impl ComputeControlPlane {
     }
 
     // TODO: check port availability and
-    fn get_port(&mut self) -> u32 {
+    fn get_port(&mut self) -> u16 {
         let port = self.last_assigned_port + 1;
         self.last_assigned_port += 1;
         port
@@ -132,8 +187,7 @@ impl ComputeControlPlane {
         // listen for selected port
         node.append_conf(
             "postgresql.conf",
-            format!(
-                "\
+            format!("\
             max_wal_senders = 10\n\
             max_replication_slots = 10\n\
             hot_standby = on\n\
@@ -142,12 +196,7 @@ impl ComputeControlPlane {
             wal_level = replica\n\
             listen_addresses = '{address}'\n\
             port = {port}\n\
-        ",
-                address = node.ip,
-                port = node.port
-            )
-            .as_str(),
-        );
+        ", address = node.ip, port = node.port).as_str());
 
         node
     }
@@ -157,7 +206,7 @@ impl ComputeControlPlane {
 
 pub struct PostgresNode {
     _node_id: usize,
-    port: u32,
+    port: u16,
     ip: IpAddr,
     pgdata: PathBuf,
     pg_install_dir: PathBuf,
@@ -204,6 +253,10 @@ impl PostgresNode {
         self.pg_ctl("stop", true);
     }
 
+    pub fn addr(&self) -> SocketAddr {
+        SocketAddr::new(self.ip, self.port)
+    }
+
     // XXX: cache that in control plane
     fn whoami(&self) -> String {
         let output = Command::new("whoami")
@@ -241,6 +294,6 @@ impl Drop for PostgresNode {
     // TODO: put logs to a separate location to run `tail -F` on them
     fn drop(&mut self) {
         self.pg_ctl("stop", false);
-        fs::remove_dir_all(self.pgdata.clone()).unwrap();
+        // fs::remove_dir_all(self.pgdata.clone()).unwrap();
     }
 }

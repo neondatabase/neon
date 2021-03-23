@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[allow(dead_code)]
@@ -15,11 +15,12 @@ pub mod tui_event;
 mod tui_logger;
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct PageServerConf {
     pub data_dir: PathBuf,
     pub daemonize: bool,
     pub interactive: bool,
-    pub wal_producer_ip: IpAddr,
-    pub wal_producer_port: u32,
+    pub wal_producer_addr: SocketAddr,
+    pub listen_addr: SocketAddr,
     pub skip_recovery: bool,
 }

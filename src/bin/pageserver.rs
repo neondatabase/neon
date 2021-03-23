@@ -6,7 +6,7 @@ use log::*;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
-use std::{net::IpAddr, thread};
+use std::thread;
 
 use clap::{App, Arg};
 use daemonize::Daemonize;
@@ -36,6 +36,11 @@ fn main() -> Result<(), io::Error> {
                  .long("wal-producer")
                  .takes_value(true)
                  .help("connect to the WAL sender (postgres or wal_acceptor) on ip:port (default: 127.0.0.1:65432)"))
+        .arg(Arg::with_name("listen")
+                 .short("l")
+                 .long("listen")
+                 .takes_value(true)
+                 .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"))
         .arg(Arg::with_name("interactive")
                  .short("i")
                  .long("interactive")
@@ -56,8 +61,8 @@ fn main() -> Result<(), io::Error> {
         data_dir: PathBuf::from("./"),
         daemonize: false,
         interactive: false,
-        wal_producer_ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
-        wal_producer_port: 65432,
+        wal_producer_addr: "127.0.0.1:65432".parse().unwrap(),
+        listen_addr: "127.0.0.1:5430".parse().unwrap(),
         skip_recovery: false,
     };
 
@@ -85,9 +90,11 @@ fn main() -> Result<(), io::Error> {
     }
 
     if let Some(addr) = arg_matches.value_of("wal_producer") {
-        let parts: Vec<&str> = addr.split(':').collect();
-        conf.wal_producer_ip = parts[0].parse().unwrap();
-        conf.wal_producer_port = parts[1].parse().unwrap();
+        conf.wal_producer_addr = addr.parse().unwrap();
+    }
+
+    if let Some(addr) = arg_matches.value_of("listen") {
+        conf.listen_addr = addr.parse().unwrap();
     }
 
     start_pageserver(conf)
@@ -160,22 +167,24 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     // Launch the WAL receiver thread. It will try to connect to the WAL safekeeper,
     // and stream the WAL. If the connection is lost, it will reconnect on its own.
     // We just fire and forget it here.
+    let conf1 = conf.clone();
     let walreceiver_thread = thread::Builder::new()
         .name("WAL receiver thread".into())
         .spawn(|| {
             // thread code
-            walreceiver::thread_main(conf);
+            walreceiver::thread_main(conf1);
         })
         .unwrap();
     threads.push(walreceiver_thread);
 
     // GetPage@LSN requests are served by another thread. (It uses async I/O,
     // but the code in page_service sets up it own thread pool for that)
+    let conf2 = conf.clone();
     let page_server_thread = thread::Builder::new()
         .name("Page Service thread".into())
         .spawn(|| {
             // thread code
-            page_service::thread_main();
+            page_service::thread_main(conf2);
         })
         .unwrap();
     threads.push(page_server_thread);
