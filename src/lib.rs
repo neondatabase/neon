@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 #[allow(dead_code)]
 pub mod control_plane;
@@ -13,8 +14,9 @@ pub mod tui;
 pub mod tui_event;
 mod tui_logger;
 
+#[allow(dead_code)]
 pub struct PageServerConf {
-    pub data_dir: String,
+    pub data_dir: PathBuf,
     pub daemonize: bool,
     pub interactive: bool,
     pub wal_producer_ip: IpAddr,

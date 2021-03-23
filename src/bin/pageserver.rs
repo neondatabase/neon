@@ -3,10 +3,13 @@
 //
 
 use log::*;
-use std::io::Error;
+use std::fs::File;
+use std::io;
+use std::path::PathBuf;
 use std::{net::IpAddr, thread};
 
 use clap::{App, Arg};
+use daemonize::Daemonize;
 
 use slog;
 use slog_stdlog;
@@ -20,7 +23,7 @@ use pageserver::walreceiver;
 use pageserver::walredo;
 use pageserver::PageServerConf;
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), io::Error> {
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .arg(Arg::with_name("datadir")
@@ -50,7 +53,7 @@ fn main() -> Result<(), Error> {
         .get_matches();
 
     let mut conf = PageServerConf {
-        data_dir: String::from("."),
+        data_dir: PathBuf::from("./"),
         daemonize: false,
         interactive: false,
         wal_producer_ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
@@ -59,7 +62,7 @@ fn main() -> Result<(), Error> {
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
-        conf.data_dir = String::from(dir);
+        conf.data_dir = PathBuf::from(dir);
     }
 
     if arg_matches.is_present("daemonize") {
@@ -68,6 +71,13 @@ fn main() -> Result<(), Error> {
 
     if arg_matches.is_present("interactive") {
         conf.interactive = true;
+    }
+
+    if conf.daemonize && conf.interactive {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--daemonize is not allowed with --interactive: choose one",
+        ));
     }
 
     if arg_matches.is_present("skip_recovery") {
@@ -83,9 +93,7 @@ fn main() -> Result<(), Error> {
     start_pageserver(conf)
 }
 
-fn start_pageserver(conf: PageServerConf) -> Result<(), Error> {
-    let mut threads = Vec::new();
-
+fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     // Initialize logger
     let _scope_guard;
     if !conf.interactive {
@@ -110,6 +118,26 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), Error> {
     } else {
         tui_thread = None;
     }
+
+    if conf.daemonize {
+        info!("daemonizing...");
+
+        let stdout = File::create(conf.data_dir.join("pageserver.log")).unwrap();
+        let stderr = File::create(conf.data_dir.join("pageserver.err.log")).unwrap();
+
+        let daemonize = Daemonize::new()
+            .pid_file(conf.data_dir.join("pageserver.pid"))
+            .working_directory(conf.data_dir.clone())
+            .stdout(stdout)
+            .stderr(stderr);
+
+        match daemonize.start() {
+            Ok(_) => info!("Success, daemonized"),
+            Err(e) => error!("Error, {}", e),
+        }
+    }
+
+    let mut threads = Vec::new();
 
     info!("starting...");
 
