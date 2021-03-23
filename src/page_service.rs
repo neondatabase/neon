@@ -227,7 +227,9 @@ async fn page_service_main(listen_address: &str) {
     let listener = TcpListener::bind(listen_address).await.unwrap();
 
     loop {
-        let (socket, _) = listener.accept().await.unwrap();
+        let (socket, peer_addr) = listener.accept().await.unwrap();
+
+        debug!("accepted connection from {}", peer_addr);
 
         let mut conn_handler = Connection::new(socket);
 

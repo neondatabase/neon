@@ -102,7 +102,7 @@ impl ComputeControlPlane {
         // allocate new node entry with generated port
         let node_id = self.nodes.len() + 1;
         let node = PostgresNode {
-            node_id: node_id,
+            _node_id: node_id,
             port: self.get_port(),
             ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
@@ -156,7 +156,7 @@ impl ComputeControlPlane {
 ///////////////////////////////////////////////////////////////////////////////
 
 pub struct PostgresNode {
-    node_id: usize,
+    _node_id: usize,
     port: u32,
     ip: IpAddr,
     pgdata: PathBuf,

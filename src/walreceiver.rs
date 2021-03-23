@@ -24,7 +24,7 @@ use postgres_protocol::message::backend::ReplicationMessage;
 //
 pub fn thread_main(conf: PageServerConf) {
 
-    info!("Starting WAL receiver");
+    info!("WAL receiver thread started");
 
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()

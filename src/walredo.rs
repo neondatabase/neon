@@ -36,6 +36,8 @@ use crate::page_cache;
 //
 pub fn wal_applicator_main()
 {
+    info!("WAL redo thread started");
+
     // We block on waiting for requests on the walredo request channel, but
     // use async I/O to communicate with the child process. Initialize the
     // runtime for the async part.

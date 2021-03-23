@@ -290,7 +290,6 @@ pub fn collect_records_for_apply(entry: &CacheEntry) -> (Option<Bytes>, Vec<WALR
 
             // If this WAL record initializes the page, no need to dig deeper.
             if rec.will_init {
-                debug!("WAL record at LSN {} initializes the page", rec.lsn);
                 break;
             }
         } else {

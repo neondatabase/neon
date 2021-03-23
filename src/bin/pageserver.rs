@@ -8,8 +8,14 @@ use std::{net::IpAddr, thread};
 
 use clap::{App, Arg};
 
+use slog;
+use slog_stdlog;
+use slog_scope;
+use slog::Drain;
+
 use pageserver::page_service;
 use pageserver::restore_s3;
+use pageserver::tui;
 use pageserver::walreceiver;
 use pageserver::walredo;
 use pageserver::PageServerConf;
@@ -27,6 +33,11 @@ fn main() -> Result<(), Error> {
                  .long("wal-producer")
                  .takes_value(true)
                  .help("connect to the WAL sender (postgres or wal_acceptor) on ip:port (default: 127.0.0.1:65432)"))
+        .arg(Arg::with_name("interactive")
+                 .short("i")
+                 .long("interactive")
+                 .takes_value(false)
+                 .help("Interactive mode"))
         .arg(Arg::with_name("daemonize")
                  .short("d")
                  .long("daemonize")
@@ -41,6 +52,7 @@ fn main() -> Result<(), Error> {
     let mut conf = PageServerConf {
         data_dir: String::from("."),
         daemonize: false,
+        interactive: false,
         wal_producer_ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
         wal_producer_port: 65432,
         skip_recovery: false,
@@ -52,6 +64,10 @@ fn main() -> Result<(), Error> {
 
     if arg_matches.is_present("daemonize") {
         conf.daemonize = true;
+    }
+
+    if arg_matches.is_present("interactive") {
+        conf.interactive = true;
     }
 
     if arg_matches.is_present("skip_recovery") {
@@ -71,11 +87,30 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), Error> {
     let mut threads = Vec::new();
 
     // Initialize logger
-    stderrlog::new()
-        .verbosity(3)
-        .module("pageserver")
-        .init()
-        .unwrap();
+    let _scope_guard;
+    if !conf.interactive {
+        _scope_guard = init_noninteractive_logging();
+    } else {
+        _scope_guard = tui::init_logging();
+    }
+    let _log_guard = slog_stdlog::init().unwrap();
+    // Note: this `info!(...)` macro comes from `log` crate
+    info!("standard logging redirected to slog");
+
+    let tui_thread: Option<thread::JoinHandle<()>>;
+    if conf.interactive {
+        // Initialize the UI
+        tui_thread = Some(
+            thread::Builder::new()
+                .name("UI thread".into()).spawn(
+                    || {
+                        let _ = tui::ui_main();
+                    }).unwrap());
+        //threads.push(tui_thread);
+    } else {
+        tui_thread = None;
+    }
+
     info!("starting...");
 
     // Initialize the WAL applicator
@@ -117,9 +152,33 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), Error> {
         .unwrap();
     threads.push(page_server_thread);
 
-    // never returns.
-    for t in threads {
-        t.join().unwrap()
+    if tui_thread.is_some() {
+        // The TUI thread exits when the user asks to Quit.
+        tui_thread.unwrap().join().unwrap();
+    } else {
+        // In non-interactive mode, wait forever.
+        for t in threads {
+            t.join().unwrap()
+        }
     }
     Ok(())
+}
+
+fn init_noninteractive_logging() -> slog_scope::GlobalLoggerGuard {
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
+    let drain = slog::Filter::new(drain,
+                                  |record: &slog::Record| {
+                                      if record.level().is_at_least(slog::Level::Info) {
+                                          return true;
+                                      }
+                                      if record.level().is_at_least(slog::Level::Debug) && record.module().starts_with("pageserver") {
+                                          return true;
+                                      }
+                                      return false;
+                                  }
+    ).fuse();
+    let logger = slog::Logger::root(drain, slog::o!());
+    return slog_scope::set_global_logger(logger);
 }
