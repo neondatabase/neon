@@ -99,6 +99,7 @@ fn handle_apply_request(process: &WalRedoProcess, runtime: &Runtime, entry_rc: A
         error!("could not apply WAL records: {}", e);
     } else {
         entry.page_image = Some(apply_result.unwrap());
+        page_cache::PAGECACHE.num_page_images.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Wake up the requester, whether the operation succeeded or not.

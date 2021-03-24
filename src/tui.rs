@@ -6,10 +6,12 @@ use std::{error::Error, io};
 use std::sync::Arc;
 use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
 use tui::backend::TermionBackend;
-use tui::style::{Color, Style};
+use tui::buffer::Buffer;
+use tui::style::{Color, Style, Modifier};
 use tui::Terminal;
-use tui::widgets::{Block, Borders, BorderType};
-use tui::layout::{Layout, Direction, Constraint};
+use tui::text::{Text, Span, Spans};
+use tui::widgets::{Widget, Block, Borders, BorderType, Paragraph};
+use tui::layout::{Layout, Direction, Constraint, Rect};
 use lazy_static::lazy_static;
 
 use slog;
@@ -100,19 +102,19 @@ pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
         terminal.draw(|f| {
             let size = f.size();
 
-            // +---------------+---------------+
-            // |               |               |
-            // | top_top_left  |               |
-            // |               |               |
-            // +---------------+   top_right   |
-            // |               |               |
-            // | top_bot_left  |               |
-            // |               |               |
-            // +---------------+---------------+
-            // |                               |
-            // |            bottom             |
-            // |                               |
-            // +---------------+---------------+
+            // +----------------+----------------+
+            // |                |                |
+            // |  top_top_left  | top_top_right  |
+            // |                |                |
+            // +----------------+----------------|
+            // |                |                |
+            // |  top_bot_left  | top_left_right |
+            // |                |                |
+            // +----------------+----------------+
+            // |                                 |
+            // |             bottom              |
+            // |                                 |
+            // +---------------------------------+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
@@ -134,49 +136,27 @@ pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
             let top_top_left_chunk = c[0];
             let top_bot_left_chunk = c[1];
 
-            let w = TuiLoggerWidget::default(PAGESERVICE_DRAIN.as_ref())
-                .block(Block::default()
-                       .borders(Borders::ALL)
-                       .title("Page Service")
-                       .border_type(BorderType::Rounded))
-                .show_module(false)
-                .style_error(Style::default().fg(Color::Red))
-                .style_warn(Style::default().fg(Color::Yellow))
-                .style_info(Style::default().fg(Color::Green));
-            f.render_widget(w, top_top_left_chunk);
+            let c = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+                .split(top_right_chunk);
+            let top_top_right_chunk = c[0];
+            let top_bot_right_chunk = c[1];
 
-            let w = TuiLoggerWidget::default(WALREDO_DRAIN.as_ref())
-                .block(Block::default()
-                       .borders(Borders::ALL)
-                       .title("WAL Redo")
-                       .border_type(BorderType::Rounded))
-                .show_module(false)
-                .style_error(Style::default().fg(Color::Red))
-                .style_warn(Style::default().fg(Color::Yellow))
-                .style_info(Style::default().fg(Color::Green));
-            f.render_widget(w, top_bot_left_chunk);
+            f.render_widget(LogWidget::new(PAGESERVICE_DRAIN.as_ref(),"Page Service"),
+                            top_top_left_chunk);
 
-            let w = TuiLoggerWidget::default(WALRECEIVER_DRAIN.as_ref())
-                .block(Block::default()
-                       .borders(Borders::ALL)
-                       .title("WAL Receiver")
-                       .border_type(BorderType::Rounded))
-                .show_module(false)
-                .style_error(Style::default().fg(Color::Red))
-                .style_warn(Style::default().fg(Color::Yellow))
-                .style_info(Style::default().fg(Color::Green));
-            f.render_widget(w, top_right_chunk);
+            f.render_widget(LogWidget::new(WALREDO_DRAIN.as_ref(), "WAL Redo"),
+                            top_bot_left_chunk);
 
-            let w = TuiLoggerWidget::default(CATCHALL_DRAIN.as_ref())
-                .block(Block::default()
-                .borders(Borders::ALL)
-                .title("Other log")
-                .border_type(BorderType::Rounded))
-                .show_module(true)
-                .style_error(Style::default().fg(Color::Red))
-                .style_warn(Style::default().fg(Color::Yellow))
-                .style_info(Style::default().fg(Color::Green));
-            f.render_widget(w, bottom_chunk);
+            f.render_widget(LogWidget::new(WALRECEIVER_DRAIN.as_ref(), "WAL Receiver"),
+                            top_top_right_chunk);
+
+            f.render_widget(MetricsWidget {}, top_bot_right_chunk);
+
+            f.render_widget(LogWidget::new(CATCHALL_DRAIN.as_ref(), "All Log")
+                            .show_module(true),
+                            bottom_chunk);
 
         })?;
 
@@ -195,4 +175,99 @@ pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
     terminal.clear().unwrap();
 
     Ok(())
+}
+
+
+struct LogWidget<'a> {
+    logger: &'a TuiLogger,
+    title: &'a str,
+    show_module: bool,
+}
+
+impl<'a> LogWidget<'a> {
+    fn new(logger: &'a TuiLogger, title: &'a str) -> LogWidget<'a> {
+        LogWidget { logger, title, show_module: false }
+    }
+
+    fn show_module(mut self, b: bool) -> LogWidget<'a> {
+        self.show_module = b;
+        self
+    }
+}
+
+impl<'a> Widget for LogWidget<'a> {
+
+    fn render(self, area: Rect, buf: &mut Buffer) {
+
+        let w = TuiLoggerWidget::default(self.logger)
+            .block(Block::default()
+                   .borders(Borders::ALL)
+                   .title(self.title)
+                   .border_type(BorderType::Rounded))
+            .show_module(true)
+            .style_error(Style::default().fg(Color::Red))
+            .style_warn(Style::default().fg(Color::Yellow))
+            .style_info(Style::default().fg(Color::Green));
+        w.render(area, buf);
+    }
+}
+
+// Render a widget to show some metrics
+struct MetricsWidget {
+}
+
+fn get_metric_u64<'a>(title: &'a str, value: u64) -> Spans<'a> {
+    Spans::from(vec![
+        Span::styled(format!("{:<20}", title), Style::default()),
+        Span::raw(": "),
+        Span::styled(value.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+    ])
+}
+
+fn get_metric_str<'a>(title: &'a str, value: &'a str) -> Spans<'a> {
+    Spans::from(vec![
+        Span::styled(format!("{:<20}", title), Style::default()),
+        Span::raw(": "),
+        Span::styled(value, Style::default().add_modifier(Modifier::BOLD)),
+    ])
+}
+
+// FIXME: We really should define a datatype for LSNs, with Display trait and
+// helper functions. There's one in tokio-postgres, but I don't think we want
+// to rely on that.
+fn format_lsn(lsn: u64) -> String
+{
+    return format!("{:X}/{:X}", lsn >> 32, lsn & 0xffff_ffff)
+}
+
+impl tui::widgets::Widget for MetricsWidget {
+
+
+    fn render(self, area: Rect, buf: &mut Buffer) {
+
+
+        let block = Block::default()
+                   .borders(Borders::ALL)
+                   .title("Page Cache Metrics")
+                   .border_type(BorderType::Rounded);
+        let inner_area = block.inner(area);
+
+        block.render(area, buf);
+
+        let mut lines: Vec<Spans> = Vec::new();
+
+        let page_cache_stats = crate::page_cache::get_stats();
+        let lsnrange = format!("{} - {}",
+                               format_lsn(page_cache_stats.first_valid_lsn),
+                               format_lsn(page_cache_stats.last_valid_lsn));
+        lines.push(get_metric_str("Valid LSN range", &lsnrange));
+        lines.push(get_metric_u64("# of cache entries", page_cache_stats.num_entries));
+        lines.push(get_metric_u64("# of page images", page_cache_stats.num_page_images));
+        lines.push(get_metric_u64("# of WAL records", page_cache_stats.num_wal_records));
+        lines.push(get_metric_u64("# of GetPage@LSN calls", page_cache_stats.num_getpage_requests));
+
+        let text = Text::from(lines);
+
+        Paragraph::new(text).render(inner_area, buf);
+    }
 }

@@ -12,6 +12,8 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use rand::Rng;
@@ -26,6 +28,26 @@ pub struct PageCache {
     // Channel for communicating with the WAL redo process here.
     pub walredo_sender: Sender<Arc<CacheEntry>>,
     pub walredo_receiver: Receiver<Arc<CacheEntry>>,
+
+    // Counters, for metrics collection.
+    pub num_entries: AtomicU64,
+    pub num_page_images: AtomicU64,
+    pub num_wal_records: AtomicU64,
+    pub num_getpage_requests: AtomicU64,
+
+    // copies of shared.first/last_valid_lsn fields (copied here so
+    // that they can be read without acquiring the mutex).
+    pub first_valid_lsn: AtomicU64,
+    pub last_valid_lsn: AtomicU64,
+}
+
+pub struct PageCacheStats {
+    pub num_entries: u64,
+    pub num_page_images: u64,
+    pub num_wal_records: u64,
+    pub num_getpage_requests: u64,
+    pub first_valid_lsn: u64,
+    pub last_valid_lsn: u64,
 }
 
 //
@@ -49,7 +71,7 @@ struct PageCacheShared {
     // we receive all the WAL up to the request.
     //
     first_valid_lsn: u64,
-    last_valid_lsn: u64
+    last_valid_lsn: u64,
 }
 
 lazy_static! {
@@ -71,6 +93,14 @@ fn init_page_cache() -> PageCache
 
         walredo_sender: s,
         walredo_receiver: r,
+
+        num_entries: AtomicU64::new(0),
+        num_page_images: AtomicU64::new(0),
+        num_wal_records: AtomicU64::new(0),
+        num_getpage_requests: AtomicU64::new(0),
+
+        first_valid_lsn: AtomicU64::new(0),
+        last_valid_lsn: AtomicU64::new(0),
     }
 
 }
@@ -163,21 +193,12 @@ pub struct WALRecord {
 //
 pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>>
 {
-    // TODO:
-    //
-    // Look up cache entry
-    // If it's a page image, return that. If it's a WAL record, walk backwards
-    // to the latest page image. Then apply all the WAL records up until the
-    // given LSN.
-    //
-    let minkey = CacheKey {
-        tag: tag,
-        lsn: 0
-    };
-    let maxkey = CacheKey {
-        tag: tag,
-        lsn: lsn
-    };
+    PAGECACHE.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
+
+    // Look up cache entry. If it's a page image, return that. If it's a WAL record,
+    // ask the WAL redo service to reconstruct the page image from the WAL records.
+    let minkey = CacheKey { tag: tag, lsn: 0 };
+    let maxkey = CacheKey { tag: tag, lsn: lsn };
 
     let entry_rc: Arc<CacheEntry>;
     {
@@ -329,7 +350,10 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
     }
 
     let oldentry = shared.pagecache.insert(key, Arc::new(entry));
+    PAGECACHE.num_entries.fetch_add(1, Ordering::Relaxed);
     assert!(oldentry.is_none());
+
+    PAGECACHE.num_wal_records.fetch_add(1, Ordering::Relaxed);
 }
 
 //
@@ -349,10 +373,13 @@ pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
     let pagecache = &mut shared.pagecache;
 
     let oldentry = pagecache.insert(key, Arc::new(entry));
+    PAGECACHE.num_entries.fetch_add(1, Ordering::Relaxed);
     assert!(oldentry.is_none());
 
     debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
             tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
+
+    PAGECACHE.num_page_images.fetch_add(1, Ordering::Relaxed);
 }
 
 //
@@ -364,6 +391,7 @@ pub fn advance_last_valid_lsn(lsn: u64)
     assert!(lsn >= shared.last_valid_lsn);
 
     shared.last_valid_lsn = lsn;
+    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
 }
 
 //
@@ -379,6 +407,7 @@ pub fn _advance_first_valid_lsn(lsn: u64)
     assert!(shared.last_valid_lsn == 0 || lsn < shared.last_valid_lsn);
 
     shared.first_valid_lsn = lsn;
+    PAGECACHE.first_valid_lsn.store(lsn, Ordering::Relaxed);
 }
 
 pub fn init_valid_lsn(lsn: u64)
@@ -390,6 +419,8 @@ pub fn init_valid_lsn(lsn: u64)
 
     shared.first_valid_lsn = lsn;
     shared.last_valid_lsn = lsn;
+    PAGECACHE.first_valid_lsn.store(lsn, Ordering::Relaxed);
+    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
 }
 
 pub fn get_last_valid_lsn() -> u64
@@ -398,7 +429,6 @@ pub fn get_last_valid_lsn() -> u64
 
     return shared.last_valid_lsn;
 }
-
 
 //
 // Simple test function for the WAL redo code:
@@ -477,4 +507,16 @@ pub fn relsize_exist(rel: &RelTag) -> bool
     let shared = PAGECACHE.shared.lock().unwrap();
     let relsize_cache = &shared.relsize_cache;
     relsize_cache.contains_key(rel)
+}
+
+pub fn get_stats() -> PageCacheStats
+{
+    PageCacheStats {
+        num_entries: PAGECACHE.num_entries.load(Ordering::Relaxed),
+        num_page_images: PAGECACHE.num_page_images.load(Ordering::Relaxed),
+        num_wal_records: PAGECACHE.num_wal_records.load(Ordering::Relaxed),
+        num_getpage_requests: PAGECACHE.num_getpage_requests.load(Ordering::Relaxed),
+        first_valid_lsn: PAGECACHE.first_valid_lsn.load(Ordering::Relaxed),
+        last_valid_lsn: PAGECACHE.last_valid_lsn.load(Ordering::Relaxed),
+    }
 }
