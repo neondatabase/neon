@@ -504,11 +504,26 @@ impl Connection {
                     };
 
                     let inf_lsn = 0xffff_ffff_ffff_eeee;
-                    let msg = BeMessage::ZenithReadResponse(ZenithReadResponse {
-                        ok: true,
-                        n_blocks: 0,
-                        page: page_cache::get_page_at_lsn(buf_tag, inf_lsn).unwrap()
-                    });
+
+                    let msg;
+                    {
+                        let p = page_cache::get_page_at_lsn(buf_tag, inf_lsn);
+                        if p.is_ok() {
+                            msg = ZenithReadResponse {
+                                ok: true,
+                                n_blocks: 0,
+                                page: p.unwrap()
+                            };
+                        } else {
+                            const ZERO_PAGE:[u8; 8192] = [0; 8192];
+                            msg = ZenithReadResponse {
+                                ok: false,
+                                n_blocks: 0,
+                                page: Bytes::from_static(&ZERO_PAGE)
+                            }
+                        }
+                    }
+                    let msg = BeMessage::ZenithReadResponse(msg);
 
                     self.write_message(&msg).await?
 

@@ -255,7 +255,14 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
             while entry_content.apply_pending {
                 entry_content = entry_rc.walredo_condvar.wait(entry_content).unwrap();
             }
-            page_img = entry_content.page_image.as_ref().unwrap().clone();
+
+            // We should now have a page image. If we don't, it means that WAL redo
+            // failed to reconstruct it. WAL redo should've logged that error already.
+            page_img = match &entry_content.page_image {
+                Some(p) => p.clone(),
+                None => { return Err("could not apply WAL to reconstruct page image".into()); }
+            };
+
         } else {
             // No base image, and no WAL record. Huh?
             return Err(format!("no page image or WAL record for requested page"))?;
