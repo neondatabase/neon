@@ -11,7 +11,7 @@ use pageserver::control_plane::StorageControlPlane;
 // Handcrafted cases with wal records that are (were) problematic for redo.
 #[test]
 fn test_redo_cases() {
-    // Allocate postgres instance
+    // Allocate postgres instance, but don't start
     let mut compute_cplane = ComputeControlPlane::local();
     let node = compute_cplane.new_vanilla_node();
 
@@ -24,10 +24,12 @@ fn test_redo_cases() {
         page_server_connstring = 'host={} port={}'\n\
     ", pageserver_addr.ip(), pageserver_addr.port()).as_str());
 
-    println!("pew!");
-    sleep(Duration::from_secs(5));
-
+    // start postgres
     node.start();
+
+    println!("await pageserver connection...");
+    sleep(Duration::from_secs(3));
+
     node.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
     node.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100000), 'payload'");
 

@@ -36,8 +36,8 @@ pub fn thread_main(conf: PageServerConf) {
             let _res = walreceiver_main(&conf).await;
 
             // TODO: print/log the error
-            info!("WAL streaming connection failed, retrying in 5 seconds...");
-            sleep(Duration::from_secs(5)).await;
+            info!("WAL streaming connection failed, retrying in 1 second...: {:?}", _res);
+            sleep(Duration::from_secs(1)).await;
         }
     });
 }
@@ -68,6 +68,9 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
     // Start streaming the WAL, from where we left off previously.
     //
     let last_valid_lsn = page_cache::get_last_valid_lsn();
+    if last_valid_lsn == 0 {
+        page_cache::init_valid_lsn(u64::from(_identify_system.xlogpos()));
+    }
     let startpoint = tokio_postgres::types::Lsn::from(last_valid_lsn);
 
     let mut physical_stream = rclient

@@ -36,10 +36,25 @@ impl StorageControlPlane {
         };
 
         let workdir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp_install/pageserver1");
+        let pg_install_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install/bin");
 
         fs::create_dir(workdir.clone()).unwrap();
 
-        let pserver = PageServerNode{
+        // initialize data directory
+        // TODO: make wal-redo-postgres workable without data directory?
+        // XXX: common initdb method?
+        // XXX: shared paths
+        let initdb_path = pg_install_dir.join("initdb");
+        let initdb = Command::new(initdb_path)
+            .args(&["-D", workdir.join("wal_redo_pgdata").to_str().unwrap()])
+            .env_clear()
+            .status()
+            .expect("failed to execute initdb");
+        if !initdb.success() {
+            panic!("initdb failed");
+        }
+
+        let pserver = PageServerNode {
             page_service_addr: "127.0.0.1:65200".parse().unwrap(),
             wal_producer_addr: pg_addr,
             data_dir: workdir
@@ -74,7 +89,13 @@ impl PageServerNode {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("./target/debug/pageserver")
     }
 
+    fn pg_install_path(&self) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install/bin")
+    }
+
     pub fn start(&self) {
+        let wal_redo_pgdata = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp_install/pageserver1/wal_redo_pgdata");
+
         let status = Command::new(self.binary_path())
             .args(&["-D", self.data_dir.to_str().unwrap()])
             .args(&["-w", self.wal_producer_addr.to_string().as_str()])
@@ -82,6 +103,8 @@ impl PageServerNode {
             .arg("-d")
             .arg("--skip-recovery")
             .env_clear()
+            .env("PATH", self.pg_install_path()) // path to postres-wal-redo binary
+            .env("PGDATA", wal_redo_pgdata)      // postres-wal-redo pgdata
             .status()
             .expect("failed to execute initdb");
 
@@ -280,6 +303,8 @@ impl PostgresNode {
             self.whoami()
         );
         let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
+
+        println!("Running {}", sql);
         client.query(sql, &[]).unwrap()
     }
 

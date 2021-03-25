@@ -447,7 +447,11 @@ impl Connection {
         loop {
             let message = self.read_message().await?;
 
-            // println!("query: {:?}", message);
+            // XXX: none seems to appear a lot in log.
+            // Do we have conditions for busy-loop here?
+            if let Some(m) = &message {
+                info!("query: {:?}", m);
+            };
 
             match message {
                 Some(FeMessage::ZenithExistsRequest(req)) => {
