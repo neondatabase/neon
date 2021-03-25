@@ -102,13 +102,9 @@ fn main() -> Result<(), io::Error> {
 
 fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     // Initialize logger
-    let _scope_guard;
-    if !conf.interactive {
-        _scope_guard = init_noninteractive_logging();
-    } else {
-        _scope_guard = tui::init_logging();
-    }
+    let _scope_guard = init_logging(&conf);
     let _log_guard = slog_stdlog::init().unwrap();
+
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
 
@@ -117,10 +113,12 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
         // Initialize the UI
         tui_thread = Some(
             thread::Builder::new()
-                .name("UI thread".into()).spawn(
-                    || {
-                        let _ = tui::ui_main();
-                    }).unwrap());
+                .name("UI thread".into())
+                .spawn(|| {
+                    let _ = tui::ui_main();
+                })
+                .unwrap(),
+        );
         //threads.push(tui_thread);
     } else {
         tui_thread = None;
@@ -129,8 +127,10 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     if conf.daemonize {
         info!("daemonizing...");
 
+        // There should'n be any logging to stdin/stdout. Redirect it to the main log so
+        // that we will see any accidental manual fpritf's or backtraces.
         let stdout = File::create(conf.data_dir.join("pageserver.log")).unwrap();
-        let stderr = File::create(conf.data_dir.join("pageserver.err.log")).unwrap();
+        let stderr = File::create(conf.data_dir.join("pageserver.log")).unwrap();
 
         let daemonize = Daemonize::new()
             .pid_file(conf.data_dir.join("pageserver.pid"))
@@ -201,21 +201,34 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     Ok(())
 }
 
-fn init_noninteractive_logging() -> slog_scope::GlobalLoggerGuard {
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
-    let drain = slog::Filter::new(drain,
-                                  |record: &slog::Record| {
-                                      if record.level().is_at_least(slog::Level::Info) {
-                                          return true;
-                                      }
-                                      if record.level().is_at_least(slog::Level::Debug) && record.module().starts_with("pageserver") {
-                                          return true;
-                                      }
-                                      return false;
-                                  }
-    ).fuse();
-    let logger = slog::Logger::root(drain, slog::o!());
-    return slog_scope::set_global_logger(logger);
+fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
+    if conf.interactive {
+        tui::init_logging()
+    } else if conf.daemonize {
+        let log = conf.data_dir.join("pageserver.log");
+        let log_file = File::create(log).unwrap_or_else(|_| panic!("Could not create log file"));
+        let decorator = slog_term::PlainSyncDecorator::new(log_file);
+        let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = std::sync::Mutex::new(drain).fuse();
+        let logger = slog::Logger::root(drain, slog::o!());
+        slog_scope::set_global_logger(logger)
+    } else {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
+        let drain = slog::Filter::new(drain, |record: &slog::Record| {
+            if record.level().is_at_least(slog::Level::Info) {
+                return true;
+            }
+            if record.level().is_at_least(slog::Level::Debug)
+                && record.module().starts_with("pageserver")
+            {
+                return true;
+            }
+            return false;
+        })
+        .fuse();
+        let logger = slog::Logger::root(drain, slog::o!());
+        slog_scope::set_global_logger(logger)
+    }
 }
