@@ -260,7 +260,10 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
             // failed to reconstruct it. WAL redo should've logged that error already.
             page_img = match &entry_content.page_image {
                 Some(p) => p.clone(),
-                None => { return Err("could not apply WAL to reconstruct page image".into()); }
+                None => {
+                    error!("could not apply WAL to reconstruct page image for GetPage@LSN request");
+                    return Err("could not apply WAL to reconstruct page image".into());
+                }
             };
 
         } else {
