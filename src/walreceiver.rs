@@ -45,10 +45,9 @@ pub fn thread_main(conf: PageServerConf) {
 async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
 
     // Connect to the database in replication mode.
-    let conn_str = format!("host={} user=zenith port={}", conf.wal_producer_addr.ip(), conf.wal_producer_addr.port());
-    debug!("connecting to {}...", conn_str);
+    debug!("connecting to {}...", conf.wal_producer_connstr);
     let (mut rclient, connection) = connect_replication(
-        conn_str.as_str(),
+        conf.wal_producer_connstr.as_str(),
         NoTls,
         ReplicationMode::Physical
     ).await?;
@@ -67,12 +66,14 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
     //
     // Start streaming the WAL, from where we left off previously.
     //
-    let last_valid_lsn = page_cache::get_last_valid_lsn();
-    if last_valid_lsn == 0 {
+    let mut startpoint = page_cache::get_last_valid_lsn();
+    if startpoint == 0 {
         page_cache::init_valid_lsn(u64::from(_identify_system.xlogpos()));
+        startpoint = u64::from(_identify_system.xlogpos());
     }
-    let startpoint = tokio_postgres::types::Lsn::from(last_valid_lsn);
+    let startpoint = tokio_postgres::types::Lsn::from(startpoint);
 
+    debug!("starting replication from {:?}...", startpoint);
     let mut physical_stream = rclient
         .start_physical_replication(None, startpoint, None)
         .await?;

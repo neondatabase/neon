@@ -3,7 +3,7 @@
 //
 
 use log::*;
-use std::fs::File;
+use std::{fs::File, str::FromStr};
 use std::io;
 use std::path::PathBuf;
 use std::thread;
@@ -35,7 +35,7 @@ fn main() -> Result<(), io::Error> {
                  .short("w")
                  .long("wal-producer")
                  .takes_value(true)
-                 .help("connect to the WAL sender (postgres or wal_acceptor) on ip:port (default: 127.0.0.1:65432)"))
+                 .help("connect to the WAL sender (postgres or wal_acceptor) on connstr (default: 'host=127.0.0.1 port=65432 user=zenith')"))
         .arg(Arg::with_name("listen")
                  .short("l")
                  .long("listen")
@@ -61,7 +61,7 @@ fn main() -> Result<(), io::Error> {
         data_dir: PathBuf::from("./"),
         daemonize: false,
         interactive: false,
-        wal_producer_addr: "127.0.0.1:65432".parse().unwrap(),
+        wal_producer_connstr: String::from_str("host=127.0.0.1 port=65432 user=zenith").unwrap(),
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
         skip_recovery: false,
     };
@@ -90,7 +90,7 @@ fn main() -> Result<(), io::Error> {
     }
 
     if let Some(addr) = arg_matches.value_of("wal_producer") {
-        conf.wal_producer_addr = addr.parse().unwrap();
+        conf.wal_producer_connstr = String::from_str(addr).unwrap();
     }
 
     if let Some(addr) = arg_matches.value_of("listen") {

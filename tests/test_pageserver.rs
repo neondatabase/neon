@@ -16,7 +16,7 @@ fn test_redo_cases() {
     let node = compute_cplane.new_vanilla_node();
 
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server(node.addr());
+    let storage_cplane = StorageControlPlane::one_page_server(node.connstr());
     let pageserver_addr = storage_cplane.page_server_addr();
 
     // Configure that node to take pages from pageserver
@@ -46,6 +46,6 @@ fn test_redo_cases() {
 #[test]
 fn test_regress() {}
 
-// Runs pg_regress on a compute node
+// Runs recovery with minio
 #[test]
 fn test_pageserver_recovery() {}

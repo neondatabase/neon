@@ -20,7 +20,7 @@ pub struct PageServerConf {
     pub data_dir: PathBuf,
     pub daemonize: bool,
     pub interactive: bool,
-    pub wal_producer_addr: SocketAddr,
+    pub wal_producer_connstr: String,
     pub listen_addr: SocketAddr,
     pub skip_recovery: bool,
 }
