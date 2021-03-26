@@ -361,7 +361,10 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
 
     let oldentry = shared.pagecache.insert(key, Arc::new(entry));
     PAGECACHE.num_entries.fetch_add(1, Ordering::Relaxed);
-    assert!(oldentry.is_none());
+
+    if !oldentry.is_none() {
+        error!("overwriting WAL record in page cache");
+    }
 
     PAGECACHE.num_wal_records.fetch_add(1, Ordering::Relaxed);
 }
