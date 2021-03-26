@@ -31,3 +31,4 @@ tokio-stream = { version = "0.1.4" }
 tokio-postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
 postgres-protocol = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
 postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
+anyhow = "1.0"
