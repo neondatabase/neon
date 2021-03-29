@@ -23,6 +23,8 @@ lazy_static! {
     // postgres would be there if it was build by 'make postgres' here in the repo
     pub static ref PG_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../tmp_install/bin");
+    pub static ref PG_LIB_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tmp_install/lib");
 
     pub static ref CARGO_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("./target/debug/");
@@ -89,6 +91,7 @@ impl PageServerNode {
         let initdb = Command::new(PG_BIN_DIR.join("initdb"))
             .args(&["-D", self.data_dir.join("wal_redo_pgdata").to_str().unwrap()])
             .env_clear()
+            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
             .expect("failed to execute initdb");
         if !initdb.success() {
@@ -193,6 +196,7 @@ impl ComputeControlPlane {
         let initdb = Command::new(initdb_path)
             .args(&["-D", node.pgdata.to_str().unwrap()])
             .env_clear()
+            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
             .expect("failed to execute initdb");
 
@@ -254,6 +258,7 @@ impl PostgresNode {
                 action,
             ])
             .env_clear()
+            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
             .expect("failed to execute pg_ctl");
 
