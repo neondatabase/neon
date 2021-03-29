@@ -15,7 +15,7 @@ jobs:
 
       - name: Install postgres dependencies
         run: |
-          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl-dev
+          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl4-openssl-dev
 
       - name: Build postgres
         run: |
