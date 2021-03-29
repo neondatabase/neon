@@ -19,7 +19,7 @@ jobs:
 
       - name: Build postgres
         run: |
-          pgbuild.sh
+          ./pgbuild.sh
 
       - name: Install rust
         run: |
