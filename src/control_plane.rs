@@ -22,17 +22,15 @@ use lazy_static::lazy_static;
 lazy_static! {
     // postgres would be there if it was build by 'make postgres' here in the repo
     pub static ref PG_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tmp_install/bin");
+        .join("tmp_install/bin");
     pub static ref PG_LIB_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tmp_install/lib");
+        .join("tmp_install/lib");
 
     pub static ref CARGO_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("./target/debug/");
+        .join("target/debug/");
 
     pub static ref TEST_WORKDIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("./tmp_check");
-
-    // XXX: drop dots
+        .join("tmp_check");
 }
 
 //
@@ -86,10 +84,14 @@ impl PageServerNode {
 
     // TODO: make wal-redo-postgres workable without data directory?
     pub fn init(&self) {
-        fs::create_dir(self.data_dir.clone()).unwrap();
+        fs::create_dir_all(self.data_dir.clone()).unwrap();
+
+        let datadir_path = self.data_dir.join("wal_redo_pgdata");
+        fs::remove_dir_all(datadir_path.to_str().unwrap()).ok();
 
         let initdb = Command::new(PG_BIN_DIR.join("initdb"))
-            .args(&["-D", self.data_dir.join("wal_redo_pgdata").to_str().unwrap()])
+            .args(&["-D", datadir_path.to_str().unwrap()])
+            .arg("-N")
             .env_clear()
             .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
@@ -112,7 +114,7 @@ impl PageServerNode {
             .env("PATH", PG_BIN_DIR.to_str().unwrap()) // path to postres-wal-redo binary
             .env("PGDATA", self.data_dir.join("wal_redo_pgdata"))      // postres-wal-redo pgdata
             .status()
-            .expect("failed to execute initdb");
+            .expect("failed to start pageserver");
 
         if !status.success() {
             panic!("pageserver start failed");
@@ -191,10 +193,12 @@ impl ComputeControlPlane {
         let node = self.nodes.last().unwrap();
 
         // initialize data directory
+        fs::remove_dir_all(node.pgdata.to_str().unwrap()).ok();
         let initdb_path = self.pg_bin_dir.join("initdb");
         println!("initdb_path: {}", initdb_path.to_str().unwrap());
         let initdb = Command::new(initdb_path)
             .args(&["-D", node.pgdata.to_str().unwrap()])
+            .arg("-N")
             .env_clear()
             .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
@@ -319,8 +323,8 @@ impl PostgresNode {
 
 impl Drop for PostgresNode {
     // destructor to clean up state after test is done
-    // TODO: leave everything in place if test is failed
-    // TODO: put logs to a separate location to run `tail -F` on them
+    // XXX: we may detect failed test by setting some flag in catch_unwind()
+    // and checking it here. But let just clean datadirs on start.
     fn drop(&mut self) {
         self.pg_ctl("stop", false);
         // fs::remove_dir_all(self.pgdata.clone()).unwrap();

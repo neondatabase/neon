@@ -10,13 +10,13 @@
 #
 #   2) installs postgres to REPO_ROOT/tmp_install/
 #
-REPO_ROOT=$(dirname "$0")/..
+REPO_ROOT=$(dirname "$0")
 REPO_ROOT="`( cd \"$REPO_ROOT\" && pwd )`"
 
 # configure
 mkdir -p $REPO_ROOT/tmp_install/build
 cd $REPO_ROOT/tmp_install/build
-../../configure CFLAGS='-O0' --enable-debug --enable-cassert \
+../../vendor/postgres/configure CFLAGS='-O0' --enable-debug --enable-cassert \
     --enable-depend --with-libxml --prefix=/
 
 # compile

@@ -12,5 +12,5 @@
 	url = https://github.com/libzenith/pageserver
 [submodule "vendor/postgres"]
 	path = vendor/postgres
-	url = https://github.com/libzenith/vendor-postgres
-	branch = zenith
+	url = https://github.com/libzenith/postgres
+	branch = main

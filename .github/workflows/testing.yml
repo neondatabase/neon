@@ -1,0 +1,30 @@
+name: regression check
+
+on: [push, pull_request]
+
+jobs:
+  regression-check:
+    name: run regrsession test suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+
+      - name: Install postgres dependencies
+        run: |
+          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl-dev
+
+      - name: Build postgres
+        run: |
+          pgbuild.sh
+
+      - name: Install rust
+        run: |
+          sudo apt install -y cargo
+
+      - name: Run test
+        run: |
+          cargo test --test test_pageserver -- --nocapture
