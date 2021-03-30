@@ -84,11 +84,15 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
         match replication_message? {
             ReplicationMessage::XLogData(xlog_data) => {
 
-                trace!("received XLogData , lsn: {}", xlog_data.wal_start());
-
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.
-                waldecoder.feed_bytes(xlog_data.data());
+                let data = xlog_data.data();
+                let startlsn = xlog_data.wal_start();
+                let endlsn = startlsn + data.len() as u64;
+
+                trace!("received XLogData between {} and {}", startlsn, endlsn);
+
+                waldecoder.feed_bytes(data);
 
                 loop {
                     if let Some((startlsn, endlsn, recdata)) = waldecoder.poll_decode() {
@@ -125,7 +129,16 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                         break;
                     }
                 }
+
+                // Update the last_valid LSN value in the page cache one more time. We updated
+                // it in the loop above, between each WAL record, but we might have received
+                // a partial record after the last completed record. Our page cache's value
+                // better reflect that, because GetPage@LSN requests might also point in the
+                // middle of a record, if the request LSN was taken from the server's current
+                // flush ptr.
+                page_cache::advance_last_valid_lsn(endlsn);
             }
+
             ReplicationMessage::PrimaryKeepAlive(_keepalive) => {
                 trace!("received PrimaryKeepAlive");
                 // FIXME: Reply, or the connection will time out

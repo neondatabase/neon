@@ -210,10 +210,12 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
     let entry_rc: Arc<CacheEntry>;
     {
         let mut shared = PAGECACHE.shared.lock().unwrap();
+        let mut waited = false;
 
         while lsn > shared.last_valid_lsn {
             // TODO: Wait for the WAL receiver to catch up
-            debug!("not caught up yet: {}, requested {}", shared.last_valid_lsn, lsn);
+            waited = true;
+            trace!("not caught up yet: {}, requested {}", shared.last_valid_lsn, lsn);
             let wait_result = PAGECACHE.valid_lsn_condvar.wait_timeout(shared, TIMEOUT).unwrap();
 
             shared = wait_result.0;
@@ -221,6 +223,10 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
                 return Err(format!("Timed out while waiting for WAL record at LSN {} to arrive", lsn))?;
             }
         }
+        if waited {
+            trace!("caught up now, continuing");
+        }
+
         if lsn < shared.first_valid_lsn {
             return Err(format!("LSN {} has already been removed", lsn))?;
         }
