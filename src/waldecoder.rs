@@ -51,7 +51,7 @@ pub struct WalStreamDecoder {
 
     lsn: u64,
 
-    reclsn: u64,
+    startlsn: u64,       // LSN where this record starts
     contlen: u32,
     padlen: u32,
 
@@ -70,7 +70,7 @@ impl WalStreamDecoder {
         WalStreamDecoder {
             lsn: lsn,
 
-            reclsn: 0,
+            startlsn: 0,
             contlen: 0,
             padlen: 0,
 
@@ -83,7 +83,9 @@ impl WalStreamDecoder {
         self.inputbuf.extend_from_slice(buf);
     }
 
-    pub fn poll_decode(&mut self) -> Option<(u64, Bytes)> {
+    // Returns a tuple:
+    // (start LSN, end LSN + 1, record)
+    pub fn poll_decode(&mut self) -> Option<(u64, u64, Bytes)> {
 
         loop {
             // parse and verify page boundaries as we go
@@ -135,7 +137,7 @@ impl WalStreamDecoder {
                 }
 
                 // read xl_tot_len FIXME: assumes little-endian
-                self.reclsn = self.lsn;
+                self.startlsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
                 self.lsn += 4;
 
@@ -165,11 +167,12 @@ impl WalStreamDecoder {
                 if self.contlen == 0 {
                     let recordbuf = std::mem::replace(&mut self.recordbuf, BytesMut::new());
 
-                    let result = (self.reclsn, recordbuf.freeze());
-
                     if self.lsn % 8 != 0 {
                         self.padlen = 8 - (self.lsn % 8) as u32;
                     }
+
+                    // Note: the padding is included in the end-lsn that we report
+                    let result = (self.startlsn, self.lsn + self.padlen as u64, recordbuf.freeze());
 
                     return Some(result);
                 }

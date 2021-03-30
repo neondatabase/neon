@@ -91,9 +91,9 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                 waldecoder.feed_bytes(xlog_data.data());
 
                 loop {
-                    if let Some((lsn, recdata)) = waldecoder.poll_decode() {
+                    if let Some((startlsn, endlsn, recdata)) = waldecoder.poll_decode() {
 
-                        let decoded = crate::waldecoder::decode_wal_record(lsn, recdata.clone());
+                        let decoded = crate::waldecoder::decode_wal_record(startlsn, recdata.clone());
 
                         // Put the WAL record to the page cache. We make a separate copy of
                         // it for every block it modifes. (The actual WAL record is kept in
@@ -109,7 +109,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                             };
 
                             let rec = page_cache::WALRecord {
-                                lsn: lsn,
+                                lsn: startlsn,
                                 will_init: blk.will_init || blk.apply_image,
                                 rec: recdata.clone()
                             };
@@ -119,7 +119,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
 
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
-                        page_cache::advance_last_valid_lsn(lsn);
+                        page_cache::advance_last_valid_lsn(endlsn);
 
                     } else {
                         break;

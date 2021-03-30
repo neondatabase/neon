@@ -64,6 +64,7 @@ struct ZenithRequest {
     relnode: u32,
     forknum: u8,
     blkno: u32,
+    lsn: u64,
 }
 
 #[derive(Debug)]
@@ -176,6 +177,7 @@ impl FeMessage {
                     relnode: body.get_u32(),
                     forknum: body.get_u8(),
                     blkno: body.get_u32(),
+                    lsn: body.get_u64(),
                 };
 
                 // TODO: consider using protobuf or serde bincode for less error prone
@@ -511,12 +513,11 @@ impl Connection {
                         forknum: req.forknum,
                         blknum: req.blkno
                     };
-
-                    let inf_lsn = 0xffff_ffff_ffff_eeee;
+                    let lsn = req.lsn;
 
                     let msg;
                     {
-                        let p = page_cache::get_page_at_lsn(buf_tag, inf_lsn);
+                        let p = page_cache::get_page_at_lsn(buf_tag, lsn);
                         if p.is_ok() {
                             msg = ZenithReadResponse {
                                 ok: true,

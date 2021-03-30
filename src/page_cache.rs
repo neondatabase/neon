@@ -14,6 +14,7 @@ use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use rand::Rng;
@@ -22,12 +23,17 @@ use log::*;
 use crossbeam_channel::unbounded;
 use crossbeam_channel::{Sender, Receiver};
 
+// Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
+static TIMEOUT: Duration = Duration::from_secs(20);
+
 pub struct PageCache {
     shared: Mutex<PageCacheShared>,
 
     // Channel for communicating with the WAL redo process here.
     pub walredo_sender: Sender<Arc<CacheEntry>>,
     pub walredo_receiver: Receiver<Arc<CacheEntry>>,
+
+    valid_lsn_condvar: Condvar,
 
     // Counters, for metrics collection.
     pub num_entries: AtomicU64,
@@ -90,6 +96,7 @@ fn init_page_cache() -> PageCache
                 first_valid_lsn: 0,
                 last_valid_lsn: 0,
             }),
+        valid_lsn_condvar: Condvar::new(),
 
         walredo_sender: s,
         walredo_receiver: r,
@@ -202,10 +209,17 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
 
     let entry_rc: Arc<CacheEntry>;
     {
-        let shared = PAGECACHE.shared.lock().unwrap();
+        let mut shared = PAGECACHE.shared.lock().unwrap();
 
-        if lsn > shared.last_valid_lsn {
+        while lsn > shared.last_valid_lsn {
             // TODO: Wait for the WAL receiver to catch up
+            debug!("not caught up yet: {}, requested {}", shared.last_valid_lsn, lsn);
+            let wait_result = PAGECACHE.valid_lsn_condvar.wait_timeout(shared, TIMEOUT).unwrap();
+
+            shared = wait_result.0;
+            if wait_result.1.timed_out() {
+                return Err(format!("Timed out while waiting for WAL record at LSN {} to arrive", lsn))?;
+            }
         }
         if lsn < shared.first_valid_lsn {
             return Err(format!("LSN {} has already been removed", lsn))?;
@@ -404,6 +418,8 @@ pub fn advance_last_valid_lsn(lsn: u64)
     assert!(lsn >= shared.last_valid_lsn);
 
     shared.last_valid_lsn = lsn;
+    PAGECACHE.valid_lsn_condvar.notify_all();
+
     PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
 }
 
