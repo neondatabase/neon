@@ -405,8 +405,8 @@ pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
     PAGECACHE.num_entries.fetch_add(1, Ordering::Relaxed);
     assert!(oldentry.is_none());
 
-    debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
-            tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
+    //debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
+    //        tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
 
     PAGECACHE.num_page_images.fetch_add(1, Ordering::Relaxed);
 }

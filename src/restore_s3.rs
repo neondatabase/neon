@@ -112,7 +112,7 @@ async fn restore_chunk() -> Result<(), S3Error> {
     }
     page_cache::init_valid_lsn(oldest_lsn);
 
-    info!("{} files to read...", slurp_futures.len());
+    info!("{} files to restore...", slurp_futures.len());
 
     future::join_all(slurp_futures).await;
     info!("restored!");
