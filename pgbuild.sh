@@ -20,6 +20,6 @@ cd $REPO_ROOT/tmp_install/build
     --enable-depend --with-libxml --prefix=/
 
 # compile
-make -j8
+make -j8 -s
 export DESTDIR=$REPO_ROOT/tmp_install
-make install
+make install -s
