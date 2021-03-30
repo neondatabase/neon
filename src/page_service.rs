@@ -453,6 +453,11 @@ impl Connection {
                 info!("query: {:?}", m);
             };
 
+            if message.is_none() {
+                // connection was closed
+                return Ok(());
+            }
+
             match message {
                 Some(FeMessage::ZenithExistsRequest(req)) => {
 
