@@ -84,8 +84,8 @@ impl WalStreamDecoder {
     }
 
     // Returns a tuple:
-    // (start LSN, end LSN + 1, record)
-    pub fn poll_decode(&mut self) -> Option<(u64, u64, Bytes)> {
+    // (end LSN, record)
+    pub fn poll_decode(&mut self) -> Option<(u64, Bytes)> {
 
         loop {
             // parse and verify page boundaries as we go
@@ -95,11 +95,10 @@ impl WalStreamDecoder {
                 if self.inputbuf.remaining() < SizeOfXLogLongPHD {
                     return None;
                 }
-                
+
                 self.decode_XLogLongPageHeaderData();
                 self.lsn += SizeOfXLogLongPHD as u64;
 
-                
                 // TODO: verify the fields in the header
 
                 continue;
@@ -147,7 +146,7 @@ impl WalStreamDecoder {
 
                 self.contlen = xl_tot_len - 4;
                 continue;
-            }        
+            }
             else
             {
                 // we're continuing a record, possibly from previous page.
@@ -171,9 +170,7 @@ impl WalStreamDecoder {
                         self.padlen = 8 - (self.lsn % 8) as u32;
                     }
 
-                    // Note: the padding is included in the end-lsn that we report
-                    let result = (self.startlsn, self.lsn + self.padlen as u64, recordbuf.freeze());
-
+                    let result = (self.lsn, recordbuf.freeze());
                     return Some(result);
                 }
                 continue;
@@ -192,9 +189,9 @@ impl WalStreamDecoder {
     fn decode_XLogPageHeaderData(&mut self) -> XLogPageHeaderData {
 
         let buf = &mut self.inputbuf;
-        
+
         // FIXME: Assume little-endian
-        
+
         let hdr : XLogPageHeaderData = XLogPageHeaderData {
             xlp_magic: buf.get_u16_le(),
             xlp_info: buf.get_u16_le(),
@@ -285,7 +282,7 @@ pub struct DecodedBkpBlock {
 const SizeOfXLogRecord:u32 = 24;
 
 pub struct DecodedWALRecord {
-    pub lsn: u64,
+    pub lsn: u64,            // LSN at the *end* of the record
     pub record: Bytes,       // raw XLogRecord
 
     pub blocks: Vec<DecodedBkpBlock>
@@ -296,7 +293,7 @@ pub struct DecodedWALRecord {
 //
 pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
 
-    trace!("decoding record at {:08X}/{:08X} ({} bytes)", lsn >> 32, lsn & 0xffff_ffff, rec.remaining());
+    trace!("decoding record with LSN {:08X}/{:08X} ({} bytes)", lsn >> 32, lsn & 0xffff_ffff, rec.remaining());
 
     let mut buf = rec.clone();
 
@@ -319,7 +316,7 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
     let mut got_rnode = false;
-    
+
     // Decode the headers
 
     let mut max_block_id = 0;
@@ -537,7 +534,7 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
                 blk.rnode_spcnode = rnode_spcnode;
                 blk.rnode_dbnode = rnode_dbnode;
                 blk.rnode_relnode = rnode_relnode;
-                
+
                 blk.blkno = buf.get_u32_le();
 
                 //println!("this record affects {}/{}/{} blk {}",rnode_spcnode, rnode_dbnode, rnode_relnode, blk.blkno);

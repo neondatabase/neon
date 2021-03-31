@@ -95,7 +95,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                 waldecoder.feed_bytes(data);
 
                 loop {
-                    if let Some((startlsn, endlsn, recdata)) = waldecoder.poll_decode() {
+                    if let Some((lsn, recdata)) = waldecoder.poll_decode() {
 
                         let decoded = crate::waldecoder::decode_wal_record(startlsn, recdata.clone());
 
@@ -113,7 +113,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                             };
 
                             let rec = page_cache::WALRecord {
-                                lsn: startlsn,
+                                lsn: lsn,
                                 will_init: blk.will_init || blk.apply_image,
                                 rec: recdata.clone()
                             };
@@ -123,7 +123,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
 
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
-                        page_cache::advance_last_valid_lsn(endlsn);
+                        page_cache::advance_last_valid_lsn(lsn);
 
                     } else {
                         break;

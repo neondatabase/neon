@@ -7,6 +7,7 @@
 //
 
 use core::ops::Bound::Included;
+use std::convert::TryInto;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::sync::Arc;
@@ -185,7 +186,7 @@ pub struct BufferTag {
 
 #[derive(Clone)]
 pub struct WALRecord {
-    pub lsn: u64,
+    pub lsn: u64,          // LSN at the *end* of the record
     pub will_init: bool,
     pub rec: Bytes
 }
@@ -251,7 +252,7 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
     }
 
     // Lock the cache entry and dig the page image out of it.
-    let page_img;
+    let page_img: Bytes;
     {
         let mut entry_content = entry_rc.content.lock().unwrap();
 
@@ -291,6 +292,12 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
             return Err(format!("no page image or WAL record for requested page"))?;
         }
     }
+
+    // FIXME: assumes little-endian. Only used for the debugging log though
+    let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
+    let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
+    trace!("Returning page with LSN {:X}/{:X} for {}/{}/{}.{} blk {}", page_lsn_hi, page_lsn_lo,
+           tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum);
 
     return Ok(page_img);
 }

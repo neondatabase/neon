@@ -278,14 +278,14 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes
     return buf.freeze();
 }
 
-fn build_apply_record_msg(lsn: u64, rec: Bytes) -> Bytes {
+fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
 
     let len = 4 + 8 + rec.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8('A' as u8);
     buf.put_u32(len as u32);
-    buf.put_u64(lsn);
+    buf.put_u64(endlsn);
     buf.put(rec);
 
     assert!(buf.len() == 1 + len);
