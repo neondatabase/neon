@@ -30,22 +30,31 @@ fn test_redo_cases() {
     println!("await pageserver connection...");
     sleep(Duration::from_secs(3));
 
+    // check basic work with table
     node.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
     node.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100000), 'payload'");
-
     let count: i64 = node
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
         .unwrap()
         .get(0);
-
     println!("sum = {}", count);
+    assert_eq!(count, 5000050000);
 
+    // check 'create table as'
+    node.safe_psql("postgres", "CREATE TABLE t2 AS SELECT * FROM t");
+    let count: i64 = node
+        .safe_psql("postgres", "SELECT sum(key) FROM t")
+        .first()
+        .unwrap()
+        .get(0);
+    println!("sum = {}", count);
     assert_eq!(count, 5000050000);
 }
 
 // Runs pg_regress on a compute node
 #[test]
+#[ignore]
 fn test_regress() {
     // Allocate postgres instance, but don't start
     let mut compute_cplane = ComputeControlPlane::local();
