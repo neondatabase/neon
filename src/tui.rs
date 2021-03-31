@@ -260,7 +260,10 @@ impl tui::widgets::Widget for MetricsWidget {
         let lsnrange = format!("{} - {}",
                                format_lsn(page_cache_stats.first_valid_lsn),
                                format_lsn(page_cache_stats.last_valid_lsn));
+        let last_valid_recordlsn_str =
+                               format_lsn(page_cache_stats.last_record_lsn);
         lines.push(get_metric_str("Valid LSN range", &lsnrange));
+        lines.push(get_metric_str("Last record LSN", &last_valid_recordlsn_str));
         lines.push(get_metric_u64("# of cache entries", page_cache_stats.num_entries));
         lines.push(get_metric_u64("# of page images", page_cache_stats.num_page_images));
         lines.push(get_metric_u64("# of WAL records", page_cache_stats.num_wal_records));

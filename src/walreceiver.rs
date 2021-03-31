@@ -66,18 +66,26 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
     //
     // Start streaming the WAL, from where we left off previously.
     //
-    let mut startpoint = page_cache::get_last_valid_lsn();
+    let mut startpoint = page_cache::get_last_record_lsn();
     if startpoint == 0 {
+        // FIXME: Or should we just error out?
         page_cache::init_valid_lsn(u64::from(_identify_system.xlogpos()));
         startpoint = u64::from(_identify_system.xlogpos());
+    } else {
+        // There might be some padding after the last full record, skip it.
+        //
+        // FIXME: It probably would be better to always start streaming from the beginning
+        // of the page, or the segment, so that we could check the page/segment headers
+        // too. Just for the sake of paranoia.
+        if startpoint % 8 != 0 {
+            startpoint += 8 - (startpoint % 8);
+        }
     }
     let startpoint = tokio_postgres::types::Lsn::from(startpoint);
-
     debug!("starting replication from {:?}...", startpoint);
     let mut physical_stream = rclient
         .start_physical_replication(None, startpoint, None)
         .await?;
-
     let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
     
     while let Some(replication_message) = physical_stream.next().await {
@@ -123,7 +131,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
 
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
-                        page_cache::advance_last_valid_lsn(lsn);
+                        page_cache::advance_last_record_lsn(lsn);
 
                     } else {
                         break;

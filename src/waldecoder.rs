@@ -138,6 +138,11 @@ impl WalStreamDecoder {
                 // read xl_tot_len FIXME: assumes little-endian
                 self.startlsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
+                if xl_tot_len < SizeOfXLogRecord {
+                    error!("invalid xl_tot_len {} at {:X}/{:X}", xl_tot_len,
+                           self.lsn >> 32, self.lsn & 0xffffffff);
+                    panic!();
+                }
                 self.lsn += 4;
 
                 self.recordbuf.clear();

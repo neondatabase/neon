@@ -46,6 +46,7 @@ pub struct PageCache {
     // that they can be read without acquiring the mutex).
     pub first_valid_lsn: AtomicU64,
     pub last_valid_lsn: AtomicU64,
+    pub last_record_lsn: AtomicU64,
 }
 
 pub struct PageCacheStats {
@@ -55,6 +56,7 @@ pub struct PageCacheStats {
     pub num_getpage_requests: u64,
     pub first_valid_lsn: u64,
     pub last_valid_lsn: u64,
+    pub last_record_lsn: u64,
 }
 
 //
@@ -77,8 +79,18 @@ struct PageCacheShared {
     // page version. If we get a request > last_valid_lsn, we need to wait until
     // we receive all the WAL up to the request.
     //
+    // last_record_lsn points to the end of last processed WAL record.
+    // It can lag behind last_valid_lsn, if the WAL receiver has received some WAL
+    // after the end of last record, but not the whole next record yet. In the
+    // page cache, we care about last_valid_lsn, but if the WAL receiver needs to
+    // restart the streaming, it needs to restart at the end of last record, so
+    // we track them separately. last_record_lsn should perhaps be in
+    // walreceiver.rs instead of here, but it seems convenient to keep all three
+    // values together.
+    //
     first_valid_lsn: u64,
     last_valid_lsn: u64,
+    last_record_lsn: u64,
 }
 
 lazy_static! {
@@ -96,6 +108,7 @@ fn init_page_cache() -> PageCache
                 relsize_cache: HashMap::new(),
                 first_valid_lsn: 0,
                 last_valid_lsn: 0,
+                last_record_lsn: 0,
             }),
         valid_lsn_condvar: Condvar::new(),
 
@@ -109,6 +122,7 @@ fn init_page_cache() -> PageCache
 
         first_valid_lsn: AtomicU64::new(0),
         last_valid_lsn: AtomicU64::new(0),
+        last_record_lsn: AtomicU64::new(0),
     }
 
 }
@@ -439,6 +453,25 @@ pub fn advance_last_valid_lsn(lsn: u64)
 }
 
 //
+// NOTE: this updates last_valid_lsn as well.
+//
+pub fn advance_last_record_lsn(lsn: u64)
+{
+    let mut shared = PAGECACHE.shared.lock().unwrap();
+
+    // Can't move backwards.
+    assert!(lsn >= shared.last_valid_lsn);
+    assert!(lsn >= shared.last_record_lsn);
+
+    shared.last_valid_lsn = lsn;
+    shared.last_record_lsn = lsn;
+    PAGECACHE.valid_lsn_condvar.notify_all();
+
+    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
+    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
+}
+
+//
 pub fn _advance_first_valid_lsn(lsn: u64)
 {
     let mut shared = PAGECACHE.shared.lock().unwrap();
@@ -460,18 +493,21 @@ pub fn init_valid_lsn(lsn: u64)
 
     assert!(shared.first_valid_lsn == 0);
     assert!(shared.last_valid_lsn == 0);
+    assert!(shared.last_record_lsn == 0);
 
     shared.first_valid_lsn = lsn;
     shared.last_valid_lsn = lsn;
+    shared.last_record_lsn = lsn;
     PAGECACHE.first_valid_lsn.store(lsn, Ordering::Relaxed);
     PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
+    PAGECACHE.last_record_lsn.store(lsn, Ordering::Relaxed);
 }
 
-pub fn get_last_valid_lsn() -> u64
+pub fn get_last_record_lsn() -> u64
 {
     let shared = PAGECACHE.shared.lock().unwrap();
 
-    return shared.last_valid_lsn;
+    return shared.last_record_lsn;
 }
 
 //
@@ -562,5 +598,6 @@ pub fn get_stats() -> PageCacheStats
         num_getpage_requests: PAGECACHE.num_getpage_requests.load(Ordering::Relaxed),
         first_valid_lsn: PAGECACHE.first_valid_lsn.load(Ordering::Relaxed),
         last_valid_lsn: PAGECACHE.last_valid_lsn.load(Ordering::Relaxed),
+        last_record_lsn: PAGECACHE.last_record_lsn.load(Ordering::Relaxed),
     }
 }
