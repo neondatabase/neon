@@ -84,7 +84,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
         match replication_message? {
             ReplicationMessage::XLogData(xlog_data) => {
 
-                trace!("received XLogData");
+                trace!("received XLogData , lsn: {}", xlog_data.wal_start());
 
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.

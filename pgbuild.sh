@@ -14,12 +14,16 @@ REPO_ROOT=$(dirname "$0")
 REPO_ROOT="`( cd \"$REPO_ROOT\" && pwd )`"
 
 # configure
+echo "Configiring postgres build"
 mkdir -p $REPO_ROOT/tmp_install/build
 cd $REPO_ROOT/tmp_install/build
 ../../vendor/postgres/configure CFLAGS='-O0' --enable-debug --enable-cassert \
-    --enable-depend --with-libxml --prefix=/
+    --enable-depend --with-libxml --prefix=/ > configure.log
 
 # compile
+echo "Compiling postgres"
 make -j8 -s
 export DESTDIR=$REPO_ROOT/tmp_install
+
+echo "Installing postgres to $DESTDIR"
 make install -s

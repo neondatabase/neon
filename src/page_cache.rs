@@ -373,6 +373,8 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
         *rel_entry = tag.blknum + 1;
     }
 
+    trace!("put_wal_record lsn: {}", key.lsn);
+
     let oldentry = shared.pagecache.insert(key, Arc::new(entry));
     PAGECACHE.num_entries.fetch_add(1, Ordering::Relaxed);
 

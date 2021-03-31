@@ -34,12 +34,14 @@ fn test_redo_cases() {
     node.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100000), 'payload'");
 
     let count: i64 = node
-        .safe_psql("postgres", "SELECT count(*) FROM t")
+        .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
         .unwrap()
         .get(0);
 
-    assert_eq!(count, 100000);
+    println!("sum = {}", count);
+
+    assert_eq!(count, 5000050000);
 }
 
 // Runs pg_regress on a compute node

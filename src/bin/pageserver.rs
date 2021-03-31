@@ -209,6 +209,12 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
         let log_file = File::create(log).unwrap_or_else(|_| panic!("Could not create log file"));
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = slog::Filter::new(drain, |record: &slog::Record| {
+            if record.level().is_at_least(slog::Level::Info) {
+                return true;
+            }
+            return false;
+        });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());
         slog_scope::set_global_logger(logger)

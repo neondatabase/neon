@@ -269,8 +269,6 @@ impl PostgresNode {
         if check_ok && !pg_ctl.success() {
             panic!("pg_ctl failed");
         }
-
-        self.safe_psql("postgres", "CREATE DATABASE regression");
     }
 
     pub fn start(&self) {
@@ -334,6 +332,13 @@ impl Drop for PostgresNode {
 }
 
 pub fn regress_check(pg : &PostgresNode) {
+
+    pg.safe_psql("postgres", "CREATE DATABASE regression");
+
+    let regress_run_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tmp_check/regress");
+    fs::create_dir_all(regress_run_path.clone()).unwrap();
+    std::env::set_current_dir(regress_run_path).unwrap();
 
     let regress_build_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tmp_install/build/src/test/regress");
