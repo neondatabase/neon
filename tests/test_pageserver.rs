@@ -54,7 +54,6 @@ fn test_redo_cases() {
 
 // Runs pg_regress on a compute node
 #[test]
-#[ignore]
 fn test_regress() {
     // Allocate postgres instance, but don't start
     let mut compute_cplane = ComputeControlPlane::local();

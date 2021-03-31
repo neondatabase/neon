@@ -27,4 +27,4 @@ jobs:
 
       - name: Run test
         run: |
-          cargo test --test test_pageserver -- --nocapture
+          cargo test --test test_pageserver -- --nocapture --test-threads=1
