@@ -4,7 +4,7 @@ on: [push, pull_request]
 
 jobs:
   regression-check:
-    name: run regrsession test suite
+    name: run regression test suite
     runs-on: ubuntu-latest
 
     steps:
