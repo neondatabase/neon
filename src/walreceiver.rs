@@ -100,7 +100,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                         let decoded = crate::waldecoder::decode_wal_record(startlsn, recdata.clone());
 
                         // Put the WAL record to the page cache. We make a separate copy of
-                        // it for every block it modifes. (The actual WAL record is kept in
+                        // it for every block it modifies. (The actual WAL record is kept in
                         // a Bytes, which uses a reference counter for the underlying buffer,
                         // so having multiple copies of it doesn't cost that much)
                         for blk in decoded.blocks.iter() {

@@ -166,11 +166,21 @@ impl WalStreamDecoder {
                 if self.contlen == 0 {
                     let recordbuf = std::mem::replace(&mut self.recordbuf, BytesMut::new());
 
+                    let recordbuf = recordbuf.freeze();
+
+                    // XLOG_SWITCH records are special. If we see one, we need to skip
+                    // to the next WAL segment.
+                    if is_xlog_switch_record(&recordbuf) {
+                        trace!("saw xlog switch record at {:X}/{:X}",
+                               (self.lsn >> 32), self.lsn & 0xffffffff);
+                        self.padlen = (WAL_SEGMENT_SIZE - (self.lsn % WAL_SEGMENT_SIZE)) as u32;
+                    }
+
                     if self.lsn % 8 != 0 {
                         self.padlen = 8 - (self.lsn % 8) as u32;
                     }
 
-                    let result = (self.lsn, recordbuf.freeze());
+                    let result = (self.lsn, recordbuf);
                     return Some(result);
                 }
                 continue;
@@ -286,6 +296,29 @@ pub struct DecodedWALRecord {
     pub record: Bytes,       // raw XLogRecord
 
     pub blocks: Vec<DecodedBkpBlock>
+}
+
+// From pg_control.h and rmgrlist.h
+const XLOG_SWITCH:u8 = 0x40;
+const RM_XLOG_ID:u8 = 0;
+
+// Is this record an XLOG_SWITCH record? They need some special processing,
+// so we need to check for that before the rest of the parsing.
+//
+// FIXME: refactor this and decode_wal_record() below to avoid the duplication.
+fn is_xlog_switch_record(rec: &Bytes) -> bool {
+    let mut buf = rec.clone();
+
+    // FIXME: assume little-endian here
+    let _xl_tot_len = buf.get_u32_le();
+    let _xl_xid = buf.get_u32_le();
+    let _xl_prev = buf.get_u64_le();
+    let xl_info = buf.get_u8();
+    let xl_rmid = buf.get_u8();
+    buf.advance(2);     // 2 bytes of padding
+    let _xl_crc = buf.get_u32_le();
+
+    return xl_info == XLOG_SWITCH && xl_rmid == RM_XLOG_ID;
 }
 
 //
