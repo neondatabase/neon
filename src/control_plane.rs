@@ -235,8 +235,8 @@ impl ComputeControlPlane {
 
 pub struct PostgresNode {
     _node_id: usize,
-    port: u16,
-    ip: IpAddr,
+    pub port: u16,
+    pub ip: IpAddr,
     pgdata: PathBuf,
     pg_bin_dir: PathBuf,
 }
@@ -269,6 +269,8 @@ impl PostgresNode {
         if check_ok && !pg_ctl.success() {
             panic!("pg_ctl failed");
         }
+
+        self.safe_psql("postgres", "CREATE DATABASE regression");
     }
 
     pub fn start(&self) {
@@ -289,7 +291,7 @@ impl PostgresNode {
     }
 
     // XXX: cache that in control plane
-    fn whoami(&self) -> String {
+    pub fn whoami(&self) -> String {
         let output = Command::new("whoami")
             .output()
             .expect("failed to execute whoami");
@@ -329,4 +331,29 @@ impl Drop for PostgresNode {
         self.pg_ctl("stop", false);
         // fs::remove_dir_all(self.pgdata.clone()).unwrap();
     }
+}
+
+pub fn regress_check(pg : &PostgresNode) {
+
+    let regress_build_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tmp_install/build/src/test/regress");
+    let regress_src_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("vendor/postgres/src/test/regress");
+
+    let _regress_check = Command::new(regress_build_path.join("pg_regress"))
+        .args(&[
+            "--bindir=''",
+            "--use-existing",
+            format!("--bindir={}", PG_BIN_DIR.to_str().unwrap()).as_str(),
+            format!("--dlpath={}", regress_build_path.to_str().unwrap()).as_str(),
+            format!("--schedule={}", regress_src_path.join("parallel_schedule").to_str().unwrap()).as_str(),
+            format!("--inputdir={}", regress_src_path.to_str().unwrap()).as_str(),
+        ])
+        .env_clear()
+        .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
+        .env("PGPORT", pg.port.to_string())
+        .env("PGUSER", pg.whoami())
+        .env("PGHOST", pg.ip.to_string())
+        .status()
+        .expect("pg_regress failed");
 }

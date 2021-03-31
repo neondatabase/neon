@@ -44,7 +44,30 @@ fn test_redo_cases() {
 
 // Runs pg_regress on a compute node
 #[test]
-fn test_regress() {}
+fn test_regress() {
+    // Allocate postgres instance, but don't start
+    let mut compute_cplane = ComputeControlPlane::local();
+    let node = compute_cplane.new_vanilla_node();
+
+    // Start pageserver that reads WAL directly from that postgres
+    let storage_cplane = StorageControlPlane::one_page_server(node.connstr());
+    let pageserver_addr = storage_cplane.page_server_addr();
+
+    // Configure that node to take pages from pageserver
+    node.append_conf("postgresql.conf", format!("\
+        page_server_connstring = 'host={} port={}'\n\
+    ", pageserver_addr.ip(), pageserver_addr.port()).as_str());
+
+    // start postgres
+    node.start();
+
+    println!("await pageserver connection...");
+    sleep(Duration::from_secs(3));
+
+    //////////////////////////////////////////////////////////////////
+
+    pageserver::control_plane::regress_check(node);
+}
 
 // Runs recovery with minio
 #[test]
