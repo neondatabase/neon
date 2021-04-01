@@ -15,6 +15,7 @@ use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
+use std::fs::File;
 
 use postgres::{Client, NoTls};
 use lazy_static::lazy_static;
@@ -245,6 +246,54 @@ impl ComputeControlPlane {
 
         node
     }
+
+    pub fn new_minimal_node(&mut self) -> &PostgresNode {
+        // allocate new node entry with generated port
+        let node_id = self.nodes.len() + 1;
+        let node = PostgresNode {
+            _node_id: node_id,
+            port: self.get_port(),
+            ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
+            pg_bin_dir: self.pg_bin_dir.clone(),
+        };
+        self.nodes.push(node);
+        let node = self.nodes.last().unwrap();
+
+        // initialize data directory w/o files
+        fs::remove_dir_all(node.pgdata.to_str().unwrap()).ok();
+        let initdb_path = self.pg_bin_dir.join("initdb");
+        println!("initdb_path: {}", initdb_path.to_str().unwrap());
+        let initdb = Command::new(initdb_path)
+            .args(&["-D", node.pgdata.to_str().unwrap()])
+            .arg("-N")
+            .arg("--compute-node")
+            .env_clear()
+            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
+            .status()
+            .expect("failed to execute initdb");
+
+        if !initdb.success() {
+            panic!("initdb failed");
+        }
+
+        // listen for selected port
+        node.append_conf(
+            "postgresql.conf",
+            format!("\
+            max_wal_senders = 10\n\
+            max_replication_slots = 10\n\
+            hot_standby = on\n\
+            shared_buffers = 1MB\n\
+            max_connections = 100\n\
+            wal_level = replica\n\
+            listen_addresses = '{address}'\n\
+            port = {port}\n\
+            computenode_mode = true\n\
+        ", address = node.ip, port = node.port).as_str());
+
+        node
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -330,6 +379,33 @@ impl PostgresNode {
 
         println!("Running {}", sql);
         client.query(sql, &[]).unwrap()
+    }
+
+    pub fn get_pgdata(&self) -> Option<&str>
+    {
+        self.pgdata.to_str()
+    }
+
+    pub fn create_controlfile(&self)
+    {
+        let filepath = format!("{}/global/pg_control", self.pgdata.to_str().unwrap());
+
+        {
+            File::create(filepath).unwrap();
+        }
+
+        let pg_resetwal_path = self.pg_bin_dir.join("pg_resetwal");
+
+        let initdb = Command::new(pg_resetwal_path)
+        .args(&["-D", self.pgdata.to_str().unwrap()])
+        .arg("-f")
+        // .arg("--compute-node")
+        .status()
+        .expect("failed to execute pg_resetwal");
+
+        if !initdb.success() {
+            panic!("initdb failed");
+        }
     }
 
     // TODO

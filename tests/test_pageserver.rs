@@ -13,7 +13,7 @@ use pageserver::control_plane::StorageControlPlane;
 fn test_redo_cases() {
     // Allocate postgres instance, but don't start
     let mut compute_cplane = ComputeControlPlane::local();
-    let node = compute_cplane.new_vanilla_node();
+    let node = compute_cplane.new_minimal_node();
 
     // Start pageserver that reads WAL directly from that postgres
     let storage_cplane = StorageControlPlane::one_page_server(node.connstr());
@@ -25,6 +25,8 @@ fn test_redo_cases() {
     ", pageserver_addr.ip(), pageserver_addr.port()).as_str());
 
     storage_cplane.simple_query_storage("postgres", node.whoami().as_str(), "controlfile");
+
+    node.create_controlfile();
 
     // start postgres
     node.start();
