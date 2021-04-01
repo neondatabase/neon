@@ -71,6 +71,22 @@ impl StorageControlPlane {
     }
 
     fn get_wal_acceptor_conn_info() {}
+
+
+    pub fn simple_query_storage(&self, db: &str, user: &str, sql: &str) ->  Vec<tokio_postgres::SimpleQueryMessage> {
+        let connstring = format!(
+            "host={} port={} dbname={} user={}",
+            self.page_server_addr().ip(),
+            self.page_server_addr().port(),
+            db,
+            user
+        );
+
+        let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
+
+        println!("Running {}", sql);
+        client.simple_query(sql).unwrap()
+    }
 }
 
 pub struct PageServerNode {

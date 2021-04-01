@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub mod control_plane;
 
+pub mod controlfile;
 pub mod page_cache;
 pub mod page_service;
 pub mod wal_service;

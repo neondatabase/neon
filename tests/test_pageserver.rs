@@ -24,6 +24,8 @@ fn test_redo_cases() {
         page_server_connstring = 'host={} port={}'\n\
     ", pageserver_addr.ip(), pageserver_addr.port()).as_str());
 
+    storage_cplane.simple_query_storage("postgres", node.whoami().as_str(), "controlfile");
+
     // start postgres
     node.start();
 

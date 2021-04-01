@@ -48,6 +48,7 @@ enum BeMessage {
     RowDescription,
     DataRow,
     CommandComplete,
+    ControlFile,
 
     //
     // All that messages are actually CopyData from libpq point of view.
@@ -334,6 +335,18 @@ impl Connection {
                 self.stream.write_buf(&mut b).await?;
             }
 
+            BeMessage::ControlFile => {
+                // TODO pass checkpoint and xid info in this message
+                let mut b = Bytes::from("hello pg_control");
+
+                self.stream.write_u8(b'D').await?;
+                self.stream.write_i32(4 + 2 + 4 + b.len() as i32).await?;
+
+                self.stream.write_i16(1).await?;
+                self.stream.write_i32(b.len() as i32).await?;
+                self.stream.write_buf(&mut b).await?;
+            }
+
             BeMessage::CommandComplete => {
                 let mut b = Bytes::from("SELECT 1\0");
 
@@ -422,7 +435,8 @@ impl Connection {
 
         if q.body.starts_with(b"pagestream") {
             self.handle_pagerequests().await
-
+        } else if q.body.starts_with(b"controlfile") {
+            self.handle_controlfile().await
         } else if q.body.starts_with(b"status") {
             self.write_message_noflush(&BeMessage::RowDescription).await?;
             self.write_message_noflush(&BeMessage::DataRow).await?;
@@ -435,6 +449,14 @@ impl Connection {
             self.write_message_noflush(&BeMessage::CommandComplete).await?;
             self.write_message(&BeMessage::ReadyForQuery).await
         }
+    }
+
+    async fn handle_controlfile(&mut self) -> Result<()> {
+        self.write_message_noflush(&BeMessage::RowDescription).await?;
+        self.write_message_noflush(&BeMessage::ControlFile).await?;
+        self.write_message_noflush(&BeMessage::CommandComplete).await?;
+        self.write_message(&BeMessage::ReadyForQuery).await
+
     }
 
     async fn handle_pagerequests(&mut self) -> Result<()> {
