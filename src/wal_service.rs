@@ -76,8 +76,8 @@ struct ServerInfo {
 struct RequestVote
 {
 	node_id : NodeId,
-	vcl    : XLogRecPtr,   /* volume commit LSN */
-	epoch  : u64, /* new epoch when safekeeper reaches vcl */
+	vcl     : XLogRecPtr,   /* volume commit LSN */
+	epoch   : u64,          /* new epoch when safekeeper reaches vcl */
 }
 
 /*
@@ -87,12 +87,12 @@ struct RequestVote
 #[derive(Debug,Clone,Copy)]
 struct SafeKeeperInfo
 {
-	magic : u32,             /* magic for verifying content the control file */
+	magic       : u32,        /* magic for verifying content the control file */
 	format_version : u32,     /* safekeeper format version */
-	epoch : u64,             /* safekeeper's epoch */
-	server : ServerInfo,
-	commit_lsn : XLogRecPtr,  /* part of WAL acknowledged by quorum */
-	flush_lsn : XLogRecPtr,   /* locally flushed part of WAL */
+	epoch       : u64,        /* safekeeper's epoch */
+	server      : ServerInfo, /* information about server */
+	commit_lsn  : XLogRecPtr, /* part of WAL acknowledged by quorum */
+	flush_lsn   : XLogRecPtr, /* locally flushed part of WAL */
 	restart_lsn : XLogRecPtr, /* minimal LSN which may be needed for recovery of some safekeeper: min(commit_lsn) for all safekeepers */
 }
 
@@ -115,11 +115,11 @@ struct HotStandbyFeedback
 #[derive(Debug)]
 struct SafeKeeperRequest
 {
-	sender_id : NodeId,    /* Sender's node identifier (looks like we do not need it for TCP streaming connection) */
-	begin_lsn : XLogRecPtr, /* start position of message in WAL */
-	end_lsn : XLogRecPtr,      /* end position of message in WAL */
-	restart_lsn : XLogRecPtr,  /* restart LSN position  (minimal LSN which may be needed by proxy to perform recovery) */
-	commit_lsn : XLogRecPtr,   /* LSN committed by quorum of safekeepers */
+	sender_id   : NodeId,     /* Sender's node identifier (looks like we do not need it for TCP streaming connection) */
+	begin_lsn   : XLogRecPtr, /* start position of message in WAL */
+	end_lsn     : XLogRecPtr, /* end position of message in WAL */
+	restart_lsn : XLogRecPtr, /* restart LSN position  (minimal LSN which may be needed by proxy to perform recovery) */
+	commit_lsn  : XLogRecPtr, /* LSN committed by quorum of safekeepers */
 }
 
 /*
@@ -129,51 +129,68 @@ struct SafeKeeperRequest
 #[derive(Debug)]
 struct SafeKeeperResponse
 {
-	epoch : u64,
-	flush_lsn : XLogRecPtr,
+	epoch       : u64,
+	flush_lsn   : XLogRecPtr,
 	hs_feedback : HotStandbyFeedback,
 }
 
+/*
+ * State shared by safekeeper tasks and protected by mutex
+ */
 #[derive(Debug)]
 struct SharedState {
-	commit_lsn : XLogRecPtr,
-	info : SafeKeeperInfo,
-	control_file : Option<File>,
-	hs_feedback : HotStandbyFeedback
+	commit_lsn   : XLogRecPtr,        /* quorum commit LSN */
+	info         : SafeKeeperInfo,    /* information about this safekeeper */
+	control_file : Option<File>,      /* opened file control file handle (needed to hold exlusive file lock */
+	hs_feedback  : HotStandbyFeedback /* combined hot standby feedback from all replicas */
 }
 
 
+/*
+ * Static data
+ */
 #[derive(Debug)]
 pub struct WalAcceptor
 {
-	mutex : Mutex<SharedState>,
-	cond : Notify,
+	mutex : Mutex<SharedState>,      /* mutext for protecting shared state */
+	cond  : Notify,                  /* conditional variable used to notify wal senders */
 }
 
+/*
+ * Private data
+*/
 #[derive(Debug)]
 struct Connection
 {
-	acceptor : &'static WalAcceptor,
-    stream: TcpStream,
-    inbuf: BytesMut,
-    outbuf: BytesMut,
-	init_done: bool,
-	conf : WalAcceptorConf,
+	acceptor  : &'static WalAcceptor,
+    stream    : TcpStream,           /* Postgres connection */
+    inbuf     : BytesMut,            /* input buffer */
+    outbuf    : BytesMut,            /* output buffer */
+ 	init_done : bool,                /* startup packet proceeded */
+	conf      : WalAcceptorConf,     /* wal acceptor configuration */
 
 }
 
+/*
+ * Customer serializer API (TODO: use protobuf?)
+ */
 trait Serializer {
 	fn pack(&self, buf : &mut BytesMut);
 	fn unpack(buf : &mut BytesMut) -> Self;
 }
 
+//
 // Implementations
+//
 
 
+//Report and return IO error */
 macro_rules! io_error {
     ($($arg:tt)*) => (error!($($arg)*); return Err(io::Error::new(io::ErrorKind::Other,format!($($arg)*))))
 }
 
+
+// Safe hex string parser returning proper result
 fn parse_hex_str(s : &str) -> Result<u64> {
 	if let Ok(val) = u32::from_str_radix(s, 16) {
 		Ok(val as u64)
@@ -300,7 +317,8 @@ impl HotStandbyFeedback {
 		HotStandbyFeedback {
 			ts:   BigEndian::read_u64(&body[0..8]),
 			xmin: BigEndian::read_u64(&body[8..16]),
-			catalog_xmin: BigEndian::read_u64(&body[16..24]) }
+			catalog_xmin: BigEndian::read_u64(&body[16..24])
+		}
 	}
 }
 
@@ -375,12 +393,17 @@ impl WalAcceptor
 		}
 	}
 
+	// Notify caught-up WAL senders about new WAL data received
 	fn notify_wal_senders(&self, commit_lsn : XLogRecPtr) {
 		let mut shared_state = self.mutex.lock().unwrap();
 		if shared_state.commit_lsn < commit_lsn {
 			shared_state.commit_lsn = commit_lsn;
 			self.cond.notify_waiters();
 		}
+	}
+
+	fn _stop_wal_senders(&self) {
+		self.notify_wal_senders(END_REPLICATION_MARKER);
 	}
 
 	fn get_info(&self) -> SafeKeeperInfo {
@@ -391,6 +414,7 @@ impl WalAcceptor
 		self.mutex.lock().unwrap().info = *info;
 	}
 
+	// Accumulate hot standby feedbacks from replicas
 	fn add_hs_feedback(&self, feedback : HotStandbyFeedback) {
 		let mut shared_state = self.mutex.lock().unwrap();
 		shared_state.hs_feedback.xmin = min(shared_state.hs_feedback.xmin, feedback.xmin);
@@ -403,6 +427,7 @@ impl WalAcceptor
 		return shared_state.hs_feedback;
 	}
 
+	// Load and lock control file (prevent running more than one instane of safekeeper */
 	fn load_control_file(&self, conf: &WalAcceptorConf) {
 		let control_file_path = conf.data_dir.join(CONTROL_FILE_NAME);
 		match OpenOptions::new().read(true).write(true).create(true).open(&control_file_path) {
@@ -493,9 +518,9 @@ impl Connection  {
 		self.stream.read_exact(&mut self.inbuf[0..4]).await?;
 		let startup_pkg_len = BigEndian::read_u32(&mut self.inbuf[0..4]);
 		if startup_pkg_len == 0 {
-			self.receive_wal().await?;
+			self.receive_wal().await?; // internal protocol between wal_proposer and wal_acceptor
 		} else {
-			self.send_wal().await?;
+			self.send_wal().await?;    // libpq replication protocol between wal_acceptor and replicas/pagers
 		}
 		Ok(())
 	}
@@ -507,21 +532,25 @@ impl Connection  {
 		Ok(T::unpack(&mut self.inbuf))
 	}
 
+	// Receive WAL from wal_proposer
 	async fn receive_wal(&mut self) -> Result<()> {
 		let mut my_info = self.acceptor.get_info();
+		// Receive information about server
 		let server_info = self.read_req::<ServerInfo>().await?;
 
+		/* Check protocol compatibility */
 		if server_info.protocol_version != SK_PROTOCOL_VERSION {
 			io_error!("Incompatible protocol version {} vs. {}",
 					  server_info.protocol_version, SK_PROTOCOL_VERSION);
 		}
+		/* Postgres upgrade is not treated as fatal error */
 		if server_info.pg_version != my_info.server.pg_version
 			&& my_info.server.pg_version != UNKNOWN_SERVER_VERSION
 		{
-			io_error!("Server version doesn't match {} vs. {}",
-					  server_info.pg_version, my_info.server.pg_version);
+			info!("Server version doesn't match {} vs. {}",
+				  server_info.pg_version, my_info.server.pg_version);
 		}
-		/* Preserve locally stored node_id */
+		/* Update information about server, but preserve locally stored node_id */
 		let node_id = my_info.server.node_id;
 		my_info.server = server_info;
 		my_info.server.node_id = node_id;
@@ -538,7 +567,9 @@ impl Connection  {
 
 		/* Wait for vote request */
 		let prop = self.read_req::<RequestVote>().await?;
+		/* This is Paxos check which should ensure that only one master can perform commits */
 		if prop.node_id < my_info.server.node_id {
+			/* Send my node-id to inform proxy that it's candidate was rejected */
 			self.start_sending();
 			my_info.server.node_id.pack(&mut self.outbuf);
 			self.send().await?;
@@ -547,13 +578,22 @@ impl Connection  {
 		}
 		my_info.server.node_id = prop.node_id;
 		self.acceptor.set_info(&my_info);
+		/* Need to persist our vote first */
 		self.acceptor.save_control_file(true)?;
 
 		let mut flushed_restart_lsn : XLogRecPtr = 0;
 		let wal_seg_size = server_info.wal_seg_size as usize;
 
+		/* Acknowledge the proposed candidate by returning it to the proxy */
+		self.start_sending();
+		prop.pack(&mut self.outbuf);
+		self.send().await?;
+
+		// Main loop
 		loop {
 			let mut sync_control_file = false;
+
+			/* Receive message header */
 			let req = self.read_req::<SafeKeeperRequest>().await?;
 			if req.sender_id != my_info.server.node_id {
 				io_error!("Sender NodeId is changed");
@@ -567,6 +607,7 @@ impl Connection  {
 			let rec_size = (end_pos - start_pos) as usize;
 			assert!(rec_size <= MAX_SEND_SIZE);
 
+			/* Receive message body */
 			self.inbuf.resize(rec_size, 0u8);
 			self.stream.read_exact(&mut self.inbuf[0..rec_size]).await?;
 
@@ -608,7 +649,6 @@ impl Connection  {
 				flush_lsn: end_pos,
 				hs_feedback: self.acceptor.get_hs_feedback()
 			};
-
 			self.start_sending();
 			resp.pack(&mut self.outbuf);
 			self.send().await?;
@@ -641,6 +681,9 @@ impl Connection  {
         }
     }
 
+	//
+	// Parse libpq message
+	//
     fn parse_message(&mut self) -> Result<Option<FeMessage>> {
         if !self.init_done {
             FeStartupMessage::parse(&mut self.inbuf)
@@ -649,14 +692,23 @@ impl Connection  {
         }
     }
 
+	//
+	// Reset output buffer to start accumulating data of new message
+	//
 	fn start_sending(&mut self) {
 		self.outbuf.clear();
 	}
 
+	//
+	// Send buffered messages
+	//
 	async fn send(&mut self) -> Result<()> {
 		self.stream.write_all(&self.outbuf).await
 	}
 
+	//
+	// Send WAL to replica or WAL sender using standard libpq replication protocol
+	//
 	async fn send_wal(&mut self) -> Result<()> {
         loop {
 			self.start_sending();
@@ -693,10 +745,12 @@ impl Connection  {
                 }
             }
         }
-
         Ok(())
     }
 
+	//
+	// Handle IDENTIFY_SYSTEM replication command
+	//
 	async fn handle_identify_system(&mut self) -> Result<()> {
 		let (start_pos,timeline) = self.find_end_of_wal(false);
 		let lsn = format!("{:X}/{:>08X}", (start_pos>>32) as u32, start_pos as u32);
@@ -707,24 +761,27 @@ impl Connection  {
 		let sysid_bytes = sysid.as_bytes();
 
 		BeMessage::write(&mut self.outbuf,
-						 &BeMessage::RowDescription(&[RowDescriptor{name:    b"systemid\0",
+						 &BeMessage::RowDescription(&[RowDescriptor{name:   b"systemid\0",
 																	typoid: 25,
-																	typlen:  -1},
-													  RowDescriptor{name:b"timeline\0",
+																	typlen: -1},
+													  RowDescriptor{name:   b"timeline\0",
 																	typoid: 23,
-																	typlen:  4},
-													  RowDescriptor{name:    b"xlogpos\0",
+																	typlen: 4},
+													  RowDescriptor{name:   b"xlogpos\0",
 																	typoid: 25,
-																	typlen:  -1},
-													  RowDescriptor{name:    b"dbname\0",
+																	typlen: -1},
+													  RowDescriptor{name:   b"dbname\0",
 																	typoid: 25,
-																	typlen:  -1}]));
+																	typlen: -1}]));
 		BeMessage::write(&mut self.outbuf, &BeMessage::DataRow(&[Some(lsn_bytes),Some(tli_bytes),Some(sysid_bytes),None]));
         BeMessage::write(&mut self.outbuf, &BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"));
         BeMessage::write(&mut self.outbuf, &BeMessage::ReadyForQuery);
 		self.send().await
  	}
 
+	//
+	// Handle START_REPLICATION replication command
+	//
 	async fn handle_start_replication(&mut self, cmd: &Bytes) -> Result<()> {
 		let re = Regex::new(r"([[:xdigit:]]*)/([[:xdigit:]]*)").unwrap();
 		let mut caps = re.captures_iter(str::from_utf8(&cmd[..]).unwrap());
@@ -746,13 +803,18 @@ impl Connection  {
 		BeMessage::write(&mut self.outbuf, &BeMessage::Copy);
 		self.send().await?;
 
+		/*
+		 * Always start streaming at the beginning of a segment
+		 */
 	    start_pos -= XLogSegmentOffset(start_pos, wal_seg_size) as u64;
+
 		let mut end_pos : XLogRecPtr;
 		let mut commit_lsn : XLogRecPtr;
 		let mut wal_file : Option<File> = None;
 		let mut buf = [0u8; LIBPQ_HDR_SIZE + XLOG_HDR_SIZE + MAX_SEND_SIZE];
 
 		loop {
+			/* Wait until we have some data to stream */
 			if stop_pos != 0 {
 				/* recovery mode: stream up to the specified LSN (VCL) */
 				if start_pos > stop_pos {
@@ -763,6 +825,8 @@ impl Connection  {
 			} else {
 				/* normal mode */
 				loop {
+					// Rust doesn't allow to grab async result from mutex scope
+					let notified = self.acceptor.cond.notified();
 					{
 						let shared_state = self.acceptor.mutex.lock().unwrap();
 						commit_lsn = shared_state.commit_lsn;
@@ -771,7 +835,7 @@ impl Connection  {
 							break;
 						}
 					}
-					self.acceptor.cond.notified().await;
+					notified.await;
 				}
 			}
 			if end_pos == END_REPLICATION_MARKER {
@@ -852,12 +916,14 @@ impl Connection  {
 	}
 
 	fn write_wal_file(&self, startpos : XLogRecPtr, timeline : TimeLineID, wal_seg_size : usize, buf: &[u8]) ->Result<()> {
-		let mut xlogoff : usize = 0;
 		let mut bytes_left : usize = buf.len();
 		let mut bytes_written : usize = 0;
 		let mut partial;
 		let mut start_pos = startpos;
 		const ZERO_BLOCK : &'static[u8] = &[0u8; XLOG_BLCKSZ];
+
+		/* Extract WAL location for this block */
+		let mut xlogoff = XLogSegmentOffset(start_pos, wal_seg_size) as usize;
 
 		while bytes_left != 0 {
 			let bytes_to_write;
@@ -906,6 +972,8 @@ impl Connection  {
 				}
 				wal_file.seek(SeekFrom::Start(xlogoff as u64))?;
 				wal_file.write_all(&buf[bytes_written..(bytes_written + bytes_to_write)])?;
+
+				// Fluh file is not prohibited
 				if !self.conf.no_sync {
 					wal_file.sync_all()?;
 				}
@@ -927,6 +995,7 @@ impl Connection  {
 		Ok(())
 	}
 
+	// Find last WAL record. If "precise" is false then just locatelast partial segment
 	fn find_end_of_wal(&self, precise : bool) -> (XLogRecPtr, TimeLineID) {
 		find_end_of_wal(&self.conf.data_dir, self.acceptor.get_info().server.wal_seg_size as usize, precise)
 	}

@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use std::cmp::min;
 use std::io::prelude::*;
 use byteorder::{LittleEndian, ByteOrder};
+use crc32c::*;
 
 pub const XLOG_FNAME_LEN : usize = 24;
 pub const XLOG_BLCKSZ : usize =  8192;
 pub const XLOG_SIZE_OF_XLOG_SHORT_PHD : usize = 2+2+4+8+4 + 4;
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD : usize = (2+2+4+8+4) + 4 + 8 + 4 + 4;
+pub const XLOG_RECORD_CRC_OFFS : usize = 4+4+8+1+1+2;
+pub const XLOG_SIZE_OF_XLOG_RECORD : usize = XLOG_RECORD_CRC_OFFS+4;
 
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
@@ -76,13 +79,17 @@ pub fn get_current_timestamp() -> TimestampTz
 }
 
 fn find_end_of_wal_segment(data_dir: &PathBuf, segno: XLogSegNo, tli: TimeLineID, wal_seg_size: usize) -> u32 {
-	let mut offs = XLOG_SIZE_OF_XLOG_LONG_PHD;
+	let mut offs : usize = 0;
 	let mut padlen : usize = 0;
 	let mut contlen : usize = 0;
+	let mut wal_crc : u32 = 0;
+	let mut crc : u32 = 0;
+	let mut rec_offs : usize = 0;
 	let mut buf = [0u8;XLOG_BLCKSZ];
 	let file_name = XLogFileName(tli, segno, wal_seg_size);
-	let mut file = File::open(data_dir.join(file_name)).unwrap();
-
+	let mut last_valid_rec_pos : usize = 0;
+	let mut file = File::open(data_dir.join(file_name.clone() + ".partial")).unwrap();
+	let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];
 	while offs < wal_seg_size {
 		if offs % XLOG_BLCKSZ == 0 {
 			if let Ok(bytes_read) = file.read(&mut buf) {
@@ -92,35 +99,66 @@ fn find_end_of_wal_segment(data_dir: &PathBuf, segno: XLogSegNo, tli: TimeLineID
 			} else {
 				break;
 			}
-            offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
+			if offs == 0 {
+				offs = XLOG_SIZE_OF_XLOG_LONG_PHD;
+			} else {
+				offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
+			}
         } else if padlen > 0 {
             offs += padlen;
             padlen = 0;
         } else if contlen == 0 {
-            let xl_tot_len = LittleEndian::read_u32(&buf[offs..offs+4]) as usize;
+			let page_offs = offs % XLOG_BLCKSZ;
+            let xl_tot_len = LittleEndian::read_u32(&buf[page_offs..page_offs+4]) as usize;
 			if xl_tot_len == 0 {
 				break;
 			}
+			last_valid_rec_pos = offs;
 			offs += 4;
+			rec_offs = 4;
             contlen = xl_tot_len - 4;
+			rec_hdr[0..4].copy_from_slice(&buf[page_offs..page_offs+4]);
         } else {
+			let page_offs = offs % XLOG_BLCKSZ;
             // we're continuing a record, possibly from previous page.
-            let pageleft = XLOG_BLCKSZ - (offs % XLOG_BLCKSZ);
+            let pageleft = XLOG_BLCKSZ - page_offs;
 
             // read the rest of the record, or as much as fits on this page.
             let n = min(contlen, pageleft);
-
+			if rec_offs < XLOG_RECORD_CRC_OFFS {
+				let len = min(XLOG_RECORD_CRC_OFFS-rec_offs, n);
+				rec_hdr[rec_offs..rec_offs+len].copy_from_slice(&buf[page_offs..page_offs+len]);
+			}
+			if rec_offs < XLOG_SIZE_OF_XLOG_RECORD && rec_offs + n >= XLOG_SIZE_OF_XLOG_RECORD {
+				let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
+				wal_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs+4]);
+				crc = crc32c_append(0, &buf[crc_offs+4..page_offs+n]);
+				crc = !crc;
+			} else {
+				crc ^= 0xFFFFFFFFu32;
+				crc = crc32c_append(crc, &buf[page_offs..page_offs+n]);
+				crc = !crc;
+			}
+			rec_offs += n;
             offs += n;
             contlen -= n;
 
             if contlen == 0 {
+				crc = !crc;
+				crc = crc32c_append(crc, &rec_hdr);
                 if offs % 8 != 0 {
                     padlen = 8 - (offs % 8);
                 }
+				if crc == wal_crc {
+					last_valid_rec_pos = offs + padlen;
+				} else {
+					println!("CRC mismatch {} vs {}", crc, wal_crc);
+					break;
+				}
             }
         }
 	}
-	return offs as u32;
+	return last_valid_rec_pos as u32;
 }
 
 pub fn find_end_of_wal(data_dir: &PathBuf, wal_seg_size:usize, precise:bool) -> (XLogRecPtr,TimeLineID) {
@@ -172,4 +210,12 @@ pub fn find_end_of_wal(data_dir: &PathBuf, wal_seg_size:usize, precise:bool) -> 
 		return (high_ptr,high_tli);
 	}
 	return (0,0);
+}
+
+pub fn main() {
+	let mut data_dir = PathBuf::new();
+	data_dir.push(".");
+	let wal_seg_size = 16*1024*1024;
+	let (wal_end,tli) = find_end_of_wal(&data_dir, wal_seg_size, true);
+	println!("wal_end={:>08X}{:>08X}, tli={}", (wal_end >> 32) as u32, wal_end as u32, tli);
 }

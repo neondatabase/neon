@@ -33,3 +33,4 @@ tokio-postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "r
 postgres-protocol = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
 postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
 anyhow = "1.0"
+crc32c = "0.6.0"
