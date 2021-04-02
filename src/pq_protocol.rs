@@ -47,7 +47,7 @@ pub enum StartupRequestCode {
 
 impl FeStartupMessage {
     pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>> {
-        const MAX_STARTUP_PACKET_LENGTH: u32 = 10000;
+        const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
         const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
         const NEGOTIATE_SSL_CODE: u32  = (1234 << 16) | 5679;
         const NEGOTIATE_GSS_CODE: u32  = (1234 << 16) | 5680;
@@ -55,13 +55,16 @@ impl FeStartupMessage {
         if buf.len() < 4 {
             return Ok(None);
         }
-        let len = BigEndian::read_u32(&buf[0..4]);
+        let len = BigEndian::read_u32(&buf[0..4]) as usize;
 
-        if len < 4 || len as u32 > MAX_STARTUP_PACKET_LENGTH {
+        if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid message length",
             ));
+        }
+        if buf.len() < len {
+            return Ok(None);
         }
 
         let version = BigEndian::read_u32(&buf[4..8]);

@@ -457,7 +457,6 @@ impl WalAcceptor
 						panic!("Incompatible format version: {} vs. {}",
 							   my_info.format_version, SK_FORMAT_VERSION);
 					}
-					let mut shared_state = self.mutex.lock().unwrap();
 					shared_state.info = my_info;
 				}
 			},
@@ -468,12 +467,12 @@ impl WalAcceptor
 	}
 
 	fn save_control_file(&self, sync : bool) -> Result<()> {
+		let mut buf = BytesMut::new();
 		let mut shared_state = self.mutex.lock().unwrap();
+		shared_state.info.pack(&mut buf);
+
 		let file = shared_state.control_file.as_mut().unwrap();
 		file.seek(SeekFrom::Start(0))?;
-		let mut buf = BytesMut::new();
-		let my_info = self.get_info();
-		my_info.pack(&mut buf);
 		file.write_all(&mut buf[..])?;
 		if sync {
 			file.sync_all()?;
@@ -487,6 +486,7 @@ impl WalAcceptor
             match listener.accept().await {
 				Ok((socket, peer_addr)) => {
 					debug!("accepted connection from {}", peer_addr);
+					socket.set_nodelay(true)?;
 					let mut conn = Connection::new(self, socket, &conf);
 					task::spawn(async move {
 						if let Err(err) = conn.run().await {
@@ -537,6 +537,7 @@ impl Connection  {
 		let mut my_info = self.acceptor.get_info();
 		// Receive information about server
 		let server_info = self.read_req::<ServerInfo>().await?;
+		info!("Start handshake with wal_proposer {}",  self.stream.peer_addr()?);
 
 		/* Check protocol compatibility */
 		if server_info.protocol_version != SK_PROTOCOL_VERSION {
@@ -586,8 +587,10 @@ impl Connection  {
 
 		/* Acknowledge the proposed candidate by returning it to the proxy */
 		self.start_sending();
-		prop.pack(&mut self.outbuf);
+		prop.node_id.pack(&mut self.outbuf);
 		self.send().await?;
+
+		info!("Start streaming from server {} address {:?}", server_info.system_id, self.stream.peer_addr()?);
 
 		// Main loop
 		loop {
@@ -644,6 +647,7 @@ impl Connection  {
 			}
 
 			/* Report flush position */
+			//info!("Confirm LSN: {:X}/{:>08X}", (end_pos>>32) as u32, end_pos as u32);
 			let resp = SafeKeeperResponse {
 				epoch: my_info.epoch,
 				flush_lsn: end_pos,
@@ -710,6 +714,7 @@ impl Connection  {
 	// Send WAL to replica or WAL sender using standard libpq replication protocol
 	//
 	async fn send_wal(&mut self) -> Result<()> {
+		info!("WAL sender to {:?} is started", self.stream.peer_addr()?);
         loop {
 			self.start_sending();
             match self.read_message().await? {
@@ -719,6 +724,7 @@ impl Connection  {
                     match m.kind {
                         StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
                             BeMessage::write(&mut self.outbuf, &BeMessage::Negotiate);
+							info!("SSL requested");
                             self.send().await?;
                         }
                         StartupRequestCode::Normal => {
@@ -731,7 +737,9 @@ impl Connection  {
                     }
                 },
                 Some(FeMessage::Query(m)) => {
-                    self.process_query(&m).await?;
+                    if !self.process_query(&m).await? {
+						break;
+					}
                 },
                 Some(FeMessage::Terminate) => {
                     break;
@@ -745,13 +753,14 @@ impl Connection  {
                 }
             }
         }
+		info!("WAL sender to {:?} is finished", self.stream.peer_addr()?);
         Ok(())
     }
 
 	//
 	// Handle IDENTIFY_SYSTEM replication command
 	//
-	async fn handle_identify_system(&mut self) -> Result<()> {
+	async fn handle_identify_system(&mut self) -> Result<bool> {
 		let (start_pos,timeline) = self.find_end_of_wal(false);
 		let lsn = format!("{:X}/{:>08X}", (start_pos>>32) as u32, start_pos as u32);
 		let tli = timeline.to_string();
@@ -776,13 +785,14 @@ impl Connection  {
 		BeMessage::write(&mut self.outbuf, &BeMessage::DataRow(&[Some(lsn_bytes),Some(tli_bytes),Some(sysid_bytes),None]));
         BeMessage::write(&mut self.outbuf, &BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"));
         BeMessage::write(&mut self.outbuf, &BeMessage::ReadyForQuery);
-		self.send().await
+		self.send().await?;
+		Ok(true)
  	}
 
 	//
 	// Handle START_REPLICATION replication command
 	//
-	async fn handle_start_replication(&mut self, cmd: &Bytes) -> Result<()> {
+	async fn handle_start_replication(&mut self, cmd: &Bytes) -> Result<bool> {
 		let re = Regex::new(r"([[:xdigit:]]*)/([[:xdigit:]]*)").unwrap();
 		let mut caps = re.captures_iter(str::from_utf8(&cmd[..]).unwrap());
 		let cap = caps.next().unwrap();
@@ -800,6 +810,9 @@ impl Connection  {
 		if start_pos == 0 {
 			start_pos = wal_end;
 		}
+		info!("Start replication from {:X}/{:>08X} till {:X}/{:>08X}",
+			  (start_pos>>32) as u32, start_pos as u32,
+			  (stop_pos>>32) as u32, stop_pos as u32);
 		BeMessage::write(&mut self.outbuf, &BeMessage::Copy);
 		self.send().await?;
 
@@ -811,13 +824,12 @@ impl Connection  {
 		let mut end_pos : XLogRecPtr;
 		let mut commit_lsn : XLogRecPtr;
 		let mut wal_file : Option<File> = None;
-		let mut buf = [0u8; LIBPQ_HDR_SIZE + XLOG_HDR_SIZE + MAX_SEND_SIZE];
-
+		self.outbuf.resize(LIBPQ_HDR_SIZE + XLOG_HDR_SIZE + MAX_SEND_SIZE, 0u8);
 		loop {
 			/* Wait until we have some data to stream */
 			if stop_pos != 0 {
 				/* recovery mode: stream up to the specified LSN (VCL) */
-				if start_pos > stop_pos {
+				if start_pos >= stop_pos {
 					/* recovery finished */
 					break;
 				}
@@ -850,10 +862,9 @@ impl Connection  {
 							self.acceptor.add_hs_feedback(HotStandbyFeedback::parse(&m.body)),
 						_ => {}
 					}
-				}
+				},
 				Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-					continue;
-				}
+				},
 				Err(e) => {
 					return Err(e.into());
 				}
@@ -885,25 +896,25 @@ impl Connection  {
 			let msg_size =  LIBPQ_HDR_SIZE + XLOG_HDR_SIZE + send_size;
 			let data_start = LIBPQ_HDR_SIZE + XLOG_HDR_SIZE;
 			let data_end = data_start + send_size;
-			file.read_exact(&mut buf[data_start..data_end])?;
-			buf[0] = b'd';
-			BigEndian::write_u32(&mut buf[1..5], (msg_size - LIBPQ_MSG_SIZE_OFFS) as u32);
-			buf[5] = b'w';
-			BigEndian::write_u64(&mut buf[6..14], start_pos);
-			BigEndian::write_u64(&mut buf[14..22], end_pos);
-			BigEndian::write_u64(&mut buf[22..30], get_current_timestamp());
+			file.read_exact(&mut self.outbuf[data_start..data_end])?;
+			self.outbuf[0] = b'd';
+			BigEndian::write_u32(&mut self.outbuf[1..5], (msg_size - LIBPQ_MSG_SIZE_OFFS) as u32);
+			self.outbuf[5] = b'w';
+			BigEndian::write_u64(&mut self.outbuf[6..14], start_pos);
+			BigEndian::write_u64(&mut self.outbuf[14..22], end_pos);
+			BigEndian::write_u64(&mut self.outbuf[22..30], get_current_timestamp());
 
-			self.stream.write_all(&buf[0..msg_size]).await?;
+			self.stream.write_all(&self.outbuf[0..msg_size]).await?;
 			start_pos += send_size as u64;
 
 			if XLogSegmentOffset(start_pos, wal_seg_size) != 0 {
 				wal_file = Some(file);
 			}
 		}
-        Ok(())
+        Ok(false)
 	}
 
-    async fn process_query(&mut self, q : &FeQueryMessage) -> Result<()> {
+    async fn process_query(&mut self, q : &FeQueryMessage) -> Result<bool> {
         trace!("got query {:?}", q.body);
 
         if q.body.starts_with(b"IDENTIFY_SYSTEM") {
@@ -957,7 +968,7 @@ impl Connection  {
 				} else {
 					/* Create and fill new partial file */
 					partial = true;
-					match OpenOptions::new().create(true).write(true).open(&wal_file_path) {
+					match OpenOptions::new().create(true).write(true).open(&wal_file_partial_path) {
 						Ok(mut file) => {
 							for _ in 0..(wal_seg_size/XLOG_BLCKSZ) {
 								file.write_all(&ZERO_BLOCK)?;
@@ -973,7 +984,7 @@ impl Connection  {
 				wal_file.seek(SeekFrom::Start(xlogoff as u64))?;
 				wal_file.write_all(&buf[bytes_written..(bytes_written + bytes_to_write)])?;
 
-				// Fluh file is not prohibited
+				// Flush file is not prohibited
 				if !self.conf.no_sync {
 					wal_file.sync_all()?;
 				}

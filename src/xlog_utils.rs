@@ -5,14 +5,17 @@ use std::cmp::min;
 use std::io::prelude::*;
 use byteorder::{LittleEndian, ByteOrder};
 use crc32c::*;
+use log::*;
 
 pub const XLOG_FNAME_LEN : usize = 24;
 pub const XLOG_BLCKSZ : usize =  8192;
-pub const XLOG_SIZE_OF_XLOG_SHORT_PHD : usize = 2+2+4+8+4 + 4;
-pub const XLOG_SIZE_OF_XLOG_LONG_PHD : usize = (2+2+4+8+4) + 4 + 8 + 4 + 4;
+pub const XLP_FIRST_IS_CONTRECORD : u16 = 0x0001;
+pub const XLOG_PAGE_MAGIC : u16 = 0xD109;
+pub const XLP_REM_LEN_OFFS : usize = 2+2+4+8;
+pub const XLOG_SIZE_OF_XLOG_SHORT_PHD : usize = XLP_REM_LEN_OFFS + 4 + 4;
+pub const XLOG_SIZE_OF_XLOG_LONG_PHD : usize = XLOG_SIZE_OF_XLOG_SHORT_PHD + 8 + 4 + 4;
 pub const XLOG_RECORD_CRC_OFFS : usize = 4+4+8+1+1+2;
 pub const XLOG_SIZE_OF_XLOG_RECORD : usize = XLOG_RECORD_CRC_OFFS+4;
-
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
 pub type TimestampTz = u64;
@@ -80,7 +83,6 @@ pub fn get_current_timestamp() -> TimestampTz
 
 fn find_end_of_wal_segment(data_dir: &PathBuf, segno: XLogSegNo, tli: TimeLineID, wal_seg_size: usize) -> u32 {
 	let mut offs : usize = 0;
-	let mut padlen : usize = 0;
 	let mut contlen : usize = 0;
 	let mut wal_crc : u32 = 0;
 	let mut crc : u32 = 0;
@@ -90,6 +92,7 @@ fn find_end_of_wal_segment(data_dir: &PathBuf, segno: XLogSegNo, tli: TimeLineID
 	let mut last_valid_rec_pos : usize = 0;
 	let mut file = File::open(data_dir.join(file_name.clone() + ".partial")).unwrap();
 	let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];
+
 	while offs < wal_seg_size {
 		if offs % XLOG_BLCKSZ == 0 {
 			if let Ok(bytes_read) = file.read(&mut buf) {
@@ -99,14 +102,21 @@ fn find_end_of_wal_segment(data_dir: &PathBuf, segno: XLogSegNo, tli: TimeLineID
 			} else {
 				break;
 			}
+			let xlp_magic = LittleEndian::read_u16(&buf[0..2]);
+			let xlp_info = LittleEndian::read_u16(&buf[2..4]);
+			let xlp_rem_len = LittleEndian::read_u32(&buf[XLP_REM_LEN_OFFS..XLP_REM_LEN_OFFS+4]);
+			if xlp_magic != XLOG_PAGE_MAGIC {
+				info!("Invalid WAL file {}.partial magic {}", file_name, xlp_magic);
+				break;
+			}
 			if offs == 0 {
 				offs = XLOG_SIZE_OF_XLOG_LONG_PHD;
+				if (xlp_info & XLP_FIRST_IS_CONTRECORD) != 0 {
+					offs += ((xlp_rem_len + 7) & !7) as usize;
+				}
 			} else {
 				offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
 			}
-        } else if padlen > 0 {
-            offs += padlen;
-            padlen = 0;
         } else if contlen == 0 {
 			let page_offs = offs % XLOG_BLCKSZ;
             let xl_tot_len = LittleEndian::read_u32(&buf[page_offs..page_offs+4]) as usize;
@@ -129,7 +139,7 @@ fn find_end_of_wal_segment(data_dir: &PathBuf, segno: XLogSegNo, tli: TimeLineID
 				let len = min(XLOG_RECORD_CRC_OFFS-rec_offs, n);
 				rec_hdr[rec_offs..rec_offs+len].copy_from_slice(&buf[page_offs..page_offs+len]);
 			}
-			if rec_offs < XLOG_SIZE_OF_XLOG_RECORD && rec_offs + n >= XLOG_SIZE_OF_XLOG_RECORD {
+			if rec_offs <= XLOG_RECORD_CRC_OFFS && rec_offs + n >= XLOG_SIZE_OF_XLOG_RECORD {
 				let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
 				wal_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs+4]);
 				crc = crc32c_append(0, &buf[crc_offs+4..page_offs+n]);
@@ -146,13 +156,11 @@ fn find_end_of_wal_segment(data_dir: &PathBuf, segno: XLogSegNo, tli: TimeLineID
             if contlen == 0 {
 				crc = !crc;
 				crc = crc32c_append(crc, &rec_hdr);
-                if offs % 8 != 0 {
-                    padlen = 8 - (offs % 8);
-                }
+				offs = (offs + 7) & !7; // pad on 8 bytes boundary */
 				if crc == wal_crc {
-					last_valid_rec_pos = offs + padlen;
+					last_valid_rec_pos = offs;
 				} else {
-					println!("CRC mismatch {} vs {}", crc, wal_crc);
+					info!("CRC mismatch {} vs {} at {}", crc, wal_crc, last_valid_rec_pos);
 					break;
 				}
             }
