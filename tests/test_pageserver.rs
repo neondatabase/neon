@@ -13,6 +13,7 @@ use pageserver::control_plane::StorageControlPlane;
 fn test_redo_cases() {
     // Allocate postgres instance, but don't start
     let mut compute_cplane = ComputeControlPlane::local();
+    // Create compute node without files, only datadir structure
     let node = compute_cplane.new_minimal_node();
 
     // Start pageserver that reads WAL directly from that postgres
@@ -24,9 +25,10 @@ fn test_redo_cases() {
         page_server_connstring = 'host={} port={}'\n\
     ", pageserver_addr.ip(), pageserver_addr.port()).as_str());
 
+    // Request info needed to build control file
     storage_cplane.simple_query_storage("postgres", node.whoami().as_str(), "controlfile");
-
-    node.create_controlfile();
+    // Setup controlfile
+    node.setup_controlfile();
 
     // start postgres
     node.start();

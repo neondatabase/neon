@@ -247,6 +247,9 @@ impl ComputeControlPlane {
         node
     }
 
+     // Init compute node without files, only datadir structure
+     // use initdb --compute-node flag and GUC 'computenode_mode'
+     // to distinguish the node
     pub fn new_minimal_node(&mut self) -> &PostgresNode {
         // allocate new node entry with generated port
         let node_id = self.nodes.len() + 1;
@@ -386,7 +389,8 @@ impl PostgresNode {
         self.pgdata.to_str()
     }
 
-    pub fn create_controlfile(&self)
+    /* Create stub controlfile and respective xlog to start computenode */
+    pub fn setup_controlfile(&self)
     {
         let filepath = format!("{}/global/pg_control", self.pgdata.to_str().unwrap());
 
@@ -396,15 +400,16 @@ impl PostgresNode {
 
         let pg_resetwal_path = self.pg_bin_dir.join("pg_resetwal");
 
-        let initdb = Command::new(pg_resetwal_path)
+        let pg_resetwal = Command::new(pg_resetwal_path)
         .args(&["-D", self.pgdata.to_str().unwrap()])
         .arg("-f")
+        // TODO probably we will have to modify pg_resetwal
         // .arg("--compute-node")
         .status()
         .expect("failed to execute pg_resetwal");
 
-        if !initdb.success() {
-            panic!("initdb failed");
+        if !pg_resetwal.success() {
+            panic!("pg_resetwal failed");
         }
     }
 
