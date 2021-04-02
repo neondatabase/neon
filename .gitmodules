@@ -1,15 +1,3 @@
-[submodule "walkeeper"]
-	path = walkeeper
-	url = https://github.com/libzenith/walkeeper
-[submodule "consensus"]
-	path = consensus
-	url = https://github.com/libzenith/consensus
-[submodule "cli"]
-	path = cli
-	url = https://github.com/libzenith/cli
-[submodule "pageserver"]
-	path = pageserver
-	url = https://github.com/libzenith/pageserver
 [submodule "vendor/postgres"]
 	path = vendor/postgres
 	url = https://github.com/libzenith/postgres
