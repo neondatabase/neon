@@ -15,11 +15,13 @@ use tokio::runtime;
 use tokio::task;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, Bytes, BytesMut};
-use std::io;
+use std::{io};
+use std::thread;
 use log::*;
 
 use crate::page_cache;
 use crate::PageServerConf;
+use crate::walreceiver;
 
 type Result<T> = std::result::Result<T, io::Error>;
 
@@ -221,43 +223,38 @@ pub fn thread_main(conf: PageServerConf) {
     info!("Starting page server on {}", conf.listen_addr);
 
     runtime.block_on(async {
-        let _unused = page_service_main(conf.listen_addr.to_string().as_str()).await;
+        let listener = TcpListener::bind(conf.listen_addr).await.unwrap();
+
+        loop {
+            let (socket, peer_addr) = listener.accept().await.unwrap();
+            debug!("accepted connection from {}", peer_addr);
+            let mut conn_handler = Connection::new(conf.clone(), socket);
+
+            task::spawn(async move {
+                if let Err(err) = conn_handler.run().await {
+                    error!("error: {}", err);
+                }
+            });
+        }
     });
-}
-
-async fn page_service_main(listen_address: &str) {
-
-    let listener = TcpListener::bind(listen_address).await.unwrap();
-
-    loop {
-        let (socket, peer_addr) = listener.accept().await.unwrap();
-
-        debug!("accepted connection from {}", peer_addr);
-
-        let mut conn_handler = Connection::new(socket);
-
-        task::spawn(async move {
-            if let Err(err) = conn_handler.run().await {
-                error!("error: {}", err);
-            }
-        });
-    }
 }
 
 #[derive(Debug)]
 struct Connection {
     stream: BufWriter<TcpStream>,
     buffer: BytesMut,
-    init_done: bool
+    init_done: bool,
+    conf: PageServerConf,
 }
 
 impl Connection {
 
-    pub fn new(socket: TcpStream) -> Connection {
+    pub fn new(conf: PageServerConf, socket: TcpStream) -> Connection {
         Connection {
             stream: BufWriter::new(socket),
             buffer: BytesMut::with_capacity(10 * 1024),
-            init_done: false
+            init_done: false,
+            conf: conf
         }
     }
 
@@ -433,10 +430,40 @@ impl Connection {
     async fn process_query(&mut self, q : &FeQueryMessage) -> Result<()> {
         trace!("got query {:?}", q.body);
 
-        if q.body.starts_with(b"pagestream") {
-            self.handle_pagerequests().await
-        } else if q.body.starts_with(b"controlfile") {
+        if q.body.starts_with(b"controlfile") {
+
             self.handle_controlfile().await
+
+        } else if q.body.starts_with(b"pagestream ") {
+            let (_l,r) = q.body.split_at("pagestream ".len());
+            let mut r = r.to_vec();
+            r.pop();
+            let sysid = String::from_utf8(r).unwrap().trim().to_string();
+            let sysid: u64 = sysid.parse().unwrap(); // XXX
+
+            self.handle_pagerequests(sysid).await
+
+        } else if q.body.starts_with(b"callmemaybe ") {
+
+            let (_l,r) = q.body.split_at("callmemaybe ".len());
+            let mut r = r.to_vec();
+            r.pop();
+            let connstr = String::from_utf8(r).unwrap().trim().to_string();
+
+            let conf_copy = self.conf.clone();
+            let _walreceiver_thread = thread::Builder::new()
+                .name("WAL receiver thread".into())
+                .spawn(move || {
+                    walreceiver::thread_main(conf_copy,&connstr);
+                })
+                .unwrap();
+
+            // generick ack:
+            self.write_message_noflush(&BeMessage::RowDescription).await?;
+            self.write_message_noflush(&BeMessage::DataRow).await?;
+            self.write_message_noflush(&BeMessage::CommandComplete).await?;
+            self.write_message(&BeMessage::ReadyForQuery).await
+
         } else if q.body.starts_with(b"status") {
             self.write_message_noflush(&BeMessage::RowDescription).await?;
             self.write_message_noflush(&BeMessage::DataRow).await?;
@@ -456,10 +483,9 @@ impl Connection {
         self.write_message_noflush(&BeMessage::ControlFile).await?;
         self.write_message_noflush(&BeMessage::CommandComplete).await?;
         self.write_message(&BeMessage::ReadyForQuery).await
-
     }
 
-    async fn handle_pagerequests(&mut self) -> Result<()> {
+    async fn handle_pagerequests(&mut self, sysid: u64) -> Result<()> {
 
         /* switch client to COPYBOTH */
         self.stream.write_u8(b'W').await?;
@@ -468,13 +494,15 @@ impl Connection {
         self.stream.write_i16(0).await?;    /* numAttributes */
         self.stream.flush().await?;
 
+        let pcache = page_cache::get_pagecahe(self.conf.clone(), sysid);
+
         loop {
             let message = self.read_message().await?;
 
             // XXX: none seems to appear a lot in log.
             // Do we have conditions for busy-loop here?
             if let Some(m) = &message {
-                info!("query: {:?}", m);
+                info!("query({}): {:?}", sysid, m);
             };
 
             if message.is_none() {
@@ -492,7 +520,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let exist = page_cache::relsize_exist(&tag);
+                    let exist = pcache.relsize_exist(&tag);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: exist,
@@ -520,7 +548,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let n_blocks = page_cache::relsize_get(&tag);
+                    let n_blocks = pcache.relsize_get(&tag);
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
@@ -535,27 +563,25 @@ impl Connection {
                         forknum: req.forknum,
                         blknum: req.blkno
                     };
-                    let lsn = req.lsn;
 
-                    let msg;
-                    {
-                        let p = page_cache::get_page_at_lsn(buf_tag, lsn);
-                        if p.is_ok() {
-                            msg = ZenithReadResponse {
+                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn) {
+                        Ok(p) => {
+                            BeMessage::ZenithReadResponse(ZenithReadResponse {
                                 ok: true,
                                 n_blocks: 0,
-                                page: p.unwrap()
-                            };
-                        } else {
+                                page: p
+                            })
+                        },
+                        Err(e) => {
                             const ZERO_PAGE:[u8; 8192] = [0; 8192];
-                            msg = ZenithReadResponse {
+                            error!("get_page_at_lsn: {}", e);
+                            BeMessage::ZenithReadResponse(ZenithReadResponse {
                                 ok: false,
                                 n_blocks: 0,
                                 page: Bytes::from_static(&ZERO_PAGE)
-                            }
+                            })
                         }
-                    }
-                    let msg = BeMessage::ZenithReadResponse(msg);
+                    };
 
                     self.write_message(&msg).await?
 
@@ -568,7 +594,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    page_cache::relsize_inc(&tag, None);
+                    pcache.relsize_inc(&tag, None);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: true,
@@ -583,7 +609,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    page_cache::relsize_inc(&tag, Some(req.blkno));
+                    pcache.relsize_inc(&tag, Some(req.blkno));
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: true,

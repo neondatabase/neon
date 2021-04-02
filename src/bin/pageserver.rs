@@ -7,6 +7,7 @@ use std::{fs::File, str::FromStr};
 use std::io;
 use std::path::PathBuf;
 use std::thread;
+use std::fs;
 
 use clap::{App, Arg};
 use daemonize::Daemonize;
@@ -20,7 +21,6 @@ use pageserver::page_service;
 use pageserver::restore_s3;
 use pageserver::tui;
 use pageserver::walreceiver;
-use pageserver::walredo;
 use pageserver::PageServerConf;
 
 fn main() -> Result<(), io::Error> {
@@ -61,7 +61,7 @@ fn main() -> Result<(), io::Error> {
         data_dir: PathBuf::from("./"),
         daemonize: false,
         interactive: false,
-        wal_producer_connstr: String::from_str("host=127.0.0.1 port=65432 user=zenith").unwrap(),
+        wal_producer_connstr: None,
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
         skip_recovery: false,
     };
@@ -90,7 +90,7 @@ fn main() -> Result<(), io::Error> {
     }
 
     if let Some(addr) = arg_matches.value_of("wal_producer") {
-        conf.wal_producer_connstr = String::from_str(addr).unwrap();
+        conf.wal_producer_connstr = Some(String::from_str(addr).unwrap());
     }
 
     if let Some(addr) = arg_matches.value_of("listen") {
@@ -148,43 +148,51 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
 
     info!("starting...");
 
-    // Initialize the WAL applicator
-    let walredo_thread = thread::Builder::new()
-        .name("WAL redo thread".into())
-        .spawn(|| {
-            walredo::wal_applicator_main();
-        })
-        .unwrap();
-    threads.push(walredo_thread);
-
     // Before opening up for connections, restore the latest base backup from S3.
     // (We don't persist anything to local disk at the moment, so we need to do
     // this at every startup)
     if !conf.skip_recovery {
-        restore_s3::restore_main();
+        restore_s3::restore_main(&conf);
     }
 
-    // Launch the WAL receiver thread. It will try to connect to the WAL safekeeper,
-    // and stream the WAL. If the connection is lost, it will reconnect on its own.
-    // We just fire and forget it here.
-    let conf1 = conf.clone();
-    let walreceiver_thread = thread::Builder::new()
-        .name("WAL receiver thread".into())
-        .spawn(|| {
-            // thread code
-            walreceiver::thread_main(conf1);
-        })
-        .unwrap();
-    threads.push(walreceiver_thread);
+    // Create directory for wal-redo datadirs
+    match fs::create_dir(conf.data_dir.join("wal-redo")) {
+        Ok(_) => {},
+        Err(e) => match e.kind() {
+            io::ErrorKind::AlreadyExists => {}
+            _ => {
+                panic!("Failed to create wal-redo data directory: {}", e);
+            }
+        }
+    }
+
+    // Launch the WAL receiver thread if pageserver was started with --wal-producer
+    // option. It will try to connect to the WAL safekeeper, and stream the WAL. If
+    // the connection is lost, it will reconnect on its own. We just fire and forget
+    // it here.
+    //
+    // All other wal receivers are started on demand by "callmemaybe" command
+    // sent to pageserver.
+    let conf_copy = conf.clone();
+    if let Some(wal_producer) = conf.wal_producer_connstr {
+        let conf = conf_copy.clone();
+        let walreceiver_thread = thread::Builder::new()
+            .name("static WAL receiver thread".into())
+            .spawn(move || {
+                walreceiver::thread_main(conf, &wal_producer);
+            })
+            .unwrap();
+        threads.push(walreceiver_thread);
+    }
 
     // GetPage@LSN requests are served by another thread. (It uses async I/O,
     // but the code in page_service sets up it own thread pool for that)
-    let conf2 = conf.clone();
+    let conf = conf_copy.clone();
     let page_server_thread = thread::Builder::new()
         .name("Page Service thread".into())
         .spawn(|| {
             // thread code
-            page_service::thread_main(conf2);
+            page_service::thread_main(conf);
         })
         .unwrap();
     threads.push(page_server_thread);

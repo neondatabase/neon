@@ -22,7 +22,7 @@ use tokio::runtime;
 
 use futures::future;
 
-use crate::page_cache;
+use crate::{PageServerConf, page_cache};
 
 struct Storage {
     region: Region,
@@ -30,12 +30,12 @@ struct Storage {
     bucket: String
 }
 
-pub fn restore_main() {
+pub fn restore_main(conf: &PageServerConf) {
     // Create a new thread pool
     let runtime = runtime::Runtime::new().unwrap();
 
     runtime.block_on(async {
-        let result = restore_chunk().await;
+        let result = restore_chunk(conf).await;
 
         match result {
             Ok(_) => { return; },
@@ -55,7 +55,7 @@ pub fn restore_main() {
 //
 // Load it all into the page cache.
 //
-async fn restore_chunk() -> Result<(), S3Error> {
+async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
 
     let backend = Storage {
         region: Region::Custom {
@@ -79,6 +79,8 @@ async fn restore_chunk() -> Result<(), S3Error> {
     // List out contents of directory
     let results: Vec<s3::serde_types::ListBucketResult> = bucket.list("relationdata/".to_string(), Some("".to_string())).await?;
 
+    // TODO: get that from backup
+    let sys_id: u64 = 42;
     let mut oldest_lsn = 0;
     let mut slurp_futures: Vec<_> = Vec::new();
 
@@ -98,7 +100,7 @@ async fn restore_chunk() -> Result<(), S3Error> {
                         oldest_lsn = p.lsn;
                     }
                     let b = bucket.clone();
-                    let f = slurp_base_file(b, key.to_string(), p);
+                    let f = slurp_base_file(conf, sys_id, b, key.to_string(), p);
 
                     slurp_futures.push(f);
                 }
@@ -110,7 +112,9 @@ async fn restore_chunk() -> Result<(), S3Error> {
     if oldest_lsn == 0 {
         panic!("no base backup found");
     }
-    page_cache::init_valid_lsn(oldest_lsn);
+
+    let pcache = page_cache::get_pagecahe(conf.clone(), sys_id);
+    pcache.init_valid_lsn(oldest_lsn);
 
     info!("{} files to restore...", slurp_futures.len());
 
@@ -266,7 +270,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
 //
 // Load a base file from S3, and insert it into the page cache
 //
-async fn slurp_base_file(bucket: Bucket, s3path: String, parsed: ParsedBaseImageFileName)
+async fn slurp_base_file(conf: &PageServerConf, sys_id: u64, bucket: Bucket, s3path: String, parsed: ParsedBaseImageFileName)
 {
     // FIXME: rust-s3 opens a new connection for each request. Should reuse
     // the reqwest::Client object. But that requires changes to rust-s3 itself.
@@ -280,6 +284,8 @@ async fn slurp_base_file(bucket: Bucket, s3path: String, parsed: ParsedBaseImage
     // FIXME: use constants (BLCKSZ)
     let mut blknum: u32 = parsed.segno * (1024*1024*1024 / 8192);
 
+    let pcache = page_cache::get_pagecahe(conf.clone(), sys_id);
+
     while bytes.remaining() >= 8192 {
 
         let tag = page_cache::BufferTag {
@@ -290,7 +296,7 @@ async fn slurp_base_file(bucket: Bucket, s3path: String, parsed: ParsedBaseImage
             blknum: blknum
         };
 
-        page_cache::put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));
+        pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));
 
         blknum += 1;
     }

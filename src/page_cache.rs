@@ -7,25 +7,27 @@
 //
 
 use core::ops::Bound::Included;
-use std::convert::TryInto;
+use std::{convert::TryInto, ops::AddAssign};
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
-use std::sync::Arc;
-use std::sync::Condvar;
-use std::sync::Mutex;
+use std::sync::{Arc,Condvar, Mutex};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::thread;
+// use tokio::sync::RwLock;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use rand::Rng;
 use log::*;
 
+use crate::{PageServerConf, walredo};
+
 use crossbeam_channel::unbounded;
 use crossbeam_channel::{Sender, Receiver};
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
-static TIMEOUT: Duration = Duration::from_secs(20);
+static TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct PageCache {
     shared: Mutex<PageCacheShared>,
@@ -49,6 +51,7 @@ pub struct PageCache {
     pub last_record_lsn: AtomicU64,
 }
 
+#[derive(Clone)]
 pub struct PageCacheStats {
     pub num_entries: u64,
     pub num_page_images: u64,
@@ -57,6 +60,21 @@ pub struct PageCacheStats {
     pub first_valid_lsn: u64,
     pub last_valid_lsn: u64,
     pub last_record_lsn: u64,
+}
+
+impl AddAssign for PageCacheStats {
+
+    fn add_assign(&mut self, other: Self) {
+        *self = Self {
+            num_entries: self.num_entries + other.num_entries,
+            num_page_images: self.num_page_images + other.num_page_images,
+            num_wal_records: self.num_wal_records + other.num_wal_records,
+            num_getpage_requests: self.num_getpage_requests + other.num_getpage_requests,
+            first_valid_lsn: self.first_valid_lsn + other.first_valid_lsn,
+            last_valid_lsn: self.last_valid_lsn + other.last_valid_lsn,
+            last_record_lsn: self.last_record_lsn + other.last_record_lsn,
+        }
+    }
 }
 
 //
@@ -94,8 +112,31 @@ struct PageCacheShared {
 }
 
 lazy_static! {
-    pub static ref PAGECACHE : PageCache = init_page_cache();
+    pub static ref PAGECACHES : Mutex<HashMap<u64, Arc<PageCache>>> = Mutex::new(HashMap::new());
 }
+
+pub fn get_pagecahe(conf: PageServerConf, sys_id : u64) -> Arc<PageCache> {
+    let mut pcaches = PAGECACHES.lock().unwrap();
+
+    if !pcaches.contains_key(&sys_id) {
+        pcaches.insert(sys_id, Arc::new(init_page_cache()));
+
+        // Initialize the WAL redo thread
+        //
+        // Now join_handle is not saved any where and we won'try restart tharead
+        // if it is dead. We may later stop that treads after some inactivity period
+        // and restart them on demand.
+        let _walredo_thread = thread::Builder::new()
+            .name("WAL redo thread".into())
+            .spawn(move || {
+                walredo::wal_redo_main(conf, sys_id);
+            })
+            .unwrap();
+    }
+
+    pcaches.get(&sys_id).unwrap().clone()
+}
+
 fn init_page_cache() -> PageCache
 {
     // Initialize the channel between the page cache and the WAL applicator
@@ -208,14 +249,16 @@ pub struct WALRecord {
 
 // Public interface functions
 
+impl PageCache {
+
 //
 // GetPage@LSN
 //
 // Returns an 8k page image
 //
-pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>>
+pub fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>>
 {
-    PAGECACHE.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
+    self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
     // Look up cache entry. If it's a page image, return that. If it's a WAL record,
     // ask the WAL redo service to reconstruct the page image from the WAL records.
@@ -224,14 +267,14 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
 
     let entry_rc: Arc<CacheEntry>;
     {
-        let mut shared = PAGECACHE.shared.lock().unwrap();
+        let mut shared = self.shared.lock().unwrap();
         let mut waited = false;
 
         while lsn > shared.last_valid_lsn {
             // TODO: Wait for the WAL receiver to catch up
             waited = true;
             trace!("not caught up yet: {}, requested {}", shared.last_valid_lsn, lsn);
-            let wait_result = PAGECACHE.valid_lsn_condvar.wait_timeout(shared, TIMEOUT).unwrap();
+            let wait_result = self.valid_lsn_condvar.wait_timeout(shared, TIMEOUT).unwrap();
 
             shared = wait_result.0;
             if wait_result.1.timed_out() {
@@ -283,7 +326,7 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
                 assert!(!entry_content.apply_pending);
                 entry_content.apply_pending = true;
 
-                let s = &PAGECACHE.walredo_sender;
+                let s = &self.walredo_sender;
                 s.send(entry_rc.clone())?;
             }
 
@@ -323,10 +366,10 @@ pub fn get_page_at_lsn(tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>
 // Returns an old page image (if any), and a vector of WAL records to apply
 // over it.
 //
-pub fn collect_records_for_apply(entry: &CacheEntry) -> (Option<Bytes>, Vec<WALRecord>)
+pub fn collect_records_for_apply(&self, entry: &CacheEntry) -> (Option<Bytes>, Vec<WALRecord>)
 {
     // Scan the BTreeMap backwards, starting from the given entry.
-    let shared = PAGECACHE.shared.lock().unwrap();
+    let shared = self.shared.lock().unwrap();
     let pagecache = &shared.pagecache;
 
     let minkey = CacheKey {
@@ -377,7 +420,7 @@ pub fn collect_records_for_apply(entry: &CacheEntry) -> (Option<Bytes>, Vec<WALR
 //
 // Adds a WAL record to the page cache
 //
-pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
+pub fn put_wal_record(&self, tag: BufferTag, rec: WALRecord)
 {
     let key = CacheKey {
         tag: tag,
@@ -387,7 +430,7 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
     let entry = CacheEntry::new(key.clone());
     entry.content.lock().unwrap().wal_record = Some(rec);
 
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
 
     let rel_tag = RelTag {
         spcnode: tag.spcnode,
@@ -403,19 +446,19 @@ pub fn put_wal_record(tag: BufferTag, rec: WALRecord)
     trace!("put_wal_record lsn: {}", key.lsn);
 
     let oldentry = shared.pagecache.insert(key, Arc::new(entry));
-    PAGECACHE.num_entries.fetch_add(1, Ordering::Relaxed);
+    self.num_entries.fetch_add(1, Ordering::Relaxed);
 
     if !oldentry.is_none() {
         error!("overwriting WAL record in page cache");
     }
 
-    PAGECACHE.num_wal_records.fetch_add(1, Ordering::Relaxed);
+    self.num_wal_records.fetch_add(1, Ordering::Relaxed);
 }
 
 //
 // Memorize a full image of a page version
 //
-pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
+pub fn put_page_image(&self, tag: BufferTag, lsn: u64, img: Bytes)
 {
     let key = CacheKey {
         tag: tag,
@@ -425,39 +468,39 @@ pub fn put_page_image(tag: BufferTag, lsn: u64, img: Bytes)
     let entry = CacheEntry::new(key.clone());
     entry.content.lock().unwrap().page_image = Some(img);
 
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
     let pagecache = &mut shared.pagecache;
 
     let oldentry = pagecache.insert(key, Arc::new(entry));
-    PAGECACHE.num_entries.fetch_add(1, Ordering::Relaxed);
+    self.num_entries.fetch_add(1, Ordering::Relaxed);
     assert!(oldentry.is_none());
 
     //debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
     //        tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
 
-    PAGECACHE.num_page_images.fetch_add(1, Ordering::Relaxed);
+    self.num_page_images.fetch_add(1, Ordering::Relaxed);
 }
 
 //
-pub fn advance_last_valid_lsn(lsn: u64)
+pub fn advance_last_valid_lsn(&self, lsn: u64)
 {
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
 
     // Can't move backwards.
     assert!(lsn >= shared.last_valid_lsn);
 
     shared.last_valid_lsn = lsn;
-    PAGECACHE.valid_lsn_condvar.notify_all();
+    self.valid_lsn_condvar.notify_all();
 
-    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
+    self.last_valid_lsn.store(lsn, Ordering::Relaxed);
 }
 
 //
 // NOTE: this updates last_valid_lsn as well.
 //
-pub fn advance_last_record_lsn(lsn: u64)
+pub fn advance_last_record_lsn(&self, lsn: u64)
 {
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
 
     // Can't move backwards.
     assert!(lsn >= shared.last_valid_lsn);
@@ -465,16 +508,16 @@ pub fn advance_last_record_lsn(lsn: u64)
 
     shared.last_valid_lsn = lsn;
     shared.last_record_lsn = lsn;
-    PAGECACHE.valid_lsn_condvar.notify_all();
+    self.valid_lsn_condvar.notify_all();
 
-    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
-    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
+    self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+    self.last_valid_lsn.store(lsn, Ordering::Relaxed);
 }
 
 //
-pub fn _advance_first_valid_lsn(lsn: u64)
+pub fn _advance_first_valid_lsn(&self, lsn: u64)
 {
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
 
     // Can't move backwards.
     assert!(lsn >= shared.first_valid_lsn);
@@ -484,12 +527,12 @@ pub fn _advance_first_valid_lsn(lsn: u64)
     assert!(shared.last_valid_lsn == 0 || lsn < shared.last_valid_lsn);
 
     shared.first_valid_lsn = lsn;
-    PAGECACHE.first_valid_lsn.store(lsn, Ordering::Relaxed);
+    self.first_valid_lsn.store(lsn, Ordering::Relaxed);
 }
 
-pub fn init_valid_lsn(lsn: u64)
+pub fn init_valid_lsn(&self, lsn: u64)
 {
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
 
     assert!(shared.first_valid_lsn == 0);
     assert!(shared.last_valid_lsn == 0);
@@ -498,14 +541,15 @@ pub fn init_valid_lsn(lsn: u64)
     shared.first_valid_lsn = lsn;
     shared.last_valid_lsn = lsn;
     shared.last_record_lsn = lsn;
-    PAGECACHE.first_valid_lsn.store(lsn, Ordering::Relaxed);
-    PAGECACHE.last_valid_lsn.store(lsn, Ordering::Relaxed);
-    PAGECACHE.last_record_lsn.store(lsn, Ordering::Relaxed);
+
+    self.first_valid_lsn.store(lsn, Ordering::Relaxed);
+    self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+    self.last_record_lsn.store(lsn, Ordering::Relaxed);
 }
 
-pub fn get_last_record_lsn() -> u64
+pub fn get_last_valid_lsn(&self) -> u64
 {
-    let shared = PAGECACHE.shared.lock().unwrap();
+    let shared = self.shared.lock().unwrap();
 
     return shared.last_record_lsn;
 }
@@ -517,7 +561,7 @@ pub fn get_last_record_lsn() -> u64
 // 2. Request that page with GetPage@LSN, using Max LSN (i.e. get the latest page version)
 //
 //
-pub fn _test_get_page_at_lsn()
+pub fn _test_get_page_at_lsn(&self)
 {
     // for quick testing of the get_page_at_lsn() funcion.
     //
@@ -527,7 +571,7 @@ pub fn _test_get_page_at_lsn()
     let mut tag: Option<BufferTag> = None;
 
     {
-        let shared = PAGECACHE.shared.lock().unwrap();
+        let shared = self.shared.lock().unwrap();
         let pagecache = &shared.pagecache;
 
         if pagecache.is_empty() {
@@ -548,7 +592,7 @@ pub fn _test_get_page_at_lsn()
     }
 
     info!("testing GetPage@LSN for block {}", tag.unwrap().blknum);
-    match get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee) {
+    match self.get_page_at_lsn(tag.unwrap(), 0xffff_ffff_ffff_eeee) {
         Ok(_img) => {
             // This prints out the whole page image.
             //println!("{:X?}", img);
@@ -563,9 +607,9 @@ pub fn _test_get_page_at_lsn()
 // FIXME: Shouldn't relation size also be tracked with an LSN?
 // If a replica is lagging behind, it needs to get the size as it was on
 // the replica's current replay LSN.
-pub fn relsize_inc(rel: &RelTag, to: Option<u32>)
+pub fn relsize_inc(&self, rel: &RelTag, to: Option<u32>)
 {
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
     let entry = shared.relsize_cache.entry(*rel).or_insert(0);
 
     if let Some(to) = to {
@@ -575,29 +619,51 @@ pub fn relsize_inc(rel: &RelTag, to: Option<u32>)
     }
 }
 
-pub fn relsize_get(rel: &RelTag) -> u32
+pub fn relsize_get(&self, rel: &RelTag) -> u32
 {
-    let mut shared = PAGECACHE.shared.lock().unwrap();
+    let mut shared = self.shared.lock().unwrap();
     let entry = shared.relsize_cache.entry(*rel).or_insert(0);
     *entry
 }
 
-pub fn relsize_exist(rel: &RelTag) -> bool
+pub fn relsize_exist(&self, rel: &RelTag) -> bool
 {
-    let shared = PAGECACHE.shared.lock().unwrap();
+    let shared = self.shared.lock().unwrap();
     let relsize_cache = &shared.relsize_cache;
     relsize_cache.contains_key(rel)
 }
 
-pub fn get_stats() -> PageCacheStats
+pub fn get_stats(&self) -> PageCacheStats
 {
     PageCacheStats {
-        num_entries: PAGECACHE.num_entries.load(Ordering::Relaxed),
-        num_page_images: PAGECACHE.num_page_images.load(Ordering::Relaxed),
-        num_wal_records: PAGECACHE.num_wal_records.load(Ordering::Relaxed),
-        num_getpage_requests: PAGECACHE.num_getpage_requests.load(Ordering::Relaxed),
-        first_valid_lsn: PAGECACHE.first_valid_lsn.load(Ordering::Relaxed),
-        last_valid_lsn: PAGECACHE.last_valid_lsn.load(Ordering::Relaxed),
-        last_record_lsn: PAGECACHE.last_record_lsn.load(Ordering::Relaxed),
+        num_entries: self.num_entries.load(Ordering::Relaxed),
+        num_page_images: self.num_page_images.load(Ordering::Relaxed),
+        num_wal_records: self.num_wal_records.load(Ordering::Relaxed),
+        num_getpage_requests: self.num_getpage_requests.load(Ordering::Relaxed),
+        first_valid_lsn: self.first_valid_lsn.load(Ordering::Relaxed),
+        last_valid_lsn: self.last_valid_lsn.load(Ordering::Relaxed),
+        last_record_lsn: self.last_record_lsn.load(Ordering::Relaxed),
     }
+}
+
+}
+
+pub fn get_stats() -> PageCacheStats
+{
+    let pcaches = PAGECACHES.lock().unwrap();
+
+    let mut stats = PageCacheStats {
+        num_entries: 0,
+        num_page_images: 0,
+        num_wal_records: 0,
+        num_getpage_requests: 0,
+        first_valid_lsn: 0,
+        last_valid_lsn: 0,
+        last_record_lsn: 0,
+    };
+
+    pcaches.iter().for_each(|(_sys_id, pcache)| {
+        stats += pcache.get_stats();
+    });
+    stats
 }

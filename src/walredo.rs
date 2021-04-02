@@ -16,7 +16,7 @@
 //
 use tokio::runtime::Runtime;
 use tokio::process::{Command, Child, ChildStdin, ChildStdout};
-use std::process::Stdio;
+use std::{path::PathBuf, process::Stdio};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
@@ -24,13 +24,14 @@ use std::io::Error;
 use std::cell::RefCell;
 use std::assert;
 use std::sync::{Arc};
+use std::fs;
 use log::*;
 use std::time::Instant;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut, BufMut};
 
-use crate::page_cache::BufferTag;
+use crate::{PageServerConf, page_cache::BufferTag};
 use crate::page_cache::CacheEntry;
 use crate::page_cache::WALRecord;
 use crate::page_cache;
@@ -40,25 +41,28 @@ static TIMEOUT: Duration = Duration::from_secs(20);
 //
 // Main entry point for the WAL applicator thread.
 //
-pub fn wal_applicator_main()
+pub fn wal_redo_main(conf: PageServerConf, sys_id: u64)
 {
-    info!("WAL redo thread started");
+    info!("WAL redo thread started {}", sys_id);
 
     // We block on waiting for requests on the walredo request channel, but
     // use async I/O to communicate with the child process. Initialize the
     // runtime for the async part.
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
 
+    let pcache = page_cache::get_pagecahe(conf.clone(), sys_id);
+
     // Loop forever, handling requests as they come.
-    let walredo_channel_receiver = &page_cache::PAGECACHE.walredo_receiver;
+    let walredo_channel_receiver = &pcache.walredo_receiver;
     loop {
 
         let mut process: WalRedoProcess;
+        let datadir = conf.data_dir.join(format!("wal-redo/{}", sys_id));
 
-        info!("launching WAL redo postgres process");
+        info!("launching WAL redo postgres process {}", sys_id);
         {
             let _guard = runtime.enter();
-            process = WalRedoProcess::launch().unwrap();
+            process = WalRedoProcess::launch(&datadir, &runtime).unwrap();
         }
 
         // Pretty arbitrarily, reuse the same Postgres process for 100 requests.
@@ -66,10 +70,9 @@ pub fn wal_applicator_main()
         // using up all shared buffers in Postgres's shared buffer cache; we don't
         // want to write any pages to disk in the WAL redo process.
         for _i in 1..100 {
-
             let request = walredo_channel_receiver.recv().unwrap();
 
-            let result = handle_apply_request(&process, &runtime, request);
+            let result = handle_apply_request(&pcache, &process, &runtime, request);
             if result.is_err() {
                 // On error, kill the process.
                 break;
@@ -84,11 +87,11 @@ pub fn wal_applicator_main()
     }
 }
 
-fn handle_apply_request(process: &WalRedoProcess, runtime: &Runtime, entry_rc: Arc<CacheEntry>) -> Result<(), Error>
+fn handle_apply_request(pcache: &page_cache::PageCache, process: &WalRedoProcess, runtime: &Runtime, entry_rc: Arc<CacheEntry>) -> Result<(), Error>
 {
     let tag = entry_rc.key.tag;
     let lsn = entry_rc.key.lsn;
-    let (base_img, records) = page_cache::collect_records_for_apply(entry_rc.as_ref());
+    let (base_img, records) = pcache.collect_records_for_apply(entry_rc.as_ref());
 
     let mut entry = entry_rc.content.lock().unwrap();
     entry.apply_pending = false;
@@ -110,7 +113,7 @@ fn handle_apply_request(process: &WalRedoProcess, runtime: &Runtime, entry_rc: A
         result = Err(e);
     } else {
         entry.page_image = Some(apply_result.unwrap());
-        page_cache::PAGECACHE.num_page_images.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        pcache.num_page_images.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         result = Ok(());
     }
 
@@ -128,18 +131,38 @@ struct WalRedoProcess {
 
 impl WalRedoProcess {
 
-    fn launch() -> Result<WalRedoProcess, Error> {
-        //
-        // Start postgres binary in special WAL redo mode.
-        //
+    //
+    // Start postgres binary in special WAL redo mode.
+    //
+    // Tests who run pageserver binary are setting proper PG_BIN_DIR
+    // and PG_LIB_DIR so that WalRedo would start right postgres. We may later
+    // switch to setting same things in pageserver config file.
+    fn launch(datadir: &PathBuf, runtime: &Runtime) -> Result<WalRedoProcess, Error> {
+
+        // Create empty data directory for wal-redo postgres deleting old one.
+        fs::remove_dir_all(datadir.to_str().unwrap()).ok();
+        let initdb = runtime.block_on(Command::new("initdb")
+            .args(&["-D", datadir.to_str().unwrap()])
+            .arg("-N")
+            .status()
+        ).expect("failed to execute initdb");
+
+        if !initdb.success() {
+            panic!("initdb failed");
+        }
+
+        // Start postgres itself
         let mut child =
             Command::new("postgres")
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
+            .env("PGDATA", datadir.to_str().unwrap())
             .spawn()
             .expect("postgres --wal-redo command failed to start");
+
+        info!("launched WAL redo postgres process on {}", datadir.to_str().unwrap());
 
         let stdin = child.stdin.take().expect("failed to open child's stdin");
         let stderr = child.stderr.take().expect("failed to open child's stderr");
@@ -159,7 +182,7 @@ impl WalRedoProcess {
                 if res.unwrap() == 0 {
                     break;
                 }
-                debug!("{}", line.trim());
+                debug!("wal-redo-postgres: {}", line.trim());
                 line.clear();
             }
             Ok::<(), Error>(())

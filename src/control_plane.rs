@@ -7,7 +7,7 @@
 // local installations.
 //
 
-use std::fs::{self, OpenOptions};
+use std::{fs::{self, OpenOptions}, rc::Rc};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str;
@@ -45,7 +45,7 @@ pub struct StorageControlPlane {
 
 impl StorageControlPlane {
     // postgres <-> page_server
-    pub fn one_page_server(pg_connstr: String) -> StorageControlPlane {
+    pub fn one_page_server() -> StorageControlPlane {
         let mut cplane = StorageControlPlane {
             wal_acceptors: Vec::new(),
             page_servers: Vec::new(),
@@ -53,7 +53,6 @@ impl StorageControlPlane {
 
         let pserver = PageServerNode {
             page_service_addr: "127.0.0.1:65200".parse().unwrap(),
-            wal_producer_connstr: pg_connstr,
             data_dir: TEST_WORKDIR.join("pageserver")
         };
         pserver.init();
@@ -73,26 +72,25 @@ impl StorageControlPlane {
 
     fn get_wal_acceptor_conn_info() {}
 
+    pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
+        let addr = &self.page_servers[0].page_service_addr;
 
-    pub fn simple_query_storage(&self, db: &str, user: &str, sql: &str) ->  Vec<tokio_postgres::SimpleQueryMessage> {
         let connstring = format!(
             "host={} port={} dbname={} user={}",
-            self.page_server_addr().ip(),
-            self.page_server_addr().port(),
-            db,
-            user
+            addr.ip(),
+            addr.port(),
+            "no_db",
+            "no_user",
         );
-
         let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
 
-        println!("Running {}", sql);
+        println!("Pageserver query: '{}'", sql);
         client.simple_query(sql).unwrap()
     }
 }
 
 pub struct PageServerNode {
     page_service_addr: SocketAddr,
-    wal_producer_connstr: String,
     data_dir: PathBuf,
 }
 
@@ -119,17 +117,15 @@ impl PageServerNode {
     }
 
     pub fn start(&self) {
-        println!("Starting pageserver at '{}', wal_producer='{}'", self.page_service_addr, self.wal_producer_connstr);
+        println!("Starting pageserver at '{}'", self.page_service_addr);
 
         let status = Command::new(CARGO_BIN_DIR.join("pageserver"))
             .args(&["-D", self.data_dir.to_str().unwrap()])
-            .args(&["-w", self.wal_producer_connstr.as_str()])
             .args(&["-l", self.page_service_addr.to_string().as_str()])
             .arg("-d")
             .arg("--skip-recovery")
             .env_clear()
             .env("PATH", PG_BIN_DIR.to_str().unwrap()) // path to postres-wal-redo binary
-            .env("PGDATA", self.data_dir.join("wal_redo_pgdata"))      // postres-wal-redo pgdata
             .status()
             .expect("failed to start pageserver");
 
@@ -172,19 +168,22 @@ impl WalAcceptorNode {}
 //
 // ComputeControlPlane
 //
-pub struct ComputeControlPlane {
+pub struct ComputeControlPlane<'a> {
     pg_bin_dir: PathBuf,
     work_dir: PathBuf,
     last_assigned_port: u16,
-    nodes: Vec<PostgresNode>,
+    storage_cplane: &'a StorageControlPlane,
+    nodes: Vec<Rc<PostgresNode>>,
 }
 
-impl ComputeControlPlane {
-    pub fn local() -> ComputeControlPlane {
+impl ComputeControlPlane<'_> {
+
+    pub fn local(storage_cplane : &StorageControlPlane) -> ComputeControlPlane {
         ComputeControlPlane {
             pg_bin_dir: PG_BIN_DIR.to_path_buf(),
             work_dir: TEST_WORKDIR.to_path_buf(),
             last_assigned_port: 65431,
+            storage_cplane: storage_cplane,
             nodes: Vec::new(),
         }
     }
@@ -196,7 +195,7 @@ impl ComputeControlPlane {
         port
     }
 
-    pub fn new_vanilla_node(&mut self) -> &PostgresNode {
+    pub fn new_vanilla_node<'a>(&mut self) -> &Rc<PostgresNode> {
         // allocate new node entry with generated port
         let node_id = self.nodes.len() + 1;
         let node = PostgresNode {
@@ -206,7 +205,7 @@ impl ComputeControlPlane {
             pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
             pg_bin_dir: self.pg_bin_dir.clone(),
         };
-        self.nodes.push(node);
+        self.nodes.push(Rc::new(node));
         let node = self.nodes.last().unwrap();
 
         // initialize data directory
@@ -260,7 +259,7 @@ impl ComputeControlPlane {
             pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
             pg_bin_dir: self.pg_bin_dir.clone(),
         };
-        self.nodes.push(node);
+        self.nodes.push(Rc::new(node));
         let node = self.nodes.last().unwrap();
 
         // initialize data directory w/o files
@@ -296,6 +295,20 @@ impl ComputeControlPlane {
         ", address = node.ip, port = node.port).as_str());
 
         node
+    }
+
+    pub fn new_node(&mut self) -> Rc<PostgresNode> {
+        let storage_cplane = self.storage_cplane;
+        let node = self.new_vanilla_node();
+
+        let pserver = storage_cplane.page_server_addr();
+
+        // Configure that node to take pages from pageserver
+        node.append_conf("postgresql.conf", format!("\
+            page_server_connstring = 'host={} port={}'\n\
+        ", pserver.ip(), pserver.port()).as_str());
+
+        node.clone()
     }
 }
 
@@ -339,8 +352,11 @@ impl PostgresNode {
         }
     }
 
-    pub fn start(&self) {
-        println!("Started postgres node at '{}'", self.connstr());
+    pub fn start(&self, storage_cplane: &StorageControlPlane) {
+        let _res = storage_cplane
+            .page_server_psql(format!("callmemaybe {}", self.connstr()).as_str());
+
+        println!("Starting postgres node at '{}'", self.connstr());
         self.pg_ctl("start", true);
     }
 
@@ -349,11 +365,11 @@ impl PostgresNode {
     }
 
     pub fn stop(&self) {
-        self.pg_ctl("stop", true);
+        self.pg_ctl("-m immediate stop", true);
     }
 
     pub fn connstr(&self) -> String {
-        format!("user={} host={} port={}", self.whoami(), self.ip, self.port)
+        format!("host={} port={} user={}", self.ip, self.port, self.whoami())
     }
 
     // XXX: cache that in control plane
@@ -370,7 +386,6 @@ impl PostgresNode {
     }
 
     pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<tokio_postgres::Row> {
-        // XXX: user!
         let connstring = format!(
             "host={} port={} dbname={} user={}",
             self.ip,

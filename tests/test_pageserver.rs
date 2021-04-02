@@ -11,19 +11,9 @@ use pageserver::control_plane::StorageControlPlane;
 // Handcrafted cases with wal records that are (were) problematic for redo.
 #[test]
 fn test_redo_cases() {
-    // Allocate postgres instance, but don't start
-    let mut compute_cplane = ComputeControlPlane::local();
-    // Create compute node without files, only datadir structure
-    let node = compute_cplane.new_minimal_node();
-
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server(node.connstr());
-    let pageserver_addr = storage_cplane.page_server_addr();
-
-    // Configure that node to take pages from pageserver
-    node.append_conf("postgresql.conf", format!("\
-        page_server_connstring = 'host={} port={}'\n\
-    ", pageserver_addr.ip(), pageserver_addr.port()).as_str());
+    let storage_cplane = StorageControlPlane::one_page_server();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
 
     // Request info needed to build control file
     storage_cplane.simple_query_storage("postgres", node.whoami().as_str(), "controlfile");
@@ -31,7 +21,8 @@ fn test_redo_cases() {
     node.setup_controlfile();
 
     // start postgres
-    node.start();
+    let node = compute_cplane.new_node();
+    node.start(&storage_cplane);
 
     println!("await pageserver connection...");
     sleep(Duration::from_secs(3));
@@ -61,30 +52,57 @@ fn test_redo_cases() {
 // Runs pg_regress on a compute node
 #[test]
 fn test_regress() {
-    // Allocate postgres instance, but don't start
-    let mut compute_cplane = ComputeControlPlane::local();
-    let node = compute_cplane.new_vanilla_node();
-
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server(node.connstr());
-    let pageserver_addr = storage_cplane.page_server_addr();
-
-    // Configure that node to take pages from pageserver
-    node.append_conf("postgresql.conf", format!("\
-        page_server_connstring = 'host={} port={}'\n\
-    ", pageserver_addr.ip(), pageserver_addr.port()).as_str());
+    let storage_cplane = StorageControlPlane::one_page_server();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
 
     // start postgres
-    node.start();
+    let node = compute_cplane.new_node();
+    node.start(&storage_cplane);
 
     println!("await pageserver connection...");
     sleep(Duration::from_secs(3));
 
-    //////////////////////////////////////////////////////////////////
-
-    pageserver::control_plane::regress_check(node);
+    pageserver::control_plane::regress_check(&node);
 }
 
-// Runs recovery with minio
+// Run two postgres instances on one pageserver
 #[test]
-fn test_pageserver_recovery() {}
+fn test_pageserver_multitenancy() {
+    // Start pageserver that reads WAL directly from that postgres
+    let storage_cplane = StorageControlPlane::one_page_server();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+
+    // Allocate postgres instance, but don't start
+    let node1 = compute_cplane.new_node();
+    let node2 = compute_cplane.new_node();
+    node1.start(&storage_cplane);
+    node2.start(&storage_cplane);
+
+    // XXX: add some extension func to postgres to check walsender conn
+    // XXX: or better just drop that
+    println!("await pageserver connection...");
+    sleep(Duration::from_secs(3));
+
+    // check node1
+    node1.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
+    node1.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100000), 'payload'");
+    let count: i64 = node1
+        .safe_psql("postgres", "SELECT sum(key) FROM t")
+        .first()
+        .unwrap()
+        .get(0);
+    println!("sum = {}", count);
+    assert_eq!(count, 5000050000);
+
+    // check node2
+    node2.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
+    node2.safe_psql("postgres", "INSERT INTO t SELECT generate_series(100000,200000), 'payload'");
+    let count: i64 = node2
+        .safe_psql("postgres", "SELECT sum(key) FROM t")
+        .first()
+        .unwrap()
+        .get(0);
+    println!("sum = {}", count);
+    assert_eq!(count, 15000150000);
+}

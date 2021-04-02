@@ -22,9 +22,9 @@ use postgres_protocol::message::backend::ReplicationMessage;
 //
 // This is the entry point for the WAL receiver thread.
 //
-pub fn thread_main(conf: PageServerConf) {
+pub fn thread_main(conf: PageServerConf, wal_producer_connstr: &String) {
 
-    info!("WAL receiver thread started");
+    info!("WAL receiver thread started: '{}'", wal_producer_connstr);
 
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
@@ -33,7 +33,7 @@ pub fn thread_main(conf: PageServerConf) {
 
     runtime.block_on( async {
         loop {
-            let _res = walreceiver_main(&conf).await;
+            let _res = walreceiver_main(conf.clone(), wal_producer_connstr).await;
 
             // TODO: print/log the error
             info!("WAL streaming connection failed, retrying in 1 second...: {:?}", _res);
@@ -42,12 +42,12 @@ pub fn thread_main(conf: PageServerConf) {
     });
 }
 
-async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
+async fn walreceiver_main(conf: PageServerConf, wal_producer_connstr: &String) -> Result<(), Error> {
 
     // Connect to the database in replication mode.
-    debug!("connecting to {}...", conf.wal_producer_connstr);
+    debug!("connecting to {}...", wal_producer_connstr);
     let (mut rclient, connection) = connect_replication(
-        conf.wal_producer_connstr.as_str(),
+        wal_producer_connstr.as_str(),
         NoTls,
         ReplicationMode::Physical
     ).await?;
@@ -63,13 +63,16 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
 
     let _identify_system = rclient.identify_system().await?;
 
+    let sysid : u64 = _identify_system.systemid().parse().unwrap();
+    let pcache = page_cache::get_pagecahe(conf, sysid);
+
     //
     // Start streaming the WAL, from where we left off previously.
     //
-    let mut startpoint = page_cache::get_last_record_lsn();
+    let mut startpoint = pcache.get_last_valid_lsn();
     if startpoint == 0 {
         // FIXME: Or should we just error out?
-        page_cache::init_valid_lsn(u64::from(_identify_system.xlogpos()));
+        pcache.init_valid_lsn(u64::from(_identify_system.xlogpos()));
         startpoint = u64::from(_identify_system.xlogpos());
     } else {
         // There might be some padding after the last full record, skip it.
@@ -126,12 +129,12 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                                 rec: recdata.clone()
                             };
 
-                            page_cache::put_wal_record(tag, rec);
+                            pcache.put_wal_record(tag, rec);
                         }
 
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
-                        page_cache::advance_last_record_lsn(lsn);
+                        pcache.advance_last_valid_lsn(lsn);
 
                     } else {
                         break;
@@ -144,7 +147,7 @@ async fn walreceiver_main(conf: &PageServerConf) -> Result<(), Error> {
                 // better reflect that, because GetPage@LSN requests might also point in the
                 // middle of a record, if the request LSN was taken from the server's current
                 // flush ptr.
-                page_cache::advance_last_valid_lsn(endlsn);
+                pcache.advance_last_valid_lsn(endlsn);
             }
 
             ReplicationMessage::PrimaryKeepAlive(_keepalive) => {

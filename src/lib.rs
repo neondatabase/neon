@@ -19,18 +19,18 @@ pub mod xlog_utils;
 mod tui_logger;
 
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PageServerConf {
     pub data_dir: PathBuf,
     pub daemonize: bool,
     pub interactive: bool,
-    pub wal_producer_connstr: String,
+    pub wal_producer_connstr: Option<String>,
     pub listen_addr: SocketAddr,
     pub skip_recovery: bool,
 }
 
 #[allow(dead_code)]
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct WalAcceptorConf {
     pub data_dir: PathBuf,
     pub no_sync: bool,
