@@ -57,7 +57,7 @@ pub struct StorageControlPlane {
 
 impl StorageControlPlane {
     // postgres <-> page_server
-    pub fn one_page_server() -> StorageControlPlane {
+    pub fn one_page_server(froms3: bool) -> StorageControlPlane {
         let mut cplane = StorageControlPlane {
             wal_acceptors: Vec::new(),
             page_servers: Vec::new(),
@@ -68,7 +68,14 @@ impl StorageControlPlane {
             data_dir: TEST_WORKDIR.join("pageserver"),
         };
         pserver.init();
-        pserver.start();
+        if froms3
+        {
+            pserver.start_froms3();
+        }
+        else
+        {
+            pserver.start();
+        }
 
         cplane.page_servers.push(pserver);
         cplane
@@ -178,6 +185,28 @@ impl PageServerNode {
             .arg("--skip-recovery")
             .env_clear()
             .env("PATH", PG_BIN_DIR.to_str().unwrap()) // path to postres-wal-redo binary
+            .status()
+            .expect("failed to start pageserver");
+
+        if !status.success() {
+            panic!("pageserver start failed");
+        }
+    }
+
+    pub fn start_froms3(&self) {
+        println!("Starting pageserver at '{}'", self.page_service_addr);
+
+        let status = Command::new(CARGO_BIN_DIR.join("pageserver"))
+            .args(&["-D", self.data_dir.to_str().unwrap()])
+            .args(&["-l", self.page_service_addr.to_string().as_str()])
+            .arg("-d")
+            .env_clear()
+            .env("PATH", PG_BIN_DIR.to_str().unwrap()) // path to postres-wal-redo binary
+            .env("S3_ENDPOINT", "https://192.168.16.216:9000")
+            .env("S3_REGION", "us-east-1")
+            .env("S3_ACCESSKEY", "minioadmin")
+            .env("S3_SECRET", "minioadmin")
+            .env("S3_BUCKET", "zenith-testbucket")
             .status()
             .expect("failed to start pageserver");
 
@@ -610,6 +639,29 @@ impl PostgresNode {
         {
             Ok(child) => WalProposerNode { pid: child.id() },
             Err(e) => panic!("Failed to launch {:?}: {}", proxy_path, e),
+        }
+    }
+
+    pub fn push_to_s3(&self)
+    {
+        println!("Push to s3 node  at '{}'", self.pgdata.to_str().unwrap());
+
+        let zenith_push_path = self.pg_bin_dir.join("zenith_push");
+        println!("zenith_push_path: {}", zenith_push_path.to_str().unwrap());
+
+        let status = Command::new(zenith_push_path)
+            .args(&["-D", self.pgdata.to_str().unwrap()])
+            .env_clear()
+            .env("S3_ENDPOINT", "https://192.168.16.216:9000")
+            .env("S3_REGION", "us-east-1")
+            .env("S3_ACCESSKEY", "minioadmin")
+            .env("S3_SECRET", "minioadmin")
+            // .env("S3_BUCKET", "zenith-testbucket")
+            .status()
+            .expect("failed to push node to s3");
+
+        if !status.success() {
+            panic!("zenith_push failed");
         }
     }
 
