@@ -15,11 +15,6 @@ fn test_redo_cases() {
     let storage_cplane = StorageControlPlane::one_page_server();
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
 
-    // Request info needed to build control file
-    storage_cplane.simple_query_storage("postgres", node.whoami().as_str(), "controlfile");
-    // Setup controlfile
-    node.setup_controlfile();
-
     // start postgres
     let node = compute_cplane.new_node();
     node.start(&storage_cplane);
