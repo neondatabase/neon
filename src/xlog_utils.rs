@@ -19,7 +19,7 @@ pub const XLOG_SIZE_OF_XLOG_RECORD : usize = XLOG_RECORD_CRC_OFFS+4;
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
 pub type TimestampTz = u64;
-pub type XLogSegNo = u32;
+pub type XLogSegNo = u64;
 
 #[allow(non_snake_case)]
 pub fn XLogSegmentOffset(xlogptr : XLogRecPtr, wal_segsz_bytes : usize) -> u32 {
@@ -33,12 +33,12 @@ pub fn XLogSegmentsPerXLogId(wal_segsz_bytes : usize) -> XLogSegNo {
 
 #[allow(non_snake_case)]
 pub fn XLByteToSeg(xlogptr : XLogRecPtr, wal_segsz_bytes : usize) -> XLogSegNo {
-	return xlogptr as u32 / wal_segsz_bytes as u32;
+	return xlogptr / wal_segsz_bytes as u64;
 }
 
 #[allow(non_snake_case)]
 pub fn XLogSegNoOffsetToRecPtr(segno: XLogSegNo, offset:u32, wal_segsz_bytes: usize) -> XLogRecPtr {
-	return (segno as u64) * (wal_segsz_bytes as u64) + (offset as u64);
+	return segno * (wal_segsz_bytes as u64) + (offset as u64);
 }
 
 #[allow(non_snake_case)]
@@ -52,8 +52,8 @@ pub fn XLogFileName(tli : TimeLineID, logSegNo : XLogSegNo, wal_segsz_bytes : us
 #[allow(non_snake_case)]
 pub fn XLogFromFileName(fname:&str, wal_seg_size: usize) -> (XLogSegNo,TimeLineID) {
 	let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
-	let log = u32::from_str_radix(&fname[8..16], 16).unwrap();
-	let seg = u32::from_str_radix(&fname[16..24], 16).unwrap();
+	let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
+	let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
 	return (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli);
 }
 
