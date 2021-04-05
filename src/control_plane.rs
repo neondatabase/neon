@@ -332,16 +332,15 @@ impl PostgresNode {
             .unwrap();
     }
 
-    fn pg_ctl(&self, action: &str, check_ok: bool) {
+    fn pg_ctl(&self, args: &[&str], check_ok: bool) {
         let pg_ctl_path = self.pg_bin_dir.join("pg_ctl");
         let pg_ctl = Command::new(pg_ctl_path)
-            .args(&[
+            .args([&[
                 "-D",
                 self.pgdata.to_str().unwrap(),
                 "-l",
                 self.pgdata.join("log").to_str().unwrap(),
-                action,
-            ])
+            ], args].concat())
             .env_clear()
             .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
@@ -357,15 +356,15 @@ impl PostgresNode {
             .page_server_psql(format!("callmemaybe {}", self.connstr()).as_str());
 
         println!("Starting postgres node at '{}'", self.connstr());
-        self.pg_ctl("start", true);
+        self.pg_ctl(&["start"], true);
     }
 
     pub fn restart(&self) {
-        self.pg_ctl("restart", true);
+        self.pg_ctl(&["restart"], true);
     }
 
     pub fn stop(&self) {
-        self.pg_ctl("-m immediate stop", true);
+        self.pg_ctl(&["-m", "immediate", "stop"], true);
     }
 
     pub fn connstr(&self) -> String {
@@ -438,7 +437,7 @@ impl Drop for PostgresNode {
     // XXX: we may detect failed test by setting some flag in catch_unwind()
     // and checking it here. But let just clean datadirs on start.
     fn drop(&mut self) {
-        self.pg_ctl("stop", false);
+        self.stop();
         // fs::remove_dir_all(self.pgdata.clone()).unwrap();
     }
 }
