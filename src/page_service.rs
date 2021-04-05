@@ -7,6 +7,7 @@
 //     *status* -- show actual info about this pageserver,
 //     *pagestream* -- enter mode where smgr and pageserver talk with their
 //  custom protocol.
+//     *callmemaybe $url* -- ask pageserver to start walreceiver on $url
 //
 
 use tokio::net::{TcpListener, TcpStream};
@@ -499,8 +500,6 @@ impl Connection {
         loop {
             let message = self.read_message().await?;
 
-            // XXX: none seems to appear a lot in log.
-            // Do we have conditions for busy-loop here?
             if let Some(m) = &message {
                 info!("query({}): {:?}", sysid, m);
             };
