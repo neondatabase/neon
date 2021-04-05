@@ -1,0 +1,55 @@
+Mock implementation of a management console.
+
+See demo-howto.txt for usage.
+
+Building and Installation
+-------------------------
+
+To compile Postgres:
+  sudo apt build-dep postgresql
+  sudo apt install bison flex libz-dev libssl-dev
+  sudo apt install ccache
+  sudo apt install libcurl4-openssl-dev libxml2-dev
+
+For the webapp:
+  # NOTE: This requires at least version 1.1.0 of python3-flask. That's not
+  # available in Debian Buster, need at least Bullseye.
+
+  sudo apt install python3 python3-flask python3-pip npm webpack
+  pip3 install Flask-BasicAuth
+  pip3 install boto3
+
+git clone and compile and install patched version of Postgres:
+
+  git clone https://github.com/libzenith/postgres.git
+  cd postgres
+  git checkout zenith-experiments
+  ./configure --enable-debug --enable-cassert --with-openssl --prefix=/home/heikki/pgsql-install --with-libxml CC="ccache gcc" CFLAGS="-O0"
+  make -j4 -s install
+
+Get the webapp:
+  cd ~
+  git clone https://github.com/libzenith/zenith-mgmt-console.git
+  cd zenith-mgmt-console
+  mkdir pgdatadirs
+
+
+  openssl req -new -x509 -days 365 -nodes -text -out server.crt \
+    -keyout server.key -subj "/CN=zenith-demo"
+
+For Mock S3 server (unless you want to test against a real cloud service):
+  sudo apt install python3-tornado
+
+  cd ~/zenith-mgmt-console
+  git clone https://github.com/hlinnaka/ms3.git
+
+Compile & run it:
+  npm install
+  webpack # compile React app
+
+  BASIC_AUTH_PASSWORD=<password> ./launch-local.sh
+
+
+You can view the contents of the S3 bucket with browser:
+
+http://<server>/list_bucket

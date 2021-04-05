@@ -1,0 +1,67 @@
+Mock implementation of a management console.
+
+This isn't very different from a "normal" PostgreSQL installation with
+a base backup and WAL archive. The main user-visible difference is
+that when you create a standby server, we don't restore the whole data
+directory, but only the "non-relation" files. Relation files are
+restored on demand, when they're accessed the first time. That makes
+the "create standby" operation is very fast, but with some delay when
+you connect and start running queries instead.  Most visible if you
+have a large database. (However, see note below about large databases)
+
+Note: lots of things are broken/unsafe. Things will fail if a table is
+larger than 1 GB. Or if there are more than 1000 files in the cloud
+bucket.
+
+How to use this demo:
+
+1. If there are any leftovers from previous runs, reset by clicking
+   the RESET DEMO button.  This kills and deletes all Postgres servers,
+   and empties the cloud storage bucket
+
+2. Create primary server by clicking on the "Init primary" button
+
+3. Push a base image of the primary to cloud storage, by clicking the
+   "push base image" button.  (This takes about 30 seconds, be
+   patient)
+
+4. Connect to primary with psql, and create a test table with a little data.
+
+      psql postgres  -p5432 -U zenith -h<host>
+
+      create table mytable (i int4);
+
+      insert into mytable values (1);
+      select pg_switch_wal();
+
+   The Postgres password is the same as for the management console.
+
+3. Now that there's a new WAL segment in the arhive, we can "slice &
+   dice" it. Click on the "Slice & dice button".
+
+4. Perform more updates on the primary, to generate more WAL.
+
+      insert into mytable values (2); select pg_switch_wal();
+      insert into mytable values (3); select pg_switch_wal();
+      insert into mytable values (4); select pg_switch_wal();
+      insert into mytable values (5); select pg_switch_wal();
+
+5. Slice & Dice the WAL again
+
+6. Now you can create read-only standby servers at any point in the
+   WAL. Type a WAL position in the text box (or use the slider), and
+   click "Create new standby". The first standby is created at port 5433,
+   the second at port 5434, and so forth.
+
+7. Connect to the standby with "psql -p 5433". Note that it takes a
+   few seconds until the connection is established. That's because the
+   standby has to restore the basic system catalogs, like pg_database and
+   pg_authid from the backup. After connecting, you can do "\d" to list
+   tables, this will also take a few seconds, as more catalog tables are
+   restored from backup.  Subsequent commands will be faster.
+
+   Run queries in the standby:
+
+      select * from mytable;
+
+   the result depends on the LSN that you picked when you created the server.
