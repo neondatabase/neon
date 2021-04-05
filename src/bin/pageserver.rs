@@ -3,7 +3,7 @@
 //
 
 use log::*;
-use std::{fs::File, str::FromStr};
+use std::{fs::File, str::FromStr, fs::OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::thread;
@@ -129,8 +129,8 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
 
         // There should'n be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fpritf's or backtraces.
-        let stdout = File::create(conf.data_dir.join("pageserver.log")).unwrap();
-        let stderr = File::create(conf.data_dir.join("pageserver.log")).unwrap();
+        let stdout = OpenOptions::new().create(true).append(true).open(conf.data_dir.join("pageserver.log")).unwrap();
+        let stderr = OpenOptions::new().create(true).append(true).open(conf.data_dir.join("pageserver.log")).unwrap();
 
         let daemonize = Daemonize::new()
             .pid_file(conf.data_dir.join("pageserver.pid"))

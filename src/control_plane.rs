@@ -7,7 +7,7 @@
 // local installations.
 //
 
-use std::{fs::{self, OpenOptions}, rc::Rc};
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str;
@@ -15,6 +15,7 @@ use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
+use std::sync::Arc;
 use std::fs::File;
 
 use postgres::{Client, NoTls};
@@ -39,8 +40,8 @@ lazy_static! {
 // as it is closer to the actual setup.
 //
 pub struct StorageControlPlane {
-    wal_acceptors: Vec<WalAcceptorNode>,
-    page_servers: Vec<PageServerNode>,
+    pub wal_acceptors: Vec<WalAcceptorNode>,
+    pub page_servers: Vec<PageServerNode>,
 }
 
 impl StorageControlPlane {
@@ -62,7 +63,27 @@ impl StorageControlPlane {
         cplane
     }
 
-    // // postgres <-> wal_acceptor x3 <-> page_server
+
+	pub fn fault_tolerant(redundancy : usize) -> StorageControlPlane {
+        let mut cplane = StorageControlPlane {
+            wal_acceptors: Vec::new(),
+            page_servers: Vec::new(),
+        };
+		const WAL_ACCEPTOR_PORT : usize = 54321;
+
+		for i in 0..redundancy {
+			let wal_acceptor = WalAcceptorNode {
+				listen: format!("127.0.0.1:{}", WAL_ACCEPTOR_PORT + i).parse().unwrap(),
+				data_dir: TEST_WORKDIR.join(format!("wal_acceptor_{}", i))
+			};
+			wal_acceptor.init();
+			wal_acceptor.start();
+			cplane.wal_acceptors.push(wal_acceptor);
+		}
+		cplane
+	}
+
+	// // postgres <-> wal_acceptor x3 <-> page_server
     // fn local(&mut self) -> StorageControlPlane {
     // }
 
@@ -70,7 +91,9 @@ impl StorageControlPlane {
         &self.page_servers[0].page_service_addr
     }
 
-    fn get_wal_acceptor_conn_info() {}
+    pub fn get_wal_acceptor_conn_info(&self) -> String {
+		self.wal_acceptors.iter().map(|wa|wa.listen.to_string().to_string()).collect::<Vec<String>>().join(",")
+	}
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
         let addr = &self.page_servers[0].page_service_addr;
@@ -161,7 +184,47 @@ pub struct WalAcceptorNode {
     data_dir: PathBuf,
 }
 
-impl WalAcceptorNode {}
+impl WalAcceptorNode {
+   pub fn init(&self) {
+       fs::remove_dir_all(self.data_dir.clone()).unwrap();
+       fs::create_dir_all(self.data_dir.clone()).unwrap();
+    }
+
+    pub fn start(&self) {
+        println!("Starting wal_acceptor in {} listening '{}'", self.data_dir.to_str().unwrap(), self.listen);
+
+        let status = Command::new(CARGO_BIN_DIR.join("wal_acceptor"))
+            .args(&["-D", self.data_dir.to_str().unwrap()])
+            .args(&["-l", self.listen.to_string().as_str()])
+            .arg("-d")
+            .arg("-n")
+            .status()
+            .expect("failed to start wal_acceptor");
+
+        if !status.success() {
+            panic!("wal_acceptor start failed");
+        }
+    }
+
+    pub fn stop(&self) {
+        let pidfile = self.data_dir.join("wal_acceptor.pid");
+        if let Ok(pid) = fs::read_to_string(pidfile) {
+			let _status = Command::new("kill")
+				.arg(pid)
+				.env_clear()
+				.status()
+				.expect("failed to execute kill");
+		}
+	}
+}
+
+
+impl Drop for WalAcceptorNode {
+    fn drop(&mut self) {
+        self.stop();
+        // fs::remove_dir_all(self.data_dir.clone()).unwrap();
+    }
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -173,7 +236,7 @@ pub struct ComputeControlPlane<'a> {
     work_dir: PathBuf,
     last_assigned_port: u16,
     storage_cplane: &'a StorageControlPlane,
-    nodes: Vec<Rc<PostgresNode>>,
+    nodes: Vec<Arc<PostgresNode>>,
 }
 
 impl ComputeControlPlane<'_> {
@@ -195,7 +258,7 @@ impl ComputeControlPlane<'_> {
         port
     }
 
-    pub fn new_vanilla_node<'a>(&mut self) -> &Rc<PostgresNode> {
+    pub fn new_vanilla_node<'a>(&mut self) -> &Arc<PostgresNode> {
         // allocate new node entry with generated port
         let node_id = self.nodes.len() + 1;
         let node = PostgresNode {
@@ -205,7 +268,7 @@ impl ComputeControlPlane<'_> {
             pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
             pg_bin_dir: self.pg_bin_dir.clone(),
         };
-        self.nodes.push(Rc::new(node));
+        self.nodes.push(Arc::new(node));
         let node = self.nodes.last().unwrap();
 
         // initialize data directory
@@ -259,7 +322,7 @@ impl ComputeControlPlane<'_> {
             pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
             pg_bin_dir: self.pg_bin_dir.clone(),
         };
-        self.nodes.push(Rc::new(node));
+        self.nodes.push(Arc::new(node));
         let node = self.nodes.last().unwrap();
 
         // initialize data directory w/o files
@@ -297,7 +360,7 @@ impl ComputeControlPlane<'_> {
         node
     }
 
-    pub fn new_node(&mut self) -> Rc<PostgresNode> {
+    pub fn new_node(&mut self) -> Arc<PostgresNode> {
         let storage_cplane = self.storage_cplane;
         let node = self.new_vanilla_node();
 
@@ -310,6 +373,40 @@ impl ComputeControlPlane<'_> {
 
         node.clone()
     }
+
+	pub fn new_master_node(&mut self) -> Arc<PostgresNode> {
+        let node = self.new_vanilla_node();
+
+        node.append_conf("postgresql.conf", "synchronous_standby_names = 'safekeeper_proxy'\n\
+						 ");
+        node.clone()
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+pub struct WalProposerNode {
+	pid: u32
+}
+
+impl WalProposerNode {
+    pub fn stop(&self) {
+        let status = Command::new("kill")
+            .arg(self.pid.to_string())
+            .env_clear()
+            .status()
+            .expect("failed to execute kill");
+
+        if !status.success() {
+            panic!("kill start failed");
+        }
+    }
+}
+
+impl Drop for WalProposerNode {
+    fn drop(&mut self) {
+        self.stop();
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -352,9 +449,10 @@ impl PostgresNode {
     }
 
     pub fn start(&self, storage_cplane: &StorageControlPlane) {
-        let _res = storage_cplane
-            .page_server_psql(format!("callmemaybe {}", self.connstr()).as_str());
-
+		if storage_cplane.page_servers.len()  != 0 {
+			let _res = storage_cplane
+				.page_server_psql(format!("callmemaybe {}", self.connstr()).as_str());
+		}
         println!("Starting postgres node at '{}'", self.connstr());
         self.pg_ctl(&["start"], true);
     }
@@ -394,8 +492,19 @@ impl PostgresNode {
         );
         let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
 
-        println!("Running {}", sql);
+		println!("Running {}", sql);
         client.query(sql, &[]).unwrap()
+    }
+
+    pub fn open_psql(&self, db: &str) -> Client {
+        let connstring = format!(
+            "host={} port={} dbname={} user={}",
+            self.ip,
+            self.port,
+            db,
+            self.whoami()
+        );
+        Client::connect(connstring.as_str(), NoTls).unwrap()
     }
 
     pub fn get_pgdata(&self) -> Option<&str>
@@ -426,6 +535,23 @@ impl PostgresNode {
             panic!("pg_resetwal failed");
         }
     }
+
+	pub fn start_proxy(&self, wal_acceptors : String) -> WalProposerNode {
+        let proxy_path = PG_BIN_DIR.join("safekeeper_proxy");
+		match Command::new(proxy_path.as_path())
+			.args(&["-s", &wal_acceptors])
+			.args(&["-h", &self.ip.to_string()])
+			.args(&["-p", &self.port.to_string()])
+			.arg("-v")
+			.stderr(File::create(TEST_WORKDIR.join("safepkeeper_proxy.log")).unwrap())
+			.spawn()
+		{
+			Ok(child) =>
+				WalProposerNode { pid: child.id() },
+			Err(e) =>
+				panic!("Failed to launch {:?}: {}", proxy_path, e)
+		}
+	}
 
     // TODO
     pub fn pg_bench() {}

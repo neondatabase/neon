@@ -32,6 +32,7 @@ pub struct PageServerConf {
 #[derive(Debug, Clone)]
 pub struct WalAcceptorConf {
     pub data_dir: PathBuf,
+    pub daemonize: bool,
     pub no_sync: bool,
     pub listen_addr: SocketAddr,
 }

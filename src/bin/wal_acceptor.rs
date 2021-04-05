@@ -2,9 +2,12 @@
 // Main entry point for the wal_acceptor executable
 //
 use log::*;
+use std::{fs::File, fs::OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::thread;
+use daemonize::Daemonize;
+use std::path::Path;
 
 use clap::{App, Arg};
 
@@ -29,6 +32,11 @@ fn main() -> Result<(), io::Error> {
              .long("listen")
              .takes_value(true)
              .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"))
+        .arg(Arg::with_name("daemonize")
+             .short("d")
+             .long("daemonize")
+             .takes_value(false)
+             .help("Run in the background"))
         .arg(Arg::with_name("no-sync")
              .short("n")
              .long("no-sync")
@@ -38,6 +46,7 @@ fn main() -> Result<(), io::Error> {
 
 	let mut conf = WalAcceptorConf {
         data_dir: PathBuf::from("./"),
+        daemonize: false,
         no_sync: false,
         listen_addr: "127.0.0.1:5454".parse().unwrap()
     };
@@ -50,6 +59,10 @@ fn main() -> Result<(), io::Error> {
         conf.no_sync = true;
     }
 
+    if arg_matches.is_present("daemonize") {
+        conf.daemonize = true;
+    }
+
     if let Some(addr) = arg_matches.value_of("listen") {
         conf.listen_addr = addr.parse().unwrap();
     }
@@ -59,12 +72,32 @@ fn main() -> Result<(), io::Error> {
 
 fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<(), io::Error> {
     // Initialize logger
-    let _scope_guard = init_noninteractive_logging();
+    let _scope_guard = init_logging(&conf);
     let _log_guard = slog_stdlog::init().unwrap();
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
 
-	let mut threads = Vec::new();
+    if conf.daemonize {
+        info!("daemonizing...");
+
+        // There should'n be any logging to stdin/stdout. Redirect it to the main log so
+        // that we will see any accidental manual fpritf's or backtraces.
+        let stdout = OpenOptions::new().create(true).append(true).open(conf.data_dir.join("wal_acceptor.log")).unwrap();
+        let stderr = OpenOptions::new().create(true).append(true).open(conf.data_dir.join("wal_acceptor.log")).unwrap();
+
+        let daemonize = Daemonize::new()
+            .pid_file(conf.data_dir.join("wal_acceptor.pid"))
+            .working_directory(Path::new("."))
+            .stdout(stdout)
+            .stderr(stderr);
+
+        match daemonize.start() {
+            Ok(_) => info!("Success, daemonized"),
+            Err(e) => error!("Error, {}", e),
+        }
+    }
+
+ 	let mut threads = Vec::new();
 	let wal_acceptor_thread = thread::Builder::new()
         .name("WAL acceptor thread".into())
         .spawn(|| {
@@ -80,10 +113,20 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<(), io::Error> {
     Ok(())
 }
 
-fn init_noninteractive_logging() -> slog_scope::GlobalLoggerGuard {
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
-    let logger = slog::Logger::root(drain, slog::o!());
-    return slog_scope::set_global_logger(logger);
+fn init_logging(conf: &WalAcceptorConf) -> slog_scope::GlobalLoggerGuard {
+	if conf.daemonize {
+        let log = conf.data_dir.join("wal_acceptor.log");
+        let log_file = File::create(log).unwrap_or_else(|_| panic!("Could not create log file"));
+        let decorator = slog_term::PlainSyncDecorator::new(log_file);
+        let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = std::sync::Mutex::new(drain).fuse();
+        let logger = slog::Logger::root(drain, slog::o!());
+        slog_scope::set_global_logger(logger)
+	} else {
+		let decorator = slog_term::TermDecorator::new().build();
+		let drain = slog_term::FullFormat::new(decorator).build().fuse();
+		let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
+		let logger = slog::Logger::root(drain, slog::o!());
+		return slog_scope::set_global_logger(logger);
+	}
 }
