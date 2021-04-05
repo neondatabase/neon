@@ -1,6 +1,3 @@
-use std::thread::sleep;
-use std::time::Duration;
-
 use pageserver::control_plane::ComputeControlPlane;
 use pageserver::control_plane::StorageControlPlane;
 
@@ -18,9 +15,6 @@ fn test_redo_cases() {
     // start postgres
     let node = compute_cplane.new_node();
     node.start(&storage_cplane);
-
-    println!("await pageserver connection...");
-    sleep(Duration::from_secs(3));
 
     // check basic work with table
     node.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
@@ -55,9 +49,6 @@ fn test_regress() {
     let node = compute_cplane.new_node();
     node.start(&storage_cplane);
 
-    println!("await pageserver connection...");
-    sleep(Duration::from_secs(3));
-
     pageserver::control_plane::regress_check(&node);
 }
 
@@ -73,11 +64,6 @@ fn test_pageserver_multitenancy() {
     let node2 = compute_cplane.new_node();
     node1.start(&storage_cplane);
     node2.start(&storage_cplane);
-
-    // XXX: add some extension func to postgres to check walsender conn
-    // XXX: or better just drop that
-    println!("await pageserver connection...");
-    sleep(Duration::from_secs(3));
 
     // check node1
     node1.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");

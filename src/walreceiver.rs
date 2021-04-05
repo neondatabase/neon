@@ -71,9 +71,16 @@ async fn walreceiver_main(conf: PageServerConf, wal_producer_connstr: &String) -
     //
     let mut startpoint = pcache.get_last_valid_lsn();
     if startpoint == 0 {
-        // FIXME: Or should we just error out?
-        pcache.init_valid_lsn(u64::from(_identify_system.xlogpos()));
-        startpoint = u64::from(_identify_system.xlogpos());
+        // If we start here with _identify_system.xlogpos() we will have race condition with
+        // postgres start: insert into postgres may request page that was modified with lsn
+        // smaller than _identify_system.xlogpos().
+        //
+        // Current procedure for starting postgres will anyway be changed to something
+        // different like having 'initdb' method on a pageserver (or importing some shared
+        // empty database snapshot), so for now I just put start of first segment which
+        // seems to be a valid record.
+        pcache.init_valid_lsn(0x_1_000_000_u64);
+        startpoint = u64::from(0x_1_000_000_u64);
     } else {
         // There might be some padding after the last full record, skip it.
         //
@@ -90,7 +97,7 @@ async fn walreceiver_main(conf: PageServerConf, wal_producer_connstr: &String) -
         .start_physical_replication(None, startpoint, None)
         .await?;
     let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
-    
+
     while let Some(replication_message) = physical_stream.next().await {
         match replication_message? {
             ReplicationMessage::XLogData(xlog_data) => {
