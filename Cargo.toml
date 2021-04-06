@@ -1,36 +1,6 @@
-[package]
-name = "pageserver"
-version = "0.1.0"
-authors = ["Stas Kelvich <stas@zenith.tech>"]
-edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-chrono = "0.4.19"
-crossbeam-channel = "0.5.0"
-rand = "0.8.3"
-regex = "1.4.5"
-bytes = "1.0.1"
-byteorder = "1.4.3"
-fs2 = "0.4.3"
-futures = "0.3.13"
-lazy_static = "1.4.0"
-slog-stdlog = "4.1.0"
-slog-async = "2.6.0"
-slog-scope = "4.4.0"
-slog-term = "2.8.0"
-slog = "2.7.0"
-log = "0.4.14"
-clap = "2.33.0"
-termion = "1.5.6"
-tui = "0.14.0"
-daemonize = "0.4.1"
-rust-s3 = { git = "https://github.com/hlinnaka/rust-s3", features = ["no-verify-ssl"] }
-tokio = { version = "1.3.0", features = ["full"] }
-tokio-stream = { version = "0.1.4" }
-tokio-postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
-postgres-protocol = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
-postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
-anyhow = "1.0"
-crc32c = "0.6.0"
+[workspace]
+members = [
+    "integration_tests",
+    "pageserver",
+    "walkeeper",
+]

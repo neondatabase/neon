@@ -16,8 +16,8 @@ use slog_stdlog;
 use slog_scope;
 use slog::Drain;
 
-use pageserver::wal_service;
-use pageserver::WalAcceptorConf;
+use walkeeper::wal_service;
+use walkeeper::WalAcceptorConf;
 
 fn main() -> Result<(), io::Error> {
     let arg_matches = App::new("Zenith wal_acceptor")

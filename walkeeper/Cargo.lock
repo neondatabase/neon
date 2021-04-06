@@ -897,18 +897,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integration_tests"
-version = "0.1.0"
-dependencies = [
- "lazy_static",
- "pageserver",
- "postgres",
- "rand 0.8.3",
- "tokio-postgres",
- "walkeeper",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1162,39 +1150,6 @@ checksum = "1c672c7ad9ec066e428c00eb917124a06f08db19e2584de982cc34b1f4c12485"
 dependencies = [
  "dlv-list",
  "hashbrown",
-]
-
-[[package]]
-name = "pageserver"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "byteorder",
- "bytes",
- "chrono",
- "clap",
- "crc32c",
- "crossbeam-channel",
- "daemonize",
- "fs2",
- "futures",
- "lazy_static",
- "log",
- "postgres",
- "postgres-protocol",
- "rand 0.8.3",
- "regex",
- "rust-s3",
- "slog",
- "slog-async",
- "slog-scope",
- "slog-stdlog",
- "slog-term",
- "termion",
- "tokio",
- "tokio-postgres",
- "tokio-stream",
- "tui",
 ]
 
 [[package]]
@@ -2248,7 +2203,6 @@ dependencies = [
  "futures",
  "lazy_static",
  "log",
- "pageserver",
  "postgres",
  "postgres-protocol",
  "rand 0.8.3",

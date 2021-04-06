@@ -1,0 +1,16 @@
+[package]
+name = "integration_tests"
+version = "0.1.0"
+authors = ["Stas Kelvich <stas@zenith.tech>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lazy_static = "1.4.0"
+rand = "0.8.3"
+postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
+tokio-postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
+
+pageserver = { path = "../pageserver" }
+walkeeper = { path = "../walkeeper" }

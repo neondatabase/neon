@@ -14,7 +14,7 @@ REPO_ROOT=$(dirname "$0")
 REPO_ROOT="`( cd \"$REPO_ROOT\" && pwd )`"
 
 # configure
-echo "Configiring postgres build"
+echo "Configuring postgres build"
 mkdir -p $REPO_ROOT/tmp_install/build
 cd $REPO_ROOT/tmp_install/build
 ../../vendor/postgres/configure CFLAGS='-O0' --enable-debug --enable-cassert \

@@ -1,6 +1,9 @@
 // Restart acceptors one by one while compute is under the load.
-use pageserver::control_plane::ComputeControlPlane;
-use pageserver::control_plane::StorageControlPlane;
+#[allow(dead_code)]
+mod control_plane;
+use control_plane::ComputeControlPlane;
+use control_plane::StorageControlPlane;
+
 use rand::Rng;
 use std::{thread, time};
 use std::sync::Arc;

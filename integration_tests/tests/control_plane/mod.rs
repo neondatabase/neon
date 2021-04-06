@@ -24,15 +24,27 @@ use lazy_static::lazy_static;
 lazy_static! {
     // postgres would be there if it was build by 'make postgres' here in the repo
     pub static ref PG_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tmp_install/bin");
+        .join("../tmp_install/bin");
     pub static ref PG_LIB_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tmp_install/lib");
+        .join("../tmp_install/lib");
 
-    pub static ref CARGO_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/debug/");
+    pub static ref BIN_DIR : PathBuf = cargo_bin_dir();
 
     pub static ref TEST_WORKDIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tmp_check");
+}
+
+
+// Find the directory where the binaries were put (i.e. target/debug/)
+pub fn cargo_bin_dir() -> PathBuf {
+    let mut pathbuf = std::env::current_exe().ok().unwrap();
+
+    pathbuf.pop();
+    if pathbuf.ends_with("deps") {
+        pathbuf.pop();
+    }
+
+    return pathbuf;
 }
 
 //
@@ -130,6 +142,7 @@ impl PageServerNode {
         let initdb = Command::new(PG_BIN_DIR.join("initdb"))
             .args(&["-D", datadir_path.to_str().unwrap()])
             .arg("-N")
+            .arg("--no-instructions")
             .env_clear()
             .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
@@ -142,7 +155,7 @@ impl PageServerNode {
     pub fn start(&self) {
         println!("Starting pageserver at '{}'", self.page_service_addr);
 
-        let status = Command::new(CARGO_BIN_DIR.join("pageserver"))
+        let status = Command::new(BIN_DIR.join("pageserver"))
             .args(&["-D", self.data_dir.to_str().unwrap()])
             .args(&["-l", self.page_service_addr.to_string().as_str()])
             .arg("-d")
@@ -185,17 +198,17 @@ pub struct WalAcceptorNode {
 }
 
 impl WalAcceptorNode {
-   pub fn init(&self) {
-       if self.data_dir.exists() {
-           fs::remove_dir_all(self.data_dir.clone()).unwrap();
-       }
-       fs::create_dir_all(self.data_dir.clone()).unwrap();
+    pub fn init(&self) {
+        if self.data_dir.exists() {
+            fs::remove_dir_all(self.data_dir.clone()).unwrap();
+        }
+        fs::create_dir_all(self.data_dir.clone()).unwrap();
     }
 
     pub fn start(&self) {
         println!("Starting wal_acceptor in {} listening '{}'", self.data_dir.to_str().unwrap(), self.listen);
 
-        let status = Command::new(CARGO_BIN_DIR.join("wal_acceptor"))
+        let status = Command::new(BIN_DIR.join("wal_acceptor"))
             .args(&["-D", self.data_dir.to_str().unwrap()])
             .args(&["-l", self.listen.to_string().as_str()])
             .arg("-d")
@@ -280,6 +293,7 @@ impl ComputeControlPlane<'_> {
         let initdb = Command::new(initdb_path)
             .args(&["-D", node.pgdata.to_str().unwrap()])
             .arg("-N")
+            .arg("--no-instructions")
             .env_clear()
             .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
@@ -334,6 +348,7 @@ impl ComputeControlPlane<'_> {
         let initdb = Command::new(initdb_path)
             .args(&["-D", node.pgdata.to_str().unwrap()])
             .arg("-N")
+            .arg("--no-instructions")
             .arg("--compute-node")
             .env_clear()
             .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
@@ -580,9 +595,9 @@ pub fn regress_check(pg : &PostgresNode) {
     std::env::set_current_dir(regress_run_path).unwrap();
 
     let regress_build_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tmp_install/build/src/test/regress");
+        .join("../tmp_install/build/src/test/regress");
     let regress_src_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("vendor/postgres/src/test/regress");
+        .join("../vendor/postgres/src/test/regress");
 
     let _regress_check = Command::new(regress_build_path.join("pg_regress"))
         .args(&[
