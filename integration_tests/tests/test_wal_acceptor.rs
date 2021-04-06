@@ -130,8 +130,8 @@ fn test_acceptors_unavalability() {
         .unwrap();
 
     storage_cplane.wal_acceptors[0].stop();
-    let ap = Arc::new(storage_cplane);
-    start_acceptor(&ap, 0);
+    let cp = Arc::new(storage_cplane);
+    start_acceptor(&cp, 0);
     let now = SystemTime::now();
     psql.execute("INSERT INTO t values (2, 'payload')", &[])
         .unwrap();
@@ -139,8 +139,8 @@ fn test_acceptors_unavalability() {
     psql.execute("INSERT INTO t values (3, 'payload')", &[])
         .unwrap();
 
-    ap.wal_acceptors[1].stop();
-    start_acceptor(&ap, 1);
+    cp.wal_acceptors[1].stop();
+    start_acceptor(&cp, 1);
     psql.execute("INSERT INTO t values (4, 'payload')", &[])
         .unwrap();
     assert!(now.elapsed().unwrap().as_secs() > 2);
@@ -200,7 +200,8 @@ fn test_race_conditions() {
         "postgres",
         "CREATE TABLE t(key int primary key, value text)",
     );
-    let cp = Arc::new(storage_cplane);
+    let cplane = Arc::new(storage_cplane);
+    let cp = cplane.clone();
     thread::spawn(move || {
         simulate_failures(&cp);
     });
@@ -217,4 +218,5 @@ fn test_race_conditions() {
         .get(0);
     println!("sum = {}", count);
     assert_eq!(count, 500500);
+    cplane.stop();
 }
