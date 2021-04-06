@@ -186,7 +186,9 @@ pub struct WalAcceptorNode {
 
 impl WalAcceptorNode {
    pub fn init(&self) {
-       fs::remove_dir_all(self.data_dir.clone()).unwrap();
+       if self.data_dir.exists() {
+           fs::remove_dir_all(self.data_dir.clone()).unwrap();
+       }
        fs::create_dir_all(self.data_dir.clone()).unwrap();
     }
 
