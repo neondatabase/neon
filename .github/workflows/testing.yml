@@ -35,16 +35,28 @@ jobs:
         run: |
           ./pgbuild.sh
 
+      - name: Upload postgres build
+        uses: actions/upload-artifact@v2
+        with:
+          name: pg_build
+          path: tmp_install
+
   pg_regress:
-    name: postgres regression testing
+    name: postgres regression test
+    needs: pgbuild
     runs-on: ubuntu-latest
     steps:
+      - name: Load pg build
+        uses: actions/download-artifact@v2
+        with:
+          name: pg_build
+
       - name: Run pg_regress
         run: |
           cd tmp_install/build && make check
 
   zenith_build:
-    name: build zenith packages
+    name: build zenith crates
     needs: pgbuild
     runs-on: ubuntu-latest
     steps:
@@ -69,11 +81,30 @@ jobs:
         run: |
           cargo build
 
+      - name: Upload zenith build
+        uses: actions/upload-artifact@v2
+        with:
+          name: zenith_build_with_deps
+          path:  |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+
   zenith_integration:
     name: zenith integration tests
     needs: zenith_build
     runs-on: ubuntu-latest
     steps:
+      - name: Load pg build
+        uses: actions/download-artifact@v2
+        with:
+          name: pg_build
+
+      - name: Load zenith build
+        uses: actions/download-artifact@v2
+        with:
+          name: zenith_build_with_deps
+
       - name: Run test
         run: |
           cargo test --test test_pageserver -- --nocapture --test-threads=1
@@ -83,12 +114,17 @@ jobs:
     needs: zenith_build
     runs-on: ubuntu-latest
     steps:
+      - name: Load zenith build
+        uses: actions/download-artifact@v2
+        with:
+          name: zenith_build_with_deps
+
       - name: Run cargo fmt
         run: |
           cargo fmt -- --check
 
   notify:
-    name: sent notifications
+    name: send notifications
     needs: pgbuild
     runs-on: ubuntu-latest
     steps:
