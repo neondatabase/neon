@@ -3,18 +3,89 @@ name: regression check
 on: [push]
 
 jobs:
-  regression-check:
-    name: run regression test suite
+  pgbuild:
+    name: build postgres
     runs-on: ubuntu-latest
-
     steps:
-
       - name: Checkout
         uses: actions/checkout@v2
         with:
           submodules: true
           fetch-depth: 2
 
+      - name: Install postgres dependencies
+        run: |
+          sudo apt update
+          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl4-openssl-dev
+
+      - name: Set pg revision for caching
+        id: pg_ver
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+
+      - name: Cache postgres build
+        id: cache_pg
+        uses: actions/cache@v2
+        with:
+          path: |
+            tmp_install/
+          key: ${{ runner.os }}-pg-${{ steps.pg_ver.outputs.pg_rev }}
+
+      - name: Build postgres
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: |
+          ./pgbuild.sh
+
+  pg_regress:
+    name: postgres regression testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pg_regress
+        run: |
+          cd tmp_install/build && make check
+
+  zenith_build:
+    name: build zenith packages
+    needs: pgbuild
+    runs-on: ubuntu-latest
+      - name: Install rust
+        run: |
+          sudo apt install -y cargo
+
+      - name: Cache cargo deps
+        id: cache_cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # That build is only to build dependencies and can be skipped if Cargo.lock
+      # wasn't changed. Next steps need their own build
+      - name: Install cargo deps
+        if: steps.cache_cargo.outputs.cache-hit != 'true'
+        run: |
+          cargo build
+
+  zenith_integration:
+    name: zenith integration tests
+    needs: zenith_build
+      - name: Run test
+        run: |
+          cargo test --test test_pageserver -- --nocapture --test-threads=1
+
+  zenith_fmt:
+    name: check code formatting
+    needs: zenith_build
+      - name: Run cargo fmt
+        run: |
+          cargo fmt -- --check
+
+  notify:
+    name: sent notifications
+    needs: pgbuild
+    runs-on: ubuntu-latest
       - name: Form variables for notification message
         id: git_info_grab
         run: |
@@ -39,50 +110,3 @@ jobs:
             ```
             ${{ steps.git_info_grab.outputs.git_stat }}
             ```
-
-      - name: Install postgres dependencies
-        run: |
-          sudo apt update
-          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl4-openssl-dev
-
-      - name: Set pg revision for caching
-        id: pg_ver
-        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
-
-      - name: Cache postgres build
-        id: cache_pg
-        uses: actions/cache@v2
-        with:
-          path: |
-            tmp_install/
-          key: ${{ runner.os }}-pg-${{ steps.pg_ver.outputs.pg_rev }}
-
-      - name: Build postgres
-        if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: |
-          ./pgbuild.sh
-
-      - name: Install rust
-        run: |
-          sudo apt install -y cargo
-
-      - name: Cache cargo deps
-        id: cache_cargo
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      # That build is only to build dependencies and can be skipped if Cargo.lock
-      # wasn't changed. Next steps need their own build
-      - name: Install cargo deps
-        if: steps.cache_cargo.outputs.cache-hit != 'true'
-        run: |
-          cargo build
-
-      - name: Run test
-        run: |
-          cargo test --test test_pageserver -- --nocapture --test-threads=1
