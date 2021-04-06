@@ -60,7 +60,7 @@ jobs:
         run: |
           pwd
           ls -al
-          cd tmp_install/build && make check
+          cd build && make check
 
   zenith_build:
     name: build zenith crates
