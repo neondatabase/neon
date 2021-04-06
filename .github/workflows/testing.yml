@@ -72,6 +72,7 @@ jobs:
   zenith_integration:
     name: zenith integration tests
     needs: zenith_build
+    runs-on: ubuntu-latest
     steps:
       - name: Run test
         run: |
@@ -80,6 +81,7 @@ jobs:
   zenith_fmt:
     name: check code formatting
     needs: zenith_build
+    runs-on: ubuntu-latest
     steps:
       - name: Run cargo fmt
         run: |
