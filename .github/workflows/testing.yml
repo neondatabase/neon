@@ -39,7 +39,12 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: pg_build
-          path: tmp_install
+          path: |
+            tmp_install/bin
+            tmp_install/include
+            tmp_install/lib
+            tmp_install/share
+            tmp_install/build/src/test/regress/pg_regress
 
   pg_regress:
     name: postgres regression test
@@ -53,6 +58,8 @@ jobs:
 
       - name: Run pg_regress
         run: |
+          pwd
+          ls -al
           cd tmp_install/build && make check
 
   zenith_build:
@@ -128,6 +135,9 @@ jobs:
     needs: pgbuild
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
       - name: Form variables for notification message
         id: git_info_grab
         run: |
