@@ -47,6 +47,7 @@ jobs:
     name: build zenith packages
     needs: pgbuild
     runs-on: ubuntu-latest
+    steps:
       - name: Install rust
         run: |
           sudo apt install -y cargo
@@ -71,6 +72,7 @@ jobs:
   zenith_integration:
     name: zenith integration tests
     needs: zenith_build
+    steps:
       - name: Run test
         run: |
           cargo test --test test_pageserver -- --nocapture --test-threads=1
@@ -78,6 +80,7 @@ jobs:
   zenith_fmt:
     name: check code formatting
     needs: zenith_build
+    steps:
       - name: Run cargo fmt
         run: |
           cargo fmt -- --check
@@ -86,6 +89,7 @@ jobs:
     name: sent notifications
     needs: pgbuild
     runs-on: ubuntu-latest
+    steps:
       - name: Form variables for notification message
         id: git_info_grab
         run: |
