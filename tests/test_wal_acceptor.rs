@@ -80,11 +80,11 @@ fn test_acceptors_restarts() {
     assert_eq!(count, 500500);
 }
 
-fn start_acceptor(plane : &Arc<StorageControlPlane>, no : usize) {
-	let sp = plane.clone();
+fn start_acceptor(cplane : &Arc<StorageControlPlane>, no : usize) {
+	let cp = cplane.clone();
 	thread::spawn(move || {
-		thread::sleep(time::Duration::from_millis(1000));
-		sp.wal_acceptors[no].start();
+		thread::sleep(time::Duration::from_secs(1));
+		cp.wal_acceptors[no].start();
 	});
 }
 
@@ -134,4 +134,62 @@ fn test_acceptors_unavalability() {
         .get(0);
     println!("sum = {}", count);
     assert_eq!(count, 15);
+}
+
+fn simulate_failures(cplane : &Arc<StorageControlPlane>) {
+	let mut rng = rand::thread_rng();
+	let n_acceptors = cplane.wal_acceptors.len();
+	let failure_period = time::Duration::from_secs(1);
+	loop {
+		thread::sleep(failure_period);
+		let mask : u32 = rng.gen_range(0..(1 << n_acceptors));
+		for i in 0..n_acceptors {
+			if (mask & (1 << i)) != 0 {
+				cplane.wal_acceptors[i].stop();
+			}
+		}
+		thread::sleep(failure_period);
+		for i in 0..n_acceptors {
+			if (mask & (1 << i)) != 0 {
+				cplane.wal_acceptors[i].start();
+			}
+		}
+	}
+}
+
+// Race condition test
+#[test]
+fn test_race_conditions() {
+    // Start pageserver that reads WAL directly from that postgres
+	const REDUNDANCY : usize = 3;
+
+    let storage_cplane = StorageControlPlane::fault_tolerant(REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+	let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
+
+    // start postgre
+    let node = compute_cplane.new_master_node();
+    node.start(&storage_cplane);
+
+	// start proxy
+	let _proxy = node.start_proxy(wal_acceptors);
+
+    // check basic work with table
+    node.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
+	let cp = Arc::new(storage_cplane);
+	thread::spawn(move || {
+		simulate_failures(&cp);
+	});
+
+	let mut psql = node.open_psql("postgres");
+	for i in 1..=1000 {
+		psql.execute("INSERT INTO t values ($1, 'payload')", &[&i]).unwrap();
+	}
+    let count: i64 = node
+        .safe_psql("postgres", "SELECT sum(key) FROM t")
+        .first()
+        .unwrap()
+        .get(0);
+    println!("sum = {}", count);
+    assert_eq!(count, 500500);
 }
