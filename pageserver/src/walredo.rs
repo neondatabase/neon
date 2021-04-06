@@ -14,48 +14,49 @@
 // TODO: Even though the postgres code runs in a separate process,
 // it's not a secure sandbox.
 //
-use tokio::runtime::Runtime;
-use tokio::process::{Command, Child, ChildStdin, ChildStdout};
-use std::{path::PathBuf, process::Stdio};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::io::AsyncBufReadExt;
-use tokio::time::timeout;
-use std::io::Error;
-use std::cell::RefCell;
-use std::assert;
-use std::sync::{Arc};
-use std::fs;
 use log::*;
-use std::time::Instant;
+use std::assert;
+use std::cell::RefCell;
+use std::fs;
+use std::io::Error;
+use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
+use std::{path::PathBuf, process::Stdio};
+use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::runtime::Runtime;
+use tokio::time::timeout;
 
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::{PageServerConf, page_cache::BufferTag};
+use crate::page_cache;
 use crate::page_cache::CacheEntry;
 use crate::page_cache::WALRecord;
-use crate::page_cache;
+use crate::{page_cache::BufferTag, PageServerConf};
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 
 //
 // Main entry point for the WAL applicator thread.
 //
-pub fn wal_redo_main(conf: PageServerConf, sys_id: u64)
-{
+pub fn wal_redo_main(conf: PageServerConf, sys_id: u64) {
     info!("WAL redo thread started {}", sys_id);
 
     // We block on waiting for requests on the walredo request channel, but
     // use async I/O to communicate with the child process. Initialize the
     // runtime for the async part.
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     let pcache = page_cache::get_pagecahe(conf.clone(), sys_id);
 
     // Loop forever, handling requests as they come.
     let walredo_channel_receiver = &pcache.walredo_receiver;
     loop {
-
         let mut process: WalRedoProcess;
         let datadir = conf.data_dir.join(format!("wal-redo/{}", sys_id));
 
@@ -87,8 +88,12 @@ pub fn wal_redo_main(conf: PageServerConf, sys_id: u64)
     }
 }
 
-fn handle_apply_request(pcache: &page_cache::PageCache, process: &WalRedoProcess, runtime: &Runtime, entry_rc: Arc<CacheEntry>) -> Result<(), Error>
-{
+fn handle_apply_request(
+    pcache: &page_cache::PageCache,
+    process: &WalRedoProcess,
+    runtime: &Runtime,
+    entry_rc: Arc<CacheEntry>,
+) -> Result<(), Error> {
     let tag = entry_rc.key.tag;
     let lsn = entry_rc.key.lsn;
     let (base_img, records) = pcache.collect_records_for_apply(entry_rc.as_ref());
@@ -104,16 +109,22 @@ fn handle_apply_request(pcache: &page_cache::PageCache, process: &WalRedoProcess
 
     let result;
 
-    debug!("applied {} WAL records in {} ms to reconstruct page image at LSN {:X}/{:X}",
-           nrecords, duration.as_millis(),
-           lsn >> 32, lsn & 0xffff_ffff);
+    debug!(
+        "applied {} WAL records in {} ms to reconstruct page image at LSN {:X}/{:X}",
+        nrecords,
+        duration.as_millis(),
+        lsn >> 32,
+        lsn & 0xffff_ffff
+    );
 
     if let Err(e) = apply_result {
         error!("could not apply WAL records: {}", e);
         result = Err(e);
     } else {
         entry.page_image = Some(apply_result.unwrap());
-        pcache.num_page_images.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        pcache
+            .num_page_images
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         result = Ok(());
     }
 
@@ -130,7 +141,6 @@ struct WalRedoProcess {
 }
 
 impl WalRedoProcess {
-
     //
     // Start postgres binary in special WAL redo mode.
     //
@@ -138,22 +148,23 @@ impl WalRedoProcess {
     // and PG_LIB_DIR so that WalRedo would start right postgres. We may later
     // switch to setting same things in pageserver config file.
     fn launch(datadir: &PathBuf, runtime: &Runtime) -> Result<WalRedoProcess, Error> {
-
         // Create empty data directory for wal-redo postgres deleting old one.
         fs::remove_dir_all(datadir.to_str().unwrap()).ok();
-        let initdb = runtime.block_on(Command::new("initdb")
-            .args(&["-D", datadir.to_str().unwrap()])
-            .arg("-N")
-            .status()
-        ).expect("failed to execute initdb");
+        let initdb = runtime
+            .block_on(
+                Command::new("initdb")
+                    .args(&["-D", datadir.to_str().unwrap()])
+                    .arg("-N")
+                    .status(),
+            )
+            .expect("failed to execute initdb");
 
         if !initdb.success() {
             panic!("initdb failed");
         }
 
         // Start postgres itself
-        let mut child =
-            Command::new("postgres")
+        let mut child = Command::new("postgres")
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -162,7 +173,10 @@ impl WalRedoProcess {
             .spawn()
             .expect("postgres --wal-redo command failed to start");
 
-        info!("launched WAL redo postgres process on {}", datadir.to_str().unwrap());
+        info!(
+            "launched WAL redo postgres process on {}",
+            datadir.to_str().unwrap()
+        );
 
         let stdin = child.stdin.take().expect("failed to open child's stdin");
         let stderr = child.stderr.take().expect("failed to open child's stderr");
@@ -200,12 +214,16 @@ impl WalRedoProcess {
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
-    fn apply_wal_records(&self, runtime: &Runtime, tag: BufferTag, base_img: Option<Bytes>, records: Vec<WALRecord>) -> Result<Bytes, Error>
-    {
+    fn apply_wal_records(
+        &self,
+        runtime: &Runtime,
+        tag: BufferTag,
+        base_img: Option<Bytes>,
+        records: Vec<WALRecord>,
+    ) -> Result<Bytes, Error> {
         let mut stdin = self.stdin.borrow_mut();
         let mut stdout = self.stdout.borrow_mut();
         return runtime.block_on(async {
-
             //
             // This async block sends all the commands to the process.
             //
@@ -216,16 +234,26 @@ impl WalRedoProcess {
             let f_stdin = async {
                 // Send base image, if any. (If the record initializes the page, previous page
                 // version is not needed.)
-                timeout(TIMEOUT, stdin.write_all(&build_begin_redo_for_block_msg(tag))).await??;
+                timeout(
+                    TIMEOUT,
+                    stdin.write_all(&build_begin_redo_for_block_msg(tag)),
+                )
+                .await??;
                 if base_img.is_some() {
-                    timeout(TIMEOUT, stdin.write_all(&build_push_page_msg(tag, base_img.unwrap()))).await??;
+                    timeout(
+                        TIMEOUT,
+                        stdin.write_all(&build_push_page_msg(tag, base_img.unwrap())),
+                    )
+                    .await??;
                 }
 
                 // Send WAL records.
                 for rec in records.iter() {
                     let r = rec.clone();
 
-                    stdin.write_all(&build_apply_record_msg(r.lsn, r.rec)).await?;
+                    stdin
+                        .write_all(&build_apply_record_msg(r.lsn, r.rec))
+                        .await?;
 
                     //debug!("sent WAL record to wal redo postgres process ({:X}/{:X}",
                     //       r.lsn >> 32, r.lsn & 0xffff_ffff);
@@ -246,7 +274,7 @@ impl WalRedoProcess {
 
                 timeout(TIMEOUT, stdout.read_exact(&mut buf)).await??;
                 //debug!("got response for {}", tag.blknum);
-                Ok::<[u8;8192], Error>(buf)
+                Ok::<[u8; 8192], Error>(buf)
             };
 
             // Kill the process. This closes its stdin, which should signal the process
@@ -262,9 +290,8 @@ impl WalRedoProcess {
     }
 }
 
-fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes
-{
-    let len = 4 + 5*4;
+fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
+    let len = 4 + 5 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8('B' as u8);
@@ -280,11 +307,10 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes
     return buf.freeze();
 }
 
-fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes
-{
+fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
     assert!(base_img.len() == 8192);
 
-    let len = 4 + 5*4 + base_img.len();
+    let len = 4 + 5 * 4 + base_img.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8('P' as u8);
@@ -302,7 +328,6 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes
 }
 
 fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
-
     let len = 4 + 8 + rec.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
@@ -317,7 +342,7 @@ fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
 }
 
 fn build_get_page_msg(tag: BufferTag) -> Bytes {
-    let len = 4 + 5*4;
+    let len = 4 + 5 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8('G' as u8);

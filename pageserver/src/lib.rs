@@ -4,12 +4,12 @@ use std::path::PathBuf;
 pub mod page_cache;
 pub mod page_service;
 pub mod restore_s3;
-pub mod waldecoder;
-pub mod walreceiver;
-pub mod walredo;
 pub mod tui;
 pub mod tui_event;
 mod tui_logger;
+pub mod waldecoder;
+pub mod walreceiver;
+pub mod walredo;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]

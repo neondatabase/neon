@@ -1,13 +1,12 @@
+use anyhow::Result;
 use clap::{App, AppSettings};
-use anyhow::{Result};
 
-mod subcommand;
 pub mod pg;
-pub mod storage;
 pub mod snapshot;
+pub mod storage;
+mod subcommand;
 
 fn main() -> Result<()> {
-
     let cli_commands = subcommand::ClapCommands {
         commands: vec![
             Box::new(pg::PgCmd {
@@ -22,14 +21,12 @@ fn main() -> Result<()> {
         ],
     };
 
-
     let matches = App::new("zenith")
         .about("Zenith CLI")
         .version("1.0")
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .subcommands(cli_commands.generate())
         .get_matches();
-
 
     if let Some(subcommand) = matches.subcommand_name() {
         println!("'git {}' was used", subcommand);

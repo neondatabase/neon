@@ -1,4 +1,3 @@
-
 #[allow(dead_code)]
 mod control_plane;
 
@@ -21,8 +20,14 @@ fn test_redo_cases() {
     node.start(&storage_cplane);
 
     // check basic work with table
-    node.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
-    node.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100000), 'payload'");
+    node.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+    );
     let count: i64 = node
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
@@ -70,8 +75,14 @@ fn test_pageserver_multitenancy() {
     node2.start(&storage_cplane);
 
     // check node1
-    node1.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
-    node1.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100000), 'payload'");
+    node1.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node1.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+    );
     let count: i64 = node1
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
@@ -81,8 +92,14 @@ fn test_pageserver_multitenancy() {
     assert_eq!(count, 5000050000);
 
     // check node2
-    node2.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
-    node2.safe_psql("postgres", "INSERT INTO t SELECT generate_series(100000,200000), 'payload'");
+    node2.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node2.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(100000,200000), 'payload'",
+    );
     let count: i64 = node2
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()

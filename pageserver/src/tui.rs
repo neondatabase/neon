@@ -2,17 +2,17 @@ use crate::tui_event::{Event, Events};
 use crate::tui_logger::TuiLogger;
 use crate::tui_logger::TuiLoggerWidget;
 
-use std::{error::Error, io};
+use lazy_static::lazy_static;
 use std::sync::Arc;
+use std::{error::Error, io};
 use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
 use tui::backend::TermionBackend;
 use tui::buffer::Buffer;
-use tui::style::{Color, Style, Modifier};
+use tui::layout::{Constraint, Direction, Layout, Rect};
+use tui::style::{Color, Modifier, Style};
+use tui::text::{Span, Spans, Text};
+use tui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 use tui::Terminal;
-use tui::text::{Text, Span, Spans};
-use tui::widgets::{Widget, Block, Borders, BorderType, Paragraph};
-use tui::layout::{Layout, Direction, Constraint, Rect};
-use lazy_static::lazy_static;
 
 use slog;
 use slog::Drain;
@@ -25,64 +25,69 @@ lazy_static! {
 }
 
 pub fn init_logging() -> slog_scope::GlobalLoggerGuard {
-
-    let pageservice_drain = slog::Filter::new(PAGESERVICE_DRAIN.as_ref(),
-        |record: &slog::Record| {
-            if record.level().is_at_least(slog::Level::Debug) && record.module().starts_with("pageserver::page_service") {
+    let pageservice_drain =
+        slog::Filter::new(PAGESERVICE_DRAIN.as_ref(), |record: &slog::Record| {
+            if record.level().is_at_least(slog::Level::Debug)
+                && record.module().starts_with("pageserver::page_service")
+            {
                 return true;
             }
             return false;
-        }
-    ).fuse();
+        })
+        .fuse();
 
-    let walredo_drain = slog::Filter::new(WALREDO_DRAIN.as_ref(),
-        |record: &slog::Record| {
-            if record.level().is_at_least(slog::Level::Debug) && record.module().starts_with("pageserver::walredo") {
+    let walredo_drain = slog::Filter::new(WALREDO_DRAIN.as_ref(), |record: &slog::Record| {
+        if record.level().is_at_least(slog::Level::Debug)
+            && record.module().starts_with("pageserver::walredo")
+        {
+            return true;
+        }
+        return false;
+    })
+    .fuse();
+
+    let walreceiver_drain =
+        slog::Filter::new(WALRECEIVER_DRAIN.as_ref(), |record: &slog::Record| {
+            if record.level().is_at_least(slog::Level::Debug)
+                && record.module().starts_with("pageserver::walreceiver")
+            {
                 return true;
             }
             return false;
-        }
-    ).fuse();
+        })
+        .fuse();
 
-    let walreceiver_drain = slog::Filter::new(WALRECEIVER_DRAIN.as_ref(),
-        |record: &slog::Record| {
-            if record.level().is_at_least(slog::Level::Debug) && record.module().starts_with("pageserver::walreceiver") {
-                return true;
-            }
-            return false;
+    let catchall_drain = slog::Filter::new(CATCHALL_DRAIN.as_ref(), |record: &slog::Record| {
+        if record.level().is_at_least(slog::Level::Info) {
+            return true;
         }
-    ).fuse();
-
-    let catchall_drain = slog::Filter::new(CATCHALL_DRAIN.as_ref(),
-        |record: &slog::Record| {
-            if record.level().is_at_least(slog::Level::Info) {
-                return true;
-            }
-            if record.level().is_at_least(slog::Level::Debug) && record.module().starts_with("pageserver") {
-                return true;
-            }
-            return false;
+        if record.level().is_at_least(slog::Level::Debug)
+            && record.module().starts_with("pageserver")
+        {
+            return true;
         }
-    ).fuse();
+        return false;
+    })
+    .fuse();
 
     let drain = pageservice_drain;
     let drain = slog::Duplicate::new(drain, walreceiver_drain).fuse();
     let drain = slog::Duplicate::new(drain, walredo_drain).fuse();
     let drain = slog::Duplicate::new(drain, catchall_drain).fuse();
     let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
-    let drain = slog::Filter::new(drain,
-                                  |record: &slog::Record| {
+    let drain = slog::Filter::new(drain, |record: &slog::Record| {
+        if record.level().is_at_least(slog::Level::Info) {
+            return true;
+        }
+        if record.level().is_at_least(slog::Level::Debug)
+            && record.module().starts_with("pageserver")
+        {
+            return true;
+        }
 
-                                      if record.level().is_at_least(slog::Level::Info) {
-                                          return true;
-                                      }
-                                      if record.level().is_at_least(slog::Level::Debug) && record.module().starts_with("pageserver") {
-                                          return true;
-                                      }
-
-                                      return false;
-                                  }
-    ).fuse();
+        return false;
+    })
+    .fuse();
     let logger = slog::Logger::root(drain, slog::o!());
     return slog_scope::set_global_logger(logger);
 }
@@ -143,21 +148,27 @@ pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
             let top_top_right_chunk = c[0];
             let top_bot_right_chunk = c[1];
 
-            f.render_widget(LogWidget::new(PAGESERVICE_DRAIN.as_ref(),"Page Service"),
-                            top_top_left_chunk);
+            f.render_widget(
+                LogWidget::new(PAGESERVICE_DRAIN.as_ref(), "Page Service"),
+                top_top_left_chunk,
+            );
 
-            f.render_widget(LogWidget::new(WALREDO_DRAIN.as_ref(), "WAL Redo"),
-                            top_bot_left_chunk);
+            f.render_widget(
+                LogWidget::new(WALREDO_DRAIN.as_ref(), "WAL Redo"),
+                top_bot_left_chunk,
+            );
 
-            f.render_widget(LogWidget::new(WALRECEIVER_DRAIN.as_ref(), "WAL Receiver"),
-                            top_top_right_chunk);
+            f.render_widget(
+                LogWidget::new(WALRECEIVER_DRAIN.as_ref(), "WAL Receiver"),
+                top_top_right_chunk,
+            );
 
             f.render_widget(MetricsWidget {}, top_bot_right_chunk);
 
-            f.render_widget(LogWidget::new(CATCHALL_DRAIN.as_ref(), "All Log")
-                            .show_module(true),
-                            bottom_chunk);
-
+            f.render_widget(
+                LogWidget::new(CATCHALL_DRAIN.as_ref(), "All Log").show_module(true),
+                bottom_chunk,
+            );
         })?;
 
         // If ther user presses 'q', quit.
@@ -177,7 +188,6 @@ pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
 struct LogWidget<'a> {
     logger: &'a TuiLogger,
     title: &'a str,
@@ -186,7 +196,11 @@ struct LogWidget<'a> {
 
 impl<'a> LogWidget<'a> {
     fn new(logger: &'a TuiLogger, title: &'a str) -> LogWidget<'a> {
-        LogWidget { logger, title, show_module: false }
+        LogWidget {
+            logger,
+            title,
+            show_module: false,
+        }
     }
 
     fn show_module(mut self, b: bool) -> LogWidget<'a> {
@@ -196,14 +210,14 @@ impl<'a> LogWidget<'a> {
 }
 
 impl<'a> Widget for LogWidget<'a> {
-
     fn render(self, area: Rect, buf: &mut Buffer) {
-
         let w = TuiLoggerWidget::default(self.logger)
-            .block(Block::default()
-                   .borders(Borders::ALL)
-                   .title(self.title)
-                   .border_type(BorderType::Rounded))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(self.title)
+                    .border_type(BorderType::Rounded),
+            )
             .show_module(true)
             .style_error(Style::default().fg(Color::Red))
             .style_warn(Style::default().fg(Color::Yellow))
@@ -213,14 +227,16 @@ impl<'a> Widget for LogWidget<'a> {
 }
 
 // Render a widget to show some metrics
-struct MetricsWidget {
-}
+struct MetricsWidget {}
 
 fn get_metric_u64<'a>(title: &'a str, value: u64) -> Spans<'a> {
     Spans::from(vec![
         Span::styled(format!("{:<20}", title), Style::default()),
         Span::raw(": "),
-        Span::styled(value.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            value.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 
@@ -235,21 +251,16 @@ fn get_metric_str<'a>(title: &'a str, value: &'a str) -> Spans<'a> {
 // FIXME: We really should define a datatype for LSNs, with Display trait and
 // helper functions. There's one in tokio-postgres, but I don't think we want
 // to rely on that.
-fn format_lsn(lsn: u64) -> String
-{
-    return format!("{:X}/{:X}", lsn >> 32, lsn & 0xffff_ffff)
+fn format_lsn(lsn: u64) -> String {
+    return format!("{:X}/{:X}", lsn >> 32, lsn & 0xffff_ffff);
 }
 
 impl tui::widgets::Widget for MetricsWidget {
-
-
     fn render(self, area: Rect, buf: &mut Buffer) {
-
-
         let block = Block::default()
-                   .borders(Borders::ALL)
-                   .title("Page Cache Metrics")
-                   .border_type(BorderType::Rounded);
+            .borders(Borders::ALL)
+            .title("Page Cache Metrics")
+            .border_type(BorderType::Rounded);
         let inner_area = block.inner(area);
 
         block.render(area, buf);
@@ -257,17 +268,30 @@ impl tui::widgets::Widget for MetricsWidget {
         let mut lines: Vec<Spans> = Vec::new();
 
         let page_cache_stats = crate::page_cache::get_stats();
-        let lsnrange = format!("{} - {}",
-                               format_lsn(page_cache_stats.first_valid_lsn),
-                               format_lsn(page_cache_stats.last_valid_lsn));
-        let last_valid_recordlsn_str =
-                               format_lsn(page_cache_stats.last_record_lsn);
+        let lsnrange = format!(
+            "{} - {}",
+            format_lsn(page_cache_stats.first_valid_lsn),
+            format_lsn(page_cache_stats.last_valid_lsn)
+        );
+        let last_valid_recordlsn_str = format_lsn(page_cache_stats.last_record_lsn);
         lines.push(get_metric_str("Valid LSN range", &lsnrange));
         lines.push(get_metric_str("Last record LSN", &last_valid_recordlsn_str));
-        lines.push(get_metric_u64("# of cache entries", page_cache_stats.num_entries));
-        lines.push(get_metric_u64("# of page images", page_cache_stats.num_page_images));
-        lines.push(get_metric_u64("# of WAL records", page_cache_stats.num_wal_records));
-        lines.push(get_metric_u64("# of GetPage@LSN calls", page_cache_stats.num_getpage_requests));
+        lines.push(get_metric_u64(
+            "# of cache entries",
+            page_cache_stats.num_entries,
+        ));
+        lines.push(get_metric_u64(
+            "# of page images",
+            page_cache_stats.num_page_images,
+        ));
+        lines.push(get_metric_u64(
+            "# of WAL records",
+            page_cache_stats.num_wal_records,
+        ));
+        lines.push(get_metric_u64(
+            "# of GetPage@LSN calls",
+            page_cache_stats.num_getpage_requests,
+        ));
 
         let text = Text::from(lines);
 

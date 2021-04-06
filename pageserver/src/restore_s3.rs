@@ -7,11 +7,11 @@
 // is started, it starts streaming from that LSN.
 //
 
+use bytes::{Buf, BytesMut};
+use log::*;
+use regex::Regex;
 use std::env;
 use std::fmt;
-use regex::Regex;
-use bytes::{BytesMut, Buf};
-use log::*;
 
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
@@ -22,12 +22,12 @@ use tokio::runtime;
 
 use futures::future;
 
-use crate::{PageServerConf, page_cache};
+use crate::{page_cache, PageServerConf};
 
 struct Storage {
     region: Region,
     credentials: Credentials,
-    bucket: String
+    bucket: String,
 }
 
 pub fn restore_main(conf: &PageServerConf) {
@@ -38,7 +38,9 @@ pub fn restore_main(conf: &PageServerConf) {
         let result = restore_chunk(conf).await;
 
         match result {
-            Ok(_) => { return; },
+            Ok(_) => {
+                return;
+            }
             Err(err) => {
                 error!("S3 error: {}", err);
                 return;
@@ -56,7 +58,6 @@ pub fn restore_main(conf: &PageServerConf) {
 // Load it all into the page cache.
 //
 async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
-
     let backend = Storage {
         region: Region::Custom {
             region: env::var("S3_REGION").unwrap().into(),
@@ -67,8 +68,10 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
             Some(&env::var("S3_SECRET").unwrap()),
             None,
             None,
-            None).unwrap(),
-        bucket: "zenith-testbucket".to_string()
+            None,
+        )
+        .unwrap(),
+        bucket: "zenith-testbucket".to_string(),
     };
 
     info!("Restoring from S3...");
@@ -77,7 +80,9 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
     let bucket = Bucket::new_with_path_style(&backend.bucket, backend.region, backend.credentials)?;
 
     // List out contents of directory
-    let results: Vec<s3::serde_types::ListBucketResult> = bucket.list("relationdata/".to_string(), Some("".to_string())).await?;
+    let results: Vec<s3::serde_types::ListBucketResult> = bucket
+        .list("relationdata/".to_string(), Some("".to_string()))
+        .await?;
 
     // TODO: get that from backup
     let sys_id: u64 = 42;
@@ -86,7 +91,6 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
 
     for result in results {
         for object in result.contents {
-
             // Download every relation file, slurping them into memory
 
             let key = object.key;
@@ -104,7 +108,9 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
 
                     slurp_futures.push(f);
                 }
-                Err(e) => { warn!("unrecognized file: {} ({})", relpath, e); }
+                Err(e) => {
+                    warn!("unrecognized file: {} ({})", relpath, e);
+                }
             };
         }
     }
@@ -127,29 +133,28 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
 // From pg_tablespace_d.h
 //
 // FIXME: we'll probably need these elsewhere too, move to some common location
-const DEFAULTTABLESPACE_OID:u32 = 1663;
-const GLOBALTABLESPACE_OID:u32 = 1664;
+const DEFAULTTABLESPACE_OID: u32 = 1663;
+const GLOBALTABLESPACE_OID: u32 = 1664;
 
 #[derive(Debug)]
 struct FilePathError {
-    msg: String
+    msg: String,
 }
 
 impl FilePathError {
     fn new(msg: &str) -> FilePathError {
         FilePathError {
-            msg: msg.to_string()
+            msg: msg.to_string(),
         }
     }
 }
 
-
 impl From<core::num::ParseIntError> for FilePathError {
-
     fn from(e: core::num::ParseIntError) -> Self {
-        return FilePathError { msg: format!("invalid filename: {}", e) }
+        return FilePathError {
+            msg: format!("invalid filename: {}", e),
+        };
     }
-
 }
 
 impl fmt::Display for FilePathError {
@@ -158,7 +163,6 @@ impl fmt::Display for FilePathError {
     }
 }
 
-
 fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
     match forkname {
         // "main" is not in filenames, it's implicit if the fork name is not present
@@ -166,7 +170,7 @@ fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
         Some("fsm") => Ok(1),
         Some("vm") => Ok(2),
         Some("init") => Ok(3),
-        Some(_) => Err(FilePathError::new("invalid forkname"))
+        Some(_) => Err(FilePathError::new("invalid forkname")),
     }
 }
 
@@ -188,20 +192,29 @@ struct ParsedBaseImageFileName {
 // <oid>_<fork name>.<segment number>
 
 fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
-
     let re = Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?_(?P<lsnhi>[[:xdigit:]]{8})(?P<lsnlo>[[:xdigit:]]{8})$").unwrap();
 
-    let caps = re.captures(fname).ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
+    let caps = re
+        .captures(fname)
+        .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
 
     let relnode_str = caps.name("relnode").unwrap().as_str();
     let relnode = u32::from_str_radix(relnode_str, 10)?;
 
     let forkname_match = caps.name("forkname");
-    let forkname = if forkname_match.is_none() { None } else { Some(forkname_match.unwrap().as_str()) };
+    let forkname = if forkname_match.is_none() {
+        None
+    } else {
+        Some(forkname_match.unwrap().as_str())
+    };
     let forknum = forkname_to_forknum(forkname)?;
 
     let segno_match = caps.name("segno");
-    let segno = if segno_match.is_none() { 0 } else { u32::from_str_radix(segno_match.unwrap().as_str(), 10)? };
+    let segno = if segno_match.is_none() {
+        0
+    } else {
+        u32::from_str_radix(segno_match.unwrap().as_str(), 10)?
+    };
 
     let lsn_hi = u64::from_str_radix(caps.name("lsnhi").unwrap().as_str(), 16)?;
     let lsn_lo = u64::from_str_radix(caps.name("lsnlo").unwrap().as_str(), 16)?;
@@ -211,7 +224,6 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
 }
 
 fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathError> {
-
     /*
      * Relation data files can be in one of the following directories:
      *
@@ -238,15 +250,20 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
             relnode,
             forknum,
             segno,
-            lsn
+            lsn,
         });
-
     } else if let Some(dbpath) = path.strip_prefix("base/") {
         let mut s = dbpath.split("/");
-        let dbnode_str = s.next().ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
+        let dbnode_str = s
+            .next()
+            .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
         let dbnode = u32::from_str_radix(dbnode_str, 10)?;
-        let fname = s.next().ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
-        if s.next().is_some() { return Err(FilePathError::new("invalid relation data file name")); };
+        let fname = s
+            .next()
+            .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
+        if s.next().is_some() {
+            return Err(FilePathError::new("invalid relation data file name"));
+        };
 
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
@@ -256,9 +273,8 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
             relnode,
             forknum,
             segno,
-            lsn
+            lsn,
         });
-
     } else if let Some(_) = path.strip_prefix("pg_tblspc/") {
         // TODO
         return Err(FilePathError::new("tablespaces not supported"));
@@ -270,8 +286,13 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
 //
 // Load a base file from S3, and insert it into the page cache
 //
-async fn slurp_base_file(conf: &PageServerConf, sys_id: u64, bucket: Bucket, s3path: String, parsed: ParsedBaseImageFileName)
-{
+async fn slurp_base_file(
+    conf: &PageServerConf,
+    sys_id: u64,
+    bucket: Bucket,
+    s3path: String,
+    parsed: ParsedBaseImageFileName,
+) {
     // FIXME: rust-s3 opens a new connection for each request. Should reuse
     // the reqwest::Client object. But that requires changes to rust-s3 itself.
     let (data, code) = bucket.get_object(s3path.clone()).await.unwrap();
@@ -282,18 +303,17 @@ async fn slurp_base_file(conf: &PageServerConf, sys_id: u64, bucket: Bucket, s3p
     let mut bytes = BytesMut::from(data.as_slice()).freeze();
 
     // FIXME: use constants (BLCKSZ)
-    let mut blknum: u32 = parsed.segno * (1024*1024*1024 / 8192);
+    let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / 8192);
 
     let pcache = page_cache::get_pagecahe(conf.clone(), sys_id);
 
     while bytes.remaining() >= 8192 {
-
         let tag = page_cache::BufferTag {
             spcnode: parsed.spcnode,
             dbnode: parsed.dbnode,
             relnode: parsed.relnode,
             forknum: parsed.forknum as u8,
-            blknum: blknum
+            blknum: blknum,
         };
 
         pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));

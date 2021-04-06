@@ -3,19 +3,19 @@
 //
 
 use log::*;
-use std::{fs::File, str::FromStr, fs::OpenOptions};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::thread;
-use std::fs;
+use std::{fs::File, fs::OpenOptions, str::FromStr};
 
 use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use slog;
-use slog_stdlog;
-use slog_scope;
 use slog::Drain;
+use slog_scope;
+use slog_stdlog;
 
 use pageserver::page_service;
 use pageserver::restore_s3;
@@ -129,8 +129,16 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
 
         // There should'n be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fpritf's or backtraces.
-        let stdout = OpenOptions::new().create(true).append(true).open(conf.data_dir.join("pageserver.log")).unwrap();
-        let stderr = OpenOptions::new().create(true).append(true).open(conf.data_dir.join("pageserver.log")).unwrap();
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(conf.data_dir.join("pageserver.log"))
+            .unwrap();
+        let stderr = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(conf.data_dir.join("pageserver.log"))
+            .unwrap();
 
         let daemonize = Daemonize::new()
             .pid_file(conf.data_dir.join("pageserver.pid"))
@@ -157,13 +165,13 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
 
     // Create directory for wal-redo datadirs
     match fs::create_dir(conf.data_dir.join("wal-redo")) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => match e.kind() {
             io::ErrorKind::AlreadyExists => {}
             _ => {
                 panic!("Failed to create wal-redo data directory: {}", e);
             }
-        }
+        },
     }
 
     // Launch the WAL receiver thread if pageserver was started with --wal-producer

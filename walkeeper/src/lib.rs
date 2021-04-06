@@ -2,9 +2,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+mod pq_protocol;
 pub mod wal_service;
 pub mod xlog_utils;
-mod pq_protocol;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]

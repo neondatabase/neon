@@ -8,19 +8,19 @@
 // Also, I didn't do any of the "hot log" stuff that gin66's implementation had, you can use an
 // AsyncDrain to buffer and handle overflow if desired.
 //
-use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::time::SystemTime;
 use chrono::offset::Local;
 use chrono::DateTime;
 use slog;
-use slog::{Drain, OwnedKVList, Record, Level};
+use slog::{Drain, Level, OwnedKVList, Record};
 use slog_async::AsyncRecord;
+use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::time::SystemTime;
 use tui::buffer::Buffer;
-use tui::layout::{Rect};
-use tui::style::{Style, Modifier};
+use tui::layout::Rect;
+use tui::style::{Modifier, Style};
 use tui::text::{Span, Spans};
-use tui::widgets::{Block, Widget, Paragraph, Wrap};
+use tui::widgets::{Block, Paragraph, Widget, Wrap};
 
 // Size of the log ring buffer, in # of records
 static BUFFER_SIZE: usize = 1000;
@@ -41,11 +41,7 @@ impl Drain for TuiLogger {
     type Ok = ();
     type Err = slog::Error;
 
-    fn log(&self,
-           record: &Record,
-           values: &OwnedKVList)
-           -> Result<Self::Ok, Self::Err> {
-
+    fn log(&self, record: &Record, values: &OwnedKVList) -> Result<Self::Ok, Self::Err> {
         let mut events = self.events.lock().unwrap();
 
         let now = SystemTime::now();
@@ -129,7 +125,6 @@ impl<'b> TuiLoggerWidget<'b> {
 }
 impl<'b> Widget for TuiLoggerWidget<'b> {
     fn render(mut self, area: Rect, buf: &mut Buffer) {
-
         buf.set_style(area, self.style);
         let list_area = match self.block.take() {
             Some(b) => {
@@ -156,7 +151,6 @@ impl<'b> Widget for TuiLoggerWidget<'b> {
             let events = self.logger.events.lock().unwrap();
 
             for evt in events.iter() {
-
                 let (timestamp, rec) = evt;
 
                 rec.as_record_values(|rec, _kwlist| {
@@ -200,7 +194,7 @@ impl<'b> Widget for TuiLoggerWidget<'b> {
         let text = tui::text::Text::from(lines);
 
         Paragraph::new(text)
-            .wrap(Wrap { trim: true } )
+            .wrap(Wrap { trim: true })
             .render(list_area, buf);
     }
 }
