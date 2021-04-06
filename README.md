@@ -7,7 +7,7 @@ Zenith substitutes PostgreSQL storage layer and redistributes data across a clus
 ```sh
 git clone --recursive https://github.com/libzenith/zenith.git
 ./pgbuild.sh # builds postgres and installs it to ./tmp_install
-cargo test
+cargo test -- --test-threads=1
 ```
 
 ## Source tree layout
