@@ -444,7 +444,7 @@ impl System {
         return shared_state.hs_feedback;
     }
 
-    // Load and lock control file (prevent running more than one instane of safekeeper */
+    // Load and lock control file (prevent running more than one instance of safekeeper
     fn load_control_file(&self, conf: &WalAcceptorConf) {
         let control_file_path = conf.data_dir
 			.join(self.id.to_string())

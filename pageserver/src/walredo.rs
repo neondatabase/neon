@@ -52,7 +52,7 @@ pub fn wal_redo_main(conf: PageServerConf, sys_id: u64) {
         .build()
         .unwrap();
 
-    let pcache = page_cache::get_pagecahe(conf.clone(), sys_id);
+    let pcache = page_cache::get_pagecache(conf.clone(), sys_id);
 
     // Loop forever, handling requests as they come.
     let walredo_channel_receiver = &pcache.walredo_receiver;

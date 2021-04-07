@@ -113,7 +113,7 @@ lazy_static! {
     pub static ref PAGECACHES: Mutex<HashMap<u64, Arc<PageCache>>> = Mutex::new(HashMap::new());
 }
 
-pub fn get_pagecahe(conf: PageServerConf, sys_id: u64) -> Arc<PageCache> {
+pub fn get_pagecache(conf: PageServerConf, sys_id: u64) -> Arc<PageCache> {
     let mut pcaches = PAGECACHES.lock().unwrap();
 
     if !pcaches.contains_key(&sys_id) {

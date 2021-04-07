@@ -27,14 +27,14 @@ fn main() -> Result<(), io::Error> {
                 .short("D")
                 .long("dir")
                 .takes_value(true)
-                .help("Path to the page server data directory"),
+                .help("Path to the WAL acceptor data directory"),
         )
         .arg(
             Arg::with_name("listen")
                 .short("l")
                 .long("listen")
                 .takes_value(true)
-                .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5454)"),
+                .help("listen for incoming connections on ip:port (default: 127.0.0.1:5454)"),
         )
         .arg(
             Arg::with_name("pageserver")

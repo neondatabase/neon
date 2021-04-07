@@ -71,7 +71,7 @@ async fn walreceiver_main(
     let mut caught_up = false;
 
     let sysid: u64 = identify_system.systemid().parse().unwrap();
-    let pcache = page_cache::get_pagecahe(conf, sysid);
+    let pcache = page_cache::get_pagecache(conf, sysid);
 
     //
     // Start streaming the WAL, from where we left off previously.

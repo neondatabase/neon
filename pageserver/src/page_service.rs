@@ -462,7 +462,7 @@ impl Connection {
                 })
                 .unwrap();
 
-            // generick ack:
+            // generic ack:
             self.write_message_noflush(&BeMessage::RowDescription)
                 .await?;
             self.write_message_noflush(&BeMessage::DataRow).await?;
@@ -503,7 +503,7 @@ impl Connection {
         self.stream.write_i16(0).await?; /* numAttributes */
         self.stream.flush().await?;
 
-        let pcache = page_cache::get_pagecahe(self.conf.clone(), sysid);
+        let pcache = page_cache::get_pagecache(self.conf.clone(), sysid);
 
         loop {
             let message = self.read_message().await?;
