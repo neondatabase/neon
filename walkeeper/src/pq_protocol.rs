@@ -1,8 +1,10 @@
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io;
+use std::str;
 
 pub type Oid = u32;
+pub type SystemId = u64;
 pub type Result<T> = std::result::Result<T, io::Error>;
 
 #[derive(Debug)]
@@ -35,6 +37,7 @@ pub enum BeMessage<'a> {
 pub struct FeStartupMessage {
     pub version: u32,
     pub kind: StartupRequestCode,
+	pub system_id: SystemId
 }
 
 #[derive(Debug)]
@@ -76,10 +79,30 @@ impl FeStartupMessage {
             _ => StartupRequestCode::Normal,
         };
 
+		let params_bytes = &buf[8..len];
+		let params_str = str::from_utf8(&params_bytes).unwrap();
+		let params = params_str.split('\0');
+		let mut options = false;
+		let mut system_id : u64 = 0;
+		for p in params {
+			if p == "options" {
+				options = true;
+			} else if options {
+				for opt in p.split(' ') {
+					if opt.starts_with("system.id=") {
+						system_id = opt[10..].parse::<u64>().unwrap();
+						break;
+					}
+				}
+				break;
+			}
+		}
+
         buf.advance(len as usize);
         Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
             version,
             kind,
+			system_id,
         })))
     }
 }

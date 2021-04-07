@@ -34,7 +34,14 @@ fn main() -> Result<(), io::Error> {
                 .short("l")
                 .long("listen")
                 .takes_value(true)
-                .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"),
+                .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5454)"),
+        )
+        .arg(
+            Arg::with_name("pageserver")
+                .short("p")
+                .long("pageserver")
+                .takes_value(true)
+                .help("address ip:port of pageserver with which wal_acceptor should establish connection"),
         )
         .arg(
             Arg::with_name("daemonize")
@@ -56,6 +63,7 @@ fn main() -> Result<(), io::Error> {
         data_dir: PathBuf::from("./"),
         daemonize: false,
         no_sync: false,
+        pageserver_addr: None,
         listen_addr: "127.0.0.1:5454".parse().unwrap(),
     };
 
@@ -73,6 +81,10 @@ fn main() -> Result<(), io::Error> {
 
     if let Some(addr) = arg_matches.value_of("listen") {
         conf.listen_addr = addr.parse().unwrap();
+    }
+
+    if let Some(addr) = arg_matches.value_of("pageserver") {
+        conf.pageserver_addr = Some(addr.parse().unwrap());
     }
 
     start_wal_acceptor(conf)

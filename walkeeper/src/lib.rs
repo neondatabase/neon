@@ -13,4 +13,5 @@ pub struct WalAcceptorConf {
     pub daemonize: bool,
     pub no_sync: bool,
     pub listen_addr: SocketAddr,
+    pub pageserver_addr: Option<SocketAddr>,
 }
