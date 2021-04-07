@@ -95,11 +95,11 @@ impl StorageControlPlane {
         cplane
     }
 
-	pub fn stop(&self) {
+    pub fn stop(&self) {
         for wa in self.wal_acceptors.iter() {
-			wa.stop();
-		}
-	}
+            wa.stop();
+        }
+    }
 
     // // postgres <-> wal_acceptor x3 <-> page_server
     // fn local(&mut self) -> StorageControlPlane {
@@ -136,10 +136,9 @@ impl StorageControlPlane {
 
 impl Drop for StorageControlPlane {
     fn drop(&mut self) {
-		self.stop();
-	}
+        self.stop();
+    }
 }
-
 
 pub struct PageServerNode {
     page_service_addr: SocketAddr,
