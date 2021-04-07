@@ -276,8 +276,8 @@ impl PageCache {
                 shared = wait_result.0;
                 if wait_result.1.timed_out() {
                     return Err(format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive",
-                        lsn
+                        "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
+                        lsn >> 32, lsn & 0xffff_ffff
                     ))?;
                 }
             }
@@ -286,7 +286,8 @@ impl PageCache {
             }
 
             if lsn < shared.first_valid_lsn {
-                return Err(format!("LSN {} has already been removed", lsn))?;
+                return Err(format!("LSN {:X}/{:X} has already been removed",
+                                   lsn >> 32, lsn & 0xffff_ffff))?;
             }
 
             let pagecache = &shared.pagecache;
