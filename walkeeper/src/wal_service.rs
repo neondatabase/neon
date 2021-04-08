@@ -585,7 +585,7 @@ impl Connection {
     fn set_system(&mut self, id: SystemId) -> Result<()> {
         let mut systems = SYSTEMS.lock().unwrap();
         if id == 0 {
-            // non-multitenant configuration: just sigle instance
+            // non-multitenant configuration: just a single instance
             if let Some(system) = systems.values().next() {
                 self.system = Some(system.clone());
                 return Ok(());
@@ -937,6 +937,10 @@ impl Connection {
 
         /*
          * Always start streaming at the beginning of a segment
+         *
+         * FIXME: It is common practice to start streaming at the beginning of
+         * the segment, but it should be up to the client to decide that. We
+         * shouldn't enforce that here.
          */
         start_pos -= XLogSegmentOffset(start_pos, wal_seg_size) as u64;
 
