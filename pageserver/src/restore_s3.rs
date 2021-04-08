@@ -22,7 +22,7 @@ use tokio::runtime;
 
 use futures::future;
 
-use crate::{page_cache, PageServerConf};
+use crate::{PageServerConf, page_cache, pg_constants, controlfile};
 
 struct Storage {
     region: Region,
@@ -84,8 +84,19 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
         .list("relationdata/".to_string(), Some("".to_string()))
         .await?;
 
-    // TODO: get that from backup
-    let sys_id: u64 = 42;
+    //Before uploading other files, slurp pg_control to set systemid
+
+    let control_results: Vec<s3::serde_types::ListBucketResult> = bucket.list("relationdata/global/pg_control".to_string(), Some("".to_string())).await?;
+    let object = &(&control_results[0]).contents[0];
+    let (data, _) = bucket.get_object(&object.key).await.unwrap();
+    let bytes = BytesMut::from(data.as_slice()).freeze();
+    let c = controlfile::decode_pg_control(bytes);
+
+    let pcache = page_cache::get_pagecache(conf.clone(), c.system_identifier);
+    pcache.set_controldata(c.clone());
+    trace!("uploaded controlfile {:?}", pcache.get_controldata());
+
+    let sys_id: u64 = c.system_identifier;
     let mut oldest_lsn = 0;
     let mut slurp_futures: Vec<_> = Vec::new();
 
@@ -119,22 +130,41 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
         panic!("no base backup found");
     }
 
-    let pcache = page_cache::get_pagecache(conf.clone(), sys_id);
+    //Now add nonrelation files
+    let nonrelresults: Vec<s3::serde_types::ListBucketResult> = bucket.list("nonreldata/".to_string(), Some("".to_string())).await?;
+    for result in nonrelresults {
+        for object in result.contents {
+
+            // Download needed non relation files, slurping them into memory
+
+            let key = object.key;
+            let relpath = key.strip_prefix("nonreldata/").unwrap();
+            trace!("list nonrelfiles {}", relpath);
+
+            let parsed = parse_nonrel_file_path(&relpath);
+
+            match parsed {
+                Ok(p) => {
+                    let b = bucket.clone();
+                    let f = slurp_base_file(conf, sys_id, b, key.to_string(), p);
+
+                    slurp_futures.push(f);
+                }
+                Err(e) => { warn!("unrecognized file: {} ({})", relpath, e); }
+            };
+        }
+    }
+
     pcache.init_valid_lsn(oldest_lsn);
 
     info!("{} files to restore...", slurp_futures.len());
 
     future::join_all(slurp_futures).await;
-    info!("restored!");
+    info!("restored! {:?} to {:?}", pcache.first_valid_lsn, pcache.last_valid_lsn);
 
     Ok(())
 }
 
-// From pg_tablespace_d.h
-//
-// FIXME: we'll probably need these elsewhere too, move to some common location
-const DEFAULTTABLESPACE_OID: u32 = 1663;
-const GLOBALTABLESPACE_OID: u32 = 1664;
 
 #[derive(Debug)]
 struct FilePathError {
@@ -185,6 +215,19 @@ struct ParsedBaseImageFileName {
     pub lsn: u64,
 }
 
+fn parse_lsn_from_filename(fname: &str) ->  Result<u64, FilePathError>
+{
+
+    let (_, lsn_str) = fname.split_at(fname.len()-16);
+
+    let (lsnhi, lsnlo) = lsn_str.split_at(8);
+    let lsn_hi = u64::from_str_radix(lsnhi, 16)?;
+    let lsn_lo = u64::from_str_radix(lsnlo, 16)?;
+    let lsn = lsn_hi << 32 | lsn_lo;
+
+    return Ok(lsn);
+}
+
 // formats:
 // <oid>
 // <oid>_<fork name>
@@ -223,6 +266,55 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
     return Ok((relnode, forknum, segno, lsn));
 }
 
+fn parse_nonrel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathError> {
+
+    //TODO parse segno from xact filenames too
+    if let Some(fname) = path.strip_prefix("pg_xact/") {
+
+        let lsn = parse_lsn_from_filename(fname.clone())?;
+
+        return Ok(ParsedBaseImageFileName {
+            spcnode: 0,
+            dbnode: 0,
+            relnode: 0,
+            forknum: pg_constants::PG_XACT_FORKNUM,
+            segno: 0,
+            lsn
+        });
+    }
+    else if let Some(fname) = path.strip_prefix("pg_multixact/offsets") {
+
+        let lsn = parse_lsn_from_filename(fname.clone())?;
+
+        return Ok(ParsedBaseImageFileName {
+            spcnode: 0,
+            dbnode: 0,
+            relnode: 0,
+            forknum: pg_constants::PG_MXACT_OFFSETS_FORKNUM,
+            segno: 0,
+            lsn
+        });
+    }
+    else if let Some(fname) = path.strip_prefix("pg_multixact/members") {
+
+        let lsn = parse_lsn_from_filename(fname.clone())?;
+
+        return Ok(ParsedBaseImageFileName {
+            spcnode: 0,
+            dbnode: 0,
+            relnode: 0,
+            forknum: pg_constants::PG_MXACT_MEMBERS_FORKNUM,
+            segno: 0,
+            lsn
+        });
+
+    }
+    else {
+        return Err(FilePathError::new("invalid non relation data file name"));
+    }
+
+}
+
 fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathError> {
     /*
      * Relation data files can be in one of the following directories:
@@ -242,10 +334,39 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
      * <oid>.<segment number>
      */
     if let Some(fname) = path.strip_prefix("global/") {
+
+        if fname.contains("pg_control")
+        {
+            let lsn = parse_lsn_from_filename(fname.clone())?;
+
+            return Ok(ParsedBaseImageFileName {
+                spcnode: pg_constants::GLOBALTABLESPACE_OID,
+                dbnode: 0,
+                relnode: 0,
+                forknum: pg_constants::PG_CONTROLFILE_FORKNUM,
+                segno: 0,
+                lsn
+            });
+        }
+
+        if fname.contains("pg_filenode")
+        {
+            let lsn = parse_lsn_from_filename(fname.clone())?;
+
+            return Ok(ParsedBaseImageFileName {
+                spcnode: pg_constants::GLOBALTABLESPACE_OID,
+                dbnode: 0,
+                relnode: 0,
+                forknum: pg_constants::PG_FILENODEMAP_FORKNUM,
+                segno: 0,
+                lsn
+            });
+        }
+
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
         return Ok(ParsedBaseImageFileName {
-            spcnode: GLOBALTABLESPACE_OID,
+            spcnode: pg_constants::GLOBALTABLESPACE_OID,
             dbnode: 0,
             relnode,
             forknum,
@@ -265,10 +386,25 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
             return Err(FilePathError::new("invalid relation data file name"));
         };
 
+        if fname.contains("pg_filenode")
+        {
+            let lsn = parse_lsn_from_filename(fname.clone())?;
+
+            return Ok(ParsedBaseImageFileName {
+                spcnode: pg_constants::DEFAULTTABLESPACE_OID,
+                dbnode,
+                relnode: 0,
+                forknum: pg_constants::PG_FILENODEMAP_FORKNUM,
+                segno: 0,
+                lsn
+            });
+        }
+
+
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
         return Ok(ParsedBaseImageFileName {
-            spcnode: DEFAULTTABLESPACE_OID,
+            spcnode: pg_constants::DEFAULTTABLESPACE_OID,
             dbnode,
             relnode,
             forknum,
@@ -302,22 +438,60 @@ async fn slurp_base_file(
 
     let mut bytes = BytesMut::from(data.as_slice()).freeze();
 
-    // FIXME: use constants (BLCKSZ)
-    let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / 8192);
-
     let pcache = page_cache::get_pagecache(conf.clone(), sys_id);
 
-    while bytes.remaining() >= 8192 {
-        let tag = page_cache::BufferTag {
+    // pg_filenode.map has non-standard size - 512 bytes
+    if parsed.forknum == pg_constants::PG_FILENODEMAP_FORKNUM
+    {
+        let b = bytes.clone();
+        controlfile::decode_filemapping(b);
+        while bytes.remaining() >= 512 {
+
+            let tag = page_cache::BufferTag {
+                spcnode: parsed.spcnode,
+                dbnode: parsed.dbnode,
+                relnode: parsed.relnode,
+                forknum: parsed.forknum as u8,
+                blknum: 0
+            };
+
+            pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(512));
+        }
+
+        let tag = page_cache::RelTag {
             spcnode: parsed.spcnode,
             dbnode: parsed.dbnode,
             relnode: parsed.relnode,
             forknum: parsed.forknum as u8,
-            blknum: blknum,
         };
 
-        pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));
+        pcache.relsize_inc(&tag, Some(0));
+    }
+    else
+    {
+        // FIXME: use constants (BLCKSZ)
+        let mut blknum: u32 = parsed.segno * (1024*1024*1024 / 8192);
+        let reltag = page_cache::RelTag {
+            spcnode: parsed.spcnode,
+            dbnode: parsed.dbnode,
+            relnode: parsed.relnode,
+            forknum: parsed.forknum as u8,
+        };
 
-        blknum += 1;
+        while bytes.remaining() >= 8192 {
+
+            let tag = page_cache::BufferTag {
+                spcnode: parsed.spcnode,
+                dbnode: parsed.dbnode,
+                relnode: parsed.relnode,
+                forknum: parsed.forknum as u8,
+                blknum: blknum
+            };
+
+            pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));
+            pcache.relsize_inc(&reltag, Some(blknum));
+
+            blknum += 1;
+        }
     }
 }

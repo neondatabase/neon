@@ -21,6 +21,8 @@ use std::{
 use lazy_static::lazy_static;
 use postgres::{Client, NoTls};
 
+use postgres;
+
 lazy_static! {
     // postgres would be there if it was build by 'make postgres' here in the repo
     pub static ref PG_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -196,17 +198,16 @@ impl PageServerNode {
     pub fn start_froms3(&self) {
         println!("Starting pageserver at '{}'", self.page_service_addr);
 
-        let status = Command::new(CARGO_BIN_DIR.join("pageserver"))
+        let status = Command::new(BIN_DIR.join("pageserver"))
             .args(&["-D", self.data_dir.to_str().unwrap()])
             .args(&["-l", self.page_service_addr.to_string().as_str()])
             .arg("-d")
             .env_clear()
             .env("PATH", PG_BIN_DIR.to_str().unwrap()) // path to postres-wal-redo binary
-            .env("S3_ENDPOINT", "https://192.168.16.216:9000")
+            .env("S3_ENDPOINT", "https://127.0.0.1:9000")
             .env("S3_REGION", "us-east-1")
             .env("S3_ACCESSKEY", "minioadmin")
             .env("S3_SECRET", "minioadmin")
-            .env("S3_BUCKET", "zenith-testbucket")
             .status()
             .expect("failed to start pageserver");
 
@@ -378,10 +379,10 @@ impl ComputeControlPlane<'_> {
         node
     }
 
-    // Init compute node without files, only datadir structure
-    // use initdb --compute-node flag and GUC 'computenode_mode'
-    // to distinguish the node
-    pub fn new_minimal_node(&mut self) -> &PostgresNode {
+     // Init compute node without files, only datadir structure
+     // use initdb --compute-node flag and GUC 'computenode_mode'
+     // to distinguish the node
+     pub fn new_minimal_node<'a>(&mut self) -> &Arc<PostgresNode> {
         // allocate new node entry with generated port
         let node_id = self.nodes.len() + 1;
         let node = PostgresNode {
@@ -394,7 +395,7 @@ impl ComputeControlPlane<'_> {
         self.nodes.push(Arc::new(node));
         let node = self.nodes.last().unwrap();
 
-        // initialize data directory w/o files
+        // initialize data directory
         fs::remove_dir_all(node.pgdata.to_str().unwrap()).ok();
         let initdb_path = self.pg_bin_dir.join("initdb");
         println!("initdb_path: {}", initdb_path.to_str().unwrap());
@@ -412,6 +413,11 @@ impl ComputeControlPlane<'_> {
             panic!("initdb failed");
         }
 
+        // // allow local replication connections
+        // node.append_conf("pg_hba.conf", format!("\
+        //     host replication all {}/32 sspi include_realm=1 map=regress\n\
+        // ", node.ip).as_str());
+
         // listen for selected port
         node.append_conf(
             "postgresql.conf",
@@ -426,14 +432,27 @@ impl ComputeControlPlane<'_> {
             listen_addresses = '{address}'\n\
             port = {port}\n\
             computenode_mode = true\n\
-        ",
+            ",
                 address = node.ip,
                 port = node.port
             )
             .as_str(),
         );
-
         node
+    }
+
+    pub fn new_node_wo_data(&mut self) -> Arc<PostgresNode> {
+        let storage_cplane = self.storage_cplane;
+        let node = self.new_minimal_node();
+
+        let pserver = storage_cplane.page_server_addr();
+
+        // Configure that node to take pages from pageserver
+        node.append_conf("postgresql.conf", format!("\
+            page_server_connstring = 'host={} port={}'\n\
+        ", pserver.ip(), pserver.port()).as_str());
+
+        node.clone()
     }
 
     pub fn new_node(&mut self) -> Arc<PostgresNode> {
@@ -505,6 +524,7 @@ pub struct PostgresNode {
     pgdata: PathBuf,
     pg_bin_dir: PathBuf,
 }
+
 
 impl PostgresNode {
     pub fn append_conf(&self, config: &str, opts: &str) {
@@ -604,27 +624,126 @@ impl PostgresNode {
         self.pgdata.to_str()
     }
 
-    /* Create stub controlfile and respective xlog to start computenode */
-    pub fn setup_controlfile(&self) {
-        let filepath = format!("{}/global/pg_control", self.pgdata.to_str().unwrap());
+    // Request from pageserver stub controlfile, respective xlog
+    // and a bunch of files needed to start computenode
+    //
+    // NOTE this "file" request is a crutch.
+    // It asks pageserver to write requested page to the provided filepath
+    // and thus only works locally.
+    // TODO receive pages via some libpq protocol.
+    // The problem I've met is that nonrelfiles are not valid utf8 and cannot be
+    // handled by simple_query(). that expects test.
+    // And reqular query() uses prepared queries.
 
+    // TODO pass sysid as parameter
+    pub fn setup_compute_node(&self, sysid: u64, storage_cplane: &StorageControlPlane)
+    {
+        let mut query;
+        //Request pg_control from pageserver
+        query = format!("file {}/global/pg_control,{},{},{},{},{},{},{}",
+            self.pgdata.to_str().unwrap(),
+            sysid as u64, //sysid
+            1664, //tablespace
+            0, //dboid
+            0, //reloid
+            42, //forknum pg_control
+            0, //blkno
+            0 //lsn
+        );
+        storage_cplane.page_server_psql(query.as_str());
+
+        //Request pg_xact and pg_multixact from pageserver
+        //We need them for initial pageserver startup and authentication
+        //TODO figure out which block number we really need
+        query = format!("file {}/pg_xact/0000,{},{},{},{},{},{},{}",
+            self.pgdata.to_str().unwrap(),
+            sysid as u64, //sysid
+            0, //tablespace
+            0, //dboid
+            0, //reloid
+            44, //forknum
+            0, //blkno
+            0 //lsn
+        );
+        storage_cplane.page_server_psql(query.as_str());
+
+        query = format!("file {}/pg_multixact/offsets/0000,{},{},{},{},{},{},{}",
+            self.pgdata.to_str().unwrap(),
+            sysid as u64, //sysid
+            0, //tablespace
+            0, //dboid
+            0, //reloid
+            45, //forknum
+            0, //blkno
+            0 //lsn
+        );
+        storage_cplane.page_server_psql(query.as_str());
+
+        query = format!("file {}/pg_multixact/members/0000,{},{},{},{},{},{},{}",
+            self.pgdata.to_str().unwrap(),
+            sysid as u64, //sysid
+            0, //tablespace
+            0, //dboid
+            0, //reloid
+            46, //forknum
+            0, //blkno
+            0 //lsn
+        );
+        storage_cplane.page_server_psql(query.as_str());
+
+
+        //Request a few shared catalogs needed for authentication
+        //Without them we cannot setup connection with pageserver to request further pages
+        let reloids = [1260, 1261, 1262, 2396];
+        for reloid in reloids.iter()
         {
-            File::create(filepath).unwrap();
+            //FIXME request all blocks from file, not just 10
+            for blkno in 0..10
+            {
+                query = format!("file {}/global/{},{},{},{},{},{},{},{}",
+                    self.pgdata.to_str().unwrap(),
+                    reloid, //suse it as filename
+                    sysid as u64, //sysid
+                    1664, //tablespace
+                    0, //dboid
+                    reloid, //reloid
+                    0, //forknum
+                    blkno, //blkno
+                    0 //lsn
+                );
+                storage_cplane.page_server_psql(query.as_str());
+            }
         }
+
+        fs::create_dir(format!("{}/base/13006", self.pgdata.to_str().unwrap())).unwrap();
+        fs::create_dir(format!("{}/base/13007", self.pgdata.to_str().unwrap())).unwrap();
+
+        //FIXME figure out what wal file we need to successfully start
+        let walfilepath = format!("{}/pg_wal/000000010000000000000001", self.pgdata.to_str().unwrap());
+        fs::copy("/home/anastasia/zenith/zenith/tmp_check/pgdata/pg_wal/000000010000000000000001", walfilepath).unwrap();
+
+        println!("before resetwal ");
 
         let pg_resetwal_path = self.pg_bin_dir.join("pg_resetwal");
 
+        // Now it does nothing, just prints existing content of pg_control.
+        // TODO update values with most recent lsn, xid, oid requested from pageserver
         let pg_resetwal = Command::new(pg_resetwal_path)
             .args(&["-D", self.pgdata.to_str().unwrap()])
-            .arg("-f")
-            // TODO probably we will have to modify pg_resetwal
-            // .arg("--compute-node")
+            .arg("-n") //dry run
+            //.arg("-f")
+            //.args(&["--next-transaction-id", "100500"])
+            //.args(&["--next-oid", "17000"])
+            //.args(&["--next-transaction-id", "100500"])
             .status()
             .expect("failed to execute pg_resetwal");
 
         if !pg_resetwal.success() {
             panic!("pg_resetwal failed");
         }
+
+        println!("setup done");
+
     }
 
     pub fn start_proxy(&self, wal_acceptors: String) -> WalProposerNode {
@@ -652,7 +771,7 @@ impl PostgresNode {
         let status = Command::new(zenith_push_path)
             .args(&["-D", self.pgdata.to_str().unwrap()])
             .env_clear()
-            .env("S3_ENDPOINT", "https://192.168.16.216:9000")
+            .env("S3_ENDPOINT", "https://127.0.0.1:9000")
             .env("S3_REGION", "us-east-1")
             .env("S3_ACCESSKEY", "minioadmin")
             .env("S3_SECRET", "minioadmin")

@@ -159,6 +159,7 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     // Before opening up for connections, restore the latest base backup from S3.
     // (We don't persist anything to local disk at the moment, so we need to do
     // this at every startup)
+    // TODO move it to a separate function
     if !conf.skip_recovery {
         restore_s3::restore_main(&conf);
     }
@@ -229,7 +230,7 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
             if record.level().is_at_least(slog::Level::Info) {
                 return true;
             }
-            return false;
+            return true;
         });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());

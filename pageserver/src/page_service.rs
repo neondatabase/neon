@@ -24,6 +24,8 @@ use crate::page_cache;
 use crate::walreceiver;
 use crate::PageServerConf;
 
+use crate::controlfile;
+
 type Result<T> = std::result::Result<T, io::Error>;
 
 #[derive(Debug)]
@@ -51,7 +53,6 @@ enum BeMessage {
     RowDescription,
     DataRow,
     CommandComplete,
-    ControlFile,
 
     //
     // All that messages are actually CopyData from libpq point of view.
@@ -339,18 +340,6 @@ impl Connection {
                 self.stream.write_buf(&mut b).await?;
             }
 
-            BeMessage::ControlFile => {
-                // TODO pass checkpoint and xid info in this message
-                let mut b = Bytes::from("hello pg_control");
-
-                self.stream.write_u8(b'D').await?;
-                self.stream.write_i32(4 + 2 + 4 + b.len() as i32).await?;
-
-                self.stream.write_i16(1).await?;
-                self.stream.write_i32(b.len() as i32).await?;
-                self.stream.write_buf(&mut b).await?;
-            }
-
             BeMessage::CommandComplete => {
                 let mut b = Bytes::from("SELECT 1\0");
 
@@ -385,6 +374,7 @@ impl Connection {
                 self.stream.write_u32(resp.n_blocks).await?;
                 self.stream.write_buf(&mut resp.page.clone()).await?;
             }
+
         }
 
         Ok(())
@@ -438,8 +428,34 @@ impl Connection {
     async fn process_query(&mut self, q: &FeQueryMessage) -> Result<()> {
         trace!("got query {:?}", q.body);
 
-        if q.body.starts_with(b"controlfile") {
-            self.handle_controlfile().await
+        if q.body.starts_with(b"file") {
+
+            let (_l, r) = q.body.split_at("file ".len());
+            //TODO parse it correctly
+            let r = r.to_vec();
+            let str = String::from_utf8(r).unwrap().to_string();
+
+            let mut split = str.split(',');
+            let mut s;
+
+            let filepath = split.next().unwrap();
+            let sysid = { s = split.next().unwrap(); s.parse::<u64>().unwrap()};
+
+            let buf_tag = page_cache::BufferTag {
+                spcnode: { s = split.next().unwrap(); s.parse::<u32>().unwrap() },
+                dbnode:  { s = split.next().unwrap(); s.parse::<u32>().unwrap() },
+                relnode: { s = split.next().unwrap(); s.parse::<u32>().unwrap() },
+                forknum: { s = split.next().unwrap(); s.parse::<u8>().unwrap() },
+                blknum: { s = split.next().unwrap(); s.parse::<u32>().unwrap() }
+            };
+
+            //TODO PARSE LSN
+            //let lsn = { s = split.next().unwrap(); s.parse::<u64>().unwrap()};
+            let lsn: u64 = 0;
+            info!("process file query sysid {} -- {:?} lsn {}",sysid, buf_tag, lsn);
+
+            self.handle_file(filepath.to_string(), sysid, buf_tag, lsn.into()).await
+
         } else if q.body.starts_with(b"pagestream ") {
             let (_l, r) = q.body.split_at("pagestream ".len());
             let mut r = r.to_vec();
@@ -486,12 +502,26 @@ impl Connection {
         }
     }
 
-    async fn handle_controlfile(&mut self) -> Result<()> {
-        self.write_message_noflush(&BeMessage::RowDescription)
-            .await?;
-        self.write_message_noflush(&BeMessage::ControlFile).await?;
-        self.write_message_noflush(&BeMessage::CommandComplete)
-            .await?;
+    async fn handle_file(&mut self, filepath: String, sysid:u64,
+                         buf_tag: page_cache::BufferTag, lsn:u64) -> Result<()> {
+
+        let pcache = page_cache::get_pagecache(self.conf.clone(), sysid);
+
+        match pcache.get_page_at_lsn(buf_tag, lsn) {
+            Ok(p) => {
+                info!("info succeeded get_page_at_lsn: {}", lsn);
+
+                controlfile::write_buf_to_file(filepath, p, buf_tag.blknum);
+
+            },
+            Err(e) => {
+                info!("page not found and it's ok. get_page_at_lsn: {}", e);
+            }
+        };
+
+        self.write_message_noflush(&BeMessage::RowDescription).await?;
+        self.write_message_noflush(&BeMessage::DataRow).await?;
+        self.write_message_noflush(&BeMessage::CommandComplete).await?;
         self.write_message(&BeMessage::ReadyForQuery).await
     }
 
@@ -558,6 +588,7 @@ impl Connection {
 
                     let n_blocks = pcache.relsize_get(&tag);
 
+                    info!("ZenithNblocksRequest {:?} = {}", tag, n_blocks);
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
                         n_blocks: n_blocks,
@@ -574,11 +605,29 @@ impl Connection {
                     };
 
                     let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn) {
-                        Ok(p) => BeMessage::ZenithReadResponse(ZenithReadResponse {
-                            ok: true,
-                            n_blocks: 0,
-                            page: p,
-                        }),
+                        Ok(p) => {
+                            let mut b = BytesMut::with_capacity(8192);
+
+                            info!("ZenithReadResponse get_page_at_lsn succeed");
+                            if p.len() < 8192
+                            {
+                                //add padding
+                                info!("ZenithReadResponse add padding");
+                                let padding: [u8; 8192 - 512] = [0; 8192 - 512];
+                                b.extend_from_slice(&p);
+                                b.extend_from_slice(&padding);
+                            }
+                            else
+                            {
+                                b.extend_from_slice(&p);
+                            }
+
+                            BeMessage::ZenithReadResponse(ZenithReadResponse {
+                                ok: true,
+                                n_blocks: 0,
+                                page: b.freeze()
+                            })
+                        },
                         Err(e) => {
                             const ZERO_PAGE: [u8; 8192] = [0; 8192];
                             error!("get_page_at_lsn: {}", e);
@@ -599,6 +648,7 @@ impl Connection {
                         relnode: req.relnode,
                         forknum: req.forknum,
                     };
+                    info!("ZenithCreateRequest {:?}", tag);
 
                     pcache.relsize_inc(&tag, None);
 
@@ -615,6 +665,8 @@ impl Connection {
                         relnode: req.relnode,
                         forknum: req.forknum,
                     };
+
+                    info!("ZenithExtendRequest {:?} to {}", tag, req.blkno);
 
                     pcache.relsize_inc(&tag, Some(req.blkno));
 

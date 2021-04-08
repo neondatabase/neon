@@ -4,6 +4,8 @@
 //#![allow(dead_code)]
 //include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+use crate::pg_constants;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use std::cmp::min;
@@ -234,7 +236,9 @@ const BLCKSZ: u16 = 8192;
 //
 // Constants from xlogrecord.h
 //
-const XLR_MAX_BLOCK_ID: u8 = 32;
+const XLR_INFO_MASK: u8 = 0x0F;
+
+const XLR_MAX_BLOCK_ID:u8 = 32;
 
 const XLR_BLOCK_ID_DATA_SHORT: u8 = 255;
 const XLR_BLOCK_ID_DATA_LONG: u8 = 254;
@@ -253,6 +257,12 @@ const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
 const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
 
+//
+// constants from clog.h
+//
+const CLOG_XACTS_PER_BYTE:u32 = 4;
+const CLOG_XACTS_PER_PAGE:u32 = 8192 * CLOG_XACTS_PER_BYTE;
+
 pub struct DecodedBkpBlock {
     /* Is this block ref in use? */
     //in_use: bool,
@@ -261,7 +271,7 @@ pub struct DecodedBkpBlock {
     pub rnode_spcnode: u32,
     pub rnode_dbnode: u32,
     pub rnode_relnode: u32,
-    pub forknum: u8,
+    pub forknum: u8, // Note that we have a few special forknum values for non-rel files. Handle them too
     pub blkno: u32,
 
     /* copy of the fork_flags field from the XLogRecordBlockHeader */
@@ -297,6 +307,27 @@ pub struct DecodedWALRecord {
 const XLOG_SWITCH: u8 = 0x40;
 const RM_XLOG_ID: u8 = 0;
 
+const RM_XACT_ID:u8 = 1;
+// const RM_CLOG_ID:u8 = 3;
+//const RM_MULTIXACT_ID:u8 = 6;
+
+// from xact.h
+const XLOG_XACT_COMMIT: u8 = 0x00;
+// const XLOG_XACT_PREPARE: u8 = 0x10;
+// const XLOG_XACT_ABORT: u8 = 0x20;
+const XLOG_XACT_COMMIT_PREPARED: u8 = 0x30;
+// const XLOG_XACT_ABORT_PREPARED: u8 = 0x40;
+// const XLOG_XACT_ASSIGNMENT: u8 = 0x50;
+// const XLOG_XACT_INVALIDATIONS: u8 = 0x60;
+/* free opcode 0x70 */
+
+/* mask for filtering opcodes out of xl_info */
+const XLOG_XACT_OPMASK: u8 = 0x70;
+
+/* does this record have a 'xinfo' field or not */
+// const XLOG_XACT_HAS_INFO: u8 = 0x80;
+
+
 // Is this record an XLOG_SWITCH record? They need some special processing,
 // so we need to check for that before the rest of the parsing.
 //
@@ -331,12 +362,16 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
 
     // FIXME: assume little-endian here
     let xl_tot_len = buf.get_u32_le();
-    let _xl_xid = buf.get_u32_le();
+    let xl_xid = buf.get_u32_le();
     let _xl_prev = buf.get_u64_le();
-    let _xl_info = buf.get_u8();
-    let _xl_rmid = buf.get_u8();
+    let xl_info = buf.get_u8();
+    let xl_rmid = buf.get_u8();
     buf.advance(2); // 2 bytes of padding
     let _xl_crc = buf.get_u32_le();
+
+    info!("decode_wal_record xl_rmid = {}" , xl_rmid);
+
+	let rminfo: u8 = xl_info & !XLR_INFO_MASK;
 
     let remaining = xl_tot_len - SizeOfXLogRecord;
 
@@ -348,6 +383,50 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
     let mut got_rnode = false;
+
+    if xl_rmid == RM_XACT_ID &&
+       ((rminfo & XLOG_XACT_OPMASK) == XLOG_XACT_COMMIT ||
+        (rminfo & XLOG_XACT_OPMASK) == XLOG_XACT_COMMIT_PREPARED)
+    {
+        info!("decode_wal_record RM_XACT_ID - XLOG_XACT_COMMIT");
+
+        let mut blocks: Vec<DecodedBkpBlock> = Vec::new();
+
+        let blkno = xl_xid/CLOG_XACTS_PER_PAGE;
+
+        let mut blk = DecodedBkpBlock {
+            rnode_spcnode: 0,
+            rnode_dbnode: 0,
+            rnode_relnode: 0,
+            forknum: pg_constants::PG_XACT_FORKNUM as u8,
+            blkno: blkno,
+
+            flags: 0,
+            has_image: false,
+            apply_image: false,
+            will_init: false,
+            hole_offset: 0,
+            hole_length: 0,
+            bimg_len: 0,
+            bimg_info: 0,
+
+            has_data: true,
+            data_len: 0
+        };
+
+        let fork_flags = buf.get_u8();
+        blk.has_data = (fork_flags & BKPBLOCK_HAS_DATA) != 0;
+        blk.data_len = buf.get_u16_le();
+
+        info!("decode_wal_record RM_XACT_ID blk has data with data_len {}", blk.data_len);
+
+        blocks.push(blk);
+        return DecodedWALRecord {
+            lsn: lsn,
+            record: rec,
+            blocks: blocks
+        }
+    }
 
     // Decode the headers
 
@@ -552,6 +631,7 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
 
                     //blk->rnode = *rnode;
                 }
+
                 blk.rnode_spcnode = rnode_spcnode;
                 blk.rnode_dbnode = rnode_dbnode;
                 blk.rnode_relnode = rnode_relnode;
