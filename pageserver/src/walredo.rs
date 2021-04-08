@@ -65,6 +65,7 @@ pub fn wal_redo_main(conf: PageServerConf, sys_id: u64) {
             let _guard = runtime.enter();
             process = WalRedoProcess::launch(&datadir, &runtime).unwrap();
         }
+		info!("WAL redo postgres started");
 
         // Pretty arbitrarily, reuse the same Postgres process for 100 requests.
         // After that, kill it and start a new one. This is mostly to avoid
@@ -76,11 +77,11 @@ pub fn wal_redo_main(conf: PageServerConf, sys_id: u64) {
             let result = handle_apply_request(&pcache, &process, &runtime, request);
             if result.is_err() {
                 // On error, kill the process.
+				error!("Kill wal redo process on error");
                 break;
             }
         }
 
-        info!("killing WAL redo postgres process");
         let _ = runtime.block_on(process.stdin.get_mut().shutdown());
         let mut child = process.child;
         drop(process.stdin);
@@ -99,6 +100,7 @@ fn handle_apply_request(
     let (base_img, records) = pcache.collect_records_for_apply(entry_rc.as_ref());
 
     let mut entry = entry_rc.content.lock().unwrap();
+	assert!(entry.apply_pending);
     entry.apply_pending = false;
 
     let nrecords = records.len();
@@ -122,9 +124,6 @@ fn handle_apply_request(
         result = Err(e);
     } else {
         entry.page_image = Some(apply_result.unwrap());
-        pcache
-            .num_page_images
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         result = Ok(());
     }
 
@@ -296,11 +295,7 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
 
     buf.put_u8('B' as u8);
     buf.put_u32(len as u32);
-    buf.put_u32(tag.spcnode);
-    buf.put_u32(tag.dbnode);
-    buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum as u32);
-    buf.put_u32(tag.blknum);
+    tag.pack(&mut buf);
 
     assert!(buf.len() == 1 + len);
 
@@ -315,11 +310,7 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
 
     buf.put_u8('P' as u8);
     buf.put_u32(len as u32);
-    buf.put_u32(tag.spcnode);
-    buf.put_u32(tag.dbnode);
-    buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum as u32);
-    buf.put_u32(tag.blknum);
+    tag.pack(&mut buf);
     buf.put(base_img);
 
     assert!(buf.len() == 1 + len);
@@ -347,11 +338,7 @@ fn build_get_page_msg(tag: BufferTag) -> Bytes {
 
     buf.put_u8('G' as u8);
     buf.put_u32(len as u32);
-    buf.put_u32(tag.spcnode);
-    buf.put_u32(tag.dbnode);
-    buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum as u32);
-    buf.put_u32(tag.blknum);
+    tag.pack(&mut buf);
 
     assert!(buf.len() == 1 + len);
 

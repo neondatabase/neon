@@ -566,10 +566,12 @@ impl Connection {
                 }
                 Some(FeMessage::ZenithReadRequest(req)) => {
                     let buf_tag = page_cache::BufferTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
+                        rel: page_cache::RelTag {
+                            spcnode: req.spcnode,
+                            dbnode: req.dbnode,
+                            relnode: req.relnode,
+                            forknum: req.forknum,
+                        },
                         blknum: req.blkno,
                     };
 

@@ -12,7 +12,7 @@ use tokio::time::{sleep, Duration};
 use tokio_stream::StreamExt;
 
 use crate::page_cache;
-use crate::page_cache::BufferTag;
+use crate::page_cache::{BufferTag, RelTag};
 use crate::waldecoder::WalStreamDecoder;
 use crate::PageServerConf;
 
@@ -141,10 +141,12 @@ async fn walreceiver_main(
                         // so having multiple copies of it doesn't cost that much)
                         for blk in decoded.blocks.iter() {
                             let tag = BufferTag {
-                                spcnode: blk.rnode_spcnode,
-                                dbnode: blk.rnode_dbnode,
-                                relnode: blk.rnode_relnode,
-                                forknum: blk.forknum as u8,
+                                rel: RelTag {
+                                    spcnode: blk.rnode_spcnode,
+                                    dbnode: blk.rnode_dbnode,
+                                    relnode: blk.rnode_relnode,
+                                    forknum: blk.forknum as u8,
+                                },
                                 blknum: blk.blkno,
                             };
 
