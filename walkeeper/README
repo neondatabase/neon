@@ -1,0 +1,38 @@
+# WAL safekeeper
+
+Also know as the WAL service, WAL keeper or WAL acceptor.
+
+The WAL safekeeper acts as a holding area and redistribution center
+for recently generated WAL. The primary Postgres server streams the
+WAL to the WAL safekeeper, and treats it like a (synchronous)
+replica. A replication slot is used in the primary to prevent the
+primary from discarding WAL that hasn't been streamed to the
+safekeeper yet.
+
+The primary connects to the WAL safekeeper, so it works in a "push"
+fashion.  That's different from how streaming replication usually
+works, where the replica initiates the connection. To do that, there
+is a component called "safekeeper_proxy". The safekeeper_proxy runs on
+the same host as the primary Postgres server and connects to it to do
+streaming replication.  It also connects to the WAL safekeeper, and
+forwards all the WAL. (PostgreSQL's archive_commands works in the
+"push" style, but it operates on a WAL segment granularity. If
+PostgreSQL had a push style API for streaming, we wouldn't need the
+proxy).
+
+The Page Server connects to the WAL safekeeper, using the same
+streaming replication protocol that's used between Postgres primary
+and standby. You can also connect the Page Server directly to a
+primary PostgreSQL node for testing.
+
+In a production installation, there are multiple WAL safekeepers
+running on different nodes, and there is a quorum mechanism using the
+Paxos algorithm to ensure that a piece of WAL is considered as durable
+only after it has been flushed to disk on more than half of the WAL
+safekeepers. The Paxos and crash recovery algorithm ensures that only
+one primary node can be actively streaming WAL to the quorum of
+safekeepers.
+
+
+See vendor/postgres/src/bin/safekeeper/README.md for a more detailed
+desription of the consensus protocol. (TODO: move the text here?)
