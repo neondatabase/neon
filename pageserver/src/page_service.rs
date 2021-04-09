@@ -234,6 +234,7 @@ pub fn thread_main(conf: PageServerConf) {
         loop {
             let (socket, peer_addr) = listener.accept().await.unwrap();
             debug!("accepted connection from {}", peer_addr);
+			socket.set_nodelay(true).unwrap();
             let mut conn_handler = Connection::new(conf.clone(), socket);
 
             task::spawn(async move {

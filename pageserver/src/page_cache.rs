@@ -317,13 +317,13 @@ impl WALRecord {
     pub fn pack(&self, buf: &mut BytesMut) {
         buf.put_u64(self.lsn);
         buf.put_u8(self.will_init as u8);
-        buf.put_u16(self.rec.len() as u16);
+        buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
     }
     pub fn unpack(buf: &mut BytesMut) -> WALRecord {
         let lsn = buf.get_u64();
         let will_init = buf.get_u8() != 0;
-        let mut dst = vec![0u8; buf.get_u16() as usize];
+        let mut dst = vec![0u8; buf.get_u32() as usize];
         buf.copy_to_slice(&mut dst);
         WALRecord {
             lsn,
@@ -439,7 +439,7 @@ impl PageCache {
             self.put_page_image(tag, lsn, page_img.clone());
         } else {
             // No base image, and no WAL record. Huh?
-            return Err(format!("no page image or WAL record for requested page"))?;
+			panic!("no page image or WAL record for requested page");
         }
 
         // FIXME: assumes little-endian. Only used for the debugging log though

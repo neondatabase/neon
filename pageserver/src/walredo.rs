@@ -197,7 +197,7 @@ impl WalRedoProcess {
                 if res.unwrap() == 0 {
                     break;
                 }
-                debug!("wal-redo-postgres: {}", line.trim());
+                error!("wal-redo-postgres: {}", line.trim());
                 line.clear();
             }
             Ok::<(), Error>(())

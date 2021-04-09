@@ -7,7 +7,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::thread;
-use std::{fs::File, fs::OpenOptions, str::FromStr};
+use std::{fs::OpenOptions, str::FromStr};
 
 use clap::{App, Arg};
 use daemonize::Daemonize;
@@ -132,12 +132,12 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(conf.data_dir.join("pageserver.log"))
+            .open(conf.data_dir.join("pageserver-stdout.log"))
             .unwrap();
         let stderr = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(conf.data_dir.join("pageserver.log"))
+            .open(conf.data_dir.join("pageserver-stderr.log"))
             .unwrap();
 
         let daemonize = Daemonize::new()
@@ -222,7 +222,10 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
         tui::init_logging()
     } else if conf.daemonize {
         let log = conf.data_dir.join("pageserver.log");
-        let log_file = File::create(log).unwrap_or_else(|_| panic!("Could not create log file"));
+        let log_file =  OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log).unwrap_or_else(|_| panic!("Could not create log file"));
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {
