@@ -373,8 +373,8 @@ impl PageCache {
                         lsn
 					);
                     return Err(format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive",
-                        lsn
+                        "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
+                        lsn >> 32, lsn & 0xffff_ffff
                     ))?;
                 }
             }
@@ -383,11 +383,8 @@ impl PageCache {
             }
 
             if lsn < shared.first_valid_lsn {
-				error!(
-					"LSN {} has already been removed",
-                    lsn
-				);
-                return Err(format!("LSN {} has already been removed", lsn))?;
+                return Err(format!("LSN {:X}/{:X} has already been removed",
+                                   lsn >> 32, lsn & 0xffff_ffff))?;
             }
         }
         let mut buf = BytesMut::new();

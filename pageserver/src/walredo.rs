@@ -154,12 +154,14 @@ impl WalRedoProcess {
                 Command::new("initdb")
                     .args(&["-D", datadir.to_str().unwrap()])
                     .arg("-N")
-                    .status(),
+                    .output(),
             )
             .expect("failed to execute initdb");
 
-        if !initdb.success() {
-            panic!("initdb failed");
+        if !initdb.status.success() {
+            panic!("initdb failed: {}\nstderr:\n{}",
+                   std::str::from_utf8(&initdb.stdout).unwrap(),
+                   std::str::from_utf8(&initdb.stderr).unwrap());
         }
 
         // Start postgres itself

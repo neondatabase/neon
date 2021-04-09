@@ -178,6 +178,7 @@ impl PageServerNode {
             .arg("--skip-recovery")
             .env_clear()
             .env("PATH", PG_BIN_DIR.to_str().unwrap()) // path to postres-wal-redo binary
+            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
             .status()
             .expect("failed to start pageserver");
 
