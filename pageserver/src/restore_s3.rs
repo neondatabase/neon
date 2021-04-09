@@ -22,7 +22,7 @@ use tokio::runtime;
 
 use futures::future;
 
-use crate::{PageServerConf, page_cache, pg_constants, controlfile};
+use crate::{controlfile, page_cache, pg_constants, PageServerConf};
 
 struct Storage {
     region: Region,
@@ -86,7 +86,12 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
 
     //Before uploading other files, slurp pg_control to set systemid
 
-    let control_results: Vec<s3::serde_types::ListBucketResult> = bucket.list("relationdata/global/pg_control".to_string(), Some("".to_string())).await?;
+    let control_results: Vec<s3::serde_types::ListBucketResult> = bucket
+        .list(
+            "relationdata/global/pg_control".to_string(),
+            Some("".to_string()),
+        )
+        .await?;
     let object = &(&control_results[0]).contents[0];
     let (data, _) = bucket.get_object(&object.key).await.unwrap();
     let bytes = BytesMut::from(data.as_slice()).freeze();
@@ -131,10 +136,11 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
     }
 
     //Now add nonrelation files
-    let nonrelresults: Vec<s3::serde_types::ListBucketResult> = bucket.list("nonreldata/".to_string(), Some("".to_string())).await?;
+    let nonrelresults: Vec<s3::serde_types::ListBucketResult> = bucket
+        .list("nonreldata/".to_string(), Some("".to_string()))
+        .await?;
     for result in nonrelresults {
         for object in result.contents {
-
             // Download needed non relation files, slurping them into memory
 
             let key = object.key;
@@ -150,7 +156,9 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
 
                     slurp_futures.push(f);
                 }
-                Err(e) => { warn!("unrecognized file: {} ({})", relpath, e); }
+                Err(e) => {
+                    warn!("unrecognized file: {} ({})", relpath, e);
+                }
             };
         }
     }
@@ -160,11 +168,13 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
     info!("{} files to restore...", slurp_futures.len());
 
     future::join_all(slurp_futures).await;
-    info!("restored! {:?} to {:?}", pcache.first_valid_lsn, pcache.last_valid_lsn);
+    info!(
+        "restored! {:?} to {:?}",
+        pcache.first_valid_lsn, pcache.last_valid_lsn
+    );
 
     Ok(())
 }
-
 
 #[derive(Debug)]
 struct FilePathError {
@@ -215,10 +225,8 @@ struct ParsedBaseImageFileName {
     pub lsn: u64,
 }
 
-fn parse_lsn_from_filename(fname: &str) ->  Result<u64, FilePathError>
-{
-
-    let (_, lsn_str) = fname.split_at(fname.len()-16);
+fn parse_lsn_from_filename(fname: &str) -> Result<u64, FilePathError> {
+    let (_, lsn_str) = fname.split_at(fname.len() - 16);
 
     let (lsnhi, lsnlo) = lsn_str.split_at(8);
     let lsn_hi = u64::from_str_radix(lsnhi, 16)?;
@@ -267,10 +275,8 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
 }
 
 fn parse_nonrel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathError> {
-
     //TODO parse segno from xact filenames too
     if let Some(fname) = path.strip_prefix("pg_xact/") {
-
         let lsn = parse_lsn_from_filename(fname.clone())?;
 
         return Ok(ParsedBaseImageFileName {
@@ -279,11 +285,9 @@ fn parse_nonrel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePat
             relnode: 0,
             forknum: pg_constants::PG_XACT_FORKNUM,
             segno: 0,
-            lsn
+            lsn,
         });
-    }
-    else if let Some(fname) = path.strip_prefix("pg_multixact/offsets") {
-
+    } else if let Some(fname) = path.strip_prefix("pg_multixact/offsets") {
         let lsn = parse_lsn_from_filename(fname.clone())?;
 
         return Ok(ParsedBaseImageFileName {
@@ -292,11 +296,9 @@ fn parse_nonrel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePat
             relnode: 0,
             forknum: pg_constants::PG_MXACT_OFFSETS_FORKNUM,
             segno: 0,
-            lsn
+            lsn,
         });
-    }
-    else if let Some(fname) = path.strip_prefix("pg_multixact/members") {
-
+    } else if let Some(fname) = path.strip_prefix("pg_multixact/members") {
         let lsn = parse_lsn_from_filename(fname.clone())?;
 
         return Ok(ParsedBaseImageFileName {
@@ -305,14 +307,11 @@ fn parse_nonrel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePat
             relnode: 0,
             forknum: pg_constants::PG_MXACT_MEMBERS_FORKNUM,
             segno: 0,
-            lsn
+            lsn,
         });
-
-    }
-    else {
+    } else {
         return Err(FilePathError::new("invalid non relation data file name"));
     }
-
 }
 
 fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathError> {
@@ -334,9 +333,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
      * <oid>.<segment number>
      */
     if let Some(fname) = path.strip_prefix("global/") {
-
-        if fname.contains("pg_control")
-        {
+        if fname.contains("pg_control") {
             let lsn = parse_lsn_from_filename(fname.clone())?;
 
             return Ok(ParsedBaseImageFileName {
@@ -345,12 +342,11 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
                 relnode: 0,
                 forknum: pg_constants::PG_CONTROLFILE_FORKNUM,
                 segno: 0,
-                lsn
+                lsn,
             });
         }
 
-        if fname.contains("pg_filenode")
-        {
+        if fname.contains("pg_filenode") {
             let lsn = parse_lsn_from_filename(fname.clone())?;
 
             return Ok(ParsedBaseImageFileName {
@@ -359,7 +355,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
                 relnode: 0,
                 forknum: pg_constants::PG_FILENODEMAP_FORKNUM,
                 segno: 0,
-                lsn
+                lsn,
             });
         }
 
@@ -386,8 +382,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
             return Err(FilePathError::new("invalid relation data file name"));
         };
 
-        if fname.contains("pg_filenode")
-        {
+        if fname.contains("pg_filenode") {
             let lsn = parse_lsn_from_filename(fname.clone())?;
 
             return Ok(ParsedBaseImageFileName {
@@ -396,10 +391,9 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
                 relnode: 0,
                 forknum: pg_constants::PG_FILENODEMAP_FORKNUM,
                 segno: 0,
-                lsn
+                lsn,
             });
         }
-
 
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
@@ -441,18 +435,16 @@ async fn slurp_base_file(
     let pcache = page_cache::get_pagecache(conf.clone(), sys_id);
 
     // pg_filenode.map has non-standard size - 512 bytes
-    if parsed.forknum == pg_constants::PG_FILENODEMAP_FORKNUM
-    {
+    if parsed.forknum == pg_constants::PG_FILENODEMAP_FORKNUM {
         let b = bytes.clone();
         controlfile::decode_filemapping(b);
         while bytes.remaining() >= 512 {
-
             let tag = page_cache::BufferTag {
                 spcnode: parsed.spcnode,
                 dbnode: parsed.dbnode,
                 relnode: parsed.relnode,
                 forknum: parsed.forknum as u8,
-                blknum: 0
+                blknum: 0,
             };
 
             pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(512));
@@ -466,11 +458,9 @@ async fn slurp_base_file(
         };
 
         pcache.relsize_inc(&tag, Some(0));
-    }
-    else
-    {
+    } else {
         // FIXME: use constants (BLCKSZ)
-        let mut blknum: u32 = parsed.segno * (1024*1024*1024 / 8192);
+        let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / 8192);
         let reltag = page_cache::RelTag {
             spcnode: parsed.spcnode,
             dbnode: parsed.dbnode,
@@ -479,13 +469,12 @@ async fn slurp_base_file(
         };
 
         while bytes.remaining() >= 8192 {
-
             let tag = page_cache::BufferTag {
                 spcnode: parsed.spcnode,
                 dbnode: parsed.dbnode,
                 relnode: parsed.relnode,
                 forknum: parsed.forknum as u8,
-                blknum: blknum
+                blknum: blknum,
             };
 
             pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));

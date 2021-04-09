@@ -230,7 +230,7 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
             if record.level().is_at_least(slog::Level::Info) {
                 return true;
             }
-            return true;
+            return false;
         });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());

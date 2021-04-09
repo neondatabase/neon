@@ -1,12 +1,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-#[allow(dead_code)]
-
-pub mod pg_constants;
 pub mod controlfile;
 pub mod page_cache;
 pub mod page_service;
+#[allow(dead_code)]
+pub mod pg_constants;
 pub mod restore_s3;
 pub mod tui;
 pub mod tui_event;

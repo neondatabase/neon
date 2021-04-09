@@ -70,12 +70,9 @@ impl StorageControlPlane {
             data_dir: TEST_WORKDIR.join("pageserver"),
         };
         pserver.init();
-        if froms3
-        {
+        if froms3 {
             pserver.start_froms3();
-        }
-        else
-        {
+        } else {
             pserver.start();
         }
 
@@ -379,10 +376,10 @@ impl ComputeControlPlane<'_> {
         node
     }
 
-     // Init compute node without files, only datadir structure
-     // use initdb --compute-node flag and GUC 'computenode_mode'
-     // to distinguish the node
-     pub fn new_minimal_node<'a>(&mut self) -> &Arc<PostgresNode> {
+    // Init compute node without files, only datadir structure
+    // use initdb --compute-node flag and GUC 'computenode_mode'
+    // to distinguish the node
+    pub fn new_minimal_node<'a>(&mut self) -> &Arc<PostgresNode> {
         // allocate new node entry with generated port
         let node_id = self.nodes.len() + 1;
         let node = PostgresNode {
@@ -448,9 +445,17 @@ impl ComputeControlPlane<'_> {
         let pserver = storage_cplane.page_server_addr();
 
         // Configure that node to take pages from pageserver
-        node.append_conf("postgresql.conf", format!("\
+        node.append_conf(
+            "postgresql.conf",
+            format!(
+                "\
             page_server_connstring = 'host={} port={}'\n\
-        ", pserver.ip(), pserver.port()).as_str());
+        ",
+                pserver.ip(),
+                pserver.port()
+            )
+            .as_str(),
+        );
 
         node.clone()
     }
@@ -524,7 +529,6 @@ pub struct PostgresNode {
     pgdata: PathBuf,
     pg_bin_dir: PathBuf,
 }
-
 
 impl PostgresNode {
     pub fn append_conf(&self, config: &str, opts: &str) {
@@ -636,80 +640,81 @@ impl PostgresNode {
     // And reqular query() uses prepared queries.
 
     // TODO pass sysid as parameter
-    pub fn setup_compute_node(&self, sysid: u64, storage_cplane: &StorageControlPlane)
-    {
+    pub fn setup_compute_node(&self, sysid: u64, storage_cplane: &StorageControlPlane) {
         let mut query;
         //Request pg_control from pageserver
-        query = format!("file {}/global/pg_control,{},{},{},{},{},{},{}",
+        query = format!(
+            "file {}/global/pg_control,{},{},{},{},{},{},{}",
             self.pgdata.to_str().unwrap(),
             sysid as u64, //sysid
-            1664, //tablespace
-            0, //dboid
-            0, //reloid
-            42, //forknum pg_control
-            0, //blkno
-            0 //lsn
+            1664,         //tablespace
+            0,            //dboid
+            0,            //reloid
+            42,           //forknum pg_control
+            0,            //blkno
+            0             //lsn
         );
         storage_cplane.page_server_psql(query.as_str());
 
         //Request pg_xact and pg_multixact from pageserver
         //We need them for initial pageserver startup and authentication
         //TODO figure out which block number we really need
-        query = format!("file {}/pg_xact/0000,{},{},{},{},{},{},{}",
+        query = format!(
+            "file {}/pg_xact/0000,{},{},{},{},{},{},{}",
             self.pgdata.to_str().unwrap(),
             sysid as u64, //sysid
-            0, //tablespace
-            0, //dboid
-            0, //reloid
-            44, //forknum
-            0, //blkno
-            0 //lsn
+            0,            //tablespace
+            0,            //dboid
+            0,            //reloid
+            44,           //forknum
+            0,            //blkno
+            0             //lsn
         );
         storage_cplane.page_server_psql(query.as_str());
 
-        query = format!("file {}/pg_multixact/offsets/0000,{},{},{},{},{},{},{}",
+        query = format!(
+            "file {}/pg_multixact/offsets/0000,{},{},{},{},{},{},{}",
             self.pgdata.to_str().unwrap(),
             sysid as u64, //sysid
-            0, //tablespace
-            0, //dboid
-            0, //reloid
-            45, //forknum
-            0, //blkno
-            0 //lsn
+            0,            //tablespace
+            0,            //dboid
+            0,            //reloid
+            45,           //forknum
+            0,            //blkno
+            0             //lsn
         );
         storage_cplane.page_server_psql(query.as_str());
 
-        query = format!("file {}/pg_multixact/members/0000,{},{},{},{},{},{},{}",
+        query = format!(
+            "file {}/pg_multixact/members/0000,{},{},{},{},{},{},{}",
             self.pgdata.to_str().unwrap(),
             sysid as u64, //sysid
-            0, //tablespace
-            0, //dboid
-            0, //reloid
-            46, //forknum
-            0, //blkno
-            0 //lsn
+            0,            //tablespace
+            0,            //dboid
+            0,            //reloid
+            46,           //forknum
+            0,            //blkno
+            0             //lsn
         );
         storage_cplane.page_server_psql(query.as_str());
-
 
         //Request a few shared catalogs needed for authentication
         //Without them we cannot setup connection with pageserver to request further pages
         let reloids = [1260, 1261, 1262, 2396];
-        for reloid in reloids.iter()
-        {
+        for reloid in reloids.iter() {
             //FIXME request all blocks from file, not just 10
-            for blkno in 0..10
-            {
-                query = format!("file {}/global/{},{},{},{},{},{},{},{}",
+            for blkno in 0..10 {
+                query = format!(
+                    "file {}/global/{},{},{},{},{},{},{},{}",
                     self.pgdata.to_str().unwrap(),
-                    reloid, //suse it as filename
+                    reloid,       //suse it as filename
                     sysid as u64, //sysid
-                    1664, //tablespace
-                    0, //dboid
-                    reloid, //reloid
-                    0, //forknum
-                    blkno, //blkno
-                    0 //lsn
+                    1664,         //tablespace
+                    0,            //dboid
+                    reloid,       //reloid
+                    0,            //forknum
+                    blkno,        //blkno
+                    0             //lsn
                 );
                 storage_cplane.page_server_psql(query.as_str());
             }
@@ -719,8 +724,15 @@ impl PostgresNode {
         fs::create_dir(format!("{}/base/13007", self.pgdata.to_str().unwrap())).unwrap();
 
         //FIXME figure out what wal file we need to successfully start
-        let walfilepath = format!("{}/pg_wal/000000010000000000000001", self.pgdata.to_str().unwrap());
-        fs::copy("/home/anastasia/zenith/zenith/tmp_check/pgdata/pg_wal/000000010000000000000001", walfilepath).unwrap();
+        let walfilepath = format!(
+            "{}/pg_wal/000000010000000000000001",
+            self.pgdata.to_str().unwrap()
+        );
+        fs::copy(
+            "/home/anastasia/zenith/zenith/tmp_check/pgdata/pg_wal/000000010000000000000001",
+            walfilepath,
+        )
+        .unwrap();
 
         println!("before resetwal ");
 
@@ -743,7 +755,6 @@ impl PostgresNode {
         }
 
         println!("setup done");
-
     }
 
     pub fn start_proxy(&self, wal_acceptors: String) -> WalProposerNode {
@@ -761,8 +772,7 @@ impl PostgresNode {
         }
     }
 
-    pub fn push_to_s3(&self)
-    {
+    pub fn push_to_s3(&self) {
         println!("Push to s3 node  at '{}'", self.pgdata.to_str().unwrap());
 
         let zenith_push_path = self.pg_bin_dir.join("zenith_push");

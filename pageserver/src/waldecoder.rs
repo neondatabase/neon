@@ -238,7 +238,7 @@ const BLCKSZ: u16 = 8192;
 //
 const XLR_INFO_MASK: u8 = 0x0F;
 
-const XLR_MAX_BLOCK_ID:u8 = 32;
+const XLR_MAX_BLOCK_ID: u8 = 32;
 
 const XLR_BLOCK_ID_DATA_SHORT: u8 = 255;
 const XLR_BLOCK_ID_DATA_LONG: u8 = 254;
@@ -260,8 +260,8 @@ const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay 
 //
 // constants from clog.h
 //
-const CLOG_XACTS_PER_BYTE:u32 = 4;
-const CLOG_XACTS_PER_PAGE:u32 = 8192 * CLOG_XACTS_PER_BYTE;
+const CLOG_XACTS_PER_BYTE: u32 = 4;
+const CLOG_XACTS_PER_PAGE: u32 = 8192 * CLOG_XACTS_PER_BYTE;
 
 pub struct DecodedBkpBlock {
     /* Is this block ref in use? */
@@ -307,7 +307,7 @@ pub struct DecodedWALRecord {
 const XLOG_SWITCH: u8 = 0x40;
 const RM_XLOG_ID: u8 = 0;
 
-const RM_XACT_ID:u8 = 1;
+const RM_XACT_ID: u8 = 1;
 // const RM_CLOG_ID:u8 = 3;
 //const RM_MULTIXACT_ID:u8 = 6;
 
@@ -326,7 +326,6 @@ const XLOG_XACT_OPMASK: u8 = 0x70;
 
 /* does this record have a 'xinfo' field or not */
 // const XLOG_XACT_HAS_INFO: u8 = 0x80;
-
 
 // Is this record an XLOG_SWITCH record? They need some special processing,
 // so we need to check for that before the rest of the parsing.
@@ -369,9 +368,9 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
     buf.advance(2); // 2 bytes of padding
     let _xl_crc = buf.get_u32_le();
 
-    info!("decode_wal_record xl_rmid = {}" , xl_rmid);
+    info!("decode_wal_record xl_rmid = {}", xl_rmid);
 
-	let rminfo: u8 = xl_info & !XLR_INFO_MASK;
+    let rminfo: u8 = xl_info & !XLR_INFO_MASK;
 
     let remaining = xl_tot_len - SizeOfXLogRecord;
 
@@ -384,15 +383,15 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
     let mut rnode_relnode: u32 = 0;
     let mut got_rnode = false;
 
-    if xl_rmid == RM_XACT_ID &&
-       ((rminfo & XLOG_XACT_OPMASK) == XLOG_XACT_COMMIT ||
-        (rminfo & XLOG_XACT_OPMASK) == XLOG_XACT_COMMIT_PREPARED)
+    if xl_rmid == RM_XACT_ID
+        && ((rminfo & XLOG_XACT_OPMASK) == XLOG_XACT_COMMIT
+            || (rminfo & XLOG_XACT_OPMASK) == XLOG_XACT_COMMIT_PREPARED)
     {
         info!("decode_wal_record RM_XACT_ID - XLOG_XACT_COMMIT");
 
         let mut blocks: Vec<DecodedBkpBlock> = Vec::new();
 
-        let blkno = xl_xid/CLOG_XACTS_PER_PAGE;
+        let blkno = xl_xid / CLOG_XACTS_PER_PAGE;
 
         let mut blk = DecodedBkpBlock {
             rnode_spcnode: 0,
@@ -411,21 +410,24 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
             bimg_info: 0,
 
             has_data: true,
-            data_len: 0
+            data_len: 0,
         };
 
         let fork_flags = buf.get_u8();
         blk.has_data = (fork_flags & BKPBLOCK_HAS_DATA) != 0;
         blk.data_len = buf.get_u16_le();
 
-        info!("decode_wal_record RM_XACT_ID blk has data with data_len {}", blk.data_len);
+        info!(
+            "decode_wal_record RM_XACT_ID blk has data with data_len {}",
+            blk.data_len
+        );
 
         blocks.push(blk);
         return DecodedWALRecord {
             lsn: lsn,
             record: rec,
-            blocks: blocks
-        }
+            blocks: blocks,
+        };
     }
 
     // Decode the headers

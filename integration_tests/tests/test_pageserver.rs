@@ -6,7 +6,6 @@ use std::time::Duration;
 use control_plane::ComputeControlPlane;
 use control_plane::StorageControlPlane;
 
-
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
 // -- pageserver api endpoint to check all rels
@@ -27,8 +26,14 @@ fn test_redo_cases() {
     sleep(Duration::from_secs(3));
 
     // check basic work with table
-    node.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
-    node.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100), 'payload'");
+    node.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100), 'payload'",
+    );
     let count: i64 = node
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
@@ -86,8 +91,14 @@ fn test_pageserver_multitenancy() {
     sleep(Duration::from_secs(3));
 
     // check node1
-    node1.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
-    node1.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100), 'payload'");
+    node1.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node1.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100), 'payload'",
+    );
     let count: i64 = node1
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
@@ -97,8 +108,14 @@ fn test_pageserver_multitenancy() {
     assert_eq!(count, 5050);
 
     // check node2
-    node2.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
-    node2.safe_psql("postgres", "INSERT INTO t SELECT generate_series(100,200), 'payload'");
+    node2.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node2.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(100,200), 'payload'",
+    );
     let count: i64 = node2
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
@@ -120,7 +137,8 @@ fn test_pageserver_multitenancy() {
 // .env("S3_BUCKET", "zenith-testbucket")
 // TODO use env variables in test
 fn test_pageserver_recovery() {
-
+    //This test expects that image is already uploaded to s3
+    //To upload it use zenith_push before test (see node.push_to_s3() for details)
     let storage_cplane = StorageControlPlane::one_page_server(true);
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
 
@@ -143,7 +161,6 @@ fn test_pageserver_recovery() {
 #[ignore]
 //Scenario for future test. Not implemented yet
 fn test_pageserver_node_switch() {
-
     //Create pageserver
     let storage_cplane = StorageControlPlane::one_page_server(false);
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
@@ -152,8 +169,14 @@ fn test_pageserver_node_switch() {
     let node = compute_cplane.new_node();
     node.start(&storage_cplane);
 
-    node.safe_psql("postgres", "CREATE TABLE t(key int primary key, value text)");
-    node.safe_psql("postgres", "INSERT INTO t SELECT generate_series(1,100), 'payload'");
+    node.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100), 'payload'",
+    );
     let count: i64 = node
         .safe_psql("postgres", "SELECT sum(key) FROM t")
         .first()
