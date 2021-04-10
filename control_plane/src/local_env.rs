@@ -7,7 +7,6 @@
 use std::env;
 use std::error;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use home;
@@ -34,9 +33,6 @@ pub struct LocalEnv {
 
     // Path to pageserver binary.
     pub zenith_distrib_dir: PathBuf,
-
-    // PageServer-specific options.
-    pub pageserver: PageServerConf,
 }
 
 impl LocalEnv {
@@ -56,11 +52,6 @@ impl LocalEnv {
     pub fn pageserver_pidfile(&self) -> PathBuf {
         self.pageserver_data_dir().join("pageserver.pid")
     }
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct PageServerConf {
-    pub listen_address: SocketAddr,
 }
 
 //
@@ -150,9 +141,6 @@ pub fn init() -> Result<()> {
         data_dir,
         pg_distrib_dir,
         zenith_distrib_dir,
-        pageserver: PageServerConf {
-            listen_address: "127.0.0.1:5430".parse().unwrap(),
-        },
     };
     let toml = toml::to_string(&conf)?;
     fs::write(cfg_path, toml)?;
@@ -191,9 +179,6 @@ pub fn test_env() -> LocalEnv {
         data_dir,
         pg_distrib_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install"),
         zenith_distrib_dir: cargo_bin_dir(),
-        pageserver: PageServerConf {
-            listen_address: "127.0.0.1:65200".parse().unwrap(),
-        },
     }
 }
 

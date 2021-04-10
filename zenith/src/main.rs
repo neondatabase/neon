@@ -1,9 +1,7 @@
 use clap::{App, SubCommand};
-use std::fs;
 use std::process::exit;
-use std::process::Command;
 
-use control_plane::local_env;
+use control_plane::{local_env, storage};
 
 fn main() {
     let matches = App::new("zenith")
@@ -44,7 +42,7 @@ fn main() {
     }
 
     // all other commands would need config
-    let conf = match local_env::load_config() {
+    let env = match local_env::load_config() {
         Ok(conf) => conf,
         Err(e) => {
             eprintln!("Error loading config from ~/.zenith: {}", e);
@@ -58,45 +56,22 @@ fn main() {
         }
 
         ("start", Some(_sub_m)) => {
-            println!(
-                "Starting pageserver at '{}'",
-                conf.pageserver.listen_address
-            );
+            let pageserver = storage::PageServerNode::from_env(&env);
 
-            let status = Command::new(conf.zenith_distrib_dir.join("pageserver"))
-                .args(&["-D", conf.data_dir.to_str().unwrap()])
-                .args(&["-l", conf.pageserver.listen_address.to_string().as_str()])
-                .arg("-d")
-                .arg("--skip-recovery")
-                .env_clear()
-                .env("PATH", conf.pg_bin_dir().to_str().unwrap()) // pageserver needs postres-wal-redo binary
-                .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-                .status()
-                .expect("failed to start pageserver");
-
-            if !status.success() {
-                eprintln!(
-                    "Pageserver failed to start. See '{}' for details.",
-                    conf.pageserver_log().to_str().unwrap()
-                );
+            if let Err(e) = pageserver.start() {
+                eprintln!("start: {}", e);
                 exit(1);
             }
 
-            // TODO: check it's actually started, or run status
-
+            // TODO: check and await actual start
             println!("Done!");
         }
 
         ("stop", Some(_sub_m)) => {
-            let pid = fs::read_to_string(conf.pageserver_pidfile()).unwrap();
-            let status = Command::new("kill")
-                .arg(pid)
-                .env_clear()
-                .status()
-                .expect("failed to execute kill");
+            let pageserver = storage::PageServerNode::from_env(&env);
 
-            if !status.success() {
-                eprintln!("Failed to kill pageserver");
+            if let Err(e) = pageserver.stop() {
+                eprintln!("stop: {}", e);
                 exit(1);
             }
 

@@ -7,11 +7,14 @@ use std::thread;
 use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::net::SocketAddr;
+use std::error;
 
 use postgres::{Client, NoTls};
 
 use crate::local_env::{self, LocalEnv};
 use crate::compute::{PostgresNode};
+
+type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
 
 //
 // Collection of several example deployments useful for tests.
@@ -33,9 +36,10 @@ impl TestStorageControlPlane {
         let pserver = Arc::new(PageServerNode {
             env: env.clone(),
             kill_on_exit: true,
+            listen_address: None,
         });
         pserver.init();
-        pserver.start();
+        pserver.start().unwrap();
 
         TestStorageControlPlane {
             wal_acceptors: Vec::new(),
@@ -52,11 +56,12 @@ impl TestStorageControlPlane {
             pageserver: Arc::new(PageServerNode {
                 env: env.clone(),
                 kill_on_exit: true,
+                listen_address: None,
             }),
             test_done: AtomicBool::new(false),
         };
         cplane.pageserver.init();
-        cplane.pageserver.start();
+        cplane.pageserver.start().unwrap();
 
         const WAL_ACCEPTOR_PORT: usize = 54321;
 
@@ -105,77 +110,95 @@ impl Drop for TestStorageControlPlane {
 //
 pub struct PageServerNode {
     kill_on_exit: bool,
-    env: LocalEnv,
+    listen_address: Option<SocketAddr>,
+    pub env: LocalEnv,
 }
 
 impl PageServerNode {
+    pub fn from_env(env: &LocalEnv) -> PageServerNode {
+        PageServerNode {
+            kill_on_exit: false,
+            listen_address: None, // default
+            env: env.clone(),
+        }
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        match self.listen_address {
+            Some(addr) => addr,
+            None => "127.0.0.1:64000".parse().unwrap()
+        }
+    }
+
     pub fn init(&self) {
         fs::create_dir_all(self.env.pageserver_data_dir()).unwrap();
     }
 
-    pub fn start(&self) {
-        println!(
-            "Starting pageserver at '{}'",
-            self.env.pageserver.listen_address
-        );
+    pub fn start(&self) -> Result<()> {
+        println!("Starting pageserver at '{}'", self.address());
 
         let status = Command::new(self.env.zenith_distrib_dir.join("pageserver")) // XXX -> method
             .args(&["-D", self.env.pageserver_data_dir().to_str().unwrap()])
             .args(&[
                 "-l",
-                self.env.pageserver.listen_address.to_string().as_str(),
+                self.address().to_string().as_str(),
             ])
             .arg("-d")
             .arg("--skip-recovery")
             .env_clear()
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .status()
-            .expect("failed to start pageserver");
+            .status()?;
 
         if !status.success() {
-            panic!("pageserver start failed");
+            return Err(Box::<dyn error::Error>::from(
+                format!("Pageserver failed to start. See '{}' for details.",
+                self.env.pageserver_log().to_str().unwrap())
+            ));
+        } else {
+            return Ok(());
         }
     }
 
-    pub fn stop(&self) {
+    pub fn stop(&self) -> Result<()> {
         let pidfile = self.env.pageserver_pidfile();
         let pid = fs::read_to_string(pidfile).unwrap();
 
         let status = Command::new("kill")
-            .arg(pid)
+            .arg(pid.clone())
             .env_clear()
             .status()
             .expect("failed to execute kill");
 
         if !status.success() {
-            panic!("kill start failed");
+            return Err(Box::<dyn error::Error>::from(
+                format!("Failed to kill pageserver with pid {}",
+                pid
+            )));
         }
 
         // await for pageserver stop
         for _ in 0..5 {
-            let stream = TcpStream::connect(self.env.pageserver.listen_address);
+            let stream = TcpStream::connect(self.address());
             if let Err(_e) = stream {
-                return;
+                return Ok(());
             }
-            println!(
-                "Stopping pageserver on {}",
-                self.env.pageserver.listen_address
-            );
+            println!("Stopping pageserver on {}", self.address());
             thread::sleep(Duration::from_secs(1));
         }
 
         // ok, we failed to stop pageserver, let's panic
-        panic!("Failed to stop pageserver");
-    }
-
-    pub fn address(&self) -> &std::net::SocketAddr {
-        &self.env.pageserver.listen_address
+        if !status.success() {
+            return Err(Box::<dyn error::Error>::from(
+                format!("Failed to stop pageserver with pid {}",
+                pid
+            )));
+        } else {
+            return Ok(());
+        }
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        // let addr = &self.page_servers[0].env.pageserver.listen_address;
-
         let connstring = format!(
             "host={} port={} dbname={} user={}",
             self.address().ip(),
@@ -193,7 +216,7 @@ impl PageServerNode {
 impl Drop for PageServerNode {
     fn drop(&mut self) {
         if self.kill_on_exit {
-            self.stop();
+            let _ = self.stop();
         }
     }
 }
