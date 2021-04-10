@@ -9,76 +9,68 @@
 
 use std::fs::File;
 use std::fs::{self, OpenOptions};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-use lazy_static::lazy_static;
+pub mod local_env;
+use local_env::LocalEnv;
 use postgres::{Client, NoTls};
 
-lazy_static! {
-    // postgres would be there if it was build by 'make postgres' here in the repo
-    pub static ref PG_BIN_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tmp_install/bin");
-    pub static ref PG_LIB_DIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tmp_install/lib");
-
-    pub static ref BIN_DIR : PathBuf = cargo_bin_dir();
-
-    pub static ref TEST_WORKDIR : PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tmp_check");
-}
-
-// Find the directory where the binaries were put (i.e. target/debug/)
-pub fn cargo_bin_dir() -> PathBuf {
-    let mut pathbuf = std::env::current_exe().ok().unwrap();
-
-    pathbuf.pop();
-    if pathbuf.ends_with("deps") {
-        pathbuf.pop();
-    }
-
-    return pathbuf;
-}
-
+//
+// Collection of several example deployments useful for tests.
 //
 // I'm intendedly modelling storage and compute control planes as a separate entities
 // as it is closer to the actual setup.
 //
-pub struct StorageControlPlane {
+pub struct TestStorageControlPlane {
     pub wal_acceptors: Vec<WalAcceptorNode>,
-    pub page_servers: Vec<PageServerNode>,
+    pub pageserver: Arc<PageServerNode>,
+    pub test_done: AtomicBool,
 }
 
-impl StorageControlPlane {
+impl TestStorageControlPlane {
     // postgres <-> page_server
-    pub fn one_page_server() -> StorageControlPlane {
-        let mut cplane = StorageControlPlane {
-            wal_acceptors: Vec::new(),
-            page_servers: Vec::new(),
-        };
+    pub fn one_page_server() -> TestStorageControlPlane {
+        let env = local_env::test_env();
 
-        let pserver = PageServerNode {
-            page_service_addr: "127.0.0.1:65200".parse().unwrap(),
-            data_dir: TEST_WORKDIR.join("pageserver"),
-        };
+        let pserver = Arc::new(PageServerNode {
+            env: env.clone(),
+            kill_on_exit: true,
+        });
         pserver.init();
         pserver.start();
 
-        cplane.page_servers.push(pserver);
-        cplane
+        TestStorageControlPlane {
+            wal_acceptors: Vec::new(),
+            pageserver: pserver,
+            test_done: AtomicBool::new(false),
+        }
     }
 
-    pub fn fault_tolerant(redundancy: usize) -> StorageControlPlane {
-        let mut cplane = StorageControlPlane {
+    // postgres <-> {wal_acceptor1, wal_acceptor2, ...}
+    pub fn fault_tolerant(redundancy: usize) -> TestStorageControlPlane {
+        let env = local_env::test_env();
+        let mut cplane = TestStorageControlPlane {
             wal_acceptors: Vec::new(),
-            page_servers: Vec::new(),
+            pageserver: Arc::new(PageServerNode {
+                env: env.clone(),
+                kill_on_exit: true,
+            }),
+            test_done: AtomicBool::new(false),
         };
+        cplane.pageserver.init();
+        cplane.pageserver.start();
+
         const WAL_ACCEPTOR_PORT: usize = 54321;
 
         for i in 0..redundancy {
@@ -86,7 +78,8 @@ impl StorageControlPlane {
                 listen: format!("127.0.0.1:{}", WAL_ACCEPTOR_PORT + i)
                     .parse()
                     .unwrap(),
-                data_dir: TEST_WORKDIR.join(format!("wal_acceptor_{}", i)),
+                data_dir: env.data_dir.join(format!("wal_acceptor_{}", i)),
+                env: env.clone(),
             };
             wal_acceptor.init();
             wal_acceptor.start();
@@ -96,17 +89,7 @@ impl StorageControlPlane {
     }
 
     pub fn stop(&self) {
-        for wa in self.wal_acceptors.iter() {
-            wa.stop();
-        }
-    }
-
-    // // postgres <-> wal_acceptor x3 <-> page_server
-    // fn local(&mut self) -> StorageControlPlane {
-    // }
-
-    pub fn page_server_addr(&self) -> &SocketAddr {
-        &self.page_servers[0].page_service_addr
+        self.test_done.store(true, Ordering::Relaxed);
     }
 
     pub fn get_wal_acceptor_conn_info(&self) -> String {
@@ -117,13 +100,99 @@ impl StorageControlPlane {
             .join(",")
     }
 
+    pub fn is_running(&self) -> bool {
+        self.test_done.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for TestStorageControlPlane {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+//
+// Control routines for pageserver.
+//
+// Used in CLI and tests.
+//
+pub struct PageServerNode {
+    kill_on_exit: bool,
+    env: LocalEnv,
+}
+
+impl PageServerNode {
+    pub fn init(&self) {
+        fs::create_dir_all(self.env.pageserver_data_dir()).unwrap();
+    }
+
+    pub fn start(&self) {
+        println!(
+            "Starting pageserver at '{}'",
+            self.env.pageserver.listen_address
+        );
+
+        let status = Command::new(self.env.zenith_distrib_dir.join("pageserver")) // XXX -> method
+            .args(&["-D", self.env.pageserver_data_dir().to_str().unwrap()])
+            .args(&[
+                "-l",
+                self.env.pageserver.listen_address.to_string().as_str(),
+            ])
+            .arg("-d")
+            .arg("--skip-recovery")
+            .env_clear()
+            .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .status()
+            .expect("failed to start pageserver");
+
+        if !status.success() {
+            panic!("pageserver start failed");
+        }
+    }
+
+    pub fn stop(&self) {
+        let pidfile = self.env.pageserver_pidfile();
+        let pid = fs::read_to_string(pidfile).unwrap();
+
+        let status = Command::new("kill")
+            .arg(pid)
+            .env_clear()
+            .status()
+            .expect("failed to execute kill");
+
+        if !status.success() {
+            panic!("kill start failed");
+        }
+
+        // await for pageserver stop
+        for _ in 0..5 {
+            let stream = TcpStream::connect(self.env.pageserver.listen_address);
+            if let Err(_e) = stream {
+                return;
+            }
+            println!(
+                "Stopping pageserver on {}",
+                self.env.pageserver.listen_address
+            );
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        // ok, we failed to stop pageserver, let's panic
+        panic!("Failed to stop pageserver");
+    }
+
+    pub fn address(&self) -> &std::net::SocketAddr {
+        &self.env.pageserver.listen_address
+    }
+
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        let addr = &self.page_servers[0].page_service_addr;
+        // let addr = &self.page_servers[0].env.pageserver.listen_address;
 
         let connstring = format!(
             "host={} port={} dbname={} user={}",
-            addr.ip(),
-            addr.port(),
+            self.address().ip(),
+            self.address().port(),
             "no_db",
             "no_user",
         );
@@ -134,83 +203,23 @@ impl StorageControlPlane {
     }
 }
 
-impl Drop for StorageControlPlane {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-pub struct PageServerNode {
-    page_service_addr: SocketAddr,
-    data_dir: PathBuf,
-}
-
-impl PageServerNode {
-    // TODO: method to force redo on a specific relation
-
-    // TODO: make wal-redo-postgres workable without data directory?
-    pub fn init(&self) {
-        fs::create_dir_all(self.data_dir.clone()).unwrap();
-
-        let datadir_path = self.data_dir.join("wal_redo_pgdata");
-        fs::remove_dir_all(datadir_path.to_str().unwrap()).ok();
-
-        let initdb = Command::new(PG_BIN_DIR.join("initdb"))
-            .args(&["-D", datadir_path.to_str().unwrap()])
-            .arg("-N")
-            .arg("--no-instructions")
-            .env_clear()
-            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
-            .status()
-            .expect("failed to execute initdb");
-        if !initdb.success() {
-            panic!("initdb failed");
-        }
-    }
-
-    pub fn start(&self) {
-        println!("Starting pageserver at '{}'", self.page_service_addr);
-
-        let status = Command::new(BIN_DIR.join("pageserver"))
-            .args(&["-D", self.data_dir.to_str().unwrap()])
-            .args(&["-l", self.page_service_addr.to_string().as_str()])
-            .arg("-d")
-            .arg("--skip-recovery")
-            .env_clear()
-            .env("PATH", PG_BIN_DIR.to_str().unwrap()) // path to postres-wal-redo binary
-            .status()
-            .expect("failed to start pageserver");
-
-        if !status.success() {
-            panic!("pageserver start failed");
-        }
-    }
-
-    pub fn stop(&self) {
-        let pidfile = self.data_dir.join("pageserver.pid");
-        let pid = fs::read_to_string(pidfile).unwrap();
-        let status = Command::new("kill")
-            .arg(pid)
-            .env_clear()
-            .status()
-            .expect("failed to execute kill");
-
-        if !status.success() {
-            panic!("kill start failed");
-        }
-    }
-}
-
 impl Drop for PageServerNode {
     fn drop(&mut self) {
-        self.stop();
-        // fs::remove_dir_all(self.data_dir.clone()).unwrap();
+        if self.kill_on_exit {
+            self.stop();
+        }
     }
 }
 
+//
+// Control routines for WalAcceptor.
+//
+// Now used only in test setups.
+//
 pub struct WalAcceptorNode {
     listen: SocketAddr,
     data_dir: PathBuf,
+    env: LocalEnv,
 }
 
 impl WalAcceptorNode {
@@ -228,7 +237,7 @@ impl WalAcceptorNode {
             self.listen
         );
 
-        let status = Command::new(BIN_DIR.join("wal_acceptor"))
+        let status = Command::new(self.env.zenith_distrib_dir.join("wal_acceptor"))
             .args(&["-D", self.data_dir.to_str().unwrap()])
             .args(&["-l", self.listen.to_string().as_str()])
             .arg("-d")
@@ -242,6 +251,7 @@ impl WalAcceptorNode {
     }
 
     pub fn stop(&self) {
+        println!("Stopping wal acceptor on {}", self.listen);
         let pidfile = self.data_dir.join("wal_acceptor.pid");
         if let Ok(pid) = fs::read_to_string(pidfile) {
             let _status = Command::new("kill")
@@ -256,7 +266,6 @@ impl WalAcceptorNode {
 impl Drop for WalAcceptorNode {
     fn drop(&mut self) {
         self.stop();
-        // fs::remove_dir_all(self.data_dir.clone()).unwrap();
     }
 }
 
@@ -265,22 +274,25 @@ impl Drop for WalAcceptorNode {
 //
 // ComputeControlPlane
 //
-pub struct ComputeControlPlane<'a> {
+pub struct ComputeControlPlane {
     pg_bin_dir: PathBuf,
     work_dir: PathBuf,
     last_assigned_port: u16,
-    storage_cplane: &'a StorageControlPlane,
+    pageserver: Arc<PageServerNode>,
     nodes: Vec<Arc<PostgresNode>>,
+    env: LocalEnv,
 }
 
-impl ComputeControlPlane<'_> {
-    pub fn local(storage_cplane: &StorageControlPlane) -> ComputeControlPlane {
+impl ComputeControlPlane {
+    pub fn local(pageserver: &Arc<PageServerNode>) -> ComputeControlPlane {
+        let env = local_env::test_env();
         ComputeControlPlane {
-            pg_bin_dir: PG_BIN_DIR.to_path_buf(),
-            work_dir: TEST_WORKDIR.to_path_buf(),
+            pg_bin_dir: env.pg_bin_dir(),
+            work_dir: env.data_dir.clone(),
             last_assigned_port: 65431,
-            storage_cplane: storage_cplane,
+            pageserver: Arc::clone(pageserver),
             nodes: Vec::new(),
+            env: env.clone(),
         }
     }
 
@@ -296,24 +308,29 @@ impl ComputeControlPlane<'_> {
         let node_id = self.nodes.len() + 1;
         let node = PostgresNode {
             _node_id: node_id,
-            port: self.get_port(),
-            ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.get_port()),
             pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
-            pg_bin_dir: self.pg_bin_dir.clone(),
+            env: self.env.clone(),
+            pageserver: Arc::clone(&self.pageserver),
         };
         self.nodes.push(Arc::new(node));
         let node = self.nodes.last().unwrap();
 
+        println!(
+            "Creating new postgres: path={} port={}",
+            node.pgdata.to_str().unwrap(),
+            node.address.port()
+        );
+
         // initialize data directory
         fs::remove_dir_all(node.pgdata.to_str().unwrap()).ok();
         let initdb_path = self.pg_bin_dir.join("initdb");
-        println!("initdb_path: {}", initdb_path.to_str().unwrap());
         let initdb = Command::new(initdb_path)
             .args(&["-D", node.pgdata.to_str().unwrap()])
             .arg("-N")
             .arg("--no-instructions")
             .env_clear()
-            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("failed to execute initdb");
 
@@ -340,8 +357,8 @@ impl ComputeControlPlane<'_> {
             listen_addresses = '{address}'\n\
             port = {port}\n\
         ",
-                address = node.ip,
-                port = node.port
+                address = node.address.ip(),
+                port = node.address.port()
             )
             .as_str(),
         );
@@ -357,10 +374,10 @@ impl ComputeControlPlane<'_> {
         let node_id = self.nodes.len() + 1;
         let node = PostgresNode {
             _node_id: node_id,
-            port: self.get_port(),
-            ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.get_port()),
             pgdata: self.work_dir.join(format!("compute/pg{}", node_id)),
-            pg_bin_dir: self.pg_bin_dir.clone(),
+            env: self.env.clone(),
+            pageserver: Arc::clone(&self.pageserver),
         };
         self.nodes.push(Arc::new(node));
         let node = self.nodes.last().unwrap();
@@ -375,7 +392,7 @@ impl ComputeControlPlane<'_> {
             .arg("--no-instructions")
             .arg("--compute-node")
             .env_clear()
-            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("failed to execute initdb");
 
@@ -398,8 +415,8 @@ impl ComputeControlPlane<'_> {
             port = {port}\n\
             computenode_mode = true\n\
         ",
-                address = node.ip,
-                port = node.port
+                address = node.address.ip(),
+                port = node.address.port()
             )
             .as_str(),
         );
@@ -408,20 +425,18 @@ impl ComputeControlPlane<'_> {
     }
 
     pub fn new_node(&mut self) -> Arc<PostgresNode> {
-        let storage_cplane = self.storage_cplane;
+        let addr = self.pageserver.address().clone();
         let node = self.new_vanilla_node();
-
-        let pserver = storage_cplane.page_server_addr();
 
         // Configure that node to take pages from pageserver
         node.append_conf(
             "postgresql.conf",
             format!(
                 "\
-            page_server_connstring = 'host={} port={}'\n\
-        ",
-                pserver.ip(),
-                pserver.port()
+                page_server_connstring = 'host={} port={}'\n\
+            ",
+                addr.ip(),
+                addr.port()
             )
             .as_str(),
         );
@@ -434,8 +449,7 @@ impl ComputeControlPlane<'_> {
 
         node.append_conf(
             "postgresql.conf",
-            "synchronous_standby_names = 'safekeeper_proxy'\n\
-						 ",
+            "synchronous_standby_names = 'safekeeper_proxy'\n",
         );
         node.clone()
     }
@@ -470,11 +484,11 @@ impl Drop for WalProposerNode {
 ///////////////////////////////////////////////////////////////////////////////
 
 pub struct PostgresNode {
+    pub address: SocketAddr,
     _node_id: usize,
-    pub port: u16,
-    pub ip: IpAddr,
     pgdata: PathBuf,
-    pg_bin_dir: PathBuf,
+    pub env: LocalEnv,
+    pageserver: Arc<PageServerNode>,
 }
 
 impl PostgresNode {
@@ -488,7 +502,7 @@ impl PostgresNode {
     }
 
     fn pg_ctl(&self, args: &[&str], check_ok: bool) {
-        let pg_ctl_path = self.pg_bin_dir.join("pg_ctl");
+        let pg_ctl_path = self.env.pg_bin_dir().join("pg_ctl");
         let pg_ctl = Command::new(pg_ctl_path)
             .args(
                 [
@@ -503,7 +517,7 @@ impl PostgresNode {
                 .concat(),
             )
             .env_clear()
-            .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("failed to execute pg_ctl");
 
@@ -512,11 +526,10 @@ impl PostgresNode {
         }
     }
 
-    pub fn start(&self, storage_cplane: &StorageControlPlane) {
-        if storage_cplane.page_servers.len() != 0 {
-            let _res =
-                storage_cplane.page_server_psql(format!("callmemaybe {}", self.connstr()).as_str());
-        }
+    pub fn start(&self) {
+        let _res = self
+            .pageserver
+            .page_server_psql(format!("callmemaybe {}", self.connstr()).as_str());
         println!("Starting postgres node at '{}'", self.connstr());
         self.pg_ctl(&["start"], true);
     }
@@ -530,7 +543,12 @@ impl PostgresNode {
     }
 
     pub fn connstr(&self) -> String {
-        format!("host={} port={} user={}", self.ip, self.port, self.whoami())
+        format!(
+            "host={} port={} user={}",
+            self.address.ip(),
+            self.address.port(),
+            self.whoami()
+        )
     }
 
     // XXX: cache that in control plane
@@ -549,8 +567,8 @@ impl PostgresNode {
     pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<tokio_postgres::Row> {
         let connstring = format!(
             "host={} port={} dbname={} user={}",
-            self.ip,
-            self.port,
+            self.address.ip(),
+            self.address.port(),
             db,
             self.whoami()
         );
@@ -563,8 +581,8 @@ impl PostgresNode {
     pub fn open_psql(&self, db: &str) -> Client {
         let connstring = format!(
             "host={} port={} dbname={} user={}",
-            self.ip,
-            self.port,
+            self.address.ip(),
+            self.address.port(),
             db,
             self.whoami()
         );
@@ -583,7 +601,7 @@ impl PostgresNode {
             File::create(filepath).unwrap();
         }
 
-        let pg_resetwal_path = self.pg_bin_dir.join("pg_resetwal");
+        let pg_resetwal_path = self.env.pg_bin_dir().join("pg_resetwal");
 
         let pg_resetwal = Command::new(pg_resetwal_path)
             .args(&["-D", self.pgdata.to_str().unwrap()])
@@ -599,13 +617,13 @@ impl PostgresNode {
     }
 
     pub fn start_proxy(&self, wal_acceptors: String) -> WalProposerNode {
-        let proxy_path = PG_BIN_DIR.join("safekeeper_proxy");
+        let proxy_path = self.env.pg_bin_dir().join("safekeeper_proxy");
         match Command::new(proxy_path.as_path())
             .args(&["-s", &wal_acceptors])
-            .args(&["-h", &self.ip.to_string()])
-            .args(&["-p", &self.port.to_string()])
+            .args(&["-h", &self.address.ip().to_string()])
+            .args(&["-p", &self.address.port().to_string()])
             .arg("-v")
-            .stderr(File::create(TEST_WORKDIR.join("safepkeeper_proxy.log")).unwrap())
+            .stderr(File::create(self.env.data_dir.join("safepkeeper_proxy.log")).unwrap())
             .spawn()
         {
             Ok(child) => WalProposerNode { pid: child.id() },
@@ -644,7 +662,7 @@ pub fn regress_check(pg: &PostgresNode) {
         .args(&[
             "--bindir=''",
             "--use-existing",
-            format!("--bindir={}", PG_BIN_DIR.to_str().unwrap()).as_str(),
+            format!("--bindir={}", pg.env.pg_bin_dir().to_str().unwrap()).as_str(),
             format!("--dlpath={}", regress_build_path.to_str().unwrap()).as_str(),
             format!(
                 "--schedule={}",
@@ -654,10 +672,10 @@ pub fn regress_check(pg: &PostgresNode) {
             format!("--inputdir={}", regress_src_path.to_str().unwrap()).as_str(),
         ])
         .env_clear()
-        .env("LD_LIBRARY_PATH", PG_LIB_DIR.to_str().unwrap())
-        .env("PGPORT", pg.port.to_string())
+        .env("LD_LIBRARY_PATH", pg.env.pg_lib_dir().to_str().unwrap())
+        .env("PGHOST", pg.address.ip().to_string())
+        .env("PGPORT", pg.address.port().to_string())
         .env("PGUSER", pg.whoami())
-        .env("PGHOST", pg.ip.to_string())
         .status()
         .expect("pg_regress failed");
 }

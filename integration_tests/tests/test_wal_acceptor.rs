@@ -1,8 +1,6 @@
 // Restart acceptors one by one while compute is under the load.
-#[allow(dead_code)]
-mod control_plane;
 use control_plane::ComputeControlPlane;
-use control_plane::StorageControlPlane;
+use control_plane::TestStorageControlPlane;
 
 use rand::Rng;
 use std::sync::Arc;
@@ -13,13 +11,13 @@ use std::{thread, time};
 fn test_acceptors_normal_work() {
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
-    let storage_cplane = StorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
-    // start postgre
+    // start postgres
     let node = compute_cplane.new_master_node();
-    node.start(&storage_cplane);
+    node.start();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
@@ -50,14 +48,14 @@ fn test_acceptors_restarts() {
     const REDUNDANCY: usize = 3;
     const FAULT_PROBABILITY: f32 = 0.01;
 
-    let storage_cplane = StorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
     let mut rng = rand::thread_rng();
 
-    // start postgre
+    // start postgres
     let node = compute_cplane.new_master_node();
-    node.start(&storage_cplane);
+    node.start();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
@@ -93,7 +91,7 @@ fn test_acceptors_restarts() {
     assert_eq!(count, 500500);
 }
 
-fn start_acceptor(cplane: &Arc<StorageControlPlane>, no: usize) {
+fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize) {
     let cp = cplane.clone();
     thread::spawn(move || {
         thread::sleep(time::Duration::from_secs(1));
@@ -109,13 +107,13 @@ fn test_acceptors_unavalability() {
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 2;
 
-    let storage_cplane = StorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
-    // start postgre
+    // start postgres
     let node = compute_cplane.new_master_node();
-    node.start(&storage_cplane);
+    node.start();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
@@ -157,11 +155,11 @@ fn test_acceptors_unavalability() {
     assert_eq!(count, 15);
 }
 
-fn simulate_failures(cplane: &Arc<StorageControlPlane>) {
+fn simulate_failures(cplane: Arc<TestStorageControlPlane>) {
     let mut rng = rand::thread_rng();
     let n_acceptors = cplane.wal_acceptors.len();
     let failure_period = time::Duration::from_secs(1);
-    loop {
+    while cplane.is_running() {
         thread::sleep(failure_period);
         let mask: u32 = rng.gen_range(0..(1 << n_acceptors));
         for i in 0..n_acceptors {
@@ -184,13 +182,13 @@ fn test_race_conditions() {
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
 
-    let storage_cplane = StorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = Arc::new(TestStorageControlPlane::fault_tolerant(REDUNDANCY));
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
-    // start postgre
+    // start postgres
     let node = compute_cplane.new_master_node();
-    node.start(&storage_cplane);
+    node.start();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
@@ -200,10 +198,10 @@ fn test_race_conditions() {
         "postgres",
         "CREATE TABLE t(key int primary key, value text)",
     );
-    let cplane = Arc::new(storage_cplane);
-    let cp = cplane.clone();
-    thread::spawn(move || {
-        simulate_failures(&cp);
+
+    let cp = storage_cplane.clone();
+    let failures_thread = thread::spawn(move || {
+        simulate_failures(cp);
     });
 
     let mut psql = node.open_psql("postgres");
@@ -218,5 +216,7 @@ fn test_race_conditions() {
         .get(0);
     println!("sum = {}", count);
     assert_eq!(count, 500500);
-    cplane.stop();
+
+    storage_cplane.stop();
+    failures_thread.join().unwrap();
 }

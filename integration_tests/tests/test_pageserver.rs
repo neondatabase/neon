@@ -1,8 +1,7 @@
 #[allow(dead_code)]
-mod control_plane;
-
+// mod control_plane;
 use control_plane::ComputeControlPlane;
-use control_plane::StorageControlPlane;
+use control_plane::TestStorageControlPlane;
 
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
@@ -12,12 +11,12 @@ use control_plane::StorageControlPlane;
 #[test]
 fn test_redo_cases() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server();
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::one_page_server();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
     let node = compute_cplane.new_node();
-    node.start(&storage_cplane);
+    node.start();
 
     // check basic work with table
     node.safe_psql(
@@ -49,14 +48,15 @@ fn test_redo_cases() {
 
 // Runs pg_regress on a compute node
 #[test]
+#[ignore]
 fn test_regress() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server();
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::one_page_server();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
     let node = compute_cplane.new_node();
-    node.start(&storage_cplane);
+    node.start();
 
     control_plane::regress_check(&node);
 }
@@ -65,14 +65,14 @@ fn test_regress() {
 #[test]
 fn test_pageserver_multitenancy() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server();
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::one_page_server();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // Allocate postgres instance, but don't start
     let node1 = compute_cplane.new_node();
     let node2 = compute_cplane.new_node();
-    node1.start(&storage_cplane);
-    node2.start(&storage_cplane);
+    node1.start();
+    node2.start();
 
     // check node1
     node1.safe_psql(
