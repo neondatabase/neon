@@ -1,6 +1,6 @@
 // Restart acceptors one by one while compute is under the load.
-use control_plane::ComputeControlPlane;
-use control_plane::TestStorageControlPlane;
+use control_plane::compute::ComputeControlPlane;
+use control_plane::storage::TestStorageControlPlane;
 
 use rand::Rng;
 use std::sync::Arc;

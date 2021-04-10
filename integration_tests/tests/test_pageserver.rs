@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 // mod control_plane;
-use control_plane::ComputeControlPlane;
-use control_plane::TestStorageControlPlane;
+use control_plane::compute::ComputeControlPlane;
+use control_plane::storage::TestStorageControlPlane;
 
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
@@ -58,7 +58,7 @@ fn test_regress() {
     let node = compute_cplane.new_node();
     node.start();
 
-    control_plane::regress_check(&node);
+    control_plane::storage::regress_check(&node);
 }
 
 // Run two postgres instances on one pageserver
