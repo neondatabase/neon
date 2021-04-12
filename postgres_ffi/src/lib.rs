@@ -1,0 +1,58 @@
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+use bytes::{Buf, Bytes, BytesMut};
+
+// sizeof(ControlFileData)
+const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
+
+impl ControlFileData {
+
+    // Initialize an all-zeros ControlFileData struct
+    pub fn new() -> ControlFileData {
+        let controlfile: ControlFileData;
+
+        let b = [0u8; SIZEOF_CONTROLDATA];
+        controlfile = unsafe {
+            std::mem::transmute::<[u8; SIZEOF_CONTROLDATA], ControlFileData>(b)
+        };
+
+        return controlfile;
+    }
+}
+
+pub fn decode_pg_control(buf: Bytes) -> ControlFileData {
+
+    let mut b: [u8; SIZEOF_CONTROLDATA] = [0u8; SIZEOF_CONTROLDATA];
+
+    buf.clone().copy_to_slice(&mut b);
+
+    let controlfile: ControlFileData;
+
+    controlfile = unsafe {
+        std::mem::transmute::<[u8; SIZEOF_CONTROLDATA], ControlFileData>(b)
+    };
+
+    return controlfile;
+}
+
+pub fn encode_pg_control(controlfile: ControlFileData) -> Bytes {
+
+    let b: [u8; SIZEOF_CONTROLDATA];
+
+    b = unsafe {
+        std::mem::transmute::<ControlFileData, [u8; SIZEOF_CONTROLDATA]>(controlfile)
+    };
+
+    // TODO: Recompute the CRC here
+
+    let mut buf = BytesMut::with_capacity(PG_CONTROL_FILE_SIZE as usize);
+
+    buf.extend_from_slice(&b);
+    // Fill the rest of the control file with zeros.
+    buf.resize(PG_CONTROL_FILE_SIZE as usize, 0);
+
+    return buf.into();
+}

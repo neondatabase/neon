@@ -34,3 +34,5 @@ postgres-protocol = { git = "https://github.com/kelvich/rust-postgres", branch =
 postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
 anyhow = "1.0"
 crc32c = "0.6.0"
+
+postgres_ffi = { path = "../postgres_ffi" }

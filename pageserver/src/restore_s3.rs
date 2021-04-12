@@ -95,7 +95,7 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
     let object = &(&control_results[0]).contents[0];
     let (data, _) = bucket.get_object(&object.key).await.unwrap();
     let bytes = BytesMut::from(data.as_slice()).freeze();
-    let c = controlfile::decode_pg_control(bytes);
+    let c = postgres_ffi::decode_pg_control(bytes);
 
     let pcache = page_cache::get_pagecache(conf.clone(), c.system_identifier);
     pcache.set_controldata(c.clone());

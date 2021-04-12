@@ -3,4 +3,5 @@ members = [
     "integration_tests",
     "pageserver",
     "walkeeper",
+    "postgres_ffi",
 ]

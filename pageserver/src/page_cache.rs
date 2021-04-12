@@ -22,7 +22,7 @@ use lazy_static::lazy_static;
 use log::*;
 use rand::Rng;
 
-use crate::{controlfile, walredo, PageServerConf};
+use crate::{walredo, PageServerConf};
 
 use crossbeam_channel::unbounded;
 use crossbeam_channel::{Receiver, Sender};
@@ -109,7 +109,7 @@ struct PageCacheShared {
     last_valid_lsn: u64,
     last_record_lsn: u64,
 
-    controldata: controlfile::ControlFileDataZenith,
+    controldata: postgres_ffi::ControlFileData,
 }
 
 lazy_static! {
@@ -149,7 +149,7 @@ fn init_page_cache() -> PageCache {
             first_valid_lsn: 0,
             last_valid_lsn: 0,
             last_record_lsn: 0,
-            controldata: controlfile::ControlFileDataZenith::new(),
+            controldata: postgres_ffi::ControlFileData::new(),
         }),
         valid_lsn_condvar: Condvar::new(),
 
@@ -675,12 +675,12 @@ impl PageCache {
         return shared.last_record_lsn;
     }
 
-    pub fn set_controldata(&self, c: controlfile::ControlFileDataZenith) {
+    pub fn set_controldata(&self, c: postgres_ffi::ControlFileData) {
         let mut shared = self.shared.lock().unwrap();
         shared.controldata = c;
     }
 
-    pub fn get_controldata(&self) -> controlfile::ControlFileDataZenith {
+    pub fn get_controldata(&self) -> postgres_ffi::ControlFileData {
         let shared = self.shared.lock().unwrap();
         return shared.controldata.clone();
     }
