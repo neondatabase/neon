@@ -14,10 +14,7 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 use anyhow::Result;
 
-use slog;
 use slog::Drain;
-use slog_scope;
-use slog_stdlog;
 
 use pageserver::page_service;
 use pageserver::restore_datadir;

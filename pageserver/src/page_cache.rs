@@ -205,7 +205,7 @@ pub struct CacheEntryContent {
 impl CacheEntry {
     fn new(key: CacheKey) -> CacheEntry {
         CacheEntry {
-            key: key,
+            key,
             content: Mutex::new(CacheEntryContent {
                 page_image: None,
                 wal_record: None,
@@ -253,8 +253,8 @@ impl PageCache {
 
         // Look up cache entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
-        let minkey = CacheKey { tag: tag, lsn: 0 };
-        let maxkey = CacheKey { tag: tag, lsn: lsn };
+        let minkey = CacheKey { tag, lsn: 0 };
+        let maxkey = CacheKey { tag, lsn };
 
         let entry_rc: Arc<CacheEntry>;
         {
@@ -302,7 +302,7 @@ impl PageCache {
             let entry_opt = entries.next_back();
 
             if entry_opt.is_none() {
-                static ZERO_PAGE: [u8; 8192] = [0 as u8; 8192];
+                static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
                 return Ok(Bytes::from_static(&ZERO_PAGE));
                 /* return Err("could not find page image")?; */
             }
@@ -433,7 +433,7 @@ impl PageCache {
     //
     pub fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
         let key = CacheKey {
-            tag: tag,
+            tag,
             lsn: rec.lsn,
         };
 
@@ -469,7 +469,7 @@ impl PageCache {
     // Memorize a full image of a page version
     //
     pub fn put_page_image(&self, tag: BufferTag, lsn: u64, img: Bytes) {
-        let key = CacheKey { tag: tag, lsn: lsn };
+        let key = CacheKey { tag, lsn };
 
         let entry = CacheEntry::new(key.clone());
         entry.content.lock().unwrap().page_image = Some(img);

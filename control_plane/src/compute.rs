@@ -73,7 +73,7 @@ impl ComputeControlPlane {
             base_port: 65431,
             pageserver: Arc::clone(pageserver),
             nodes: BTreeMap::new(),
-            env: env.clone(),
+            env,
         }
     }
 

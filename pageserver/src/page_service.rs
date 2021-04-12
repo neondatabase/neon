@@ -259,7 +259,7 @@ impl Connection {
             stream: BufWriter::new(socket),
             buffer: BytesMut::with_capacity(10 * 1024),
             init_done: false,
-            conf: conf,
+            conf,
         }
     }
 
@@ -560,7 +560,7 @@ impl Connection {
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
-                        n_blocks: n_blocks,
+                        n_blocks,
                     }))
                     .await?
                 }

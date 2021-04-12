@@ -208,7 +208,7 @@ impl WalRedoProcess {
         tokio::spawn(f_stderr);
 
         Ok(WalRedoProcess {
-            child: child,
+            child,
             stdin: RefCell::new(stdin),
             stdout: RefCell::new(stdout),
         })

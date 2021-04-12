@@ -402,7 +402,7 @@ impl System {
             },
         };
         System {
-            id: id,
+            id,
             mutex: Mutex::new(shared_state),
             cond: Notify::new(),
         }
@@ -989,7 +989,7 @@ impl Connection {
                 },
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) => {
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
 
@@ -1018,7 +1018,7 @@ impl Connection {
                         Ok(opened_file) => file = opened_file,
                         Err(e) => {
                             error!("Failed to open log file {:?}: {}", &wal_file_path, e);
-                            return Err(e.into());
+                            return Err(e);
                         }
                     }
                 }
@@ -1130,7 +1130,7 @@ impl Connection {
                         }
                         Err(e) => {
                             error!("Failed to open log file {:?}: {}", &wal_file_path, e);
-                            return Err(e.into());
+                            return Err(e);
                         }
                     }
                 }

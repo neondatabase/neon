@@ -58,7 +58,7 @@ impl TestStorageControlPlane {
         let env = local_env::test_env();
 
         let pserver = Arc::new(PageServerNode {
-            env: env.clone(),
+            env,
             kill_on_exit: true,
             listen_address: None,
         });
@@ -110,7 +110,7 @@ impl TestStorageControlPlane {
     pub fn get_wal_acceptor_conn_info(&self) -> String {
         self.wal_acceptors
             .iter()
-            .map(|wa| wa.listen.to_string().to_string())
+            .map(|wa| wa.listen.to_string())
             .collect::<Vec<String>>()
             .join(",")
     }

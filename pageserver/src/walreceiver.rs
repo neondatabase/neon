@@ -88,7 +88,7 @@ async fn walreceiver_main(
         // empty database snapshot), so for now I just put start of first segment which
         // seems to be a valid record.
         pcache.init_valid_lsn(0x_1_000_000_u64);
-        startpoint = u64::from(0x_1_000_000_u64);
+        startpoint = 0x_1_000_000_u64;
     } else {
         // There might be some padding after the last full record, skip it.
         //
@@ -156,7 +156,7 @@ async fn walreceiver_main(
                             };
 
                             let rec = page_cache::WALRecord {
-                                lsn: lsn,
+                                lsn,
                                 will_init: blk.will_init || blk.apply_image,
                                 rec: recdata.clone(),
                             };
