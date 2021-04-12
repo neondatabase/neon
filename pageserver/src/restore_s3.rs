@@ -60,8 +60,8 @@ pub fn restore_main(conf: &PageServerConf) {
 async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
     let backend = Storage {
         region: Region::Custom {
-            region: env::var("S3_REGION").unwrap().into(),
-            endpoint: env::var("S3_ENDPOINT").unwrap().into(),
+            region: env::var("S3_REGION").unwrap(),
+            endpoint: env::var("S3_ENDPOINT").unwrap(),
         },
         credentials: Credentials::new(
             Some(&env::var("S3_ACCESSKEY").unwrap()),
@@ -313,7 +313,7 @@ async fn slurp_base_file(
             dbnode: parsed.dbnode,
             relnode: parsed.relnode,
             forknum: parsed.forknum as u8,
-            blknum: blknum,
+            blknum,
         };
 
         pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));

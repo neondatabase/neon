@@ -11,10 +11,7 @@ use std::{fs::File, fs::OpenOptions};
 
 use clap::{App, Arg};
 
-use slog;
 use slog::Drain;
-use slog_scope;
-use slog_stdlog;
 
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;

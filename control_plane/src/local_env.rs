@@ -9,7 +9,6 @@ use std::error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use home;
 use serde_derive::{Deserialize, Serialize};
 
 type Result<T> = std::result::Result<T, Box<dyn error::Error>>;

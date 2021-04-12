@@ -64,7 +64,7 @@ pub struct WalStreamDecoder {
 impl WalStreamDecoder {
     pub fn new(lsn: u64) -> WalStreamDecoder {
         WalStreamDecoder {
-            lsn: lsn,
+            lsn,
 
             startlsn: 0,
             contlen: 0,
@@ -584,8 +584,8 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
     // Since we don't care about the data payloads here, we're done.
 
     return DecodedWALRecord {
-        lsn: lsn,
+        lsn,
         record: rec,
-        blocks: blocks,
+        blocks,
     };
 }
