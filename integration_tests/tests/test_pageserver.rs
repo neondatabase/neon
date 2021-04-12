@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 // mod control_plane;
 use control_plane::compute::ComputeControlPlane;
 use control_plane::storage::TestStorageControlPlane;

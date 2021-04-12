@@ -13,7 +13,6 @@ pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PageServerConf {
     pub data_dir: PathBuf,
