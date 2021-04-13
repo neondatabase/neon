@@ -198,8 +198,10 @@ impl PostgresNode {
         // initialize data directory
 
         if self.is_test {
-            fs::remove_dir_all(self.pgdata().to_str().unwrap())?;
+            fs::remove_dir_all(self.pgdata().to_str().unwrap()).ok();
         }
+
+        fs::create_dir_all(self.pgdata().to_str().unwrap())?;
 
         let initdb_path = self.env.pg_bin_dir().join("initdb");
         let initdb = Command::new(initdb_path)

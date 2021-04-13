@@ -120,7 +120,7 @@ pub fn init() -> Result<()> {
     // ok, we are good to go
 
     // create dirs
-    let data_dir = cargo_path.join("tmp_check");
+    let data_dir = cargo_path.join("tmp_check_cli");
 
     for &dir in &["compute", "pageserver"] {
         fs::create_dir_all(data_dir.join(dir))
@@ -168,7 +168,7 @@ pub fn load_config() -> Result<LocalEnv> {
 
 // local env for tests
 pub fn test_env() -> LocalEnv {
-    let data_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp_check");
+    let data_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_check");
     fs::create_dir_all(data_dir.clone()).unwrap();
     LocalEnv {
         data_dir,
