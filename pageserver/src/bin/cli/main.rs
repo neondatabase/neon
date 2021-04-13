@@ -149,7 +149,6 @@ fn find_end_of_wal(tli: [u8; 16]) -> Result<u64> {
                 "--start", &format!("{:X}/{:X}", maxsnapshot >> 32, maxsnapshot & 0xffffffff)])
         .output()?;
 
-    println!("status: {}", waldump_result.status);
     let stderr_str = std::str::from_utf8(&waldump_result.stderr)?;
 
     let re = Regex::new(r"error in WAL record at ([[:xdigit:]]+)/([[:xdigit:]]+)").unwrap();

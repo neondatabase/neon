@@ -65,7 +65,6 @@ current end of the 'main' branch, but you could specify a different
 LSN as the start point instead.
 
     ~/git-sandbox/zenith (cli-v2)$ ./target/debug/cli branch experimental main
-    status: exit code: 1
     branching at end of WAL: 0/161F478
     
     ~/git-sandbox/zenith (cli-v2)$ ./target/debug/cli branch 
