@@ -14,6 +14,7 @@ regex = "1.4.5"
 bytes = "1.0.1"
 byteorder = "1.4.3"
 fs2 = "0.4.3"
+fs_extra = "1.2.0"
 futures = "0.3.13"
 lazy_static = "1.4.0"
 slog-stdlog = "4.1.0"
@@ -34,3 +35,6 @@ postgres-protocol = { git = "https://github.com/kelvich/rust-postgres", branch =
 postgres = { git = "https://github.com/kelvich/rust-postgres", branch = "replication_rebase" }
 anyhow = "1.0"
 crc32c = "0.6.0"
+hex = "0.4.3"
+
+postgres_ffi = { path = "../postgres_ffi" }

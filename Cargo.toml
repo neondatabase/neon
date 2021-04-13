@@ -5,4 +5,5 @@ members = [
     "walkeeper",
     "zenith",
     "control_plane",
+    "postgres_ffi",
 ]
