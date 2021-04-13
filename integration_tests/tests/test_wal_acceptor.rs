@@ -78,7 +78,7 @@ fn test_acceptors_restarts() {
             } else {
                 let node: usize = rng.gen_range(0..REDUNDANCY);
                 failed_node = Some(node);
-                storage_cplane.wal_acceptors[node].stop();
+                storage_cplane.wal_acceptors[node].stop().unwrap();
             }
         }
     }
@@ -127,7 +127,7 @@ fn test_acceptors_unavalability() {
     psql.execute("INSERT INTO t values (1, 'payload')", &[])
         .unwrap();
 
-    storage_cplane.wal_acceptors[0].stop();
+    storage_cplane.wal_acceptors[0].stop().unwrap();
     let cp = Arc::new(storage_cplane);
     start_acceptor(&cp, 0);
     let now = SystemTime::now();
@@ -137,7 +137,7 @@ fn test_acceptors_unavalability() {
     psql.execute("INSERT INTO t values (3, 'payload')", &[])
         .unwrap();
 
-    cp.wal_acceptors[1].stop();
+    cp.wal_acceptors[1].stop().unwrap();
     start_acceptor(&cp, 1);
     psql.execute("INSERT INTO t values (4, 'payload')", &[])
         .unwrap();
@@ -164,7 +164,7 @@ fn simulate_failures(cplane: Arc<TestStorageControlPlane>) {
         let mask: u32 = rng.gen_range(0..(1 << n_acceptors));
         for i in 0..n_acceptors {
             if (mask & (1 << i)) != 0 {
-                cplane.wal_acceptors[i].stop();
+                cplane.wal_acceptors[i].stop().unwrap();
             }
         }
         thread::sleep(failure_period);

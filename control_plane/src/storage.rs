@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::fs;
+use std::io;
 use std::process::Command;
 use std::net::TcpStream;
 use std::thread;
@@ -162,10 +163,10 @@ impl PageServerNode {
 
     pub fn stop(&self) -> Result<()> {
         let pidfile = self.env.pageserver_pidfile();
-        let pid = fs::read_to_string(pidfile).unwrap();
+        let pid = read_pidfile(&pidfile)?;
 
         let status = Command::new("kill")
-            .arg(pid.clone())
+            .arg(&pid)
             .env_clear()
             .status()
             .expect("failed to execute kill");
@@ -260,22 +261,24 @@ impl WalAcceptorNode {
         }
     }
 
-    pub fn stop(&self) {
+    pub fn stop(&self) -> std::result::Result<(), io::Error> {
         println!("Stopping wal acceptor on {}", self.listen);
         let pidfile = self.data_dir.join("wal_acceptor.pid");
-        if let Ok(pid) = fs::read_to_string(pidfile) {
-            let _status = Command::new("kill")
-                .arg(pid)
-                .env_clear()
-                .status()
-                .expect("failed to execute kill");
-        }
+        let pid = read_pidfile(&pidfile)?;
+        // Ignores any failures when running this command
+        let _status = Command::new("kill")
+            .arg(pid)
+            .env_clear()
+            .status()
+            .expect("failed to execute kill");
+
+        Ok(())
     }
 }
 
 impl Drop for WalAcceptorNode {
     fn drop(&mut self) {
-        self.stop();
+        self.stop().unwrap();
     }
 }
 
@@ -339,4 +342,15 @@ pub fn regress_check(pg: &PostgresNode) {
         .env("PGUSER", pg.whoami())
         .status()
         .expect("pg_regress failed");
+}
+
+/// Read a PID file
+///
+/// This should contain an unsigned integer, but we return it as a String
+/// because our callers only want to pass it back into a subcommand.
+fn read_pidfile(pidfile: &Path) -> std::result::Result<String, io::Error> {
+    fs::read_to_string(pidfile).map_err(|err| {
+        eprintln!("failed to read pidfile {:?}: {:?}", pidfile, err);
+        err
+    })
 }
