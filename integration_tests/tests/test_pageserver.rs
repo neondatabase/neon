@@ -15,8 +15,8 @@ fn test_redo_cases() {
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
-    let node = compute_cplane.new_node();
-    node.start();
+    let node = compute_cplane.new_test_node();
+    node.start().unwrap();
 
     // check basic work with table
     node.safe_psql(
@@ -55,8 +55,8 @@ fn test_regress() {
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
-    let node = compute_cplane.new_node();
-    node.start();
+    let node = compute_cplane.new_test_node();
+    node.start().unwrap();
 
     control_plane::storage::regress_check(&node);
 }
@@ -69,10 +69,10 @@ fn test_pageserver_multitenancy() {
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // Allocate postgres instance, but don't start
-    let node1 = compute_cplane.new_node();
-    let node2 = compute_cplane.new_node();
-    node1.start();
-    node2.start();
+    let node1 = compute_cplane.new_test_node();
+    let node2 = compute_cplane.new_test_node();
+    node1.start().unwrap();
+    node2.start().unwrap();
 
     // check node1
     node1.safe_psql(

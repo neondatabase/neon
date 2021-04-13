@@ -383,9 +383,11 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "home",
+ "lazy_static",
  "pageserver",
  "postgres",
  "rand 0.8.3",
+ "regex",
  "serde",
  "serde_derive",
  "tokio-postgres",

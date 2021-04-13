@@ -16,8 +16,8 @@ fn test_acceptors_normal_work() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_master_node();
-    node.start();
+    let node = compute_cplane.new_test_master_node();
+    node.start().unwrap();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
@@ -54,8 +54,8 @@ fn test_acceptors_restarts() {
     let mut rng = rand::thread_rng();
 
     // start postgres
-    let node = compute_cplane.new_master_node();
-    node.start();
+    let node = compute_cplane.new_test_master_node();
+    node.start().unwrap();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
@@ -112,8 +112,8 @@ fn test_acceptors_unavalability() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_master_node();
-    node.start();
+    let node = compute_cplane.new_test_master_node();
+    node.start().unwrap();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
@@ -187,8 +187,8 @@ fn test_race_conditions() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_master_node();
-    node.start();
+    let node = compute_cplane.new_test_master_node();
+    node.start().unwrap();
 
     // start proxy
     let _proxy = node.start_proxy(wal_acceptors);
