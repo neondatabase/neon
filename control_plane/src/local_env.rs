@@ -36,6 +36,7 @@ pub struct LocalEnv {
 }
 
 impl LocalEnv {
+    // postgres installation
     pub fn pg_bin_dir(&self) -> PathBuf {
         self.pg_distrib_dir.join("bin")
     }
@@ -43,6 +44,7 @@ impl LocalEnv {
         self.pg_distrib_dir.join("lib")
     }
 
+    // pageserver
     pub fn pageserver_data_dir(&self) -> PathBuf {
         self.data_dir.join("pageserver")
     }
@@ -52,6 +54,11 @@ impl LocalEnv {
     pub fn pageserver_pidfile(&self) -> PathBuf {
         self.pageserver_data_dir().join("pageserver.pid")
     }
+
+    // compute nodes
+    pub fn compute_dir(&self) -> PathBuf {
+        self.data_dir.join("compute")
+    }
 }
 
 //
@@ -60,14 +67,7 @@ impl LocalEnv {
 // home crate and cargo uses it.
 //
 fn get_home() -> Result<PathBuf> {
-    match home::home_dir() {
-        Some(path) => Ok(path),
-        None => {
-            return Err(Box::<dyn error::Error>::from(
-                "can not determine home directory path",
-            ));
-        }
-    }
+    home::home_dir().ok_or("can not determine home directory path".into())
 }
 
 pub fn init() -> Result<()> {
@@ -80,7 +80,7 @@ pub fn init() -> Result<()> {
             "{} already exists. Perhaps already initialized?",
             cfg_path.to_str().unwrap()
         );
-        return Err(Box::<dyn error::Error>::from(err_msg));
+        return Err(err_msg.into());
     }
 
     // Now we can run init only from crate directory, so check that current dir is our crate.
@@ -89,7 +89,7 @@ pub fn init() -> Result<()> {
     if !cargo_path.join("pageserver/Cargo.toml").exists() {
         let err_msg = "Current dirrectory does not look like a zenith repo. \
             Please, run 'init' from zenith repo root.";
-        return Err(Box::<dyn error::Error>::from(err_msg));
+        return Err(err_msg.into());
     }
 
     // ok, now check that expected binaries are present
@@ -103,7 +103,7 @@ pub fn init() -> Result<()> {
             Perhaps './pgbuild.sh' is needed to build it first.",
             pg_path.to_str().unwrap()
         );
-        return Err(Box::<dyn error::Error>::from(err_msg));
+        return Err(err_msg.into());
     }
 
     // check pageserver
@@ -114,26 +114,23 @@ pub fn init() -> Result<()> {
             "Can't find pageserver binary at {}. Please build it.",
             pageserver_path.to_str().unwrap()
         );
-        return Err(Box::<dyn error::Error>::from(err_msg));
+        return Err(err_msg.into());
     }
 
     // ok, we are good to go
 
-    // create data dir
-    let data_dir = cargo_path.join("tmp_install");
-    match fs::create_dir(data_dir.clone()) {
-        Ok(_) => {}
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::AlreadyExists => {}
-            _ => {
-                let err_msg = format!(
-                    "Failed to create data directory in '{}': {}",
+    // create dirs
+    let data_dir = cargo_path.join("tmp_check");
+
+    for &dir in &["compute", "pageserver"] {
+        fs::create_dir_all(data_dir.join(dir))
+            .map_err(|e| {
+                format!(
+                    "Failed to create directory in '{}': {}",
                     data_dir.to_str().unwrap(),
                     e
-                );
-                return Err(Box::<dyn error::Error>::from(err_msg));
-            }
-        },
+                )
+            })?;
     }
 
     // write config
@@ -160,15 +157,13 @@ pub fn load_config() -> Result<LocalEnv> {
             "Zenith config is not found in {}. You need to run 'zenith init' first",
             cfg_path.to_str().unwrap()
         );
-        return Err(Box::<dyn error::Error>::from(err_msg));
+        return Err(err_msg.into());
     }
 
     // load and parse file
     let config = fs::read_to_string(cfg_path)?;
-    match toml::from_str(config.as_str()) {
-        Ok(cfg) => Ok(cfg),
-        Err(e) => Err(Box::<dyn error::Error>::from(e)),
-    }
+    toml::from_str(config.as_str())
+        .map_err(|e| e.into())
 }
 
 // local env for tests
@@ -184,7 +179,7 @@ pub fn test_env() -> LocalEnv {
 
 // Find the directory where the binaries were put (i.e. target/debug/)
 pub fn cargo_bin_dir() -> PathBuf {
-    let mut pathbuf = std::env::current_exe().ok().unwrap();
+    let mut pathbuf = std::env::current_exe().unwrap();
 
     pathbuf.pop();
     if pathbuf.ends_with("deps") {
