@@ -102,7 +102,7 @@ fn main() -> Result<(), io::Error> {
 
 fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     // Initialize logger
-    let _scope_guard = init_logging(&conf);
+    let _scope_guard = init_logging(&conf)?;
     let _log_guard = slog_stdlog::init().unwrap();
 
     // Note: this `info!(...)` macro comes from `log` crate
@@ -217,12 +217,16 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     Ok(())
 }
 
-fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
+fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
     if conf.interactive {
-        tui::init_logging()
+        Ok(tui::init_logging())
     } else if conf.daemonize {
         let log = conf.data_dir.join("pageserver.log");
-        let log_file = File::create(log).unwrap_or_else(|_| panic!("Could not create log file"));
+        let log_file = File::create(&log).map_err(|err| {
+            // We failed to initialize logging, so we can't log this message with error!
+            eprintln!("Could not create log file {:?}: {}", log, err);
+            err
+        })?;
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {
@@ -233,7 +237,7 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
         });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());
-        slog_scope::set_global_logger(logger)
+        Ok(slog_scope::set_global_logger(logger))
     } else {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -251,6 +255,6 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
         })
         .fuse();
         let logger = slog::Logger::root(drain, slog::o!());
-        slog_scope::set_global_logger(logger)
+        Ok(slog_scope::set_global_logger(logger))
     }
 }
