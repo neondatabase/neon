@@ -10,6 +10,10 @@
 #
 #   2) installs postgres to REPO_ROOT/tmp_install/
 #
+
+# Halt immediately if any command fails
+set -e
+
 REPO_ROOT=$(dirname "$0")
 REPO_ROOT="`( cd \"$REPO_ROOT\" && pwd )`"
 
