@@ -145,7 +145,6 @@ impl PageServerNode {
                 self.address().to_string().as_str(),
             ])
             .arg("-d")
-            .arg("--skip-recovery")
             .env_clear()
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())

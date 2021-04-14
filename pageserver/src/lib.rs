@@ -19,5 +19,5 @@ pub struct PageServerConf {
     pub interactive: bool,
     pub wal_producer_connstr: Option<String>,
     pub listen_addr: SocketAddr,
-    pub skip_recovery: bool,
+    pub restore_from: String,
 }
