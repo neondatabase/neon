@@ -3,6 +3,9 @@
 use control_plane::compute::ComputeControlPlane;
 use control_plane::storage::TestStorageControlPlane;
 
+use std::thread::sleep;
+use std::time::Duration;
+
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
 // -- pageserver api endpoint to check all rels
@@ -108,4 +111,37 @@ fn test_pageserver_multitenancy() {
         .get(0);
     println!("sum = {}", count);
     assert_eq!(count, 15000150000);
+}
+
+#[test]
+fn test_upload_pageserver_local() {
+    // Init pageserver that reads WAL directly from that postgres
+    // Don't start yet
+
+    let storage_cplane = TestStorageControlPlane::one_page_server_no_start();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+
+    // init postgres node
+    let node = compute_cplane.new_test_node();
+
+    //upload data to pageserver & start it
+    &storage_cplane
+        .pageserver
+        .start_fromdatadir(node.pgdata().to_str().unwrap().to_string())
+        .unwrap();
+
+    sleep(Duration::from_secs(10));
+
+    // start postgres node
+    node.start().unwrap();
+
+    // check basic work with table
+    node.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+    );
 }
