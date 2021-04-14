@@ -165,7 +165,6 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
         restore_datadir::restore_main(&conf);
     }
 
-
     // Create directory for wal-redo datadirs
     match fs::create_dir(conf.data_dir.join("wal-redo")) {
         Ok(_) => {}

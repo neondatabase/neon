@@ -41,12 +41,9 @@ impl TestStorageControlPlane {
         });
         pserver.init();
 
-        if pgdata_base_path.is_empty()
-        {
+        if pgdata_base_path.is_empty() {
             pserver.start().unwrap();
-        }
-        else
-        {
+        } else {
             pserver.start_fromdatadir(pgdata_base_path).unwrap();
         }
 
