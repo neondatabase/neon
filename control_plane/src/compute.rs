@@ -1,15 +1,15 @@
-use std::{collections::BTreeMap, path::PathBuf};
-use std::sync::Arc;
-use std::fs::{self, OpenOptions};
-use std::process::{Command, Stdio};
-use std::fs::File;
-use std::time::Duration;
-use std::{io::Write, net::SocketAddr};
 use std::error;
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::net::TcpStream;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::Duration;
+use std::{collections::BTreeMap, path::PathBuf};
+use std::{io::Write, net::SocketAddr};
 
-use postgres::{Client, NoTls};
 use lazy_static::lazy_static;
+use postgres::{Client, NoTls};
 use regex::Regex;
 
 use crate::local_env::{self, LocalEnv};
@@ -28,7 +28,6 @@ pub struct ComputeControlPlane {
 }
 
 impl ComputeControlPlane {
-
     // Load current nodes with ports from data directories on disk
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
         // TODO: since pageserver do not have config file yet we believe here that
@@ -36,11 +35,17 @@ impl ComputeControlPlane {
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
         let nodes: Result<BTreeMap<_, _>> = fs::read_dir(env.compute_dir())
-            .map_err(|e| format!("failed to list {}: {}", env.compute_dir().to_str().unwrap(), e))?
+            .map_err(|e| {
+                format!(
+                    "failed to list {}: {}",
+                    env.compute_dir().to_str().unwrap(),
+                    e
+                )
+            })?
             .into_iter()
             .map(|f| {
                 PostgresNode::from_dir_entry(f?, &env, &pageserver)
-                    .map(|node| (node.name.clone(), Arc::new(node)) )
+                    .map(|node| (node.name.clone(), Arc::new(node)))
             })
             .collect();
         let nodes = nodes?;
@@ -49,12 +54,13 @@ impl ComputeControlPlane {
             base_port: 55431,
             pageserver,
             nodes,
-            env
+            env,
         })
     }
 
     fn get_port(&mut self) -> u16 {
-        1 + self.nodes
+        1 + self
+            .nodes
             .iter()
             .map(|(_name, node)| node.address.port())
             .max()
@@ -79,7 +85,7 @@ impl ComputeControlPlane {
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), self.get_port()),
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
-            is_test
+            is_test,
         });
         node.init_vanilla()?;
         self.nodes.insert(node.name.clone(), Arc::clone(&node));
@@ -92,8 +98,10 @@ impl ComputeControlPlane {
         let node = self.new_vanilla_node(true).unwrap();
 
         // Configure that node to take pages from pageserver
-        node.append_conf("postgresql.conf",
-            format!("page_server_connstring = 'host={} port={}'\n",
+        node.append_conf(
+            "postgresql.conf",
+            format!(
+                "page_server_connstring = 'host={} port={}'\n",
                 addr.ip(),
                 addr.port()
             )
@@ -119,8 +127,10 @@ impl ComputeControlPlane {
         let node = self.new_vanilla_node(false)?;
 
         // Configure that node to take pages from pageserver
-        node.append_conf("postgresql.conf",
-            format!("page_server_connstring = 'host={} port={}'\n",
+        node.append_conf(
+            "postgresql.conf",
+            format!(
+                "page_server_connstring = 'host={} port={}'\n",
                 addr.ip(),
                 addr.port()
             )
@@ -142,7 +152,11 @@ pub struct PostgresNode {
 }
 
 impl PostgresNode {
-    fn from_dir_entry(entry: std::fs::DirEntry, env: &LocalEnv, pageserver: &Arc<PageServerNode>) -> Result<PostgresNode> {
+    fn from_dir_entry(
+        entry: std::fs::DirEntry,
+        env: &LocalEnv,
+        pageserver: &Arc<PageServerNode>,
+    ) -> Result<PostgresNode> {
         if !entry.file_type()?.is_dir() {
             let err_msg = format!(
                 "PostgresNode::from_dir_entry failed: '{}' is not a directory",
@@ -161,12 +175,18 @@ impl PostgresNode {
 
         // find out tcp port in config file
         let cfg_path = entry.path().join("postgresql.conf");
-        let config = fs::read_to_string(cfg_path.clone())
-            .map_err(|e| {
-                format!("failed to read config file in {}: {}", cfg_path.to_str().unwrap(), e)
-            })?;
+        let config = fs::read_to_string(cfg_path.clone()).map_err(|e| {
+            format!(
+                "failed to read config file in {}: {}",
+                cfg_path.to_str().unwrap(),
+                e
+            )
+        })?;
 
-        let err_msg = format!("failed to find port definition in config file {}", cfg_path.to_str().unwrap());
+        let err_msg = format!(
+            "failed to find port definition in config file {}",
+            cfg_path.to_str().unwrap()
+        );
         let port: u16 = CONF_PORT_RE
             .captures(config.as_str())
             .ok_or(err_msg.clone() + " 1")?
@@ -184,7 +204,7 @@ impl PostgresNode {
             name,
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
-            is_test: false
+            is_test: false,
         })
     }
 
@@ -221,7 +241,8 @@ impl PostgresNode {
         // listen for selected port
         self.append_conf(
             "postgresql.conf",
-            format!("max_wal_senders = 10\n\
+            format!(
+                "max_wal_senders = 10\n\
             max_replication_slots = 10\n\
             hot_standby = on\n\
             shared_buffers = 1MB\n\

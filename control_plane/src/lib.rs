@@ -7,6 +7,6 @@
 // local installations.
 //
 
-pub mod local_env;
 pub mod compute;
+pub mod local_env;
 pub mod storage;

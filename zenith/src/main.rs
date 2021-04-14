@@ -1,6 +1,6 @@
-use clap::{App, ArgMatches, SubCommand, Arg};
-use std::process::exit;
+use clap::{App, Arg, ArgMatches, SubCommand};
 use std::error;
+use std::process::exit;
 
 use control_plane::{compute::ComputeControlPlane, local_env, storage};
 
@@ -20,18 +20,15 @@ fn main() {
         .subcommand(
             SubCommand::with_name("pg")
                 .about("Manage postgres instances")
-                .subcommand(SubCommand::with_name("create")
-                    // .arg(name_arg.clone()
-                    //     .required(false)
-                    //     .help("name of this postgres instance (will be pgN if omitted)"))
-                    )
+                .subcommand(
+                    SubCommand::with_name("create"), // .arg(name_arg.clone()
+                                                     //     .required(false)
+                                                     //     .help("name of this postgres instance (will be pgN if omitted)"))
+                )
                 .subcommand(SubCommand::with_name("list"))
-                .subcommand(SubCommand::with_name("start")
-                    .arg(name_arg.clone()))
-                .subcommand(SubCommand::with_name("stop")
-                    .arg(name_arg.clone()))
-                .subcommand(SubCommand::with_name("destroy")
-                    .arg(name_arg.clone()))
+                .subcommand(SubCommand::with_name("start").arg(name_arg.clone()))
+                .subcommand(SubCommand::with_name("stop").arg(name_arg.clone()))
+                .subcommand(SubCommand::with_name("destroy").arg(name_arg.clone())),
         )
         .subcommand(
             SubCommand::with_name("snapshot")
@@ -91,7 +88,7 @@ fn main() {
         ("status", Some(_sub_m)) => {}
 
         ("pg", Some(pg_match)) => {
-            if let Err(e) = handle_pg(pg_match, &env){
+            if let Err(e) = handle_pg(pg_match, &env) {
                 eprintln!("pg operation failed: {}", e);
                 exit(1);
             }
