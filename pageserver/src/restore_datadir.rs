@@ -265,7 +265,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
             segno: u32::from_str_radix(fname, 10).unwrap(),
             lsn: 0,
         });
-    } else if let Some(fname) = path.strip_prefix("pg_multixact/members") {
+    } else if let Some(fname) = path.strip_prefix("pg_multixact/members/") {
         return Ok(ParsedBaseImageFileName {
             spcnode: 0,
             dbnode: 0,
@@ -274,7 +274,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
             segno: u32::from_str_radix(fname, 10).unwrap(),
             lsn: 0,
         });
-    } else if let Some(fname) = path.strip_prefix("pg_multixact/offsets") {
+    } else if let Some(fname) = path.strip_prefix("pg_multixact/offsets/") {
         return Ok(ParsedBaseImageFileName {
             spcnode: 0,
             dbnode: 0,
