@@ -138,7 +138,7 @@ fn open_rocksdb(conf: &PageServerConf, sys_id: u64) -> DB {
     let path = conf.data_dir.join(sys_id.to_string());
     let mut opts = Options::default();
     opts.create_if_missing(true);
-    opts.set_use_fsync(true);
+    //opts.set_use_fsync(true);
     opts.set_compression_type(DBCompressionType::Lz4);
     DB::open(&opts, &path).unwrap()
 }

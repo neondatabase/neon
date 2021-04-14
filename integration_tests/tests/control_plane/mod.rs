@@ -635,6 +635,7 @@ pub fn regress_check(pg: &PostgresNode) {
 
     let regress_run_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp_check/regress");
     fs::create_dir_all(regress_run_path.clone()).unwrap();
+    fs::create_dir_all(regress_run_path.join("testtablespace")).unwrap();
     std::env::set_current_dir(regress_run_path).unwrap();
 
     let regress_build_path =
@@ -650,7 +651,7 @@ pub fn regress_check(pg: &PostgresNode) {
             format!("--dlpath={}", regress_build_path.to_str().unwrap()).as_str(),
             format!(
                 "--schedule={}",
-                regress_src_path.join("parallel_schedule").to_str().unwrap()
+                regress_src_path.join("serial_schedule").to_str().unwrap()
             )
             .as_str(),
             format!("--inputdir={}", regress_src_path.to_str().unwrap()).as_str(),

@@ -508,11 +508,11 @@ impl Connection {
 
         loop {
             let message = self.read_message().await?;
-
+/*
             if let Some(m) = &message {
-                info!("query({}): {:?}", sysid, m);
+                trace!("query({}): {:?}", sysid, m);
             };
-
+*/
             if message.is_none() {
                 // connection was closed
                 return Ok(());

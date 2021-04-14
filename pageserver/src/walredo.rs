@@ -18,6 +18,8 @@ use log::*;
 use std::assert;
 use std::cell::RefCell;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::prelude::*;
 use std::io::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,7 +73,7 @@ pub fn wal_redo_main(conf: PageServerConf, sys_id: u64) {
         // After that, kill it and start a new one. This is mostly to avoid
         // using up all shared buffers in Postgres's shared buffer cache; we don't
         // want to write any pages to disk in the WAL redo process.
-        for _i in 1..100 {
+        for _i in 1..100000 {
             let request = walredo_channel_receiver.recv().unwrap();
 
             let result = handle_apply_request(&pcache, &process, &runtime, request);
@@ -162,8 +164,11 @@ impl WalRedoProcess {
             panic!("initdb failed: {}\nstderr:\n{}",
                    std::str::from_utf8(&initdb.stdout).unwrap(),
                    std::str::from_utf8(&initdb.stderr).unwrap());
-        }
-
+        } else {
+			// Limit shared cache for wal-redo-postres
+			let mut config = OpenOptions::new().append(true).open(datadir.join("postgresql.conf"))?;
+			config.write(b"shared_buffers=128kB\n")?;
+		}
         // Start postgres itself
         let mut child = Command::new("postgres")
             .arg("--wal-redo")
