@@ -160,9 +160,11 @@ impl WalRedoProcess {
             .expect("failed to execute initdb");
 
         if !initdb.status.success() {
-            panic!("initdb failed: {}\nstderr:\n{}",
-                   std::str::from_utf8(&initdb.stdout).unwrap(),
-                   std::str::from_utf8(&initdb.stderr).unwrap());
+            panic!(
+                "initdb failed: {}\nstderr:\n{}",
+                std::str::from_utf8(&initdb.stdout).unwrap(),
+                std::str::from_utf8(&initdb.stderr).unwrap()
+            );
         }
 
         // Start postgres itself

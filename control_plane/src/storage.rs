@@ -1,19 +1,19 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::error;
 use std::fs;
 use std::io;
-use std::process::Command;
+use std::net::SocketAddr;
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::path::{Path, PathBuf};
-use std::net::SocketAddr;
-use std::error;
 
 use postgres::{Client, NoTls};
 
+use crate::compute::PostgresNode;
 use crate::local_env::{self, LocalEnv};
-use crate::compute::{PostgresNode};
 
 type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
 
@@ -135,7 +135,7 @@ impl PageServerNode {
     pub fn address(&self) -> SocketAddr {
         match self.listen_address {
             Some(addr) => addr,
-            None => "127.0.0.1:64000".parse().unwrap()
+            None => "127.0.0.1:64000".parse().unwrap(),
         }
     }
 
@@ -148,10 +148,7 @@ impl PageServerNode {
 
         let status = Command::new(self.env.zenith_distrib_dir.join("pageserver")) // XXX -> method
             .args(&["-D", self.env.pageserver_data_dir().to_str().unwrap()])
-            .args(&[
-                "-l",
-                self.address().to_string().as_str(),
-            ])
+            .args(&["-l", self.address().to_string().as_str()])
             .arg("-d")
             .env_clear()
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
@@ -203,8 +200,8 @@ impl PageServerNode {
             .expect("failed to execute kill");
 
         if !status.success() {
-            return Err(Box::<dyn error::Error>::from(
-                format!("Failed to kill pageserver with pid {}",
+            return Err(Box::<dyn error::Error>::from(format!(
+                "Failed to kill pageserver with pid {}",
                 pid
             )));
         }
@@ -221,8 +218,8 @@ impl PageServerNode {
 
         // ok, we failed to stop pageserver, let's panic
         if !status.success() {
-            return Err(Box::<dyn error::Error>::from(
-                format!("Failed to stop pageserver with pid {}",
+            return Err(Box::<dyn error::Error>::from(format!(
+                "Failed to stop pageserver with pid {}",
                 pid
             )));
         } else {

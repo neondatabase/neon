@@ -123,14 +123,13 @@ pub fn init() -> Result<()> {
     let data_dir = cargo_path.join("tmp_check_cli");
 
     for &dir in &["compute", "pageserver"] {
-        fs::create_dir_all(data_dir.join(dir))
-            .map_err(|e| {
-                format!(
-                    "Failed to create directory in '{}': {}",
-                    data_dir.to_str().unwrap(),
-                    e
-                )
-            })?;
+        fs::create_dir_all(data_dir.join(dir)).map_err(|e| {
+            format!(
+                "Failed to create directory in '{}': {}",
+                data_dir.to_str().unwrap(),
+                e
+            )
+        })?;
     }
 
     // write config
@@ -162,8 +161,7 @@ pub fn load_config() -> Result<LocalEnv> {
 
     // load and parse file
     let config = fs::read_to_string(cfg_path)?;
-    toml::from_str(config.as_str())
-        .map_err(|e| e.into())
+    toml::from_str(config.as_str()).map_err(|e| e.into())
 }
 
 // local env for tests
