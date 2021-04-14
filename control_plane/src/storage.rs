@@ -31,7 +31,7 @@ pub struct TestStorageControlPlane {
 
 impl TestStorageControlPlane {
     // postgres <-> page_server
-    pub fn one_page_server() -> TestStorageControlPlane {
+    pub fn one_page_server(pgdata_base_path: String) -> TestStorageControlPlane {
         let env = local_env::test_env();
 
         let pserver = Arc::new(PageServerNode {
@@ -40,7 +40,15 @@ impl TestStorageControlPlane {
             listen_address: None,
         });
         pserver.init();
-        pserver.start().unwrap();
+
+        if pgdata_base_path.is_empty()
+        {
+            pserver.start().unwrap();
+        }
+        else
+        {
+            pserver.start_fromdatadir(pgdata_base_path).unwrap();
+        }
 
         TestStorageControlPlane {
             wal_acceptors: Vec::new(),
@@ -151,10 +159,34 @@ impl PageServerNode {
             .status()?;
 
         if !status.success() {
-            return Err(Box::<dyn error::Error>::from(
-                format!("Pageserver failed to start. See '{}' for details.",
-                self.env.pageserver_log().to_str().unwrap())
-            ));
+            return Err(Box::<dyn error::Error>::from(format!(
+                "Pageserver failed to start. See '{}' for details.",
+                self.env.pageserver_log().to_str().unwrap()
+            )));
+        } else {
+            return Ok(());
+        }
+    }
+
+    pub fn start_fromdatadir(&self, pgdata_base_path: String) -> Result<()> {
+        println!("Starting pageserver at '{}'", self.address());
+
+        let status = Command::new(self.env.zenith_distrib_dir.join("pageserver")) // XXX -> method
+            .args(&["-D", self.env.pageserver_data_dir().to_str().unwrap()])
+            .args(&["-l", self.address().to_string().as_str()])
+            .arg("-d")
+            .args(&["--restore-from", "local"])
+            .env_clear()
+            .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("PGDATA_BASE_PATH", pgdata_base_path)
+            .status()?;
+
+        if !status.success() {
+            return Err(Box::<dyn error::Error>::from(format!(
+                "Pageserver failed to start. See '{}' for details.",
+                self.env.pageserver_log().to_str().unwrap()
+            )));
         } else {
             return Ok(());
         }

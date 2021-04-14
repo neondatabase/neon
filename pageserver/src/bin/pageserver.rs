@@ -18,6 +18,7 @@ use slog_scope;
 use slog_stdlog;
 
 use pageserver::page_service;
+use pageserver::restore_datadir;
 use pageserver::restore_s3;
 use pageserver::tui;
 use pageserver::walreceiver;
@@ -160,7 +161,10 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     // this at every startup)
     if conf.restore_from.eq("s3") {
         restore_s3::restore_main(&conf);
+    } else if conf.restore_from.eq("local") {
+        restore_datadir::restore_main(&conf);
     }
+
 
     // Create directory for wal-redo datadirs
     match fs::create_dir(conf.data_dir.join("wal-redo")) {
