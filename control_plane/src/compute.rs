@@ -260,7 +260,7 @@ impl PostgresNode {
         Ok(())
     }
 
-    fn pgdata(&self) -> PathBuf {
+    pub fn pgdata(&self) -> PathBuf {
         self.env.compute_dir().join(self.name.clone())
     }
 

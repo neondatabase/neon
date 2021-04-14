@@ -52,7 +52,8 @@ fn main() -> Result<(), io::Error> {
                  .long("daemonize")
                  .takes_value(false)
                  .help("Run in the background"))
-        .arg(Arg::with_name("restore-from")
+        .arg(Arg::with_name("restore_from")
+                 .long("restore-from")
                  .takes_value(true)
                  .help("Upload data from s3 or datadir"))
         .get_matches();
@@ -154,14 +155,16 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
 
     let mut threads = Vec::new();
 
-    info!("starting...");
+    info!("starting... {}", conf.restore_from);
 
     // Before opening up for connections, restore the latest base backup from S3.
     // (We don't persist anything to local disk at the moment, so we need to do
     // this at every startup)
     if conf.restore_from.eq("s3") {
+        info!("restore-from s3...");
         restore_s3::restore_main(&conf);
     } else if conf.restore_from.eq("local") {
+        info!("restore-from local...");
         restore_datadir::restore_main(&conf);
     }
 
