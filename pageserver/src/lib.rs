@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 pub mod page_cache;
 pub mod page_service;
+pub mod pg_constants;
 pub mod restore_datadir;
 pub mod restore_s3;
 pub mod tui;
