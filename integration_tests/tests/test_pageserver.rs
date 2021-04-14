@@ -11,7 +11,7 @@ use control_plane::storage::TestStorageControlPlane;
 #[test]
 fn test_redo_cases() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = TestStorageControlPlane::one_page_server();
+    let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
@@ -51,7 +51,7 @@ fn test_redo_cases() {
 #[ignore]
 fn test_regress() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = TestStorageControlPlane::one_page_server();
+    let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
@@ -63,9 +63,10 @@ fn test_regress() {
 
 // Run two postgres instances on one pageserver
 #[test]
+#[ignore]
 fn test_pageserver_multitenancy() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = TestStorageControlPlane::one_page_server();
+    let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
     let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // Allocate postgres instance, but don't start

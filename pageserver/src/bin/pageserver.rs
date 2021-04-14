@@ -18,6 +18,7 @@ use slog_scope;
 use slog_stdlog;
 
 use pageserver::page_service;
+use pageserver::restore_datadir;
 use pageserver::restore_s3;
 use pageserver::tui;
 use pageserver::walreceiver;
@@ -51,10 +52,9 @@ fn main() -> Result<(), io::Error> {
                  .long("daemonize")
                  .takes_value(false)
                  .help("Run in the background"))
-        .arg(Arg::with_name("skip_recovery")
-                 .long("skip-recovery")
-                 .takes_value(false)
-                 .help("Skip S3 recovery procedy and start empty"))
+        .arg(Arg::with_name("restore-from")
+                 .takes_value(true)
+                 .help("Upload data from s3 or datadir"))
         .get_matches();
 
     let mut conf = PageServerConf {
@@ -63,7 +63,7 @@ fn main() -> Result<(), io::Error> {
         interactive: false,
         wal_producer_connstr: None,
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
-        skip_recovery: false,
+        restore_from: String::new(),
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
@@ -85,8 +85,8 @@ fn main() -> Result<(), io::Error> {
         ));
     }
 
-    if arg_matches.is_present("skip_recovery") {
-        conf.skip_recovery = true;
+    if let Some(restore_from) = arg_matches.value_of("restore_from") {
+        conf.restore_from = String::from(restore_from);
     }
 
     if let Some(addr) = arg_matches.value_of("wal_producer") {
@@ -159,9 +159,12 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     // Before opening up for connections, restore the latest base backup from S3.
     // (We don't persist anything to local disk at the moment, so we need to do
     // this at every startup)
-    if !conf.skip_recovery {
+    if conf.restore_from.eq("s3") {
         restore_s3::restore_main(&conf);
+    } else if conf.restore_from.eq("local") {
+        restore_datadir::restore_main(&conf);
     }
+
 
     // Create directory for wal-redo datadirs
     match fs::create_dir(conf.data_dir.join("wal-redo")) {
