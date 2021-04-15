@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 //
 // WAL receiver
 //
@@ -13,11 +15,14 @@ use tokio_stream::StreamExt;
 
 use crate::page_cache;
 use crate::page_cache::BufferTag;
-use crate::waldecoder::WalStreamDecoder;
+use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 
 use postgres_protocol::message::backend::ReplicationMessage;
-use tokio_postgres::{connect_replication, Error, NoTls, ReplicationMode};
+use postgres_types::PgLsn;
+use tokio_postgres::replication::ReplicationStream;
+
+use tokio_postgres::{Error, NoTls, SimpleQueryMessage, SimpleQueryRow};
 
 //
 // This is the entry point for the WAL receiver thread.
@@ -49,14 +54,10 @@ async fn walreceiver_main(
     wal_producer_connstr: &str,
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
-    debug!("connecting to {}...", wal_producer_connstr);
-    let (mut rclient, connection) = connect_replication(
-        wal_producer_connstr,
-        NoTls,
-        ReplicationMode::Physical,
-    )
-    .await?;
-    debug!("connected!");
+    info!("connecting to {:?}", wal_producer_connstr);
+    let connect_cfg = format!("{} replication=true", wal_producer_connstr);
+    let (rclient, connection) = tokio_postgres::connect(&connect_cfg, NoTls).await?;
+    info!("connected!");
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
@@ -66,21 +67,21 @@ async fn walreceiver_main(
         }
     });
 
-    let identify_system = rclient.identify_system().await?;
-    let end_of_wal = u64::from(identify_system.xlogpos());
+    let identify = identify_system(&rclient).await?;
+    info!("{:?}", identify);
+    let end_of_wal = u64::from(identify.xlogpos);
     let mut caught_up = false;
 
-    let sysid: u64 = identify_system.systemid().parse().unwrap();
-    let pcache = page_cache::get_pagecache(conf, sysid);
+    let pcache = page_cache::get_pagecache(conf, identify.systemid);
 
     //
     // Start streaming the WAL, from where we left off previously.
     //
     let mut startpoint = pcache.get_last_valid_lsn();
     if startpoint == 0 {
-        // If we start here with identify_system.xlogpos() we will have race condition with
+        // If we start here with identify.xlogpos we will have race condition with
         // postgres start: insert into postgres may request page that was modified with lsn
-        // smaller than identify_system.xlogpos().
+        // smaller than identify.xlogpos.
         //
         // Current procedure for starting postgres will anyway be changed to something
         // different like having 'initdb' method on a pageserver (or importing some shared
@@ -105,10 +106,17 @@ async fn walreceiver_main(
         (end_of_wal >> 32),
         (end_of_wal & 0xffffffff)
     );
-    let startpoint = tokio_postgres::types::Lsn::from(startpoint);
-    let mut physical_stream = rclient
-        .start_physical_replication(None, startpoint, None)
-        .await?;
+
+    let startpoint = PgLsn::from(startpoint);
+    let query = format!("START_REPLICATION PHYSICAL {}", startpoint);
+    let copy_stream = rclient
+        .copy_both_simple::<bytes::Bytes>(&query)
+        .await
+        .unwrap();
+
+    let physical_stream = ReplicationStream::new(copy_stream);
+    tokio::pin!(physical_stream);
+
     let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
 
     while let Some(replication_message) = physical_stream.next().await {
@@ -132,8 +140,7 @@ async fn walreceiver_main(
 
                 loop {
                     if let Some((lsn, recdata)) = waldecoder.poll_decode() {
-                        let decoded =
-                            crate::waldecoder::decode_wal_record(startlsn, recdata.clone());
+                        let decoded = decode_wal_record(startlsn, recdata.clone());
 
                         // Put the WAL record to the page cache. We make a separate copy of
                         // it for every block it modifies. (The actual WAL record is kept in
@@ -191,4 +198,48 @@ async fn walreceiver_main(
         }
     }
     return Ok(());
+}
+
+/// Data returned from the postgres `IDENTIFY_SYSTEM` command
+///
+/// See the [postgres docs] for more details.
+///
+/// [postgres docs]: https://www.postgresql.org/docs/current/protocol-replication.html
+#[derive(Debug)]
+pub struct IdentifySystem {
+    systemid: u64,
+    timeline: u32,
+    xlogpos: PgLsn,
+    dbname: Option<String>,
+}
+
+/// Run the postgres `IDENTIFY_SYSTEM` command
+pub async fn identify_system(client: &tokio_postgres::Client) -> Result<IdentifySystem, Error> {
+    let query_str = "IDENTIFY_SYSTEM";
+    let response = client.simple_query(query_str).await?;
+
+    // get(N) from row, then parse it as some destination type.
+    fn get_parse<T>(row: &SimpleQueryRow, idx: usize) -> Option<T>
+    where
+        T: FromStr,
+    {
+        let val = row.get(idx)?;
+        val.parse::<T>().ok()
+    }
+
+    // FIXME: turn unwrap() into errors.
+    // All of the tokio_postgres::Error builders are private, so we
+    // can't create them here. We'll just have to create our own error type.
+
+    if let SimpleQueryMessage::Row(first_row) = response.get(0).unwrap() {
+        Ok(IdentifySystem {
+            systemid: get_parse(first_row, 0).unwrap(),
+            timeline: get_parse(first_row, 1).unwrap(),
+            xlogpos: get_parse(first_row, 2).unwrap(),
+            dbname: get_parse(first_row, 3),
+        })
+    } else {
+        // FIXME: return an error
+        panic!("identify_system returned non-row response");
+    }
 }
