@@ -66,7 +66,6 @@ fn test_regress() {
 
 // Run two postgres instances on one pageserver
 #[test]
-#[ignore]
 fn test_pageserver_multitenancy() {
     // Start pageserver that reads WAL directly from that postgres
     let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
