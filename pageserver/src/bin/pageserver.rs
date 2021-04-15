@@ -6,11 +6,13 @@ use log::*;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::exit;
 use std::thread;
 use std::{fs::File, fs::OpenOptions, str::FromStr};
 
 use clap::{App, Arg};
 use daemonize::Daemonize;
+use anyhow::Result;
 
 use slog;
 use slog::Drain;
@@ -24,7 +26,7 @@ use pageserver::tui;
 use pageserver::walreceiver;
 use pageserver::PageServerConf;
 
-fn main() -> Result<(), io::Error> {
+fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .arg(Arg::with_name("datadir")
@@ -80,10 +82,8 @@ fn main() -> Result<(), io::Error> {
     }
 
     if conf.daemonize && conf.interactive {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--daemonize is not allowed with --interactive: choose one",
-        ));
+        eprintln!("--daemonize is not allowed with --interactive: choose one");
+        exit(1);
     }
 
     if let Some(restore_from) = arg_matches.value_of("restore_from") {
@@ -101,7 +101,7 @@ fn main() -> Result<(), io::Error> {
     start_pageserver(conf)
 }
 
-fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
+fn start_pageserver(conf: PageServerConf) -> Result<()> {
     // Initialize logger
     let _scope_guard = init_logging(&conf)?;
     let _log_guard = slog_stdlog::init().unwrap();
@@ -174,7 +174,7 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
         Err(e) => match e.kind() {
             io::ErrorKind::AlreadyExists => {}
             _ => {
-                panic!("Failed to create wal-redo data directory: {}", e);
+                anyhow::bail!("Failed to create wal-redo data directory: {}", e);
             }
         },
     }
