@@ -13,7 +13,7 @@ use tokio_stream::StreamExt;
 
 use crate::page_cache;
 use crate::page_cache::{BufferTag, RelTag};
-use crate::waldecoder::WalStreamDecoder;
+use crate::waldecoder::*;
 use crate::PageServerConf;
 
 use postgres_protocol::message::backend::ReplicationMessage;
@@ -158,7 +158,29 @@ async fn walreceiver_main(
 
                             pcache.put_wal_record(tag, rec);
                         }
-
+                        // include truncate wal record in all pages
+                        if decoded.xl_rmid == RM_SMGR_ID
+                            && (decoded.xl_info & XLR_RMGR_INFO_MASK) == XLOG_SMGR_TRUNCATE
+                        {
+                            let truncate = decode_truncate_record(&decoded);
+                            if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
+                                let tag = BufferTag {
+                                    rel: RelTag {
+                                        spcnode: truncate.rnode.spcnode,
+                                        dbnode: truncate.rnode.dbnode,
+                                        relnode: truncate.rnode.relnode,
+                                        forknum: MAIN_FORKNUM,
+                                    },
+                                    blknum: truncate.blkno,
+                                };
+                                let rec = page_cache::WALRecord {
+                                    lsn: lsn,
+                                    will_init: false,
+                                    rec: recdata.clone(),
+                                };
+                                pcache.put_rel_wal_record(tag, rec);
+                            }
+                        }
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
                         pcache.advance_last_valid_lsn(lsn);

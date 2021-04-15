@@ -368,13 +368,14 @@ impl PageCache {
 
                 shared = wait_result.0;
                 if wait_result.1.timed_out() {
-					error!(
-						"Timed out while waiting for WAL record at LSN {} to arrive",
+                    error!(
+                        "Timed out while waiting for WAL record at LSN {} to arrive",
                         lsn
-					);
+                    );
                     return Err(format!(
                         "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
-                        lsn >> 32, lsn & 0xffff_ffff
+                        lsn >> 32,
+                        lsn & 0xffff_ffff
                     ))?;
                 }
             }
@@ -383,8 +384,11 @@ impl PageCache {
             }
 
             if lsn < shared.first_valid_lsn {
-                return Err(format!("LSN {:X}/{:X} has already been removed",
-                                   lsn >> 32, lsn & 0xffff_ffff))?;
+                return Err(format!(
+                    "LSN {:X}/{:X} has already been removed",
+                    lsn >> 32,
+                    lsn & 0xffff_ffff
+                ))?;
             }
         }
         let mut buf = BytesMut::new();
@@ -439,7 +443,7 @@ impl PageCache {
             self.put_page_image(tag, lsn, page_img.clone());
         } else {
             // No base image, and no WAL record. Huh?
-			panic!("no page image or WAL record for requested page");
+            panic!("no page image or WAL record for requested page");
         }
 
         // FIXME: assumes little-endian. Only used for the debugging log though
@@ -555,6 +559,41 @@ impl PageCache {
     }
 
     //
+    // Adds a relation-wide WAL record (like truncate) to the page cache,
+    // associating it with all pages started with specified block number
+    //
+    pub fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) {
+        let mut key = CacheKey { tag, lsn: rec.lsn };
+        let old_rel_size = self.relsize_get(&tag.rel);
+        let content = CacheEntryContent {
+            page_image: None,
+            wal_record: Some(rec),
+            apply_pending: false,
+        };
+        // set new relation size
+        self.shared
+            .lock()
+            .unwrap()
+            .relsize_cache
+            .insert(tag.rel, tag.blknum);
+
+        let mut key_buf = BytesMut::new();
+        let mut val_buf = BytesMut::new();
+        content.pack(&mut val_buf);
+
+        for blknum in tag.blknum..old_rel_size {
+            key_buf.clear();
+            key.tag.blknum = blknum;
+            key.pack(&mut key_buf);
+            trace!("put_wal_record lsn: {}", key.lsn);
+            let _res = self.db.put(&key_buf[..], &val_buf[..]);
+        }
+        let n = (old_rel_size - tag.blknum) as u64;
+        self.num_entries.fetch_add(n, Ordering::Relaxed);
+        self.num_wal_records.fetch_add(n, Ordering::Relaxed);
+    }
+
+    //
     // Memorize a full image of a page version
     //
     pub fn put_page_image(&self, tag: BufferTag, lsn: u64, img: Bytes) {
@@ -584,14 +623,18 @@ impl PageCache {
 
         // Can't move backwards.
         //assert!(lsn >= shared.last_valid_lsn);
-		if lsn > shared.last_valid_lsn {
-			shared.last_valid_lsn = lsn;
-			self.valid_lsn_condvar.notify_all();
+        if lsn > shared.last_valid_lsn {
+            shared.last_valid_lsn = lsn;
+            self.valid_lsn_condvar.notify_all();
 
-			self.last_valid_lsn.store(lsn, Ordering::Relaxed);
-		} else {
-			trace!("lsn={}, shared.last_valid_lsn={}", lsn, shared.last_valid_lsn);
-		}
+            self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+        } else {
+            trace!(
+                "lsn={}, shared.last_valid_lsn={}",
+                lsn,
+                shared.last_valid_lsn
+            );
+        }
     }
 
     //

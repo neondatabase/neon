@@ -67,7 +67,7 @@ pub fn wal_redo_main(conf: PageServerConf, sys_id: u64) {
             let _guard = runtime.enter();
             process = WalRedoProcess::launch(&datadir, &runtime).unwrap();
         }
-		info!("WAL redo postgres started");
+        info!("WAL redo postgres started");
 
         // Pretty arbitrarily, reuse the same Postgres process for 100 requests.
         // After that, kill it and start a new one. This is mostly to avoid
@@ -79,7 +79,7 @@ pub fn wal_redo_main(conf: PageServerConf, sys_id: u64) {
             let result = handle_apply_request(&pcache, &process, &runtime, request);
             if result.is_err() {
                 // On error, kill the process.
-				error!("Kill wal redo process on error");
+                error!("Kill wal redo process on error");
                 break;
             }
         }
@@ -102,7 +102,7 @@ fn handle_apply_request(
     let (base_img, records) = pcache.collect_records_for_apply(entry_rc.as_ref());
 
     let mut entry = entry_rc.content.lock().unwrap();
-	assert!(entry.apply_pending);
+    assert!(entry.apply_pending);
     entry.apply_pending = false;
 
     let nrecords = records.len();
@@ -161,14 +161,18 @@ impl WalRedoProcess {
             .expect("failed to execute initdb");
 
         if !initdb.status.success() {
-            panic!("initdb failed: {}\nstderr:\n{}",
-                   std::str::from_utf8(&initdb.stdout).unwrap(),
-                   std::str::from_utf8(&initdb.stderr).unwrap());
+            panic!(
+                "initdb failed: {}\nstderr:\n{}",
+                std::str::from_utf8(&initdb.stdout).unwrap(),
+                std::str::from_utf8(&initdb.stderr).unwrap()
+            );
         } else {
-			// Limit shared cache for wal-redo-postres
-			let mut config = OpenOptions::new().append(true).open(datadir.join("postgresql.conf"))?;
-			config.write(b"shared_buffers=128kB\n")?;
-		}
+            // Limit shared cache for wal-redo-postres
+            let mut config = OpenOptions::new()
+                .append(true)
+                .open(datadir.join("postgresql.conf"))?;
+            config.write(b"shared_buffers=128kB\n")?;
+        }
         // Start postgres itself
         let mut child = Command::new("postgres")
             .arg("--wal-redo")

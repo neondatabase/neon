@@ -222,10 +222,11 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
         tui::init_logging()
     } else if conf.daemonize {
         let log = conf.data_dir.join("pageserver.log");
-        let log_file =  OpenOptions::new()
+        let log_file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log).unwrap_or_else(|_| panic!("Could not create log file"));
+            .open(log)
+            .unwrap_or_else(|_| panic!("Could not create log file"));
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {

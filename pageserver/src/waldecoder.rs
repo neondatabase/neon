@@ -287,15 +287,22 @@ pub struct DecodedBkpBlock {
 const SizeOfXLogRecord: u32 = 24;
 
 pub struct DecodedWALRecord {
-    pub lsn: u64,      // LSN at the *end* of the record
+    pub lsn: u64, // LSN at the *end* of the record
+    pub xl_info: u8,
+    pub xl_rmid: u8,
     pub record: Bytes, // raw XLogRecord
 
     pub blocks: Vec<DecodedBkpBlock>,
 }
 
 // From pg_control.h and rmgrlist.h
-const XLOG_SWITCH: u8 = 0x40;
-const RM_XLOG_ID: u8 = 0;
+pub const XLOG_SWITCH: u8 = 0x40;
+pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
+pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
+
+pub const RM_XLOG_ID: u8 = 0;
+pub const RM_XACT_ID: u8 = 1;
+pub const RM_SMGR_ID: u8 = 2;
 
 // Is this record an XLOG_SWITCH record? They need some special processing,
 // so we need to check for that before the rest of the parsing.
@@ -316,25 +323,61 @@ fn is_xlog_switch_record(rec: &Bytes) -> bool {
     return xl_info == XLOG_SWITCH && xl_rmid == RM_XLOG_ID;
 }
 
+pub type Oid = u32;
+pub type BlockNumber = u32;
+
+pub const MAIN_FORKNUM: u8 = 0;
+pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct RelFileNode {
+    pub spcnode: Oid, /* tablespace */
+    pub dbnode: Oid,  /* database */
+    pub relnode: Oid, /* relation */
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlSmgrTruncate {
+    pub blkno: BlockNumber,
+    pub rnode: RelFileNode,
+    pub flags: u32,
+}
+
+pub fn decode_truncate_record(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
+    let mut buf = decoded.record.clone();
+    buf.advance(SizeOfXLogRecord as usize);
+    XlSmgrTruncate {
+        blkno: buf.get_u32_le(),
+        rnode: RelFileNode {
+            spcnode: buf.get_u32_le(), /* tablespace */
+            dbnode: buf.get_u32_le(),  /* database */
+            relnode: buf.get_u32_le(), /* relation */
+        },
+        flags: buf.get_u32_le(),
+    }
+}
+
 //
 // Routines to decode a WAL record and figure out which blocks are modified
 //
-pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
+pub fn decode_wal_record(lsn: u64, record: Bytes) -> DecodedWALRecord {
     trace!(
         "decoding record with LSN {:08X}/{:08X} ({} bytes)",
         lsn >> 32,
         lsn & 0xffff_ffff,
-        rec.remaining()
+        record.remaining()
     );
 
-    let mut buf = rec.clone();
+    let mut buf = record.clone();
 
     // FIXME: assume little-endian here
     let xl_tot_len = buf.get_u32_le();
     let _xl_xid = buf.get_u32_le();
     let _xl_prev = buf.get_u64_le();
-    let _xl_info = buf.get_u8();
-    let _xl_rmid = buf.get_u8();
+    let xl_info = buf.get_u8();
+    let xl_rmid = buf.get_u8();
     buf.advance(2); // 2 bytes of padding
     let _xl_crc = buf.get_u32_le();
 
@@ -582,8 +625,10 @@ pub fn decode_wal_record(lsn: u64, rec: Bytes) -> DecodedWALRecord {
     // Since we don't care about the data payloads here, we're done.
 
     return DecodedWALRecord {
-        lsn: lsn,
-        record: rec,
-        blocks: blocks,
+        lsn,
+        xl_info,
+        xl_rmid,
+        record,
+        blocks,
     };
 }

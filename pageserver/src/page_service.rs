@@ -234,7 +234,7 @@ pub fn thread_main(conf: PageServerConf) {
         loop {
             let (socket, peer_addr) = listener.accept().await.unwrap();
             debug!("accepted connection from {}", peer_addr);
-			socket.set_nodelay(true).unwrap();
+            socket.set_nodelay(true).unwrap();
             let mut conn_handler = Connection::new(conf.clone(), socket);
 
             task::spawn(async move {
@@ -318,7 +318,7 @@ impl Connection {
                     .await?;
 
                 self.stream.write_i16(1).await?;
-                self.stream.write_buf(&mut b).await?;
+                self.stream.write_all(&mut b).await?;
                 self.stream.write_i32(0).await?; /* table oid */
                 self.stream.write_i16(0).await?; /* attnum */
                 self.stream.write_i32(25).await?; /* TEXTOID */
@@ -337,7 +337,7 @@ impl Connection {
 
                 self.stream.write_i16(1).await?;
                 self.stream.write_i32(b.len() as i32).await?;
-                self.stream.write_buf(&mut b).await?;
+                self.stream.write_all(&mut b).await?;
             }
 
             BeMessage::ControlFile => {
@@ -349,7 +349,7 @@ impl Connection {
 
                 self.stream.write_i16(1).await?;
                 self.stream.write_i32(b.len() as i32).await?;
-                self.stream.write_buf(&mut b).await?;
+                self.stream.write_all(&mut b).await?;
             }
 
             BeMessage::CommandComplete => {
@@ -357,7 +357,7 @@ impl Connection {
 
                 self.stream.write_u8(b'C').await?;
                 self.stream.write_i32(4 + b.len() as i32).await?;
-                self.stream.write_buf(&mut b).await?;
+                self.stream.write_all(&mut b).await?;
             }
 
             BeMessage::ZenithStatusResponse(resp) => {
@@ -384,7 +384,7 @@ impl Connection {
                 self.stream.write_u8(102).await?; /* tag from pagestore_client.h */
                 self.stream.write_u8(resp.ok as u8).await?;
                 self.stream.write_u32(resp.n_blocks).await?;
-                self.stream.write_buf(&mut resp.page.clone()).await?;
+                self.stream.write_all(&mut resp.page.clone()).await?;
             }
         }
 
@@ -405,7 +405,7 @@ impl Connection {
                     match m.kind {
                         StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
                             let mut b = Bytes::from("N");
-                            self.stream.write_buf(&mut b).await?;
+                            self.stream.write_all(&mut b).await?;
                             self.stream.flush().await?;
                         }
                         StartupRequestCode::Normal => {
@@ -508,11 +508,11 @@ impl Connection {
 
         loop {
             let message = self.read_message().await?;
-/*
-            if let Some(m) = &message {
-                trace!("query({}): {:?}", sysid, m);
-            };
-*/
+            /*
+                        if let Some(m) = &message {
+                            trace!("query({}): {:?}", sysid, m);
+                        };
+            */
             if message.is_none() {
                 // connection was closed
                 return Ok(());

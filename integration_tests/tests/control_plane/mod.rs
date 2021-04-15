@@ -338,6 +338,7 @@ impl ComputeControlPlane<'_> {
             shared_buffers = 1MB\n\
             max_connections = 100\n\
             wal_level = replica\n\
+			max_parallel_workers = 0\n\
 			wal_sender_timeout = 0\n\
             listen_addresses = '{address}'\n\
             port = {port}\n\
@@ -396,6 +397,7 @@ impl ComputeControlPlane<'_> {
             shared_buffers = 1MB\n\
             max_connections = 100\n\
             wal_level = replica\n\
+			max_parallel_workers = 0\n\
             listen_addresses = '{address}'\n\
             port = {port}\n\
             computenode_mode = true\n\
