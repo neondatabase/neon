@@ -20,7 +20,7 @@ use crate::PageServerConf;
 
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
-use tokio_postgres::replication::ReplicationStream;
+use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
 
 use tokio_postgres::{Error, NoTls, SimpleQueryMessage, SimpleQueryRow};
 
@@ -190,9 +190,32 @@ async fn walreceiver_main(
                 }
             }
 
-            ReplicationMessage::PrimaryKeepAlive(_keepalive) => {
-                trace!("received PrimaryKeepAlive");
-                // FIXME: Reply, or the connection will time out
+            ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                let wal_end = keepalive.wal_end();
+                let timestamp = keepalive.timestamp();
+                let reply_requested: bool = keepalive.reply() != 0;
+
+                trace!(
+                    "received PrimaryKeepAlive(wal_end: {}, timestamp: {} reply: {})",
+                    wal_end,
+                    timestamp,
+                    reply_requested,
+                );
+                if reply_requested {
+                    // TODO: More thought should go into what values are sent here.
+                    let last_lsn = PgLsn::from(pcache.get_last_valid_lsn());
+                    let write_lsn = last_lsn;
+                    let flush_lsn = last_lsn;
+                    let apply_lsn = PgLsn::INVALID;
+                    let ts = PgTimestamp::now().unwrap();
+                    const NO_REPLY: u8 = 0u8;
+
+                    physical_stream
+                        .as_mut()
+                        .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)
+                        .await
+                        .unwrap();
+                }
             }
             _ => (),
         }
