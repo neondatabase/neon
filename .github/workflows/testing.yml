@@ -77,10 +77,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # That build is only to build dependencies and can be skipped if Cargo.lock
-      # wasn't changed. Next steps need their own build
-      - name: Install cargo deps
-        if: steps.cache_cargo.outputs.cache-hit != 'true'
+      - name: Build
         run: |
           cargo build
 
