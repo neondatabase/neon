@@ -113,7 +113,7 @@ lazy_static! {
     pub static ref PAGECACHES: Mutex<HashMap<u64, Arc<PageCache>>> = Mutex::new(HashMap::new());
 }
 
-pub fn get_pagecache(conf: PageServerConf, sys_id: u64) -> Arc<PageCache> {
+pub fn get_pagecache(conf: &PageServerConf, sys_id: u64) -> Arc<PageCache> {
     let mut pcaches = PAGECACHES.lock().unwrap();
 
     if !pcaches.contains_key(&sys_id) {
@@ -124,10 +124,11 @@ pub fn get_pagecache(conf: PageServerConf, sys_id: u64) -> Arc<PageCache> {
         // Now join_handle is not saved any where and we won'try restart tharead
         // if it is dead. We may later stop that treads after some inactivity period
         // and restart them on demand.
+        let conf = conf.clone();
         let _walredo_thread = thread::Builder::new()
             .name("WAL redo thread".into())
             .spawn(move || {
-                walredo::wal_redo_main(conf, sys_id);
+                walredo::wal_redo_main(&conf, sys_id);
             })
             .unwrap();
     }

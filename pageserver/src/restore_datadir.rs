@@ -80,7 +80,7 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), FilePathError> {
         }
     }
 
-    let pcache = page_cache::get_pagecache(conf.clone(), sys_id);
+    let pcache = page_cache::get_pagecache(conf, sys_id);
     pcache.init_valid_lsn(control_lsn);
 
     info!("{} files to restore...", slurp_futures.len());
@@ -313,7 +313,7 @@ async fn slurp_base_file(
     // FIXME: use constants (BLCKSZ)
     let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / 8192);
 
-    let pcache = page_cache::get_pagecache(conf.clone(), sys_id);
+    let pcache = page_cache::get_pagecache(conf, sys_id);
 
     let reltag = page_cache::RelTag {
         spcnode: parsed.spcnode,

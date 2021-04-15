@@ -22,7 +22,7 @@ use tokio_postgres::{connect_replication, Error, NoTls, ReplicationMode};
 //
 // This is the entry point for the WAL receiver thread.
 //
-pub fn thread_main(conf: PageServerConf, wal_producer_connstr: &String) {
+pub fn thread_main(conf: &PageServerConf, wal_producer_connstr: &str) {
     info!("WAL receiver thread started: '{}'", wal_producer_connstr);
 
     let runtime = runtime::Builder::new_current_thread()
@@ -32,7 +32,7 @@ pub fn thread_main(conf: PageServerConf, wal_producer_connstr: &String) {
 
     runtime.block_on(async {
         loop {
-            let _res = walreceiver_main(conf.clone(), wal_producer_connstr).await;
+            let _res = walreceiver_main(conf, wal_producer_connstr).await;
 
             // TODO: print/log the error
             info!(
@@ -45,13 +45,13 @@ pub fn thread_main(conf: PageServerConf, wal_producer_connstr: &String) {
 }
 
 async fn walreceiver_main(
-    conf: PageServerConf,
-    wal_producer_connstr: &String,
+    conf: &PageServerConf,
+    wal_producer_connstr: &str,
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
     debug!("connecting to {}...", wal_producer_connstr);
     let (mut rclient, connection) = connect_replication(
-        wal_producer_connstr.as_str(),
+        wal_producer_connstr,
         NoTls,
         ReplicationMode::Physical,
     )

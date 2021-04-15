@@ -98,10 +98,10 @@ fn main() -> Result<()> {
         conf.listen_addr = addr.parse().unwrap();
     }
 
-    start_pageserver(conf)
+    start_pageserver(&conf)
 }
 
-fn start_pageserver(conf: PageServerConf) -> Result<()> {
+fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     // Initialize logger
     let _scope_guard = init_logging(&conf)?;
     let _log_guard = slog_stdlog::init().unwrap();
@@ -186,13 +186,13 @@ fn start_pageserver(conf: PageServerConf) -> Result<()> {
     //
     // All other wal receivers are started on demand by "callmemaybe" command
     // sent to pageserver.
-    let conf_copy = conf.clone();
-    if let Some(wal_producer) = conf.wal_producer_connstr {
-        let conf = conf_copy.clone();
+    if let Some(wal_producer) = &conf.wal_producer_connstr {
+        let conf_copy = conf.clone();
+        let wal_producer = wal_producer.clone();
         let walreceiver_thread = thread::Builder::new()
             .name("static WAL receiver thread".into())
             .spawn(move || {
-                walreceiver::thread_main(conf, &wal_producer);
+                walreceiver::thread_main(&conf_copy, &wal_producer);
             })
             .unwrap();
         threads.push(walreceiver_thread);
@@ -200,12 +200,12 @@ fn start_pageserver(conf: PageServerConf) -> Result<()> {
 
     // GetPage@LSN requests are served by another thread. (It uses async I/O,
     // but the code in page_service sets up it own thread pool for that)
-    let conf = conf_copy.clone();
+    let conf_copy = conf.clone();
     let page_server_thread = thread::Builder::new()
         .name("Page Service thread".into())
-        .spawn(|| {
+        .spawn(move || {
             // thread code
-            page_service::thread_main(conf);
+            page_service::thread_main(&conf_copy);
         })
         .unwrap();
     threads.push(page_server_thread);
