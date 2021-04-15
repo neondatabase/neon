@@ -347,7 +347,7 @@ pub struct XlSmgrTruncate {
 
 pub fn decode_truncate_record(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
     let mut buf = decoded.record.clone();
-    buf.advance(SizeOfXLogRecord as usize);
+    buf.advance((SizeOfXLogRecord+2) as usize);
     XlSmgrTruncate {
         blkno: buf.get_u32_le(),
         rnode: RelFileNode {
