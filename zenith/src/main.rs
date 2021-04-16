@@ -30,14 +30,6 @@ fn main() {
                 .subcommand(SubCommand::with_name("stop").arg(name_arg.clone()))
                 .subcommand(SubCommand::with_name("destroy").arg(name_arg.clone())),
         )
-        .subcommand(
-            SubCommand::with_name("snapshot")
-                .about("Manage database snapshots")
-                .subcommand(SubCommand::with_name("create"))
-                .subcommand(SubCommand::with_name("start"))
-                .subcommand(SubCommand::with_name("stop"))
-                .subcommand(SubCommand::with_name("destroy")),
-        )
         .get_matches();
 
     // handle init separately and exit
