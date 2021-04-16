@@ -409,7 +409,7 @@ fn write_wal_file(
     let mut bytes_written: usize = 0;
     let mut partial;
     let mut start_pos = startpos;
-    const ZERO_BLOCK: &'static [u8] = &[0u8; XLOG_BLCKSZ];
+    const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
     let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
 

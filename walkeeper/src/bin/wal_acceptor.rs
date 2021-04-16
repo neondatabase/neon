@@ -69,7 +69,7 @@ fn main() -> Result<()> {
 
     let mut conf = WalAcceptorConf {
         data_dir: PathBuf::from("./"),
-        systemid: systemid,
+        systemid,
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,

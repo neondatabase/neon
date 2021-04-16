@@ -11,7 +11,6 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
-use tar;
 
 use postgres::{Client, NoTls};
 
@@ -290,7 +289,7 @@ impl PostgresNode {
         // slot or something proper, to prevent the compute node
         // from removing WAL that hasn't been streamed to the safekeepr or
         // page server yet. But this will do for now.
-        self.append_conf("postgresql.conf", &format!("wal_keep_size='10TB'\n"));
+        self.append_conf("postgresql.conf", "wal_keep_size='10TB'\n");
 
         // Connect it to the page server.
 

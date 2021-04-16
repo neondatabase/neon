@@ -38,12 +38,9 @@ pub fn restore_main(conf: &PageServerConf) {
         let result = restore_chunk(conf).await;
 
         match result {
-            Ok(_) => {
-                return;
-            }
+            Ok(_) => {}
             Err(err) => {
                 error!("S3 error: {}", err);
-                return;
             }
         }
     });
@@ -199,7 +196,7 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
         .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
 
     let relnode_str = caps.name("relnode").unwrap().as_str();
-    let relnode = u32::from_str_radix(relnode_str, 10)?;
+    let relnode: u32 = relnode_str.parse()?;
 
     let forkname_match = caps.name("forkname");
     let forkname = if forkname_match.is_none() {
@@ -213,14 +210,14 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
     let segno = if segno_match.is_none() {
         0
     } else {
-        u32::from_str_radix(segno_match.unwrap().as_str(), 10)?
+        segno_match.unwrap().as_str().parse::<u32>()?
     };
 
-    let lsn_hi = u64::from_str_radix(caps.name("lsnhi").unwrap().as_str(), 16)?;
-    let lsn_lo = u64::from_str_radix(caps.name("lsnlo").unwrap().as_str(), 16)?;
+    let lsn_hi: u64 = caps.name("lsnhi").unwrap().as_str().parse()?;
+    let lsn_lo: u64 = caps.name("lsnlo").unwrap().as_str().parse()?;
     let lsn = lsn_hi << 32 | lsn_lo;
 
-    return Ok((relnode, forknum, segno, lsn));
+    Ok((relnode, forknum, segno, lsn))
 }
 
 fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathError> {
@@ -244,20 +241,20 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
     if let Some(fname) = path.strip_prefix("global/") {
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
-        return Ok(ParsedBaseImageFileName {
+        Ok(ParsedBaseImageFileName {
             spcnode: GLOBALTABLESPACE_OID,
             dbnode: 0,
             relnode,
             forknum,
             segno,
             lsn,
-        });
+        })
     } else if let Some(dbpath) = path.strip_prefix("base/") {
         let mut s = dbpath.split("/");
         let dbnode_str = s
             .next()
             .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
-        let dbnode = u32::from_str_radix(dbnode_str, 10)?;
+        let dbnode: u32 = dbnode_str.parse()?;
         let fname = s
             .next()
             .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
@@ -267,19 +264,19 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
 
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
-        return Ok(ParsedBaseImageFileName {
+        Ok(ParsedBaseImageFileName {
             spcnode: DEFAULTTABLESPACE_OID,
             dbnode,
             relnode,
             forknum,
             segno,
             lsn,
-        });
+        })
     } else if let Some(_) = path.strip_prefix("pg_tblspc/") {
         // TODO
-        return Err(FilePathError::new("tablespaces not supported"));
+        Err(FilePathError::new("tablespaces not supported"))
     } else {
-        return Err(FilePathError::new("invalid relation data file name"));
+        Err(FilePathError::new("invalid relation data file name"))
     }
 }
 

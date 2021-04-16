@@ -224,7 +224,7 @@ fn handle_apply_request(
     // Wake up the requester, whether the operation succeeded or not.
     entry_rc.walredo_condvar.notify_all();
 
-    return result;
+    result
 }
 
 struct WalRedoProcess {
@@ -317,7 +317,7 @@ impl WalRedoProcess {
     ) -> Result<Bytes, Error> {
         let mut stdin = self.stdin.borrow_mut();
         let mut stdout = self.stdout.borrow_mut();
-        return runtime.block_on(async {
+        runtime.block_on(async {
             //
             // This async block sends all the commands to the process.
             //
@@ -380,7 +380,7 @@ impl WalRedoProcess {
             let buf = res.0;
 
             Ok::<Bytes, Error>(Bytes::from(std::vec::Vec::from(buf)))
-        });
+        })
     }
 }
 
@@ -398,7 +398,7 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }
 
 fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
@@ -418,7 +418,7 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }
 
 fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
@@ -432,7 +432,7 @@ fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }
 
 fn build_get_page_msg(tag: BufferTag) -> Bytes {
@@ -449,5 +449,5 @@ fn build_get_page_msg(tag: BufferTag) -> Bytes {
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }

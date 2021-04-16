@@ -23,17 +23,17 @@ pub type XLogSegNo = u64;
 
 #[allow(non_snake_case)]
 pub fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> u32 {
-    return (xlogptr as u32) & (wal_segsz_bytes as u32 - 1);
+    (xlogptr as u32) & (wal_segsz_bytes as u32 - 1)
 }
 
 #[allow(non_snake_case)]
 pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
-    return (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo;
+    (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo
 }
 
 #[allow(non_snake_case)]
 pub fn XLByteToSeg(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> XLogSegNo {
-    return xlogptr / wal_segsz_bytes as u64;
+    xlogptr / wal_segsz_bytes as u64
 }
 
 #[allow(non_snake_case)]
@@ -42,7 +42,7 @@ pub fn XLogSegNoOffsetToRecPtr(
     offset: u32,
     wal_segsz_bytes: usize,
 ) -> XLogRecPtr {
-    return segno * (wal_segsz_bytes as u64) + (offset as u64);
+    segno * (wal_segsz_bytes as u64) + (offset as u64)
 }
 
 #[allow(non_snake_case)]
@@ -60,7 +60,7 @@ pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLin
     let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
     let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
     let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
-    return (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli);
+    (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli)
 }
 
 #[allow(non_snake_case)]
@@ -70,7 +70,7 @@ pub fn IsXLogFileName(fname: &str) -> bool {
 
 #[allow(non_snake_case)]
 pub fn IsPartialXLogFileName(fname: &str) -> bool {
-    return fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8]);
+    fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
 }
 
 pub fn get_current_timestamp() -> TimestampTz {
@@ -181,7 +181,7 @@ fn find_end_of_wal_segment(
             }
         }
     }
-    return last_valid_rec_pos as u32;
+    last_valid_rec_pos as u32
 }
 
 pub fn find_end_of_wal(
@@ -237,7 +237,7 @@ pub fn find_end_of_wal(
         let high_ptr = XLogSegNoOffsetToRecPtr(high_segno, high_offs, wal_seg_size);
         return (high_ptr, high_tli);
     }
-    return (0, 0);
+    (0, 0)
 }
 
 pub fn main() {

@@ -205,9 +205,9 @@ fn restore_relfile(
                 let tag = page_cache::BufferTag {
                     spcnode: spcoid,
                     dbnode: dboid,
-                    relnode: relnode,
+                    relnode,
                     forknum: forknum as u8,
-                    blknum: blknum,
+                    blknum,
                 };
                 pcache.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
                 /*
@@ -236,7 +236,7 @@ fn restore_relfile(
     let tag = page_cache::RelTag {
         spcnode: spcoid,
         dbnode: dboid,
-        relnode: relnode,
+        relnode,
         forknum: forknum as u8,
     };
     pcache.relsize_inc(&tag, blknum);
@@ -254,7 +254,7 @@ fn restore_wal(
 ) -> Result<()> {
     let walpath = format!("timelines/{}/wal", timeline);
 
-    let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
+    let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let mut segno = XLByteToSeg(startpoint, 16 * 1024 * 1024);
     let mut offset = XLogSegmentOffset(startpoint, 16 * 1024 * 1024);
@@ -315,7 +315,7 @@ fn restore_wal(
                     };
 
                     let rec = page_cache::WALRecord {
-                        lsn: lsn,
+                        lsn,
                         will_init: blk.will_init || blk.apply_image,
                         rec: recdata.clone(),
                         main_data_offset: decoded.main_data_offset,
@@ -485,5 +485,5 @@ fn parse_relfilename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
         u32::from_str_radix(segno_match.unwrap().as_str(), 10)?
     };
 
-    return Ok((relnode, forknum, segno));
+    Ok((relnode, forknum, segno))
 }

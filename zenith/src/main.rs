@@ -76,7 +76,7 @@ fn main() -> Result<()> {
 
     // all other commands would need config
 
-    let repopath = PathBuf::from(zenith_repo_dir());
+    let repopath = zenith_repo_dir();
     if !repopath.exists() {
         bail!(
             "Zenith repository does not exists in {}.\n\
