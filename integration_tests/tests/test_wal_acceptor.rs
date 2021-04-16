@@ -1,6 +1,7 @@
 // Restart acceptors one by one while compute is under the load.
 use control_plane::compute::ComputeControlPlane;
 use control_plane::storage::TestStorageControlPlane;
+use control_plane::local_env;
 
 use rand::Rng;
 use std::sync::Arc;
@@ -9,14 +10,16 @@ use std::{thread, time};
 
 #[test]
 fn test_acceptors_normal_work() {
-    // Start pageserver that reads WAL directly from that postgres
+    let local_env = local_env::test_env("test_acceptors_normal_work");
+
     const REDUNDANCY: usize = 3;
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy
@@ -91,17 +94,20 @@ fn test_multitenancy() {
 // Majority is always alive
 #[test]
 fn test_acceptors_restarts() {
+    let local_env = local_env::test_env("test_acceptors_restarts");
+
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
     const FAULT_PROBABILITY: f32 = 0.01;
 
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
     let mut rng = rand::thread_rng();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy
@@ -150,16 +156,19 @@ fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize) {
 // them again and check that nothing was losed. Repeat.
 // N_CRASHES env var
 #[test]
-fn test_acceptors_unavalability() {
+fn test_acceptors_unavailability() {
+    let local_env = local_env::test_env("test_acceptors_unavailability");
+
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 2;
 
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy
@@ -226,15 +235,18 @@ fn simulate_failures(cplane: Arc<TestStorageControlPlane>) {
 // Race condition test
 #[test]
 fn test_race_conditions() {
+    let local_env = local_env::test_env("test_race_conditions");
+
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
 
-    let storage_cplane = Arc::new(TestStorageControlPlane::fault_tolerant(REDUNDANCY));
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = Arc::new(TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY));
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy

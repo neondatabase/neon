@@ -563,7 +563,8 @@ impl Connection {
                 "no_user",
             );
             let callme = format!(
-                "callmemaybe host={} port={} replication=1 options='-c system.id={}'",
+                "callmemaybe {} host={} port={} replication=1 options='-c system.id={}'",
+                self.conf.timelineid,
                 self.conf.listen_addr.ip(),
                 self.conf.listen_addr.port(),
                 self.system().get_info().server.system_id,

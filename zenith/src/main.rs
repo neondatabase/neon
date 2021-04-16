@@ -1,29 +1,66 @@
-use clap::{App, Arg, ArgMatches, SubCommand};
-use std::error;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
+use clap::{App, Arg, ArgMatches, SubCommand};
+use anyhow::Result;
+use anyhow::*;
+
 use control_plane::{compute::ComputeControlPlane, local_env, storage};
+use control_plane::local_env::LocalEnv;
+use control_plane::storage::PageServerNode;
 
-type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
+use pageserver::ZTimelineId;
 
-fn main() {
+fn zenith_repo_dir() -> String {
+    // Find repository path
+    match std::env::var_os("ZENITH_REPO_DIR") {
+        Some(val) => String::from(val.to_str().unwrap()),
+        None => ".zenith".into(),
+    }
+}
+
+// Main entry point for the 'zenith' CLI utility
+//
+// This utility can used to work with a local zenith repository.
+// In order to run queries in it, you need to launch the page server,
+// and a compute node against the page server
+fn main() -> Result<()> {
     let name_arg = Arg::with_name("NAME")
         .short("n")
         .index(1)
         .help("name of this postgres instance")
         .required(true);
     let matches = App::new("zenith")
-        .subcommand(SubCommand::with_name("init"))
-        .subcommand(SubCommand::with_name("start"))
-        .subcommand(SubCommand::with_name("stop"))
-        .subcommand(SubCommand::with_name("status"))
+        .about("Zenith CLI")
+        .subcommand(SubCommand::with_name("init")
+                    .about("Initialize a new Zenith repository in current directory"))
+        .subcommand(SubCommand::with_name("branch")
+                    .about("Create a new branch")
+                    .arg(Arg::with_name("branchname")
+                         .required(false)
+                         .index(1))
+                    .arg(Arg::with_name("start-point")
+                         .required(false)
+                         .index(2)))
+        .subcommand(
+            SubCommand::with_name("pageserver")
+                .about("Manage pageserver instance")
+                .subcommand(SubCommand::with_name("status"))
+                .subcommand(SubCommand::with_name("start"))
+                .subcommand(SubCommand::with_name("stop"))
+        )
         .subcommand(
             SubCommand::with_name("pg")
                 .about("Manage postgres instances")
                 .subcommand(
-                    SubCommand::with_name("create"), // .arg(name_arg.clone()
-                                                     //     .required(false)
-                                                     //     .help("name of this postgres instance (will be pgN if omitted)"))
+                    SubCommand::with_name("create")
+                    // .arg(name_arg.clone()
+                    //     .required(false)
+                    //     .help("name of this postgres instance (will be pgN if omitted)"))
+                    .arg(Arg::with_name("timeline")
+                     .required(false)
+                     .index(1))
                 )
                 .subcommand(SubCommand::with_name("list"))
                 .subcommand(SubCommand::with_name("start").arg(name_arg.clone()))
@@ -33,24 +70,24 @@ fn main() {
         .get_matches();
 
     // handle init separately and exit
-    if let Some("init") = matches.subcommand_name() {
-        match local_env::init() {
-            Ok(_) => {
-                println!("Initialization complete! You may start zenith with 'zenith start' now.");
-                exit(0);
-            }
-            Err(e) => {
-                eprintln!("Error during init: {}", e);
-                exit(1);
-            }
-        }
+    if let ("init", Some(sub_args)) = matches.subcommand() {
+        run_init_cmd(sub_args.clone())?;
+        exit(0);
     }
 
     // all other commands would need config
-    let env = match local_env::load_config() {
+
+    let repopath = PathBuf::from(zenith_repo_dir());
+    if !repopath.exists() {
+        bail!("Zenith repository does not exists in {}.\n\
+               Set ZENITH_REPO_DIR or initialize a new repository with 'zenith init'",
+              repopath.display());
+    }
+    // TODO: check that it looks like a zenith repository
+    let env = match local_env::load_config(&repopath) {
         Ok(conf) => conf,
         Err(e) => {
-            eprintln!("Error loading config from ~/.zenith: {}", e);
+            eprintln!("Error loading config from {}: {}", repopath.display(), e);
             exit(1);
         }
     };
@@ -59,6 +96,9 @@ fn main() {
         ("init", Some(_)) => {
             panic!() /* Should not happen. Init was handled before */
         }
+
+        ("branch", Some(sub_args)) => run_branch_cmd(&env, sub_args.clone())?,
+        ("pageserver", Some(sub_args)) => run_pageserver_cmd(&env, sub_args.clone())?,
 
         ("start", Some(_sub_m)) => {
             let pageserver = storage::PageServerNode::from_env(&env);
@@ -86,15 +126,53 @@ fn main() {
             }
         }
         _ => {}
-    }
+    };
+
+    Ok(())
+}
+
+fn run_pageserver_cmd(local_env: &LocalEnv, args: ArgMatches) -> Result<()> {
+    match args.subcommand() {
+        ("status", Some(_sub_m)) => {
+            todo!();
+        }
+        ("start", Some(_sub_m)) => {
+            let psnode = PageServerNode::from_env(local_env);
+            psnode.start()?;
+            println!("Page server started");
+        }
+        ("stop", Some(_sub_m)) => {
+            todo!();
+        }
+        _ => unreachable!(),
+    };
+
+    Ok(())
+}
+
+// Peek into the repository, to grab the timeline ID of given branch
+pub fn get_branch_timeline(repopath: &Path, branchname: &str) -> ZTimelineId {
+    let branchpath = repopath.join("refs/branches/".to_owned() + branchname);
+
+    ZTimelineId::from_str(&(fs::read_to_string(&branchpath).unwrap())).unwrap()
 }
 
 fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
     match pg_match.subcommand() {
-        ("create", Some(_sub_m)) => {
-            cplane.new_node()?;
+        ("create", Some(sub_m)) => {
+            // FIXME: cheat and resolve the timeline by peeking into the
+            // repository. In reality, when you're launching a compute node
+            // against a possibly-remote page server, we wouldn't know what
+            // branches exist in the remote repository. Or would we require
+            // that you "zenith fetch" them into a local repoitory first?
+            let timeline_arg = sub_m.value_of("timeline").unwrap_or("main");
+            let timeline = get_branch_timeline(&env.repo_path, timeline_arg);
+
+            println!("Initializing Postgres on timeline {}...", timeline);
+
+            cplane.new_node(timeline)?;
         }
         ("list", Some(_sub_m)) => {
             println!("NODE\tADDRESS\tSTATUS");
@@ -107,7 +185,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let node = cplane
                 .nodes
                 .get(name)
-                .ok_or(format!("postgres {} is not found", name))?;
+                .ok_or(anyhow!("postgres {} is not found", name))?;
             node.start()?;
         }
         ("stop", Some(sub_m)) => {
@@ -115,7 +193,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let node = cplane
                 .nodes
                 .get(name)
-                .ok_or(format!("postgres {} is not found", name))?;
+                .ok_or(anyhow!("postgres {} is not found", name))?;
             node.stop()?;
         }
 
@@ -123,4 +201,129 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     }
 
     Ok(())
+}
+
+
+// "zenith init" - Initialize a new Zenith repository in current dir
+fn run_init_cmd(_args: ArgMatches) -> Result<()> {
+    local_env::init()?;
+    Ok(())
+}
+
+// handle "zenith branch" subcommand
+fn run_branch_cmd(local_env: &LocalEnv, args: ArgMatches) -> Result<()> {
+    let repopath = local_env.repo_path.to_str().unwrap();
+
+    if let Some(branchname) = args.value_of("branchname") {
+        if PathBuf::from(format!("{}/refs/branches/{}", repopath, branchname)).exists() {
+            anyhow::bail!("branch {} already exists", branchname);
+        }
+
+        if let Some(startpoint_str) = args.value_of("start-point") {
+
+            let mut startpoint = parse_point_in_time(startpoint_str)?;
+
+            if startpoint.lsn == 0 {
+                // Find end of WAL on the old timeline
+                let end_of_wal = local_env::find_end_of_wal(local_env, startpoint.timelineid)?;
+
+                println!("branching at end of WAL: {:X}/{:X}", end_of_wal >> 32, end_of_wal & 0xffffffff);
+
+                startpoint.lsn = end_of_wal;
+            }
+
+            return local_env::create_branch(local_env, branchname, startpoint);
+
+        } else {
+            panic!("Missing start-point");
+        }
+    } else {
+        // No arguments, list branches
+        list_branches();
+    }
+    Ok(())
+}
+
+fn list_branches() {
+    // list branches
+    let paths = fs::read_dir(zenith_repo_dir() + "/refs/branches").unwrap();
+
+    for path in paths {
+        let filename = path.unwrap().file_name().to_str().unwrap().to_owned();
+        println!("  {}", filename);
+    }
+}
+
+//
+// Parse user-given string that represents a point-in-time.
+//
+// We support multiple variants:
+//
+// Raw timeline id in hex, meaning the end of that timeline:
+//    bc62e7d612d0e6fe8f99a6dd2f281f9d
+//
+// A specific LSN on a timeline:
+//    bc62e7d612d0e6fe8f99a6dd2f281f9d@2/15D3DD8
+//
+// Same, with a human-friendly branch name:
+//    main
+//    main@2/15D3DD8
+//
+// Human-friendly tag name:
+//    mytag
+//
+//
+fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
+
+    let mut strings = s.split("@");
+    let name = strings.next().unwrap();
+
+    let lsn: Option<u64>;
+    if let Some(lsnstr) = strings.next() {
+        let mut s = lsnstr.split("/");
+        let lsn_hi: u64 = s.next().unwrap().parse()?;
+        let lsn_lo: u64 = s.next().unwrap().parse()?;
+        lsn = Some(lsn_hi << 32 | lsn_lo);
+    }
+    else {
+        lsn = None
+    }
+
+    // Check if it's a tag
+    if lsn.is_none() {
+        let tagpath:PathBuf = PathBuf::from(zenith_repo_dir() + "/refs/tags/" + name);
+        if tagpath.exists() {
+            let pointstr = fs::read_to_string(tagpath)?;
+
+            return parse_point_in_time(&pointstr);
+        }
+    }
+    // Check if it's a branch
+    // Check if it's branch @ LSN
+    let branchpath:PathBuf = PathBuf::from(zenith_repo_dir() + "/refs/branches/" + name);
+    if branchpath.exists() {
+        let pointstr = fs::read_to_string(branchpath)?;
+
+        let mut result = parse_point_in_time(&pointstr)?;
+        if lsn.is_some() {
+            result.lsn = lsn.unwrap();
+        } else {
+            result.lsn = 0;
+        }
+        return Ok(result);
+    }
+
+    // Check if it's a timelineid
+    // Check if it's timelineid @ LSN
+    let tlipath:PathBuf = PathBuf::from(zenith_repo_dir() + "/timelines/" + name);
+    if tlipath.exists() {
+        let result = local_env::PointInTime {
+            timelineid: ZTimelineId::from_str(name)?,
+            lsn: lsn.unwrap_or(0)
+        };
+
+        return Ok(result);
+    }
+
+    panic!("could not parse point-in-time {}", s);
 }

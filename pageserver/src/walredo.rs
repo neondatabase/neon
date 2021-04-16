@@ -22,7 +22,7 @@ use std::io::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::{path::PathBuf, process::Stdio};
+use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -35,14 +35,15 @@ use crate::page_cache;
 use crate::page_cache::CacheEntry;
 use crate::page_cache::WALRecord;
 use crate::{page_cache::BufferTag, PageServerConf};
+use crate::ZTimelineId;
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 
 //
 // Main entry point for the WAL applicator thread.
 //
-pub fn wal_redo_main(conf: &PageServerConf, sys_id: u64) {
-    info!("WAL redo thread started {}", sys_id);
+pub fn wal_redo_main(conf: &PageServerConf, timelineid: ZTimelineId) {
+    info!("WAL redo thread started {}", timelineid);
 
     // We block on waiting for requests on the walredo request channel, but
     // use async I/O to communicate with the child process. Initialize the
@@ -52,15 +53,15 @@ pub fn wal_redo_main(conf: &PageServerConf, sys_id: u64) {
         .build()
         .unwrap();
 
-    let pcache = page_cache::get_pagecache(conf, sys_id);
+    let pcache = page_cache::get_pagecache(conf, timelineid).unwrap();
 
     // Loop forever, handling requests as they come.
     let walredo_channel_receiver = &pcache.walredo_receiver;
     loop {
         let mut process: WalRedoProcess;
-        let datadir = conf.data_dir.join(format!("wal-redo/{}", sys_id));
+        let datadir = format!("wal-redo/{}", timelineid);
 
-        info!("launching WAL redo postgres process {}", sys_id);
+        info!("launching WAL redo postgres process {}", timelineid);
         {
             let _guard = runtime.enter();
             process = WalRedoProcess::launch(&datadir, &runtime).unwrap();
@@ -147,13 +148,13 @@ impl WalRedoProcess {
     // Tests who run pageserver binary are setting proper PG_BIN_DIR
     // and PG_LIB_DIR so that WalRedo would start right postgres. We may later
     // switch to setting same things in pageserver config file.
-    fn launch(datadir: &PathBuf, runtime: &Runtime) -> Result<WalRedoProcess, Error> {
+    fn launch(datadir: &str, runtime: &Runtime) -> Result<WalRedoProcess, Error> {
         // Create empty data directory for wal-redo postgres deleting old one.
-        fs::remove_dir_all(datadir.to_str().unwrap()).ok();
+        fs::remove_dir_all(datadir).ok();
         let initdb = runtime
             .block_on(
                 Command::new("initdb")
-                    .args(&["-D", datadir.to_str().unwrap()])
+                    .args(&["-D", datadir])
                     .arg("-N")
                     .output(),
             )
@@ -173,14 +174,11 @@ impl WalRedoProcess {
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
-            .env("PGDATA", datadir.to_str().unwrap())
+            .env("PGDATA", datadir)
             .spawn()
             .expect("postgres --wal-redo command failed to start");
 
-        info!(
-            "launched WAL redo postgres process on {}",
-            datadir.to_str().unwrap()
-        );
+        info!("launched WAL redo postgres process on {}", datadir);
 
         let stdin = child.stdin.take().expect("failed to open child's stdin");
         let stderr = child.stderr.take().expect("failed to open child's stderr");

@@ -4,7 +4,7 @@ use log::*;
 use std::cmp::min;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub const XLOG_FNAME_LEN: usize = 24;
@@ -89,7 +89,7 @@ pub fn get_current_timestamp() -> TimestampTz {
 }
 
 fn find_end_of_wal_segment(
-    data_dir: &PathBuf,
+    data_dir: &Path,
     segno: XLogSegNo,
     tli: TimeLineID,
     wal_seg_size: usize,
@@ -185,7 +185,7 @@ fn find_end_of_wal_segment(
 }
 
 pub fn find_end_of_wal(
-    data_dir: &PathBuf,
+    data_dir: &Path,
     wal_seg_size: usize,
     precise: bool,
 ) -> (XLogRecPtr, TimeLineID) {

@@ -7,6 +7,8 @@
 //
 
 use crate::{walredo, PageServerConf};
+use crate::restore_local_repo::restore_timeline;
+use crate::ZTimelineId;
 use anyhow::bail;
 use bytes::Bytes;
 use core::ops::Bound::Included;
@@ -107,30 +109,49 @@ struct PageCacheShared {
 }
 
 lazy_static! {
-    pub static ref PAGECACHES: Mutex<HashMap<u64, Arc<PageCache>>> = Mutex::new(HashMap::new());
+    pub static ref PAGECACHES: Mutex<HashMap<ZTimelineId, Arc<PageCache>>> = Mutex::new(HashMap::new());
 }
 
-pub fn get_pagecache(conf: &PageServerConf, sys_id: u64) -> Arc<PageCache> {
+// Get Page Cache for given timeline. It is assumed to already exist.
+pub fn get_pagecache(_conf: &PageServerConf, timelineid: ZTimelineId) -> Option<Arc<PageCache>> {
+    let pcaches = PAGECACHES.lock().unwrap();
+
+    match pcaches.get(&timelineid) {
+        Some(pcache) => Some(pcache.clone()),
+        None => None
+    }
+}
+
+pub fn get_or_restore_pagecache(conf: &PageServerConf, timelineid: ZTimelineId) -> anyhow::Result<Arc<PageCache>> {
     let mut pcaches = PAGECACHES.lock().unwrap();
 
-    if !pcaches.contains_key(&sys_id) {
-        pcaches.insert(sys_id, Arc::new(init_page_cache()));
+    match pcaches.get(&timelineid) {
+        Some(pcache) => Ok(pcache.clone()),
+        None => {
+            let pcache = init_page_cache();
 
-        // Initialize the WAL redo thread
-        //
-        // Now join_handle is not saved any where and we won'try restart tharead
-        // if it is dead. We may later stop that treads after some inactivity period
-        // and restart them on demand.
-        let conf = conf.clone();
-        let _walredo_thread = thread::Builder::new()
-            .name("WAL redo thread".into())
-            .spawn(move || {
-                walredo::wal_redo_main(&conf, sys_id);
-            })
-            .unwrap();
+            restore_timeline(conf, &pcache, timelineid)?;
+
+            let result = Arc::new(pcache);
+
+            pcaches.insert(timelineid, result.clone());
+
+            // Initialize the WAL redo thread
+            //
+            // Now join_handle is not saved any where and we won'try restart tharead
+            // if it is dead. We may later stop that treads after some inactivity period
+            // and restart them on demand.
+            let conf_copy = conf.clone();
+            let _walredo_thread = thread::Builder::new()
+                .name("WAL redo thread".into())
+                .spawn(move || {
+                    walredo::wal_redo_main(&conf_copy, timelineid);
+                })
+                .unwrap();
+
+            return Ok(result);
+        }
     }
-
-    pcaches.get(&sys_id).unwrap().clone()
 }
 
 fn init_page_cache() -> PageCache {
@@ -429,7 +450,8 @@ impl PageCache {
     // Adds a WAL record to the page cache
     //
     pub fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
-        let key = CacheKey { tag, lsn: rec.lsn };
+        let lsn = rec.lsn;
+        let key = CacheKey { tag, lsn };
 
         let entry = CacheEntry::new(key.clone());
         entry.content.lock().unwrap().wal_record = Some(rec);
@@ -447,13 +469,14 @@ impl PageCache {
             *rel_entry = tag.blknum + 1;
         }
 
-        trace!("put_wal_record lsn: {}", key.lsn);
+        //trace!("put_wal_record lsn: {}", lsn);
 
         let oldentry = shared.pagecache.insert(key, Arc::new(entry));
         self.num_entries.fetch_add(1, Ordering::Relaxed);
 
         if !oldentry.is_none() {
-            error!("overwriting WAL record in page cache");
+            error!("overwriting WAL record with LSN {:X}/{:X} in page cache",
+                   lsn >> 32, lsn & 0xffffffff);
         }
 
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
@@ -486,12 +509,17 @@ impl PageCache {
         let mut shared = self.shared.lock().unwrap();
 
         // Can't move backwards.
-        assert!(lsn >= shared.last_valid_lsn);
+        let oldlsn = shared.last_valid_lsn;
+        if lsn >= oldlsn {
 
-        shared.last_valid_lsn = lsn;
-        self.valid_lsn_condvar.notify_all();
+            shared.last_valid_lsn = lsn;
+            self.valid_lsn_condvar.notify_all();
 
-        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+            self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+        } else {
+            warn!("attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
+                  oldlsn >> 32, oldlsn & 0xffffffff, lsn >> 32, lsn & 0xffffffff);
+        }
     }
 
     //
@@ -606,7 +634,7 @@ impl PageCache {
 
         if let Some(to) = to {
             if to >= *entry {
-                *entry = to + 1;
+                *entry = to;
             }
         }
     }

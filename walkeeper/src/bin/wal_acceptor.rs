@@ -13,6 +13,8 @@ use clap::{App, Arg};
 
 use slog::Drain;
 
+use pageserver::ZTimelineId;
+
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
 
@@ -25,6 +27,12 @@ fn main() -> Result<(), io::Error> {
                 .long("dir")
                 .takes_value(true)
                 .help("Path to the WAL acceptor data directory"),
+        )
+        .arg(
+            Arg::with_name("timelineid")
+                .long("timelineid")
+                .takes_value(true)
+                .help("zenith timeline id"),
         )
         .arg(
             Arg::with_name("listen")
@@ -58,6 +66,7 @@ fn main() -> Result<(), io::Error> {
 
     let mut conf = WalAcceptorConf {
         data_dir: PathBuf::from("./"),
+        timelineid: ZTimelineId::from([0u8; 16]),
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
@@ -66,6 +75,10 @@ fn main() -> Result<(), io::Error> {
 
     if let Some(dir) = arg_matches.value_of("datadir") {
         conf.data_dir = PathBuf::from(dir);
+    }
+
+    if let Some(timelineid_str) = arg_matches.value_of("timelineid") {
+        conf.timelineid = ZTimelineId::from_str(timelineid_str).unwrap();
     }
 
     if arg_matches.is_present("no-sync") {
@@ -98,7 +111,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<(), io::Error> {
         info!("daemonizing...");
 
         // There should'n be any logging to stdin/stdout. Redirect it to the main log so
-        // that we will see any accidental manual fpritf's or backtraces.
+        // that we will see any accidental manual fprintf's or backtraces.
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)

@@ -12,4 +12,6 @@ rand = "0.8.3"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 
+pageserver = { path = "../pageserver" }
+walkeeper = { path = "../walkeeper" }
 control_plane = { path = "../control_plane" }

@@ -10,11 +10,20 @@ use crate::page_cache;
 use crate::page_cache::BufferTag;
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
+use crate::ZTimelineId;
 use anyhow::Error;
+use lazy_static::lazy_static;
 use log::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
+use std::collections::HashMap;
+use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::{Write, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Mutex;
+use std::thread;
 use tokio::runtime;
 use tokio::time::{sleep, Duration};
 use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
@@ -22,10 +31,51 @@ use tokio_postgres::{NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
 
 //
+// We keep one WAL Receiver active per timeline.
+//
+struct WalReceiverEntry {
+    wal_producer_connstr: String,
+}
+
+lazy_static! {
+    static ref WAL_RECEIVERS: Mutex<HashMap<ZTimelineId, WalReceiverEntry>> = Mutex::new(HashMap::new());
+}
+
+// Launch a new WAL receiver, or tell one that's running about change in connection string
+pub fn launch_wal_receiver(conf: &PageServerConf, timelineid: ZTimelineId, wal_producer_connstr: &str) {
+    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+
+    match receivers.get_mut(&timelineid) {
+        Some(receiver) => {
+            receiver.wal_producer_connstr = wal_producer_connstr.into();
+        }
+        None => {
+            let receiver = WalReceiverEntry { wal_producer_connstr: wal_producer_connstr.into() };
+            receivers.insert(timelineid, receiver);
+
+            // Also launch a new thread to handle this connection
+            let conf_copy = conf.clone();
+            let _walreceiver_thread = thread::Builder::new()
+                .name("WAL receiver thread".into())
+                .spawn(move || {
+                    thread_main(&conf_copy, timelineid);
+                }).unwrap();
+        }
+    };
+}
+
+// Look up current WAL producer connection string in the hash table
+fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
+    let receivers = WAL_RECEIVERS.lock().unwrap();
+
+    receivers.get(&timelineid).unwrap().wal_producer_connstr.clone()
+}
+
+//
 // This is the entry point for the WAL receiver thread.
 //
-pub fn thread_main(conf: &PageServerConf, wal_producer_connstr: &str) {
-    info!("WAL receiver thread started: '{}'", wal_producer_connstr);
+fn thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
+    info!("WAL receiver thread started for timeline : '{}'", timelineid);
 
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
@@ -34,7 +84,10 @@ pub fn thread_main(conf: &PageServerConf, wal_producer_connstr: &str) {
 
     runtime.block_on(async {
         loop {
-            let res = walreceiver_main(conf, wal_producer_connstr).await;
+            // Look up the current WAL producer address
+            let wal_producer_connstr = get_wal_producer_connstr(timelineid);
+
+            let res = walreceiver_main(conf, timelineid, &wal_producer_connstr).await;
 
             if let Err(e) = res {
                 info!(
@@ -47,7 +100,7 @@ pub fn thread_main(conf: &PageServerConf, wal_producer_connstr: &str) {
     });
 }
 
-async fn walreceiver_main(conf: &PageServerConf, wal_producer_connstr: &str) -> Result<(), Error> {
+async fn walreceiver_main(conf: &PageServerConf, timelineid: ZTimelineId, wal_producer_connstr: &str) -> Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
     let connect_cfg = format!("{} replication=true", wal_producer_connstr);
@@ -67,7 +120,7 @@ async fn walreceiver_main(conf: &PageServerConf, wal_producer_connstr: &str) -> 
     let end_of_wal = u64::from(identify.xlogpos);
     let mut caught_up = false;
 
-    let pcache = page_cache::get_pagecache(conf, identify.systemid);
+    let pcache = page_cache::get_pagecache(&conf, timelineid).unwrap();
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -95,9 +148,10 @@ async fn walreceiver_main(conf: &PageServerConf, wal_producer_connstr: &str) -> 
         }
     }
     debug!(
-        "starting replication from {:X}/{:X}, server is at {:X}/{:X}...",
+        "starting replication from {:X}/{:X} for timeline {}, server is at {:X}/{:X}...",
         (startpoint >> 32),
         (startpoint & 0xffffffff),
+        timelineid,
         (end_of_wal >> 32),
         (end_of_wal & 0xffffffff)
     );
@@ -120,6 +174,11 @@ async fn walreceiver_main(conf: &PageServerConf, wal_producer_connstr: &str) -> 
                 let startlsn = xlog_data.wal_start();
                 let endlsn = startlsn + data.len() as u64;
 
+                write_wal_file(startlsn,
+                               timelineid,
+                               16 * 1024 * 1024, // FIXME
+                               data)?;
+
                 trace!(
                     "received XLogData between {:X}/{:X} and {:X}/{:X}",
                     (startlsn >> 32),
@@ -131,8 +190,8 @@ async fn walreceiver_main(conf: &PageServerConf, wal_producer_connstr: &str) -> 
                 waldecoder.feed_bytes(data);
 
                 loop {
-                    if let Some((lsn, recdata)) = waldecoder.poll_decode() {
-                        let decoded = decode_wal_record(startlsn, recdata.clone());
+                    if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                        let decoded = decode_wal_record(recdata.clone());
 
                         // Put the WAL record to the page cache. We make a separate copy of
                         // it for every block it modifies. (The actual WAL record is kept in
@@ -259,4 +318,154 @@ pub async fn identify_system(client: &tokio_postgres::Client) -> Result<Identify
     } else {
         Err(IdentifyError)?
     }
+}
+
+pub const XLOG_FNAME_LEN: usize = 24;
+pub const XLOG_BLCKSZ: usize = 8192;
+pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
+pub const XLOG_PAGE_MAGIC: u16 = 0xD109;
+pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
+pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = XLP_REM_LEN_OFFS + 4 + 4;
+pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = XLOG_SIZE_OF_XLOG_SHORT_PHD + 8 + 4 + 4;
+pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
+pub const XLOG_SIZE_OF_XLOG_RECORD: usize = XLOG_RECORD_CRC_OFFS + 4;
+pub type XLogRecPtr = u64;
+pub type TimeLineID = u32;
+pub type TimestampTz = u64;
+pub type XLogSegNo = u64;
+
+#[allow(non_snake_case)]
+pub fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> u32 {
+    return (xlogptr as u32) & (wal_segsz_bytes as u32 - 1);
+}
+
+#[allow(non_snake_case)]
+pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
+    return (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo;
+}
+
+#[allow(non_snake_case)]
+pub fn XLByteToSeg(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> XLogSegNo {
+    return xlogptr / wal_segsz_bytes as u64;
+}
+
+#[allow(non_snake_case)]
+pub fn XLogSegNoOffsetToRecPtr(
+    segno: XLogSegNo,
+    offset: u32,
+    wal_segsz_bytes: usize,
+) -> XLogRecPtr {
+    return segno * (wal_segsz_bytes as u64) + (offset as u64);
+}
+
+#[allow(non_snake_case)]
+pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
+    return format!(
+        "{:>08X}{:>08X}{:>08X}",
+        tli,
+        logSegNo / XLogSegmentsPerXLogId(wal_segsz_bytes),
+        logSegNo % XLogSegmentsPerXLogId(wal_segsz_bytes)
+    );
+}
+
+#[allow(non_snake_case)]
+pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
+    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
+    let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
+    let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
+    return (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli);
+}
+
+
+fn write_wal_file(
+    startpos: XLogRecPtr,
+    timeline: ZTimelineId,
+    wal_seg_size: usize,
+    buf: &[u8],
+) -> anyhow::Result<()> {
+    let mut bytes_left: usize = buf.len();
+    let mut bytes_written: usize = 0;
+    let mut partial;
+    let mut start_pos = startpos;
+    const ZERO_BLOCK: &'static [u8] = &[0u8; XLOG_BLCKSZ];
+
+    let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
+
+    /* Extract WAL location for this block */
+    let mut xlogoff = XLogSegmentOffset(start_pos, wal_seg_size) as usize;
+
+    while bytes_left != 0 {
+        let bytes_to_write;
+
+        /*
+         * If crossing a WAL boundary, only write up until we reach wal
+         * segment size.
+         */
+        if xlogoff + bytes_left > wal_seg_size {
+            bytes_to_write = wal_seg_size - xlogoff;
+        } else {
+            bytes_to_write = bytes_left;
+        }
+
+        /* Open file */
+        let segno = XLByteToSeg(start_pos, wal_seg_size);
+        let wal_file_name = XLogFileName(1, // FIXME: always use Postgres timeline 1
+                                         segno, wal_seg_size);
+        let wal_file_path = wal_dir
+            .join(wal_file_name.clone());
+        let wal_file_partial_path = wal_dir
+            .join(wal_file_name.clone() + ".partial");
+
+        {
+            let mut wal_file: File;
+            /* Try to open already completed segment */
+            if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path) {
+                wal_file = file;
+                partial = false;
+            } else if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_partial_path)
+            {
+                /* Try to open existed partial file */
+                wal_file = file;
+                partial = true;
+            } else {
+                /* Create and fill new partial file */
+                partial = true;
+                match OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(&wal_file_partial_path)
+                {
+                    Ok(mut file) => {
+                        for _ in 0..(wal_seg_size / XLOG_BLCKSZ) {
+                            file.write_all(&ZERO_BLOCK)?;
+                        }
+                        wal_file = file;
+                    }
+                    Err(e) => {
+                        error!("Failed to open log file {:?}: {}", &wal_file_path, e);
+                        return Err(e.into());
+                    }
+                }
+            }
+            wal_file.seek(SeekFrom::Start(xlogoff as u64))?;
+            wal_file.write_all(&buf[bytes_written..(bytes_written + bytes_to_write)])?;
+
+            // FIXME: Flush the file
+            //wal_file.sync_all()?;
+        }
+        /* Write was successful, advance our position */
+        bytes_written += bytes_to_write;
+        bytes_left -= bytes_to_write;
+        start_pos += bytes_to_write as u64;
+        xlogoff += bytes_to_write;
+
+        /* Did we reach the end of a WAL segment? */
+        if XLogSegmentOffset(start_pos, wal_seg_size) == 0 {
+            xlogoff = 0;
+            if partial {
+                fs::rename(&wal_file_partial_path, &wal_file_path)?;
+            }
+        }
+    }
+    Ok(())
 }
