@@ -338,7 +338,6 @@ impl ComputeControlPlane<'_> {
             shared_buffers = 1MB\n\
             max_connections = 100\n\
             wal_level = replica\n\
-			max_parallel_workers = 0\n\
 			wal_sender_timeout = 0\n\
             listen_addresses = '{address}'\n\
             port = {port}\n\
@@ -397,7 +396,6 @@ impl ComputeControlPlane<'_> {
             shared_buffers = 1MB\n\
             max_connections = 100\n\
             wal_level = replica\n\
-			max_parallel_workers = 0\n\
             listen_addresses = '{address}'\n\
             port = {port}\n\
             computenode_mode = true\n\
@@ -653,7 +651,7 @@ pub fn regress_check(pg: &PostgresNode) {
             format!("--dlpath={}", regress_build_path.to_str().unwrap()).as_str(),
             format!(
                 "--schedule={}",
-                regress_src_path.join("serial_schedule").to_str().unwrap()
+                regress_src_path.join("parallel_schedule").to_str().unwrap()
             )
             .as_str(),
             format!("--inputdir={}", regress_src_path.to_str().unwrap()).as_str(),
