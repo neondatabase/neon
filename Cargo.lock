@@ -384,7 +384,6 @@ version = "0.1.0"
 dependencies = [
  "home",
  "lazy_static",
- "pageserver",
  "postgres",
  "rand 0.8.3",
  "regex",
@@ -392,7 +391,6 @@ dependencies = [
  "serde_derive",
  "tokio-postgres",
  "toml",
- "walkeeper",
 ]
 
 [[package]]
@@ -928,11 +926,9 @@ version = "0.1.0"
 dependencies = [
  "control_plane",
  "lazy_static",
- "pageserver",
  "postgres",
  "rand 0.8.3",
  "tokio-postgres",
- "walkeeper",
 ]
 
 [[package]]
@@ -2295,7 +2291,6 @@ dependencies = [
  "futures",
  "lazy_static",
  "log",
- "pageserver",
  "postgres",
  "postgres-protocol",
  "rand 0.8.3",

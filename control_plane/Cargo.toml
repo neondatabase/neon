@@ -17,6 +17,3 @@ toml = ""
 home = "0.5.3"
 lazy_static = ""
 regex = "1"
-
-pageserver = { path = "../pageserver" }
-walkeeper = { path = "../walkeeper" }

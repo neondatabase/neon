@@ -34,5 +34,3 @@ postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 anyhow = "1.0"
 crc32c = "0.6.0"
-
-pageserver = { path = "../pageserver" }
