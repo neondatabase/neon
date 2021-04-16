@@ -366,7 +366,7 @@ pub fn thread_main(conf: WalAcceptorConf) {
     info!("Starting wal acceptor on {}", conf.listen_addr);
 
     runtime.block_on(async {
-        let _unused = main_loop(&conf).await;
+        main_loop(&conf).await.unwrap();
     });
 }
 
@@ -443,7 +443,7 @@ impl System {
         return shared_state.hs_feedback;
     }
 
-    // Load and lock control file (prevent running more than one instance of safekeeper
+    // Load and lock control file (prevent running more than one instance of safekeeper)
     fn load_control_file(&self, conf: &WalAcceptorConf) {
         let control_file_path = conf
             .data_dir
@@ -678,6 +678,7 @@ impl Connection {
         // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
         if let Err(e) = self.request_callback().await {
             // Do not treate it as fatal error and continue work
+            // FIXME: we should retry after a while...
             error!("Failed to send callme request to pageserver: {}", e);
         }
 
@@ -893,11 +894,11 @@ impl Connection {
         );
         BeMessage::write(
             &mut self.outbuf,
-            &BeMessage::DataRow(&[Some(lsn_bytes), Some(tli_bytes), Some(sysid_bytes), None]),
+            &BeMessage::DataRow(&[Some(sysid_bytes), Some(tli_bytes), Some(lsn_bytes), None]),
         );
         BeMessage::write(
             &mut self.outbuf,
-            &BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"),
+            &BeMessage::CommandComplete(b"IDENTIFY_SYSTEM\0"),
         );
         BeMessage::write(&mut self.outbuf, &BeMessage::ReadyForQuery);
         self.send().await?;

@@ -146,20 +146,20 @@ impl<'a> BeMessage<'a> {
 
             BeMessage::RowDescription(rows) => {
                 buf.put_u8(b'T');
-                let total_len: u32 = rows
-                    .iter()
-                    .fold(0, |acc, row| acc + row.name.len() as u32 + 3 * (4 + 2));
-                buf.put_u32(4 + 2 + total_len);
+
+                let mut body = BytesMut::new();
+                body.put_i16(rows.len() as i16); // # of fields
                 for row in rows.iter() {
-                    buf.put_i16(row.name.len() as i16);
-                    buf.put_slice(row.name);
-                    buf.put_i32(0); /* table oid */
-                    buf.put_i16(0); /* attnum */
-                    buf.put_u32(row.typoid);
-                    buf.put_i16(row.typlen);
-                    buf.put_i32(-1); /* typmod */
-                    buf.put_i16(0); /* format code */
+                    body.put_slice(row.name);
+                    body.put_i32(0); /* table oid */
+                    body.put_i16(0); /* attnum */
+                    body.put_u32(row.typoid);
+                    body.put_i16(row.typlen);
+                    body.put_i32(-1); /* typmod */
+                    body.put_i16(0); /* format code */
                 }
+                buf.put_i32((4 + body.len()) as i32); // # of bytes, including len field itself
+                buf.put(body);
             }
 
             BeMessage::DataRow(vals) => {
