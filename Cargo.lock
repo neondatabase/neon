@@ -1616,7 +1616,7 @@ dependencies = [
 [[package]]
 name = "rust-s3"
 version = "0.27.0-beta1"
-source = "git+https://github.com/hlinnaka/rust-s3#7f15a24ec7daa0a5d9516da706212745f9042818"
+source = "git+https://github.com/hlinnaka/rust-s3?rev=7f15a24ec7daa0a5d9516da706212745f9042818#7f15a24ec7daa0a5d9516da706212745f9042818"
 dependencies = [
  "async-std",
  "async-trait",
