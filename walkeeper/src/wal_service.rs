@@ -444,7 +444,7 @@ impl Timeline {
 
     fn get_hs_feedback(&self) -> HotStandbyFeedback {
         let shared_state = self.mutex.lock().unwrap();
-        return shared_state.hs_feedback;
+        shared_state.hs_feedback
     }
 
     // Load and lock control file (prevent running more than one instance of safekeeper)
@@ -527,7 +527,7 @@ impl Timeline {
 
         let file = shared_state.control_file.as_mut().unwrap();
         file.seek(SeekFrom::Start(0))?;
-        file.write_all(&mut buf[..])?;
+        file.write_all(&buf[..])?;
         if sync {
             file.sync_all()?;
         }

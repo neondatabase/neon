@@ -125,7 +125,7 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
             .with_context(|| format!("failed to open {:?}", &log_filename))?;
 
         let daemonize = Daemonize::new()
-            .pid_file(repodir.clone().join("pageserver.pid"))
+            .pid_file(repodir.join("pageserver.pid"))
             .working_directory(repodir)
             .stdout(stdout)
             .stderr(stderr);
@@ -197,7 +197,7 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
             if record.level().is_at_least(slog::Level::Debug) {
                 return true;
             }
-            return false;
+            false
         });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());
@@ -215,7 +215,7 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
             {
                 return true;
             }
-            return false;
+            false
         })
         .fuse();
         let logger = slog::Logger::root(drain, slog::o!());

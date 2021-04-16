@@ -154,7 +154,7 @@ pub fn get_or_restore_pagecache(
                 })
                 .unwrap();
 
-            return Ok(result);
+            Ok(result)
         }
     }
 }
@@ -412,7 +412,7 @@ impl PageCache {
             tag.blknum
         );
 
-        return Ok(page_img);
+        Ok(page_img)
     }
 
     //
@@ -467,7 +467,7 @@ impl PageCache {
         }
 
         records.reverse();
-        return (base_img, records);
+        (base_img, records)
     }
 
     //
@@ -610,7 +610,7 @@ impl PageCache {
     pub fn get_last_valid_lsn(&self) -> u64 {
         let shared = self.shared.lock().unwrap();
 
-        return shared.last_record_lsn;
+        shared.last_record_lsn
     }
 
     //

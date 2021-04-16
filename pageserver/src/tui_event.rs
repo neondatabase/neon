@@ -76,8 +76,8 @@ impl Events {
         };
         Events {
             rx,
-            ignore_exit_key,
             input_handle,
+            ignore_exit_key,
             tick_handle,
         }
     }

@@ -56,7 +56,7 @@ impl TestStorageControlPlane {
             wal_acceptors: Vec::new(),
             pageserver: pserver,
             test_done: AtomicBool::new(false),
-            repopath: repopath,
+            repopath,
         }
     }
 
@@ -73,7 +73,7 @@ impl TestStorageControlPlane {
             wal_acceptors: Vec::new(),
             pageserver: pserver,
             test_done: AtomicBool::new(false),
-            repopath: repopath,
+            repopath,
         }
     }
 
@@ -89,7 +89,7 @@ impl TestStorageControlPlane {
                 listen_address: None,
             }),
             test_done: AtomicBool::new(false),
-            repopath: repopath,
+            repopath,
         };
         cplane.pageserver.start().unwrap();
 
@@ -233,7 +233,7 @@ impl PageServerNode {
         if !status.success() {
             anyhow::bail!("Failed to stop pageserver with pid {}", pid);
         } else {
-            return Ok(());
+            Ok(())
         }
     }
 
