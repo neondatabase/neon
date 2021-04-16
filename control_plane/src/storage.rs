@@ -1,4 +1,3 @@
-use std::error;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
@@ -9,13 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use anyhow::Result;
 
 use postgres::{Client, NoTls};
 
+use crate::local_env::LocalEnv;
 use crate::compute::PostgresNode;
-use crate::local_env::{self, LocalEnv};
-
-type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
+use pageserver::ZTimelineId;
 
 //
 // Collection of several example deployments useful for tests.
@@ -27,63 +26,72 @@ pub struct TestStorageControlPlane {
     pub wal_acceptors: Vec<WalAcceptorNode>,
     pub pageserver: Arc<PageServerNode>,
     pub test_done: AtomicBool,
+    pub repopath: PathBuf,
 }
 
 impl TestStorageControlPlane {
+
+    // Peek into the repository, to grab the timeline ID of given branch
+    pub fn get_branch_timeline(&self, branchname: &str) -> ZTimelineId {
+
+        let branchpath = self.repopath.join("refs/branches/".to_owned() + branchname);
+
+        ZTimelineId::from_str(&(fs::read_to_string(&branchpath).unwrap())).unwrap()
+    }
+
     // postgres <-> page_server
-    pub fn one_page_server(pgdata_base_path: String) -> TestStorageControlPlane {
-        let env = local_env::test_env();
+    //
+    // Initialize a new repository and configure a page server to run in it
+    //
+    pub fn one_page_server(local_env: &LocalEnv) -> TestStorageControlPlane {
+        let repopath = local_env.repo_path.clone();
 
         let pserver = Arc::new(PageServerNode {
-            env: env.clone(),
+            env: local_env.clone(),
             kill_on_exit: true,
             listen_address: None,
         });
-        pserver.init();
-
-        if pgdata_base_path.is_empty() {
-            pserver.start().unwrap();
-        } else {
-            pserver.start_fromdatadir(pgdata_base_path).unwrap();
-        }
+        pserver.start().unwrap();
 
         TestStorageControlPlane {
             wal_acceptors: Vec::new(),
             pageserver: pserver,
             test_done: AtomicBool::new(false),
+            repopath: repopath,
         }
     }
 
-    pub fn one_page_server_no_start() -> TestStorageControlPlane {
-        let env = local_env::test_env();
+    pub fn one_page_server_no_start(local_env: &LocalEnv) -> TestStorageControlPlane {
+        let repopath = local_env.repo_path.clone();
 
         let pserver = Arc::new(PageServerNode {
-            env,
+            env: local_env.clone(),
             kill_on_exit: true,
             listen_address: None,
         });
-        pserver.init();
 
         TestStorageControlPlane {
             wal_acceptors: Vec::new(),
             pageserver: pserver,
             test_done: AtomicBool::new(false),
+            repopath: repopath,
         }
     }
 
     // postgres <-> {wal_acceptor1, wal_acceptor2, ...}
-    pub fn fault_tolerant(redundancy: usize) -> TestStorageControlPlane {
-        let env = local_env::test_env();
+    pub fn fault_tolerant(local_env: &LocalEnv, redundancy: usize) -> TestStorageControlPlane {
+        let repopath = local_env.repo_path.clone();
+
         let mut cplane = TestStorageControlPlane {
             wal_acceptors: Vec::new(),
             pageserver: Arc::new(PageServerNode {
-                env: env.clone(),
+                env: local_env.clone(),
                 kill_on_exit: true,
                 listen_address: None,
             }),
             test_done: AtomicBool::new(false),
+            repopath: repopath,
         };
-        cplane.pageserver.init();
         cplane.pageserver.start().unwrap();
 
         const WAL_ACCEPTOR_PORT: usize = 54321;
@@ -93,8 +101,8 @@ impl TestStorageControlPlane {
                 listen: format!("127.0.0.1:{}", WAL_ACCEPTOR_PORT + i)
                     .parse()
                     .unwrap(),
-                data_dir: env.data_dir.join(format!("wal_acceptor_{}", i)),
-                env: env.clone(),
+                data_dir: local_env.repo_path.join(format!("wal_acceptor_{}", i)),
+                env: local_env.clone(),
             };
             wal_acceptor.init();
             wal_acceptor.start();
@@ -153,58 +161,46 @@ impl PageServerNode {
         }
     }
 
-    pub fn init(&self) {
-        fs::create_dir_all(self.env.pageserver_data_dir()).unwrap();
+    pub fn repo_path(&self) -> PathBuf {
+        self.env.repo_path.clone()
+    }
+
+    pub fn pid_file(&self) -> PathBuf {
+        self.env.repo_path.join("pageserver.pid")
     }
 
     pub fn start(&self) -> Result<()> {
-        println!("Starting pageserver at '{}'", self.address());
+        println!("Starting pageserver at '{}' in {}", self.address(), self.repo_path().display());
 
-        let status = Command::new(self.env.zenith_distrib_dir.join("pageserver")) // XXX -> method
-            .args(&["-D", self.env.pageserver_data_dir().to_str().unwrap()])
-            .args(&["-l", self.address().to_string().as_str()])
+        let mut cmd = Command::new(self.env.zenith_distrib_dir.join("pageserver"));
+        cmd .args(&["-l", self.address().to_string().as_str()])
             .arg("-d")
             .env_clear()
+            .env("ZENITH_REPO_DIR", self.repo_path())
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .status()?;
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
 
-        if !status.success() {
-            return Err(Box::<dyn error::Error>::from(format!(
-                "Pageserver failed to start. See '{}' for details.",
-                self.env.pageserver_log().to_str().unwrap()
-            )));
-        } else {
-            return Ok(());
+        if !cmd.status()?.success() {
+            anyhow::bail!("Pageserver failed to start. See '{}' for details.",
+                          self.repo_path().join("pageserver.log").display());
         }
-    }
 
-    pub fn start_fromdatadir(&self, pgdata_base_path: String) -> Result<()> {
-        println!("Starting pageserver at '{}'", self.address());
-
-        let status = Command::new(self.env.zenith_distrib_dir.join("pageserver")) // XXX -> method
-            .args(&["-D", self.env.pageserver_data_dir().to_str().unwrap()])
-            .args(&["-l", self.address().to_string().as_str()])
-            .arg("-d")
-            .args(&["--restore-from", "local"])
-            .env_clear()
-            .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("PGDATA_BASE_PATH", pgdata_base_path)
-            .status()?;
-
-        if !status.success() {
-            return Err(Box::<dyn error::Error>::from(format!(
-                "Pageserver failed to start. See '{}' for details.",
-                self.env.pageserver_log().to_str().unwrap()
-            )));
-        } else {
-            return Ok(());
+        // It takes a while for the page server to start up. Wait until it is
+        // open for business.
+        for retries in 1..15 {
+            let client = self.page_server_psql_client();
+            if client.is_ok() {
+                break;
+            } else {
+                println!("page server not responding yet, retrying ({})...", retries);
+                thread::sleep(Duration::from_secs(1));
+            }
         }
+        Ok(())
     }
 
     pub fn stop(&self) -> Result<()> {
-        let pidfile = self.env.pageserver_pidfile();
+        let pidfile = self.pid_file();
         let pid = read_pidfile(&pidfile)?;
 
         let status = Command::new("kill")
@@ -214,10 +210,7 @@ impl PageServerNode {
             .expect("failed to execute kill");
 
         if !status.success() {
-            return Err(Box::<dyn error::Error>::from(format!(
-                "Failed to kill pageserver with pid {}",
-                pid
-            )));
+            anyhow::bail!("Failed to kill pageserver with pid {}", pid);
         }
 
         // await for pageserver stop
@@ -232,10 +225,7 @@ impl PageServerNode {
 
         // ok, we failed to stop pageserver, let's panic
         if !status.success() {
-            return Err(Box::<dyn error::Error>::from(format!(
-                "Failed to stop pageserver with pid {}",
-                pid
-            )));
+            anyhow::bail!("Failed to stop pageserver with pid {}", pid);
         } else {
             return Ok(());
         }
@@ -253,6 +243,17 @@ impl PageServerNode {
 
         println!("Pageserver query: '{}'", sql);
         client.simple_query(sql).unwrap()
+    }
+
+    pub fn page_server_psql_client(&self) -> std::result::Result<postgres::Client, postgres::Error> {
+        let connstring = format!(
+            "host={} port={} dbname={} user={}",
+            self.address().ip(),
+            self.address().port(),
+            "no_db",
+            "no_user",
+        );
+        Client::connect(connstring.as_str(), NoTls)
     }
 }
 

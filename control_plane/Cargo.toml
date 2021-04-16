@@ -8,12 +8,20 @@ edition = "2018"
 
 [dependencies]
 rand = "0.8.3"
+tar = "0.4.33"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 
 serde = ""
 serde_derive = ""
 toml = ""
-home = "0.5.3"
 lazy_static = ""
 regex = "1"
+anyhow = "1.0"
+hex = "0.4.3"
+bytes = "1.0.1"
+fs_extra = "1.2.0"
+
+pageserver = { path = "../pageserver" }
+walkeeper = { path = "../walkeeper" }
+postgres_ffi = { path = "../postgres_ffi" }

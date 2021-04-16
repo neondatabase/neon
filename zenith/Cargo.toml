@@ -8,4 +8,10 @@ edition = "2018"
 
 [dependencies]
 clap = "2.33.0"
+anyhow = "1.0"
+
+# FIXME: 'pageserver' is needed for ZTimelineId. Refactor
+pageserver = { path = "../pageserver" }
+walkeeper = { path = "../walkeeper" }
 control_plane = { path = "../control_plane" }
+postgres_ffi = { path = "../postgres_ffi" }
