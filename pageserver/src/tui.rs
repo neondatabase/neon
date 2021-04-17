@@ -188,6 +188,7 @@ pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[allow(dead_code)]
 struct LogWidget<'a> {
     logger: &'a TuiLogger,
     title: &'a str,

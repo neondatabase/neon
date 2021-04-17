@@ -44,6 +44,7 @@ struct XLogLongPageHeaderData {
 #[allow(non_upper_case_globals)]
 const SizeOfXLogLongPHD: usize = (2 + 2 + 4 + 8 + 4) + 4 + 8 + 4 + 4;
 
+#[allow(dead_code)]
 pub struct WalStreamDecoder {
     lsn: u64,
 
@@ -253,6 +254,7 @@ const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
 const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
 
+#[allow(dead_code)]
 pub struct DecodedBkpBlock {
     /* Is this block ref in use? */
     //in_use: bool,
