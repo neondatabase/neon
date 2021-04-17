@@ -310,6 +310,7 @@ impl BufferTag {
 pub struct WALRecord {
     pub lsn: u64, // LSN at the *end* of the record
     pub will_init: bool,
+    pub truncate: bool,
     pub rec: Bytes,
 }
 
@@ -317,17 +318,20 @@ impl WALRecord {
     pub fn pack(&self, buf: &mut BytesMut) {
         buf.put_u64(self.lsn);
         buf.put_u8(self.will_init as u8);
+        buf.put_u8(self.truncate as u8);
         buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
     }
     pub fn unpack(buf: &mut BytesMut) -> WALRecord {
         let lsn = buf.get_u64();
         let will_init = buf.get_u8() != 0;
+        let truncate = buf.get_u8() != 0;
         let mut dst = vec![0u8; buf.get_u32() as usize];
         buf.copy_to_slice(&mut dst);
         WALRecord {
             lsn,
             will_init,
+            truncate,
             rec: Bytes::from(dst),
         }
     }
@@ -576,7 +580,7 @@ impl PageCache {
             .unwrap()
             .relsize_cache
             .insert(tag.rel, tag.blknum);
-
+        info!("Truncate relation {:?}", tag);
         let mut key_buf = BytesMut::new();
         let mut val_buf = BytesMut::new();
         content.pack(&mut val_buf);
@@ -711,7 +715,7 @@ impl PageCache {
         if let Some(relsize) = shared.relsize_cache.get(rel) {
             return *relsize;
         }
-        let key = CacheKey {
+        let mut key = CacheKey {
             tag: BufferTag {
                 rel: *rel,
                 blknum: u32::MAX,
@@ -719,19 +723,36 @@ impl PageCache {
             lsn: u64::MAX,
         };
         let mut buf = BytesMut::new();
-        key.pack(&mut buf);
-        let mut iter = self
-            .db
-            .iterator(IteratorMode::From(&buf[..], Direction::Reverse));
-        if let Some((k, _v)) = iter.next() {
+
+        loop {
             buf.clear();
-            buf.extend_from_slice(&k);
-            let tag = BufferTag::unpack(&mut buf);
-            if tag.rel == *rel {
-                let relsize = tag.blknum + 1;
-                shared.relsize_cache.insert(*rel, relsize);
-                return relsize;
+            key.pack(&mut buf);
+            let mut iter = self
+                .db
+                .iterator(IteratorMode::From(&buf[..], Direction::Reverse));
+            if let Some((k, v)) = iter.next() {
+                buf.clear();
+                buf.extend_from_slice(&k);
+                let tag = BufferTag::unpack(&mut buf);
+                if tag.rel == *rel {
+                    buf.clear();
+                    buf.extend_from_slice(&v);
+                    let content = CacheEntryContent::unpack(&mut buf);
+                    if let Some(rec) = &content.wal_record {
+                        if rec.truncate {
+                            if tag.blknum > 0 {
+                                key.tag.blknum = tag.blknum - 1;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    let relsize = tag.blknum + 1;
+                    shared.relsize_cache.insert(*rel, relsize);
+                    return relsize;
+                }
             }
+            break;
         }
         return 0;
     }

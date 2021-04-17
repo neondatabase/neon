@@ -153,6 +153,7 @@ async fn walreceiver_main(
                             let rec = page_cache::WALRecord {
                                 lsn: lsn,
                                 will_init: blk.will_init || blk.apply_image,
+                                truncate: false,
                                 rec: recdata.clone(),
                             };
 
@@ -176,6 +177,7 @@ async fn walreceiver_main(
                                 let rec = page_cache::WALRecord {
                                     lsn: lsn,
                                     will_init: false,
+                                    truncate: true,
                                     rec: recdata.clone(),
                                 };
                                 pcache.put_rel_wal_record(tag, rec);
