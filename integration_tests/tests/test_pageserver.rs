@@ -58,7 +58,21 @@ fn test_regress() {
     let node = compute_cplane.new_node();
     node.start(&storage_cplane);
 
-    control_plane::regress_check(&node);
+    node.pg_regress();
+}
+
+// Runs pg_bench on a compute node
+#[test]
+fn pgbench() {
+    // Start pageserver that reads WAL directly from that postgres
+    let storage_cplane = StorageControlPlane::one_page_server();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+
+    // start postgres
+    let node = compute_cplane.new_node();
+    node.start(&storage_cplane);
+
+    node.pg_bench(10, 100);
 }
 
 // Run two postgres instances on one pageserver

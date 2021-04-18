@@ -172,6 +172,7 @@ impl WalRedoProcess {
                 .append(true)
                 .open(datadir.join("postgresql.conf"))?;
             config.write(b"shared_buffers=128kB\n")?;
+            config.write(b"fsync=off\n")?;
         }
         // Start postgres itself
         let mut child = Command::new("postgres")
