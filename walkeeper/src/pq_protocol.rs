@@ -1,5 +1,6 @@
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use pageserver::ZTimelineId;
 use std::io;
 use std::str;
 
@@ -37,7 +38,7 @@ pub enum BeMessage<'a> {
 pub struct FeStartupMessage {
     pub version: u32,
     pub kind: StartupRequestCode,
-    pub system_id: SystemId,
+    pub timelineid: ZTimelineId,
 }
 
 #[derive(Debug)]
@@ -83,26 +84,33 @@ impl FeStartupMessage {
         let params_str = str::from_utf8(&params_bytes).unwrap();
         let params = params_str.split('\0');
         let mut options = false;
-        let mut system_id: u64 = 0;
+        let mut timelineid: Option<ZTimelineId> = None;
         for p in params {
             if p == "options" {
                 options = true;
             } else if options {
                 for opt in p.split(' ') {
-                    if opt.starts_with("system.id=") {
-                        system_id = opt[10..].parse::<u64>().unwrap();
+                    if opt.starts_with("ztimelineid=") {
+                        // FIXME: rethrow parsing error, don't unwrap
+                        timelineid = Some(ZTimelineId::from_str(&opt[12..]).unwrap());
                         break;
                     }
                 }
                 break;
             }
         }
+        if timelineid.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "timelineid is required",
+            ));
+        }
 
         buf.advance(len as usize);
         Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
             version,
             kind,
-            system_id,
+            timelineid: timelineid.unwrap(),
         })))
     }
 }

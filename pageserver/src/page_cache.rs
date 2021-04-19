@@ -537,7 +537,7 @@ impl PageCache {
         self.valid_lsn_condvar.notify_all();
 
         self.last_valid_lsn.store(lsn, Ordering::Relaxed);
-        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+        self.last_record_lsn.store(lsn, Ordering::Relaxed);
     }
 
     //

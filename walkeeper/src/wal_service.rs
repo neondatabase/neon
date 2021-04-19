@@ -33,6 +33,7 @@ use tokio_postgres::{connect, Error, NoTls};
 use crate::pq_protocol::*;
 use crate::xlog_utils::*;
 use crate::WalAcceptorConf;
+use pageserver::ZTimelineId;
 
 type FullTransactionId = u64;
 
@@ -64,7 +65,8 @@ struct ServerInfo {
     protocol_version: u32, /* proxy-safekeeper protocol version */
     pg_version: u32,       /* Postgres server version */
     node_id: NodeId,
-    system_id: SystemId, /* Postgres system identifier */
+    system_id: SystemId,
+    timeline_id: ZTimelineId, /* Zenith timelineid */
     wal_end: XLogRecPtr,
     timeline: TimeLineID,
     wal_seg_size: u32,
@@ -146,8 +148,8 @@ struct SharedState {
  * Database instance (tenant)
  */
 #[derive(Debug)]
-pub struct System {
-    id: SystemId,
+pub struct Timeline {
+    timelineid: ZTimelineId,
     mutex: Mutex<SharedState>,
     cond: Notify, /* conditional variable used to notify wal senders */
 }
@@ -157,7 +159,7 @@ pub struct System {
 */
 #[derive(Debug)]
 struct Connection {
-    system: Option<Arc<System>>,
+    timeline: Option<Arc<Timeline>>,
     stream: TcpStream,     /* Postgres connection */
     inbuf: BytesMut,       /* input buffer */
     outbuf: BytesMut,      /* output buffer */
@@ -211,6 +213,7 @@ impl Serializer for ServerInfo {
         buf.put_u32_le(self.pg_version);
         self.node_id.pack(buf);
         buf.put_u64_le(self.system_id);
+        buf.put_slice(&self.timeline_id.as_arr());
         buf.put_u64_le(self.wal_end);
         buf.put_u32_le(self.timeline);
         buf.put_u32_le(self.wal_seg_size);
@@ -221,6 +224,7 @@ impl Serializer for ServerInfo {
             pg_version: buf.get_u32_le(),
             node_id: NodeId::unpack(buf),
             system_id: buf.get_u64_le(),
+            timeline_id: ZTimelineId::get_from_buf(buf),
             wal_end: buf.get_u64_le(),
             timeline: buf.get_u32_le(),
             wal_seg_size: buf.get_u32_le(),
@@ -278,6 +282,7 @@ impl SafeKeeperInfo {
                 pg_version: UNKNOWN_SERVER_VERSION,    /* Postgres server version */
                 node_id: NodeId { term: 0, uuid: 0 },
                 system_id: 0, /* Postgres system identifier */
+                timeline_id: ZTimelineId::from([0u8; 16]),
                 wal_end: 0,
                 timeline: 0,
                 wal_seg_size: 0,
@@ -349,7 +354,7 @@ impl Serializer for SafeKeeperResponse {
 }
 
 lazy_static! {
-    pub static ref SYSTEMS: Mutex<HashMap<SystemId, Arc<System>>> = Mutex::new(HashMap::new());
+    pub static ref TIMELINES: Mutex<HashMap<ZTimelineId, Arc<Timeline>>> = Mutex::new(HashMap::new());
 }
 
 pub fn thread_main(conf: WalAcceptorConf) {
@@ -389,8 +394,8 @@ async fn main_loop(conf: &WalAcceptorConf) -> Result<()> {
     }
 }
 
-impl System {
-    pub fn new(id: SystemId) -> System {
+impl Timeline {
+    pub fn new(timelineid: ZTimelineId) -> Timeline {
         let shared_state = SharedState {
             commit_lsn: 0,
             info: SafeKeeperInfo::new(),
@@ -401,8 +406,8 @@ impl System {
                 catalog_xmin: u64::MAX,
             },
         };
-        System {
-            id,
+        Timeline {
+            timelineid,
             mutex: Mutex::new(shared_state),
             cond: Notify::new(),
         }
@@ -444,11 +449,20 @@ impl System {
     }
 
     // Load and lock control file (prevent running more than one instance of safekeeper)
-    fn load_control_file(&self, conf: &WalAcceptorConf) {
+    fn load_control_file(&self, conf: &WalAcceptorConf) -> Result<()> {
+
+        let mut shared_state = self.mutex.lock().unwrap();
+
+        if shared_state.control_file.is_some() {
+            info!("control file for timeline {} is already open", self.timelineid);
+            return Ok(());
+        }
+
         let control_file_path = conf
             .data_dir
-            .join(self.id.to_string())
+            .join(self.timelineid.to_string())
             .join(CONTROL_FILE_NAME);
+        info!("loading control file {}", control_file_path.display());
         match OpenOptions::new()
             .read(true)
             .write(true)
@@ -460,13 +474,12 @@ impl System {
                 match file.try_lock_exclusive() {
                     Ok(()) => {}
                     Err(e) => {
-                        panic!(
+                        io_error!(
                             "Control file {:?} is locked by some other process: {}",
                             &control_file_path, e
                         );
                     }
                 }
-                let mut shared_state = self.mutex.lock().unwrap();
                 shared_state.control_file = Some(file);
 
                 const SIZE: usize = mem::size_of::<SafeKeeperInfo>();
@@ -483,10 +496,10 @@ impl System {
                     let my_info = SafeKeeperInfo::unpack(&mut input);
 
                     if my_info.magic != SK_MAGIC {
-                        panic!("Invalid control file magic: {}", my_info.magic);
+                        io_error!("Invalid control file magic: {}", my_info.magic);
                     }
                     if my_info.format_version != SK_FORMAT_VERSION {
-                        panic!(
+                        io_error!(
                             "Incompatible format version: {} vs. {}",
                             my_info.format_version, SK_FORMAT_VERSION
                         );
@@ -501,6 +514,7 @@ impl System {
                 );
             }
         }
+        Ok(())
     }
 
     fn save_control_file(&self, sync: bool) -> Result<()> {
@@ -521,7 +535,7 @@ impl System {
 impl Connection {
     pub fn new(socket: TcpStream, conf: &WalAcceptorConf) -> Connection {
         Connection {
-            system: None,
+            timeline: None,
             stream: socket,
             inbuf: BytesMut::with_capacity(10 * 1024),
             outbuf: BytesMut::with_capacity(10 * 1024),
@@ -530,8 +544,8 @@ impl Connection {
         }
     }
 
-    fn system(&self) -> Arc<System> {
-        self.system.as_ref().unwrap().clone()
+    fn timeline(&self) -> Arc<Timeline> {
+        self.timeline.as_ref().unwrap().clone()
     }
 
     async fn run(&mut self) -> Result<()> {
@@ -563,12 +577,13 @@ impl Connection {
                 "no_user",
             );
             let callme = format!(
-                "callmemaybe {} host={} port={} replication=1 options='-c system.id={}'",
-                self.conf.timelineid,
+                "callmemaybe {} host={} port={} options='-c ztimelineid={}'",
+                self.timeline().timelineid,
                 self.conf.listen_addr.ip(),
                 self.conf.listen_addr.port(),
-                self.system().get_info().server.system_id,
+                self.timeline().timelineid
             );
+            info!("requesting page server to connect to us: start {} {}", ps_connstr, callme);
             let (client, connection) = connect(&ps_connstr, NoTls).await?;
 
             // The connection object performs the actual communication with the database,
@@ -583,22 +598,15 @@ impl Connection {
         Ok(())
     }
 
-    fn set_system(&mut self, id: SystemId) -> Result<()> {
-        let mut systems = SYSTEMS.lock().unwrap();
-        if id == 0 {
-            // non-multitenant configuration: just a single instance
-            if let Some(system) = systems.values().next() {
-                self.system = Some(system.clone());
-                return Ok(());
-            }
-            io_error!("No active instances");
+    fn set_timeline(&mut self, timelineid: ZTimelineId) -> Result<()> {
+        let mut timelines = TIMELINES.lock().unwrap();
+        if !timelines.contains_key(&timelineid) {
+            let timeline_dir = timelineid.to_str();
+            info!("creating timeline dir {}", &timeline_dir);
+            fs::create_dir_all(&timeline_dir)?;
+            timelines.insert(timelineid, Arc::new(Timeline::new(timelineid)));
         }
-        if !systems.contains_key(&id) {
-            let system_dir = self.conf.data_dir.join(id.to_string());
-            fs::create_dir_all(system_dir)?;
-            systems.insert(id, Arc::new(System::new(id)));
-        }
-        self.system = Some(systems.get(&id).unwrap().clone());
+        self.timeline = Some(timelines.get(&timelineid).unwrap().clone());
         Ok(())
     }
 
@@ -607,14 +615,16 @@ impl Connection {
         // Receive information about server
         let server_info = self.read_req::<ServerInfo>().await?;
         info!(
-            "Start handshake with wal_proposer {} sysid {}",
+            "Start handshake with wal_proposer {} sysid {} timeline {}",
             self.stream.peer_addr()?,
-            server_info.system_id
+            server_info.system_id,
+            server_info.timeline_id,
         );
-        self.set_system(server_info.system_id)?;
-        self.system().load_control_file(&self.conf);
+        // FIXME: also check that the system identifier matches
+        self.set_timeline(server_info.timeline_id)?;
+        self.timeline().load_control_file(&self.conf)?;
 
-        let mut my_info = self.system().get_info();
+        let mut my_info = self.timeline().get_info();
 
         /* Check protocol compatibility */
         if server_info.protocol_version != SK_PROTOCOL_VERSION {
@@ -663,9 +673,9 @@ impl Connection {
             );
         }
         my_info.server.node_id = prop.node_id;
-        self.system().set_info(&my_info);
+        self.timeline().set_info(&my_info);
         /* Need to persist our vote first */
-        self.system().save_control_file(true)?;
+        self.timeline().save_control_file(true)?;
 
         let mut flushed_restart_lsn: XLogRecPtr = 0;
         let wal_seg_size = server_info.wal_seg_size as usize;
@@ -684,8 +694,8 @@ impl Connection {
         }
 
         info!(
-            "Start streaming from server {} address {:?}",
-            server_info.system_id,
+            "Start streaming from timeline {} address {:?}",
+            server_info.timeline_id,
             self.stream.peer_addr()?
         );
 
@@ -706,6 +716,9 @@ impl Connection {
             let end_pos = req.end_lsn;
             let rec_size = (end_pos - start_pos) as usize;
             assert!(rec_size <= MAX_SEND_SIZE);
+
+            debug!("received for {} bytes between {:X}/{:X} and {:X}/{:X}",
+                  rec_size, start_pos >> 32, start_pos & 0xffffffff, end_pos >> 32, end_pos & 0xffffffff);
 
             /* Receive message body */
             self.inbuf.resize(rec_size, 0u8);
@@ -737,7 +750,7 @@ impl Connection {
              * when restart_lsn delta exceeds WAL segment size.
              */
             sync_control_file |= flushed_restart_lsn + (wal_seg_size as u64) < my_info.restart_lsn;
-            self.system().save_control_file(sync_control_file)?;
+            self.timeline().save_control_file(sync_control_file)?;
 
             if sync_control_file {
                 flushed_restart_lsn = my_info.restart_lsn;
@@ -748,7 +761,7 @@ impl Connection {
             let resp = SafeKeeperResponse {
                 epoch: my_info.epoch,
                 flush_lsn: end_pos,
-                hs_feedback: self.system().get_hs_feedback(),
+                hs_feedback: self.timeline().get_hs_feedback(),
             };
             self.start_sending();
             resp.pack(&mut self.outbuf);
@@ -758,7 +771,7 @@ impl Connection {
              * Ping wal sender that new data is available.
              * FlushLSN (end_pos) can be smaller than commitLSN in case we are at catching-up safekeeper.
              */
-            self.system()
+            self.timeline()
                 .notify_wal_senders(min(req.commit_lsn, end_pos));
         }
         Ok(())
@@ -809,7 +822,7 @@ impl Connection {
     }
 
     //
-    // Send WAL to replica or WAL sender using standard libpq replication protocol
+    // Send WAL to replica or WAL receiver using standard libpq replication protocol
     //
     async fn send_wal(&mut self) -> Result<()> {
         info!("WAL sender to {:?} is started", self.stream.peer_addr()?);
@@ -830,7 +843,7 @@ impl Connection {
                             BeMessage::write(&mut self.outbuf, &BeMessage::ReadyForQuery);
                             self.send().await?;
                             self.init_done = true;
-                            self.set_system(m.system_id)?;
+                            self.set_timeline(m.timelineid)?;
                         }
                         StartupRequestCode::Cancel => return Ok(()),
                     }
@@ -863,7 +876,7 @@ impl Connection {
         let (start_pos, timeline) = self.find_end_of_wal(false);
         let lsn = format!("{:X}/{:>08X}", (start_pos >> 32) as u32, start_pos as u32);
         let tli = timeline.to_string();
-        let sysid = self.system().get_info().server.system_id.to_string();
+        let sysid = self.timeline().get_info().server.system_id.to_string();
         let lsn_bytes = lsn.as_bytes();
         let tli_bytes = tli.as_bytes();
         let sysid_bytes = sysid.as_bytes();
@@ -919,7 +932,7 @@ impl Connection {
         } else {
             0
         };
-        let wal_seg_size = self.system().get_info().server.wal_seg_size as usize;
+        let wal_seg_size = self.timeline().get_info().server.wal_seg_size as usize;
         if wal_seg_size == 0 {
             io_error!("Can not start replication before connecting to wal_proposer");
         }
@@ -937,15 +950,6 @@ impl Connection {
         BeMessage::write(&mut self.outbuf, &BeMessage::Copy);
         self.send().await?;
 
-        /*
-         * Always start streaming at the beginning of a segment
-         *
-         * FIXME: It is common practice to start streaming at the beginning of
-         * the segment, but it should be up to the client to decide that. We
-         * shouldn't enforce that here.
-         */
-        start_pos -= XLogSegmentOffset(start_pos, wal_seg_size) as u64;
-
         let mut end_pos: XLogRecPtr;
         let mut commit_lsn: XLogRecPtr;
         let mut wal_file: Option<File> = None;
@@ -962,19 +966,18 @@ impl Connection {
                 end_pos = stop_pos;
             } else {
                 /* normal mode */
+                let timeline = self.timeline();
                 loop {
                     // Rust doesn't allow to grab async result from mutex scope
-                    let system = self.system();
-                    let notified = system.cond.notified();
                     {
-                        let shared_state = system.mutex.lock().unwrap();
+                        let shared_state = timeline.mutex.lock().unwrap();
                         commit_lsn = shared_state.commit_lsn;
                         if start_pos < commit_lsn {
                             end_pos = commit_lsn;
                             break;
                         }
                     }
-                    notified.await;
+                    timeline.cond.notified().await;
                 }
             }
             if end_pos == END_REPLICATION_MARKER {
@@ -985,7 +988,7 @@ impl Connection {
                 Ok(0) => break,
                 Ok(_) => match self.parse_message()? {
                     Some(FeMessage::CopyData(m)) => self
-                        .system()
+                        .timeline()
                         .add_hs_feedback(HotStandbyFeedback::parse(&m.body)),
                     _ => {}
                 },
@@ -1006,7 +1009,7 @@ impl Connection {
                 let wal_file_path = self
                     .conf
                     .data_dir
-                    .join(self.system().id.to_string())
+                    .join(self.timeline().timelineid.to_string())
                     .join(wal_file_name.clone() + ".partial");
                 if let Ok(opened_file) = File::open(&wal_file_path) {
                     file = opened_file;
@@ -1014,7 +1017,7 @@ impl Connection {
                     let wal_file_path = self
                         .conf
                         .data_dir
-                        .join(self.system().id.to_string())
+                        .join(self.timeline().timelineid.to_string())
                         .join(wal_file_name);
                     match File::open(&wal_file_path) {
                         Ok(opened_file) => file = opened_file,
@@ -1036,6 +1039,8 @@ impl Connection {
             let msg_size = LIBPQ_HDR_SIZE + XLOG_HDR_SIZE + send_size;
             let data_start = LIBPQ_HDR_SIZE + XLOG_HDR_SIZE;
             let data_end = data_start + send_size;
+
+            file.seek(SeekFrom::Start(xlogoff as u64))?;
             file.read_exact(&mut self.outbuf[data_start..data_end])?;
             self.outbuf[0] = b'd';
             BigEndian::write_u32(
@@ -1049,6 +1054,9 @@ impl Connection {
 
             self.stream.write_all(&self.outbuf[0..msg_size]).await?;
             start_pos += send_size as u64;
+
+            debug!("Sent WAL to page server up to {:X}/{:>08X}",
+                  (end_pos>>32) as u32, end_pos as u32);
 
             if XLogSegmentOffset(start_pos, wal_seg_size) != 0 {
                 wal_file = Some(file);
@@ -1104,12 +1112,12 @@ impl Connection {
             let wal_file_path = self
                 .conf
                 .data_dir
-                .join(self.system().id.to_string())
+                .join(self.timeline().timelineid.to_str())
                 .join(wal_file_name.clone());
             let wal_file_partial_path = self
                 .conf
                 .data_dir
-                .join(self.system().id.to_string())
+                .join(self.timeline().timelineid.to_str())
                 .join(wal_file_name.clone() + ".partial");
 
             {
@@ -1172,7 +1180,7 @@ impl Connection {
     fn find_end_of_wal(&self, precise: bool) -> (XLogRecPtr, TimeLineID) {
         find_end_of_wal(
             &self.conf.data_dir,
-            self.system().get_info().server.wal_seg_size as usize,
+            self.timeline().get_info().server.wal_seg_size as usize,
             precise,
         )
     }

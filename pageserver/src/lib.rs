@@ -37,6 +37,16 @@ impl ZTimelineId {
         ZTimelineId(b)
     }
 
+    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZTimelineId {
+        let mut arr = [0u8; 16];
+        buf.copy_to_slice(&mut arr);
+        ZTimelineId::from(arr)
+    }
+
+    pub fn as_arr(&self) -> [u8; 16] {
+        self.0
+    }
+
     pub fn to_str(self: &ZTimelineId) -> String {
          hex::encode(self.0)
     }

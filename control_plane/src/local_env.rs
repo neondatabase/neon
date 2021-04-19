@@ -7,9 +7,10 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use bytes::Bytes;
 use rand::Rng;
+use anyhow::Context;
 
 use hex;
 use serde_derive::{Deserialize, Serialize};
@@ -28,6 +29,9 @@ use pageserver::ZTimelineId;
 pub struct LocalEnv {
     // Path to the Repository. Here page server and compute nodes will create and store their data.
     pub repo_path: PathBuf,
+
+    // System identifier, from the PostgreSQL control file
+    pub systemid: u64,
 
     // Path to postgres distribution. It's expected that "bin", "include",
     // "lib", "share" from postgres distribution are there. If at some point
@@ -96,40 +100,32 @@ pub fn init() -> Result<()> {
     }
 
     // ok, we are good to go
-    let conf = LocalEnv {
+    let mut conf = LocalEnv {
         repo_path: repo_path.clone(),
         pg_distrib_dir,
         zenith_distrib_dir,
+        systemid: 0,
     };
-    init_repo(&conf)?;
-
-    // write config
-    let toml = toml::to_string(&conf)?;
-    fs::write(repo_path.join("config"), toml)?;
+    init_repo(&mut conf)?;
 
     Ok(())
 }
 
-pub fn init_repo(local_env: &LocalEnv) -> Result<()>
+pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
 {
     let repopath = String::from(local_env.repo_path.to_str().unwrap());
-    fs::create_dir(&repopath)?;
+    fs::create_dir(&repopath).with_context(|| format!("could not create directory {}", repopath))?;
     fs::create_dir(repopath.clone() + "/pgdatadirs")?;
     fs::create_dir(repopath.clone() + "/timelines")?;
     fs::create_dir(repopath.clone() + "/refs")?;
     fs::create_dir(repopath.clone() + "/refs/branches")?;
     fs::create_dir(repopath.clone() + "/refs/tags")?;
-
-    // Create empty config file
-    let configpath = repopath.clone() + "/config";
-    fs::write(&configpath, r##"
-# Example config file. Nothing here yet.
-"##)
-        .expect(&format!("Unable to write file {}", &configpath));
+    println!("created directory structure in {}", repopath);
 
     // Create initial timeline
     let tli = create_timeline(&local_env, None)?;
     let timelinedir = format!("{}/timelines/{}", repopath,  &hex::encode(tli));
+    println!("created initial timeline {}", timelinedir);
 
     // Run initdb
     //
@@ -139,32 +135,50 @@ pub fn init_repo(local_env: &LocalEnv) -> Result<()>
     let initdb_path = local_env.pg_bin_dir().join("initdb");
     let _initdb =
         Command::new(initdb_path)
-        .args(&["-D", "tmp", "--no-instructions"])
+        .args(&["-D", "tmp"])
+            .arg("--no-instructions")
+            .env_clear()
+            .env("LD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
+            .stdout(Stdio::null())
         .status()
-        .expect("failed to execute initdb");
+        .with_context(|| "failed to execute initdb")?;
+    println!("initdb succeeded");
 
-    // Read control file to extract the LSN
+    // Read control file to extract the LSN and system id
     let controlfile = postgres_ffi::decode_pg_control(Bytes::from(fs::read("tmp/global/pg_control")?))?;
-
+    let systemid = controlfile.system_identifier;
     let lsn = controlfile.checkPoint;
     let lsnstr = format!("{:016X}", lsn);
 
     // Move the initial WAL file
     fs::rename("tmp/pg_wal/000000010000000000000001", timelinedir.clone() + "/wal/000000010000000000000001.partial")?;
+    println!("moved initial WAL file");
 
     // Remove pg_wal
     fs::remove_dir_all("tmp/pg_wal")?;
+    println!("removed tmp/pg_wal");
 
     force_crash_recovery(&PathBuf::from("tmp"))?;
+    println!("updated pg_control");
 
     let target = timelinedir.clone() + "/snapshots/" + &lsnstr;
-    fs::rename("tmp", target)?;
+    fs::rename("tmp", &target)?;
+    println!("moved 'tmp' to {}", &target);
 
     // Create 'main' branch to refer to the initial timeline
     let data = hex::encode(tli);
     fs::write(repopath.clone() + "/refs/branches/main", data)?;
+    println!("created main branch");
+
+    // Also update the system id in the LocalEnv
+    local_env.systemid = systemid;
+
+    // write config
+    let toml = toml::to_string(&local_env)?;
+    fs::write(repopath.clone() + "/config", toml)?;
 
     println!("new zenith repository was created in {}", &repopath);
+
     Ok(())
 }
 
@@ -209,17 +223,20 @@ pub fn load_config(repopath: &Path) -> Result<LocalEnv> {
 
 // local env for tests
 pub fn test_env(testname: &str) -> LocalEnv {
+    fs::create_dir_all("../tmp_check").expect("could not create directory ../tmp_check");
+
     let repo_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_check/").join(testname);
 
     // Remove remnants of old test repo
     let _ = fs::remove_dir_all(&repo_path);
 
-    let local_env = LocalEnv {
+    let mut local_env = LocalEnv {
         repo_path,
         pg_distrib_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install"),
         zenith_distrib_dir: cargo_bin_dir(),
+        systemid: 0,
     };
-    init_repo(&local_env).unwrap();
+    init_repo(&mut local_env).expect("could not initialize zenith repository");
     return local_env;
 }
 
