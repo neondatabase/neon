@@ -1215,6 +1215,7 @@ dependencies = [
  "slog-stdlog",
  "slog-term",
  "termion",
+ "thiserror",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
