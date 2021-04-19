@@ -34,14 +34,15 @@ pub fn thread_main(conf: &PageServerConf, wal_producer_connstr: &str) {
 
     runtime.block_on(async {
         loop {
-            let _res = walreceiver_main(conf, wal_producer_connstr).await;
+            let res = walreceiver_main(conf, wal_producer_connstr).await;
 
-            // TODO: print/log the error
-            info!(
-                "WAL streaming connection failed, retrying in 1 second...: {:?}",
-                _res
-            );
-            sleep(Duration::from_secs(1)).await;
+            if let Err(e) = res {
+                info!(
+                    "WAL streaming connection failed ({}), retrying in 1 second",
+                    e
+                );
+                sleep(Duration::from_secs(1)).await;
+            }
         }
     });
 }
