@@ -1,28 +1,25 @@
-use std::str::FromStr;
-
-//
-// WAL receiver
-//
-// The WAL receiver connects to the WAL safekeeper service, and streams WAL.
-// For each WAL record, it decodes the record to figure out which data blocks
-// the record affects, and adds the records to the page cache.
-//
-use log::*;
-
-use tokio::runtime;
-use tokio::time::{sleep, Duration};
-use tokio_stream::StreamExt;
+//!
+//! WAL receiver
+//!
+//! The WAL receiver connects to the WAL safekeeper service, and streams WAL.
+//! For each WAL record, it decodes the record to figure out which data blocks
+//! the record affects, and adds the records to the page cache.
+//!
 
 use crate::page_cache;
 use crate::page_cache::BufferTag;
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
-
+use anyhow::Error;
+use log::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
+use std::str::FromStr;
+use tokio::runtime;
+use tokio::time::{sleep, Duration};
 use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
-
-use tokio_postgres::{Error, NoTls, SimpleQueryMessage, SimpleQueryRow};
+use tokio_postgres::{NoTls, SimpleQueryMessage, SimpleQueryRow};
+use tokio_stream::StreamExt;
 
 //
 // This is the entry point for the WAL receiver thread.
@@ -49,10 +46,7 @@ pub fn thread_main(conf: &PageServerConf, wal_producer_connstr: &str) {
     });
 }
 
-async fn walreceiver_main(
-    conf: &PageServerConf,
-    wal_producer_connstr: &str,
-) -> Result<(), Error> {
+async fn walreceiver_main(conf: &PageServerConf, wal_producer_connstr: &str) -> Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
     let connect_cfg = format!("{} replication=true", wal_producer_connstr);
@@ -109,10 +103,7 @@ async fn walreceiver_main(
 
     let startpoint = PgLsn::from(startpoint);
     let query = format!("START_REPLICATION PHYSICAL {}", startpoint);
-    let copy_stream = rclient
-        .copy_both_simple::<bytes::Bytes>(&query)
-        .await
-        .unwrap();
+    let copy_stream = rclient.copy_both_simple::<bytes::Bytes>(&query).await?;
 
     let physical_stream = ReplicationStream::new(copy_stream);
     tokio::pin!(physical_stream);
@@ -207,14 +198,13 @@ async fn walreceiver_main(
                     let write_lsn = last_lsn;
                     let flush_lsn = last_lsn;
                     let apply_lsn = PgLsn::INVALID;
-                    let ts = PgTimestamp::now().unwrap();
+                    let ts = PgTimestamp::now()?;
                     const NO_REPLY: u8 = 0u8;
 
                     physical_stream
                         .as_mut()
                         .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)
-                        .await
-                        .unwrap();
+                        .await?;
                 }
             }
             _ => (),
@@ -236,33 +226,36 @@ pub struct IdentifySystem {
     dbname: Option<String>,
 }
 
+/// There was a problem parsing the response to
+/// a postgres IDENTIFY_SYSTEM command.
+#[derive(Debug, thiserror::Error)]
+#[error("IDENTIFY_SYSTEM parse error")]
+pub struct IdentifyError;
+
 /// Run the postgres `IDENTIFY_SYSTEM` command
 pub async fn identify_system(client: &tokio_postgres::Client) -> Result<IdentifySystem, Error> {
     let query_str = "IDENTIFY_SYSTEM";
     let response = client.simple_query(query_str).await?;
 
     // get(N) from row, then parse it as some destination type.
-    fn get_parse<T>(row: &SimpleQueryRow, idx: usize) -> Option<T>
+    fn get_parse<T>(row: &SimpleQueryRow, idx: usize) -> Result<T, IdentifyError>
     where
         T: FromStr,
     {
-        let val = row.get(idx)?;
-        val.parse::<T>().ok()
+        let val = row.get(idx).ok_or(IdentifyError)?;
+        val.parse::<T>().or(Err(IdentifyError))
     }
 
-    // FIXME: turn unwrap() into errors.
-    // All of the tokio_postgres::Error builders are private, so we
-    // can't create them here. We'll just have to create our own error type.
-
-    if let SimpleQueryMessage::Row(first_row) = response.get(0).unwrap() {
+    // extract the row contents into an IdentifySystem struct.
+    // written as a closure so I can use ? for Option here.
+    if let Some(SimpleQueryMessage::Row(first_row)) = response.get(0) {
         Ok(IdentifySystem {
-            systemid: get_parse(first_row, 0).unwrap(),
-            timeline: get_parse(first_row, 1).unwrap(),
-            xlogpos: get_parse(first_row, 2).unwrap(),
-            dbname: get_parse(first_row, 3),
+            systemid: get_parse(first_row, 0)?,
+            timeline: get_parse(first_row, 1)?,
+            xlogpos: get_parse(first_row, 2)?,
+            dbname: get_parse(first_row, 3).ok(),
         })
     } else {
-        // FIXME: return an error
-        panic!("identify_system returned non-row response");
+        Err(IdentifyError)?
     }
 }

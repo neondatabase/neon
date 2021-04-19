@@ -6,25 +6,22 @@
 // per-entry mutex.
 //
 
+use crate::{walredo, PageServerConf};
+use anyhow::bail;
+use bytes::Bytes;
 use core::ops::Bound::Included;
+use crossbeam_channel::unbounded;
+use crossbeam_channel::{Receiver, Sender};
+use lazy_static::lazy_static;
+use log::*;
+use rand::Rng;
 use std::collections::{BTreeMap, HashMap};
-use std::error::Error;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::{convert::TryInto, ops::AddAssign};
-// use tokio::sync::RwLock;
-use bytes::Bytes;
-use lazy_static::lazy_static;
-use log::*;
-use rand::Rng;
-
-use crate::{walredo, PageServerConf};
-
-use crossbeam_channel::unbounded;
-use crossbeam_channel::{Receiver, Sender};
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -248,7 +245,7 @@ impl PageCache {
     //
     // Returns an 8k page image
     //
-    pub fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>> {
+    pub fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
         // Look up cache entry. If it's a page image, return that. If it's a WAL record,
@@ -276,11 +273,11 @@ impl PageCache {
 
                 shared = wait_result.0;
                 if wait_result.1.timed_out() {
-                    return Err(format!(
+                    bail!(
                         "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
                         lsn >> 32,
                         lsn & 0xffff_ffff
-                    ))?;
+                    );
                 }
             }
             if waited {
@@ -288,11 +285,11 @@ impl PageCache {
             }
 
             if lsn < shared.first_valid_lsn {
-                return Err(format!(
+                bail!(
                     "LSN {:X}/{:X} has already been removed",
                     lsn >> 32,
                     lsn & 0xffff_ffff
-                ))?;
+                );
             }
 
             let pagecache = &shared.pagecache;
@@ -347,12 +344,12 @@ impl PageCache {
                         error!(
                             "could not apply WAL to reconstruct page image for GetPage@LSN request"
                         );
-                        return Err("could not apply WAL to reconstruct page image".into());
+                        bail!("could not apply WAL to reconstruct page image");
                     }
                 };
             } else {
                 // No base image, and no WAL record. Huh?
-                return Err(format!("no page image or WAL record for requested page"))?;
+                bail!("no page image or WAL record for requested page");
             }
         }
 
@@ -432,10 +429,7 @@ impl PageCache {
     // Adds a WAL record to the page cache
     //
     pub fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
-        let key = CacheKey {
-            tag,
-            lsn: rec.lsn,
-        };
+        let key = CacheKey { tag, lsn: rec.lsn };
 
         let entry = CacheEntry::new(key.clone());
         entry.content.lock().unwrap().wal_record = Some(rec);
