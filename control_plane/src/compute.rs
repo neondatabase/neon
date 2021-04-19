@@ -113,7 +113,7 @@ impl ComputeControlPlane {
 
     pub fn new_test_master_node(&mut self) -> Arc<PostgresNode> {
         let node = self.new_vanilla_node(true).unwrap();
-
+		println!("Create vanilla node at {:?}", node.address);
         node.append_conf(
             "postgresql.conf",
             "synchronous_standby_names = 'safekeeper_proxy'\n",
@@ -405,7 +405,9 @@ impl PostgresNode {
             .args(&["-h", &self.address.ip().to_string()])
             .args(&["-p", &self.address.port().to_string()])
             .arg("-v")
-            .stderr(File::create(self.env.data_dir.join("safepkeeper_proxy.log")).unwrap())
+            .stderr(OpenOptions::new()
+					.append(true)
+					.open(self.env.data_dir.join("safepkeeper_proxy.log")).unwrap())
             .spawn()
         {
             Ok(child) => WalProposerNode { pid: child.id() },
