@@ -1023,7 +1023,14 @@ impl Connection {
                     }
                 }
             }
-            let send_size = min((end_pos - start_pos) as usize, MAX_SEND_SIZE);
+            let xlogoff = XLogSegmentOffset(start_pos, wal_seg_size) as usize;
+
+            // How much to read and send in message? We cannot cross the WAL file
+            // boundary, and we don't want send more than MAX_SEND_SIZE.
+            let send_size = (end_pos - start_pos) as usize;
+            let send_size = min(send_size, wal_seg_size - xlogoff);
+            let send_size = min(send_size, MAX_SEND_SIZE);
+
             let msg_size = LIBPQ_HDR_SIZE + XLOG_HDR_SIZE + send_size;
             let data_start = LIBPQ_HDR_SIZE + XLOG_HDR_SIZE;
             let data_end = data_start + send_size;
