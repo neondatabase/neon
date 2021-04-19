@@ -8,11 +8,11 @@ use std::io;
 use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
-use std::{fs::File, fs::OpenOptions, str::FromStr};
+use std::{fs::File, fs::OpenOptions};
 
+use anyhow::{Context, Result};
 use clap::{App, Arg};
 use daemonize::Daemonize;
-use anyhow::Result;
 
 use slog::Drain;
 
@@ -88,11 +88,11 @@ fn main() -> Result<()> {
     }
 
     if let Some(addr) = arg_matches.value_of("wal_producer") {
-        conf.wal_producer_connstr = Some(String::from_str(addr).unwrap());
+        conf.wal_producer_connstr = Some(String::from(addr));
     }
 
     if let Some(addr) = arg_matches.value_of("listen") {
-        conf.listen_addr = addr.parse().unwrap();
+        conf.listen_addr = addr.parse()?;
     }
 
     start_pageserver(&conf)
@@ -101,7 +101,7 @@ fn main() -> Result<()> {
 fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     // Initialize logger
     let _scope_guard = init_logging(&conf)?;
-    let _log_guard = slog_stdlog::init().unwrap();
+    let _log_guard = slog_stdlog::init()?;
 
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
@@ -125,18 +125,15 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     if conf.daemonize {
         info!("daemonizing...");
 
-        // There should'n be any logging to stdin/stdout. Redirect it to the main log so
-        // that we will see any accidental manual fpritf's or backtraces.
+        // There shouldn't be any logging to stdin/stdout. Redirect it to the main log so
+        // that we will see any accidental manual fprintf's or backtraces.
+        let log_filename = conf.data_dir.join("pageserver.log");
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(conf.data_dir.join("pageserver.log"))
-            .unwrap();
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(conf.data_dir.join("pageserver.log"))
-            .unwrap();
+            .open(&log_filename)
+            .with_context(|| format!("failed to open {:?}", log_filename))?;
+        let stderr = stdout.try_clone()?;
 
         let daemonize = Daemonize::new()
             .pid_file(conf.data_dir.join("pageserver.pid"))
