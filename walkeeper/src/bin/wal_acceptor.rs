@@ -10,15 +10,14 @@ use std::thread;
 use std::{fs::File, fs::OpenOptions};
 
 use clap::{App, Arg};
+use anyhow::Result;
 
 use slog::Drain;
-
-use pageserver::ZTimelineId;
 
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
 
-fn main() -> Result<(), io::Error> {
+fn main() -> Result<()> {
     let arg_matches = App::new("Zenith wal_acceptor")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .arg(
@@ -29,10 +28,11 @@ fn main() -> Result<(), io::Error> {
                 .help("Path to the WAL acceptor data directory"),
         )
         .arg(
-            Arg::with_name("timelineid")
-                .long("timelineid")
+            Arg::with_name("systemid")
+                .long("systemid")
                 .takes_value(true)
-                .help("zenith timeline id"),
+                .required(true)
+                .help("PostgreSQL system id, from pg_control"),
         )
         .arg(
             Arg::with_name("listen")
@@ -64,21 +64,23 @@ fn main() -> Result<(), io::Error> {
         )
         .get_matches();
 
+    let systemid_str = arg_matches.value_of("systemid").unwrap();
+    let systemid = u64::from_str_radix(systemid_str, 10)?;
+
     let mut conf = WalAcceptorConf {
         data_dir: PathBuf::from("./"),
-        timelineid: ZTimelineId::from([0u8; 16]),
+        systemid: systemid,
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
-        listen_addr: "127.0.0.1:5454".parse().unwrap(),
+        listen_addr: "127.0.0.1:5454".parse()?,
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
         conf.data_dir = PathBuf::from(dir);
-    }
 
-    if let Some(timelineid_str) = arg_matches.value_of("timelineid") {
-        conf.timelineid = ZTimelineId::from_str(timelineid_str).unwrap();
+        // change into the data directory.
+        std::env::set_current_dir(&conf.data_dir)?;
     }
 
     if arg_matches.is_present("no-sync") {
@@ -100,7 +102,7 @@ fn main() -> Result<(), io::Error> {
     start_wal_acceptor(conf)
 }
 
-fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<(), io::Error> {
+fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     // Initialize logger
     let _scope_guard = init_logging(&conf)?;
     let _log_guard = slog_stdlog::init().unwrap();
@@ -115,16 +117,16 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<(), io::Error> {
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(conf.data_dir.join("wal_acceptor.log"))
+            .open("wal_acceptor.log")
             .unwrap();
         let stderr = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(conf.data_dir.join("wal_acceptor.log"))
+            .open("wal_acceptor.log")
             .unwrap();
 
         let daemonize = Daemonize::new()
-            .pid_file(conf.data_dir.join("wal_acceptor.pid"))
+            .pid_file("wal_acceptor.pid")
             .working_directory(Path::new("."))
             .stdout(stdout)
             .stderr(stderr);

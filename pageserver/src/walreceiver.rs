@@ -217,7 +217,7 @@ async fn walreceiver_main(conf: &PageServerConf, timelineid: ZTimelineId, wal_pr
 
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
-                        pcache.advance_last_valid_lsn(lsn);
+                        pcache.advance_last_record_lsn(lsn);
                     } else {
                         break;
                     }

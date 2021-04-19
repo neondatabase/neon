@@ -419,13 +419,18 @@ impl FeMessage {
 pub fn thread_main(conf: &PageServerConf) {
     // Create a new thread pool
     //
-    // FIXME: keep it single-threaded for now, make it easier to debug with gdb,
-    // and we're not concerned with performance yet.
-    //let runtime = runtime::Runtime::new().unwrap();
-    let runtime = runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    // FIXME: It would be nice to keep this single-threaded for debugging purposes,
+    // but that currently leads to a deadlock: if a GetPage@LSN request arrives
+    // for an LSN that hasn't been received yet, the thread gets stuck waiting for
+    // the WAL to arrive. If the WAL receiver hasn't been launched yet, i.e
+    // we haven't received a "callmemaybe" request yet to tell us where to get the
+    // WAL, we will not have a thread available to process the "callmemaybe"
+    // request when it does arrive. Using a thread pool alleviates the problem so
+    // that it doesn't happen in the tests anymore, but in principle it could still
+    // happen if we receive enough GetPage@LSN requests to consume all of the
+    // available threads.
+    //let runtime = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = runtime::Runtime::new().unwrap();
 
     info!("Starting page server on {}", conf.listen_addr);
 

@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::net::TcpStream;
@@ -402,40 +401,18 @@ impl PostgresNode {
         Client::connect(connstring.as_str(), NoTls).unwrap()
     }
 
-    /* Create stub controlfile and respective xlog to start computenode */
-    pub fn setup_controlfile(&self) {
-        let filepath = format!("{}/global/pg_control", self.pgdata().to_str().unwrap());
-
-        {
-            File::create(filepath).unwrap();
-        }
-
-        let pg_resetwal_path = self.env.pg_bin_dir().join("pg_resetwal");
-
-        let pg_resetwal = Command::new(pg_resetwal_path)
-            .args(&["-D", self.pgdata().to_str().unwrap()])
-            .arg("-f")
-            // TODO probably we will have to modify pg_resetwal
-            // .arg("--compute-node")
-            .status()
-            .expect("failed to execute pg_resetwal");
-
-        if !pg_resetwal.success() {
-            panic!("pg_resetwal failed");
-        }
-    }
-
-    pub fn start_proxy(&self, wal_acceptors: String) -> WalProposerNode {
+    pub fn start_proxy(&self, wal_acceptors: &str) -> WalProposerNode {
         let proxy_path = self.env.pg_bin_dir().join("safekeeper_proxy");
         match Command::new(proxy_path.as_path())
-            .args(&["-s", &wal_acceptors])
+            .args(&["--ztimelineid", &self.timelineid.to_str()])
+            .args(&["-s", wal_acceptors])
             .args(&["-h", &self.address.ip().to_string()])
             .args(&["-p", &self.address.port().to_string()])
             .arg("-v")
             .stderr(OpenOptions::new()
+                    .create(true)
 		    .append(true)
-		    .open(self.env.repo_path.join("safepkeeper_proxy.log"))
-                    .unwrap())
+		    .open(self.pgdata().join("safekeeper_proxy.log")).unwrap())
             .spawn()
         {
             Ok(child) => WalProposerNode { pid: child.id() },

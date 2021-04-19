@@ -2,6 +2,8 @@
 use control_plane::compute::ComputeControlPlane;
 use control_plane::storage::TestStorageControlPlane;
 use control_plane::local_env;
+use control_plane::local_env::PointInTime;
+use pageserver::ZTimelineId;
 
 use rand::Rng;
 use std::sync::Arc;
@@ -23,7 +25,7 @@ fn test_acceptors_normal_work() {
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
@@ -44,23 +46,39 @@ fn test_acceptors_normal_work() {
     // check wal files equality
 }
 
+// Run page server and multiple safekeepers, and multiple compute nodes running
+// against different timelines.
 #[test]
-fn test_multitenancy() {
-    // Start pageserver that reads WAL directly from that postgres
+fn test_many_timelines() {
+    // Initialize a new repository, and set up WAL safekeepers and page server.
     const REDUNDANCY: usize = 3;
-    const N_NODES: usize = 5;
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    const N_TIMELINES: usize = 5;
+    let local_env = local_env::test_env("test_many_timelines");
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
-    // start postgres
+    // Create branches
+    let mut timelines: Vec<ZTimelineId> = Vec::new();
+    let maintli = storage_cplane.get_branch_timeline("main"); // main branch
+    timelines.push(maintli);
+    let startpoint = local_env::find_end_of_wal(&local_env, maintli).unwrap();
+    for i in 1..N_TIMELINES { // additional branches
+        let branchname = format!("experimental{}", i);
+        local_env::create_branch(&local_env, &branchname,
+                                 PointInTime { timelineid: maintli,
+                                               lsn: startpoint }).unwrap();
+        let tli = storage_cplane.get_branch_timeline(&branchname);
+        timelines.push(tli);
+    }
+
+    // start postgres on each timeline
     let mut nodes = Vec::new();
-    let mut proxies = Vec::new();
-    for _ in 0..N_NODES {
-        let node = compute_cplane.new_test_master_node();
-        nodes.push(node);
-        nodes.last().unwrap().start().unwrap();
-        proxies.push(nodes.last().unwrap().start_proxy(wal_acceptors.clone()));
+    for tli in timelines {
+	let node = compute_cplane.new_test_node(tli);
+	nodes.push(node.clone());
+	node.start().unwrap();
+	node.start_proxy(&wal_acceptors);
     }
 
     // create schema
@@ -111,7 +129,7 @@ fn test_acceptors_restarts() {
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
     let mut failed_node: Option<usize> = None;
 
     // check basic work with table
@@ -172,7 +190,7 @@ fn test_acceptors_unavailability() {
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
@@ -250,7 +268,7 @@ fn test_race_conditions() {
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
 
     // check basic work with table
     node.safe_psql(

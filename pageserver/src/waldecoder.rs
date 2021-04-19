@@ -114,7 +114,7 @@ impl WalStreamDecoder {
 
                 let hdr = self.decode_XLogLongPageHeaderData();
                 if hdr.std.xlp_pageaddr != self.lsn {
-                    return Err(WalDecodeError::new(&format!("invalid xlog page header at {:X}/{:X}",
+                    return Err(WalDecodeError::new(&format!("invalid xlog segment header at {:X}/{:X}",
                                                             self.lsn >> 32,
                                                             self.lsn & 0xffffffff)));
                 }
@@ -131,9 +131,9 @@ impl WalStreamDecoder {
 
                 let hdr = self.decode_XLogPageHeaderData();
                 if hdr.xlp_pageaddr != self.lsn {
-                    return Err(WalDecodeError::new(&format!("invalid xlog page header at {:X}/{:X}",
+                    return Err(WalDecodeError::new(&format!("invalid xlog page header at {:X}/{:X}: {:?}",
                                                             self.lsn >> 32,
-                                                            self.lsn & 0xffffffff)));
+                                                            self.lsn & 0xffffffff, hdr)));
                 }
                 // TODO: verify the remaining fields in the header
 

@@ -8,6 +8,7 @@ use std::io;
 use std::process::exit;
 use std::thread;
 use std::fs::{File, OpenOptions};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -101,11 +102,11 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     if conf.daemonize {
         info!("daemonizing...");
 
-        let repodir = zenith_repo_dir();
+        let repodir = PathBuf::from(zenith_repo_dir());
 
         // There should'n be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fprintf's or backtraces.
-        let log_filename = repodir.clone() + "pageserver.log";
+        let log_filename = repodir.join("pageserver.log");
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
@@ -118,7 +119,7 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
             .with_context(|| format!("failed to open {:?}", &log_filename))?;
 
         let daemonize = Daemonize::new()
-            .pid_file(repodir.clone() + "/pageserver.pid")
+            .pid_file(repodir.clone().join("pageserver.pid"))
             .working_directory(repodir)
             .stdout(stdout)
             .stderr(stderr);

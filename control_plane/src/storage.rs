@@ -176,6 +176,7 @@ impl PageServerNode {
         cmd .args(&["-l", self.address().to_string().as_str()])
             .arg("-d")
             .env_clear()
+            .env("RUST_BACKTRACE", "1")
             .env("ZENITH_REPO_DIR", self.repo_path())
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
@@ -294,6 +295,12 @@ impl WalAcceptorNode {
         let status = Command::new(self.env.zenith_distrib_dir.join("wal_acceptor"))
             .args(&["-D", self.data_dir.to_str().unwrap()])
             .args(&["-l", self.listen.to_string().as_str()])
+            .args(&["--systemid", &self.env.systemid.to_string()])
+        // Tell page server it can receive WAL from this WAL safekeeper
+        // FIXME: If there are multiple safekeepers, they will all inform
+        // the page server. Only the last "notification" will stay in effect.
+        // So it's pretty random which safekeeper the page server will connect to
+            .args(&["--pageserver", "127.0.0.1:64000"])
             .arg("-d")
             .arg("-n")
             .status()
