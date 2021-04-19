@@ -8,7 +8,7 @@
 
 use crate::page_cache;
 use crate::page_cache::{BufferTag, RelTag};
-use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
+use crate::waldecoder::*;
 use crate::PageServerConf;
 use anyhow::Error;
 use log::*;

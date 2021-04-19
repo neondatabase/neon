@@ -324,10 +324,12 @@ async fn slurp_base_file(
 
     while bytes.remaining() >= 8192 {
         let tag = page_cache::BufferTag {
-            spcnode: parsed.spcnode,
-            dbnode: parsed.dbnode,
-            relnode: parsed.relnode,
-            forknum: parsed.forknum as u8,
+            rel: page_cache::RelTag {
+				spcnode: parsed.spcnode,
+				dbnode: parsed.dbnode,
+				relnode: parsed.relnode,
+				forknum: parsed.forknum as u8,
+			},
             blknum: blknum,
         };
 

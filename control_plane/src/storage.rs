@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use postgres::{Client, NoTls};
 
-use crate::compute::PostgresNode;
 use crate::local_env::{self, LocalEnv};
 
 type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
@@ -104,6 +103,9 @@ impl TestStorageControlPlane {
     }
 
     pub fn stop(&self) {
+		for wa in self.wal_acceptors.iter() {
+            let _unused = wa.stop();
+        }
         self.test_done.store(true, Ordering::Relaxed);
     }
 
@@ -348,42 +350,6 @@ impl Drop for WalProposerNode {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-pub fn regress_check(pg: &PostgresNode) {
-    pg.safe_psql("postgres", "CREATE DATABASE regression");
-
-    let regress_run_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp_check/regress");
-    fs::create_dir_all(regress_run_path.clone()).unwrap();
-    std::env::set_current_dir(regress_run_path).unwrap();
-
-    let regress_build_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install/build/src/test/regress");
-    let regress_src_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/postgres/src/test/regress");
-
-    let _regress_check = Command::new(regress_build_path.join("pg_regress"))
-        .args(&[
-            "--bindir=''",
-            "--use-existing",
-            format!("--bindir={}", pg.env.pg_bin_dir().to_str().unwrap()).as_str(),
-            format!("--dlpath={}", regress_build_path.to_str().unwrap()).as_str(),
-            format!(
-                "--schedule={}",
-                regress_src_path.join("parallel_schedule").to_str().unwrap()
-            )
-            .as_str(),
-            format!("--inputdir={}", regress_src_path.to_str().unwrap()).as_str(),
-        ])
-        .env_clear()
-        .env("LD_LIBRARY_PATH", pg.env.pg_lib_dir().to_str().unwrap())
-        .env("PGHOST", pg.address.ip().to_string())
-        .env("PGPORT", pg.address.port().to_string())
-        .env("PGUSER", pg.whoami())
-        .status()
-        .expect("pg_regress failed");
 }
 
 /// Read a PID file

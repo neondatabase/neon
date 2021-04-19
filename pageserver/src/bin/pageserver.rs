@@ -224,11 +224,11 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
         let log_file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log)
-			.unwrap_or_else(|_| {
+            .open(&log).map_err(|err| {
+				// We failed to initialize logging, so we can't log this message with error!
 				eprintln!("Could not create log file {:?}: {}", log, err);
 				err
-        })?;
+			})?;
 
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();

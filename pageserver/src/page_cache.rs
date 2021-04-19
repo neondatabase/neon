@@ -9,20 +9,17 @@
 use crate::{walredo, PageServerConf};
 use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use core::ops::Bound::Included;
 use crossbeam_channel::unbounded;
 use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
 use log::*;
-use rand::Rng;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::{convert::TryInto, ops::AddAssign};
-use lazy_static::lazy_static;
 use rocksdb::*;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
@@ -254,19 +251,6 @@ impl CacheEntryContent {
 }
 
 impl CacheEntry {
-    fn new(key: CacheKey) -> CacheEntry {
-        CacheEntry {
-            key,
-            content: Mutex::new(CacheEntryContent {
-                page_image: None,
-                wal_record: None,
-                apply_pending: false,
-            }
-        }
-    }
-}
-
-impl CacheEntry {
     fn new(key: CacheKey, content: CacheEntryContent) -> CacheEntry {
         CacheEntry {
             key,
@@ -403,18 +387,6 @@ impl PageCache {
                     lsn >> 32,
                     lsn & 0xffff_ffff
                 );
-            }
-
-            let pagecache = &shared.pagecache;
-
-            let mut entries = pagecache.range((Included(&minkey), Included(&maxkey)));
-
-            let entry_opt = entries.next_back();
-
-            if entry_opt.is_none() {
-                static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-                return Ok(Bytes::from_static(&ZERO_PAGE));
-                /* return Err("could not find page image")?; */
             }
         }
         let mut buf = BytesMut::new();
