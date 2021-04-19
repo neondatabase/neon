@@ -215,7 +215,7 @@ impl FeMessage {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-pub fn thread_main(conf: PageServerConf) {
+pub fn thread_main(conf: &PageServerConf) {
     // Create a new thread pool
     //
     // FIXME: keep it single-threaded for now, make it easier to debug with gdb,
@@ -260,7 +260,7 @@ impl Connection {
             stream: BufWriter::new(socket),
             buffer: BytesMut::with_capacity(10 * 1024),
             init_done: false,
-            conf: conf,
+            conf,
         }
     }
 
@@ -459,7 +459,7 @@ impl Connection {
             let _walreceiver_thread = thread::Builder::new()
                 .name("WAL receiver thread".into())
                 .spawn(move || {
-                    walreceiver::thread_main(conf_copy, &connstr);
+                    walreceiver::thread_main(&conf_copy, &connstr);
                 })
                 .unwrap();
 
@@ -504,7 +504,7 @@ impl Connection {
         self.stream.write_i16(0).await?; /* numAttributes */
         self.stream.flush().await?;
 
-        let pcache = page_cache::get_pagecache(self.conf.clone(), sysid);
+        let pcache = page_cache::get_pagecache(&self.conf, sysid);
 
         loop {
             let message = self.read_message().await?;
@@ -561,7 +561,7 @@ impl Connection {
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
-                        n_blocks: n_blocks,
+                        n_blocks,
                     }))
                     .await?
                 }

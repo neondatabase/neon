@@ -6,7 +6,6 @@ mod pq_protocol;
 pub mod wal_service;
 pub mod xlog_utils;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WalAcceptorConf {
     pub data_dir: PathBuf,

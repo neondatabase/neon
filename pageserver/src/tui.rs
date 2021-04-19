@@ -14,7 +14,6 @@ use tui::text::{Span, Spans, Text};
 use tui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 use tui::Terminal;
 
-use slog;
 use slog::Drain;
 
 lazy_static! {
@@ -188,6 +187,7 @@ pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[allow(dead_code)]
 struct LogWidget<'a> {
     logger: &'a TuiLogger,
     title: &'a str,

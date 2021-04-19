@@ -10,7 +10,6 @@ use std::time::Duration;
 use termion::event::Key;
 use termion::input::TermRead;
 
-#[allow(dead_code)]
 pub enum Event<I> {
     Input(I),
     Tick,

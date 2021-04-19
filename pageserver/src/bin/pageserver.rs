@@ -6,24 +6,24 @@ use log::*;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::exit;
 use std::thread;
-use std::{fs::OpenOptions, str::FromStr};
+use std::fs::OpenOptions;
 
+use anyhow::{Context, Result};
 use clap::{App, Arg};
 use daemonize::Daemonize;
 
-use slog;
 use slog::Drain;
-use slog_scope;
-use slog_stdlog;
 
 use pageserver::page_service;
+use pageserver::restore_datadir;
 use pageserver::restore_s3;
 use pageserver::tui;
 use pageserver::walreceiver;
 use pageserver::PageServerConf;
 
-fn main() -> Result<(), io::Error> {
+fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .arg(Arg::with_name("datadir")
@@ -51,10 +51,10 @@ fn main() -> Result<(), io::Error> {
                  .long("daemonize")
                  .takes_value(false)
                  .help("Run in the background"))
-        .arg(Arg::with_name("skip_recovery")
-                 .long("skip-recovery")
-                 .takes_value(false)
-                 .help("Skip S3 recovery procedy and start empty"))
+        .arg(Arg::with_name("restore_from")
+                 .long("restore-from")
+                 .takes_value(true)
+                 .help("Upload data from s3 or datadir"))
         .get_matches();
 
     let mut conf = PageServerConf {
@@ -63,7 +63,7 @@ fn main() -> Result<(), io::Error> {
         interactive: false,
         wal_producer_connstr: None,
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
-        skip_recovery: false,
+        restore_from: String::new(),
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
@@ -79,31 +79,29 @@ fn main() -> Result<(), io::Error> {
     }
 
     if conf.daemonize && conf.interactive {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--daemonize is not allowed with --interactive: choose one",
-        ));
+        eprintln!("--daemonize is not allowed with --interactive: choose one");
+        exit(1);
     }
 
-    if arg_matches.is_present("skip_recovery") {
-        conf.skip_recovery = true;
+    if let Some(restore_from) = arg_matches.value_of("restore_from") {
+        conf.restore_from = String::from(restore_from);
     }
 
     if let Some(addr) = arg_matches.value_of("wal_producer") {
-        conf.wal_producer_connstr = Some(String::from_str(addr).unwrap());
+        conf.wal_producer_connstr = Some(String::from(addr));
     }
 
     if let Some(addr) = arg_matches.value_of("listen") {
-        conf.listen_addr = addr.parse().unwrap();
+        conf.listen_addr = addr.parse()?;
     }
 
-    start_pageserver(conf)
+    start_pageserver(&conf)
 }
 
-fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
+fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     // Initialize logger
-    let _scope_guard = init_logging(&conf);
-    let _log_guard = slog_stdlog::init().unwrap();
+    let _scope_guard = init_logging(&conf)?;
+    let _log_guard = slog_stdlog::init()?;
 
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
@@ -127,18 +125,15 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     if conf.daemonize {
         info!("daemonizing...");
 
-        // There should'n be any logging to stdin/stdout. Redirect it to the main log so
-        // that we will see any accidental manual fpritf's or backtraces.
+        // There shouldn't be any logging to stdin/stdout. Redirect it to the main log so
+        // that we will see any accidental manual fprintf's or backtraces.
+        let log_filename = conf.data_dir.join("pageserver.log");
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(conf.data_dir.join("pageserver-stdout.log"))
-            .unwrap();
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(conf.data_dir.join("pageserver-stderr.log"))
-            .unwrap();
+            .open(&log_filename)
+            .with_context(|| format!("failed to open {:?}", log_filename))?;
+        let stderr = stdout.try_clone()?;
 
         let daemonize = Daemonize::new()
             .pid_file(conf.data_dir.join("pageserver.pid"))
@@ -154,13 +149,17 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
 
     let mut threads = Vec::new();
 
-    info!("starting...");
+    info!("starting... {}", conf.restore_from);
 
     // Before opening up for connections, restore the latest base backup from S3.
     // (We don't persist anything to local disk at the moment, so we need to do
     // this at every startup)
-    if !conf.skip_recovery {
+    if conf.restore_from.eq("s3") {
+        info!("restore-from s3...");
         restore_s3::restore_main(&conf);
+    } else if conf.restore_from.eq("local") {
+        info!("restore-from local...");
+        restore_datadir::restore_main(&conf);
     }
 
     // Create directory for wal-redo datadirs
@@ -169,7 +168,7 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
         Err(e) => match e.kind() {
             io::ErrorKind::AlreadyExists => {}
             _ => {
-                panic!("Failed to create wal-redo data directory: {}", e);
+                anyhow::bail!("Failed to create wal-redo data directory: {}", e);
             }
         },
     }
@@ -181,13 +180,13 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     //
     // All other wal receivers are started on demand by "callmemaybe" command
     // sent to pageserver.
-    let conf_copy = conf.clone();
-    if let Some(wal_producer) = conf.wal_producer_connstr {
-        let conf = conf_copy.clone();
+    if let Some(wal_producer) = &conf.wal_producer_connstr {
+        let conf_copy = conf.clone();
+        let wal_producer = wal_producer.clone();
         let walreceiver_thread = thread::Builder::new()
             .name("static WAL receiver thread".into())
             .spawn(move || {
-                walreceiver::thread_main(conf, &wal_producer);
+                walreceiver::thread_main(&conf_copy, &wal_producer);
             })
             .unwrap();
         threads.push(walreceiver_thread);
@@ -195,12 +194,12 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
 
     // GetPage@LSN requests are served by another thread. (It uses async I/O,
     // but the code in page_service sets up it own thread pool for that)
-    let conf = conf_copy.clone();
+    let conf_copy = conf.clone();
     let page_server_thread = thread::Builder::new()
         .name("Page Service thread".into())
-        .spawn(|| {
+        .spawn(move || {
             // thread code
-            page_service::thread_main(conf);
+            page_service::thread_main(&conf_copy);
         })
         .unwrap();
     threads.push(page_server_thread);
@@ -217,16 +216,20 @@ fn start_pageserver(conf: PageServerConf) -> Result<(), io::Error> {
     Ok(())
 }
 
-fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
+fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
     if conf.interactive {
-        tui::init_logging()
+        Ok(tui::init_logging())
     } else if conf.daemonize {
         let log = conf.data_dir.join("pageserver.log");
         let log_file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(log)
-            .unwrap_or_else(|_| panic!("Could not create log file"));
+			.unwrap_or_else(|_| {
+				eprintln!("Could not create log file {:?}: {}", log, err);
+				err
+        })?;
+
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {
@@ -237,7 +240,7 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
         });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());
-        slog_scope::set_global_logger(logger)
+        Ok(slog_scope::set_global_logger(logger))
     } else {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -255,6 +258,6 @@ fn init_logging(conf: &PageServerConf) -> slog_scope::GlobalLoggerGuard {
         })
         .fuse();
         let logger = slog::Logger::root(drain, slog::o!());
-        slog_scope::set_global_logger(logger)
+        Ok(slog_scope::set_global_logger(logger))
     }
 }

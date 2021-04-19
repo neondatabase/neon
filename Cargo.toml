@@ -3,4 +3,6 @@ members = [
     "integration_tests",
     "pageserver",
     "walkeeper",
+    "zenith",
+    "control_plane",
 ]

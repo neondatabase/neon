@@ -421,6 +421,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "245097e9a4535ee1e3e3931fcfcd55a796a44c643e8596ff6566d68f09b87bbc"
 
 [[package]]
+name = "control_plane"
+version = "0.1.0"
+dependencies = [
+ "home",
+ "lazy_static",
+ "postgres",
+ "rand 0.8.3",
+ "regex",
+ "serde",
+ "serde_derive",
+ "tokio-postgres",
+ "toml",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -844,6 +859,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "home"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2456aef2e6b6a9784192ae780c0f15bc57df0e918585282325e8c8ac27737654"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "http"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -894,7 +918,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project",
- "socket2 0.4.0",
+ "socket2",
  "tokio",
  "tower-service",
  "tracing",
@@ -948,12 +972,11 @@ dependencies = [
 name = "integration_tests"
 version = "0.1.0"
 dependencies = [
+ "control_plane",
  "lazy_static",
- "pageserver",
  "postgres",
  "rand 0.8.3",
  "tokio-postgres",
- "walkeeper",
 ]
 
 [[package]]
@@ -1146,7 +1169,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a19900e7eee95eb2b3c2e26d12a874cc80aaf750e31be6fcbe743ead369fa45d"
 dependencies = [
  "libc",
- "socket2 0.4.0",
+ "socket2",
 ]
 
 [[package]]
@@ -1276,6 +1299,7 @@ dependencies = [
  "log",
  "postgres",
  "postgres-protocol",
+ "postgres-types",
  "rand 0.8.3",
  "regex",
  "rocksdb",
@@ -1286,10 +1310,12 @@ dependencies = [
  "slog-stdlog",
  "slog-term",
  "termion",
+ "thiserror",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
  "tui",
+ "walkdir",
 ]
 
 [[package]]
@@ -1406,8 +1432,8 @@ dependencies = [
 
 [[package]]
 name = "postgres"
-version = "0.19.0"
-source = "git+https://github.com/kelvich/rust-postgres?branch=replication_rebase#f3425d991f75cb7b464a37e6b3d5d05f8bf51c02"
+version = "0.19.1"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -1419,8 +1445,8 @@ dependencies = [
 
 [[package]]
 name = "postgres-protocol"
-version = "0.6.0"
-source = "git+https://github.com/kelvich/rust-postgres?branch=replication_rebase#f3425d991f75cb7b464a37e6b3d5d05f8bf51c02"
+version = "0.6.1"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
 dependencies = [
  "base64",
  "byteorder",
@@ -1436,8 +1462,8 @@ dependencies = [
 
 [[package]]
 name = "postgres-types"
-version = "0.2.0"
-source = "git+https://github.com/kelvich/rust-postgres?branch=replication_rebase#f3425d991f75cb7b464a37e6b3d5d05f8bf51c02"
+version = "0.2.1"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -1701,7 +1727,7 @@ dependencies = [
 [[package]]
 name = "rust-s3"
 version = "0.27.0-beta1"
-source = "git+https://github.com/hlinnaka/rust-s3#7f15a24ec7daa0a5d9516da706212745f9042818"
+source = "git+https://github.com/hlinnaka/rust-s3?rev=7f15a24ec7daa0a5d9516da706212745f9042818#7f15a24ec7daa0a5d9516da706212745f9042818"
 dependencies = [
  "async-std",
  "async-trait",
@@ -1755,6 +1781,15 @@ name = "ryu"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71d301d4193d031abdd79ff7e3dd721168a9572ef3fe51a1517aba235bd8f86e"
+
+[[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "schannel"
@@ -1969,17 +2004,6 @@ checksum = "fe0f37c9e8f3c5a4a66ad655a93c74daac4ad00c441533bf5c6e7990bb42604e"
 
 [[package]]
 name = "socket2"
-version = "0.3.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "122e570113d28d773067fab24266b66753f6ea915758651696b6e35e49f88d6e"
-dependencies = [
- "cfg-if 1.0.0",
- "libc",
- "winapi",
-]
-
-[[package]]
-name = "socket2"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e3dfc207c526015c632472a77be09cf1b6e46866581aecae5cc38fb4235dea2"
@@ -2171,8 +2195,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres"
-version = "0.7.0"
-source = "git+https://github.com/kelvich/rust-postgres?branch=replication_rebase#f3425d991f75cb7b464a37e6b3d5d05f8bf51c02"
+version = "0.7.1"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -2183,10 +2207,10 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "phf",
- "pin-project",
+ "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
- "socket2 0.3.19",
+ "socket2",
  "tokio",
  "tokio-util",
 ]
@@ -2214,6 +2238,15 @@ dependencies = [
  "log",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "toml"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31142970826733df8241ef35dc040ef98c679ab14d7c3e54d827099b3acecaa"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -2355,6 +2388,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d5b2c62b4012a3e1eca5a7e077d13b3bf498c4073e33ccd58626607748ceeca"
 
 [[package]]
+name = "walkdir"
+version = "2.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "808cf2735cd4b6866113f648b791c6adc5714537bc222d9347bb203386ffda56"
+dependencies = [
+ "same-file",
+ "winapi",
+ "winapi-util",
+]
+
+[[package]]
 name = "walkeeper"
 version = "0.1.0"
 dependencies = [
@@ -2370,7 +2414,6 @@ dependencies = [
  "futures",
  "lazy_static",
  "log",
- "pageserver",
  "postgres",
  "postgres-protocol",
  "rand 0.8.3",
@@ -2520,6 +2563,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
 
 [[package]]
+name = "winapi-util"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70ec6ce85bb158151cae5e5c87f95a8e97d2c0c4b001223f33a334e3ce5de178"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2539,3 +2591,11 @@ name = "xml-rs"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b07db065a5cf61a7e4ba64f29e67db906fb1787316516c4e6e5ff0fea1efcd8a"
+
+[[package]]
+name = "zenith"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "control_plane",
+]

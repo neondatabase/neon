@@ -1,8 +1,9 @@
-#[allow(dead_code)]
-mod control_plane;
+// mod control_plane;
+use control_plane::compute::ComputeControlPlane;
+use control_plane::storage::TestStorageControlPlane;
 
-use control_plane::ComputeControlPlane;
-use control_plane::StorageControlPlane;
+use std::thread::sleep;
+use std::time::Duration;
 
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
@@ -12,12 +13,12 @@ use control_plane::StorageControlPlane;
 #[test]
 fn test_redo_cases() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server();
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
-    let node = compute_cplane.new_node();
-    node.start(&storage_cplane);
+    let node = compute_cplane.new_test_node();
+    node.start().unwrap();
 
     // check basic work with table
     node.safe_psql(
@@ -49,15 +50,17 @@ fn test_redo_cases() {
 
 // Runs pg_regress on a compute node
 #[test]
+#[ignore]
 fn test_regress() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server();
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // start postgres
-    let node = compute_cplane.new_node();
-    node.start(&storage_cplane);
+    let node = compute_cplane.new_test_node();
+    node.start().unwrap();
 
+<<<<<<< HEAD
     node.pg_regress();
 }
 
@@ -73,20 +76,23 @@ fn pgbench() {
     node.start(&storage_cplane);
 
     node.pg_bench(10, 100);
+=======
+    control_plane::storage::regress_check(&node);
+>>>>>>> main
 }
 
 // Run two postgres instances on one pageserver
 #[test]
 fn test_pageserver_multitenancy() {
     // Start pageserver that reads WAL directly from that postgres
-    let storage_cplane = StorageControlPlane::one_page_server();
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane);
+    let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
 
     // Allocate postgres instance, but don't start
-    let node1 = compute_cplane.new_node();
-    let node2 = compute_cplane.new_node();
-    node1.start(&storage_cplane);
-    node2.start(&storage_cplane);
+    let node1 = compute_cplane.new_test_node();
+    let node2 = compute_cplane.new_test_node();
+    node1.start().unwrap();
+    node2.start().unwrap();
 
     // check node1
     node1.safe_psql(
@@ -121,4 +127,37 @@ fn test_pageserver_multitenancy() {
         .get(0);
     println!("sum = {}", count);
     assert_eq!(count, 15000150000);
+}
+
+#[test]
+fn test_upload_pageserver_local() {
+    // Init pageserver that reads WAL directly from that postgres
+    // Don't start yet
+
+    let storage_cplane = TestStorageControlPlane::one_page_server_no_start();
+    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+
+    // init postgres node
+    let node = compute_cplane.new_test_node();
+
+    //upload data to pageserver & start it
+    &storage_cplane
+        .pageserver
+        .start_fromdatadir(node.pgdata().to_str().unwrap().to_string())
+        .unwrap();
+
+    sleep(Duration::from_secs(10));
+
+    // start postgres node
+    node.start().unwrap();
+
+    // check basic work with table
+    node.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+    );
 }

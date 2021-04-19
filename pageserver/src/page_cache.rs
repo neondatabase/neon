@@ -6,24 +6,24 @@
 // per-entry mutex.
 //
 
+use crate::{walredo, PageServerConf};
+use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::error::Error;
+use core::ops::Bound::Included;
+use crossbeam_channel::unbounded;
+use crossbeam_channel::{Receiver, Sender};
+use lazy_static::lazy_static;
+use log::*;
+use rand::Rng;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::{convert::TryInto, ops::AddAssign};
-// use tokio::sync::RwLock;
 use lazy_static::lazy_static;
-use log::*;
 use rocksdb::*;
-use std::collections::HashMap;
-
-use crate::{walredo, PageServerConf};
-
-use crossbeam_channel::unbounded;
-use crossbeam_channel::{Receiver, Sender};
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -112,7 +112,7 @@ lazy_static! {
     pub static ref PAGECACHES: Mutex<HashMap<u64, Arc<PageCache>>> = Mutex::new(HashMap::new());
 }
 
-pub fn get_pagecache(conf: PageServerConf, sys_id: u64) -> Arc<PageCache> {
+pub fn get_pagecache(conf: &PageServerConf, sys_id: u64) -> Arc<PageCache> {
     let mut pcaches = PAGECACHES.lock().unwrap();
 
     if !pcaches.contains_key(&sys_id) {
@@ -123,10 +123,11 @@ pub fn get_pagecache(conf: PageServerConf, sys_id: u64) -> Arc<PageCache> {
         // Now join_handle is not saved any where and we won'try restart tharead
         // if it is dead. We may later stop that treads after some inactivity period
         // and restart them on demand.
+        let conf = conf.clone();
         let _walredo_thread = thread::Builder::new()
             .name("WAL redo thread".into())
             .spawn(move || {
-                walredo::wal_redo_main(conf, sys_id);
+                walredo::wal_redo_main(&conf, sys_id);
             })
             .unwrap();
     }
@@ -253,6 +254,19 @@ impl CacheEntryContent {
 }
 
 impl CacheEntry {
+    fn new(key: CacheKey) -> CacheEntry {
+        CacheEntry {
+            key,
+            content: Mutex::new(CacheEntryContent {
+                page_image: None,
+                wal_record: None,
+                apply_pending: false,
+            }
+        }
+    }
+}
+
+impl CacheEntry {
     fn new(key: CacheKey, content: CacheEntryContent) -> CacheEntry {
         CacheEntry {
             key,
@@ -345,7 +359,7 @@ impl PageCache {
     //
     // Returns an 8k page image
     //
-    pub fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> Result<Bytes, Box<dyn Error>> {
+    pub fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
         // Look up cache entry. If it's a page image, return that. If it's a WAL record,
@@ -372,15 +386,11 @@ impl PageCache {
 
                 shared = wait_result.0;
                 if wait_result.1.timed_out() {
-                    error!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive",
-                        lsn
-                    );
-                    return Err(format!(
+                    bail!(
                         "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
                         lsn >> 32,
                         lsn & 0xffff_ffff
-                    ))?;
+                    );
                 }
             }
             if waited {
@@ -388,11 +398,23 @@ impl PageCache {
             }
 
             if lsn < shared.first_valid_lsn {
-                return Err(format!(
+                bail!(
                     "LSN {:X}/{:X} has already been removed",
                     lsn >> 32,
                     lsn & 0xffff_ffff
-                ))?;
+                );
+            }
+
+            let pagecache = &shared.pagecache;
+
+            let mut entries = pagecache.range((Included(&minkey), Included(&maxkey)));
+
+            let entry_opt = entries.next_back();
+
+            if entry_opt.is_none() {
+                static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+                return Ok(Bytes::from_static(&ZERO_PAGE));
+                /* return Err("could not find page image")?; */
             }
         }
         let mut buf = BytesMut::new();
@@ -440,14 +462,16 @@ impl PageCache {
             page_img = match &entry_content.page_image {
                 Some(p) => p.clone(),
                 None => {
-                    error!("could not apply WAL to reconstruct page image for GetPage@LSN request");
-                    return Err("could not apply WAL to reconstruct page image".into());
+                    error!(
+                        "could not apply WAL to reconstruct page image for GetPage@LSN request"
+                    );
+                    bail!("could not apply WAL to reconstruct page image");
                 }
             };
             self.put_page_image(tag, lsn, page_img.clone());
         } else {
             // No base image, and no WAL record. Huh?
-            panic!("no page image or WAL record for requested page");
+            bail!("no page image or WAL record for requested page");
         }
 
         // FIXME: assumes little-endian. Only used for the debugging log though

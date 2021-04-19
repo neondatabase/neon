@@ -10,7 +10,6 @@
 //
 use chrono::offset::Local;
 use chrono::DateTime;
-use slog;
 use slog::{Drain, Level, OwnedKVList, Record};
 use slog_async::AsyncRecord;
 use std::collections::VecDeque;
@@ -81,7 +80,7 @@ impl<'b> TuiLoggerWidget<'b> {
             style_trace: None,
             style_info: None,
             show_module: true,
-            logger: logger,
+            logger,
         }
     }
 }

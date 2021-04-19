@@ -1,5 +1,5 @@
 [package]
-name = "integration_tests"
+name = "control_plane"
 version = "0.1.0"
 authors = ["Stas Kelvich <stas@zenith.tech>"]
 edition = "2018"
@@ -7,9 +7,13 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lazy_static = "1.4.0"
 rand = "0.8.3"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 
-control_plane = { path = "../control_plane" }
+serde = ""
+serde_derive = ""
+toml = ""
+home = "0.5.3"
+lazy_static = ""
+regex = "1"
