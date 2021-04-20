@@ -79,6 +79,8 @@ jobs:
 
       - name: Build
         run: |
+          ls -l
+          ls -lR tmp_install/
           cargo build
 
       - name: Run test

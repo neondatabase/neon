@@ -23,7 +23,14 @@ fn main() {
         .whitelist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
         .whitelist_type("DBState")
 
-        .clang_arg("-I../vendor/postgres/src/include")
+    // Path the server include dir. It is in tmp_install/include/server, if you did
+    // "configure --prefix=<path to tmp_install>". But if you used "configure --prefix=/",
+    // and used DESTDIR to move it into tmp_install, then it's in
+    // tmp_install/include/postgres/server (that's how the pgbuild.sh script does it).
+    // 'pg_config --includedir-server' would perhaps be the more proper way to find it,
+    // but this will do for now.
+        .clang_arg("-I../tmp_install/include/server")
+        .clang_arg("-I../tmp_install/include/postgresql/server")
 
         // Finish the builder and generate the bindings.
         .generate()
