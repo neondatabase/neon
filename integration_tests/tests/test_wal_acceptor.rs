@@ -51,41 +51,41 @@ fn test_multitenancy() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-	let mut nodes = Vec::new();
-	let mut proxies = Vec::new();
-	for _ in 0..N_NODES {
-		let node = compute_cplane.new_test_master_node();
-		nodes.push(node);
-		nodes.last().unwrap().start().unwrap();
-		proxies.push(nodes.last().unwrap().start_proxy(wal_acceptors.clone()));
-	}
+    let mut nodes = Vec::new();
+    let mut proxies = Vec::new();
+    for _ in 0..N_NODES {
+        let node = compute_cplane.new_test_master_node();
+        nodes.push(node);
+        nodes.last().unwrap().start().unwrap();
+        proxies.push(nodes.last().unwrap().start_proxy(wal_acceptors.clone()));
+    }
 
     // create schema
-	for node in &nodes {
-		node.safe_psql(
-			"postgres",
-			"CREATE TABLE t(key int primary key, value text)",
-		);
-	}
+    for node in &nodes {
+        node.safe_psql(
+            "postgres",
+            "CREATE TABLE t(key int primary key, value text)",
+        );
+    }
 
-	// Populate data
-	for node in &nodes {
-		node.safe_psql(
-			"postgres",
-			"INSERT INTO t SELECT generate_series(1,100000), 'payload'",
-		);
-	}
+    // Populate data
+    for node in &nodes {
+        node.safe_psql(
+            "postgres",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        );
+    }
 
-	// Check data
-	for node in &nodes {
-		let count: i64 = node
-			.safe_psql("postgres", "SELECT sum(key) FROM t")
-			.first()
-			.unwrap()
-			.get(0);
-		println!("sum = {}", count);
-		assert_eq!(count, 5000050000);
-	}
+    // Check data
+    for node in &nodes {
+        let count: i64 = node
+            .safe_psql("postgres", "SELECT sum(key) FROM t")
+            .first()
+            .unwrap()
+            .get(0);
+        println!("sum = {}", count);
+        assert_eq!(count, 5000050000);
+    }
 }
 
 // Majority is always alive
