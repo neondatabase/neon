@@ -2678,3 +2678,7 @@ dependencies = [
  "postgres_ffi",
  "walkeeper",
 ]
+
+[[package]]
+name = "zenith_utils"
+version = "0.1.0"
