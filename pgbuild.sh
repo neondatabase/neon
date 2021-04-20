@@ -31,9 +31,3 @@ export DESTDIR=$REPO_ROOT/tmp_install
 
 echo "Installing postgres to $DESTDIR"
 make install -s
-
-#Configure postgres in src directory. We need it for postgres_ffi build
-echo "Configuring postgres build in place"
-cd ../../vendor/postgres/
-./configure CFLAGS='-O0' --enable-debug --enable-cassert \
-    --enable-depend --with-libxml --prefix=/ > configure.log
