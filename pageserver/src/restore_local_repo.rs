@@ -45,19 +45,20 @@ const GLOBALTABLESPACE_OID: u32 = 1664;
 //
 pub fn restore_timeline(conf: &PageServerConf, pcache: &PageCache, timeline: ZTimelineId) -> Result<()> {
 
-    let timelinepath = PathBuf::from("timelines").join(&timeline.to_str());
+    let timelinepath = PathBuf::from("timelines").join(timeline.to_string());
 
     if !timelinepath.exists() {
         anyhow::bail!("timeline {} does not exist in the page server's repository");
     }
 
     // Scan .zenith/timelines/<timeline>/snapshots
-    let snapshotspath = "timelines/".to_owned() + &timeline.to_str() + "/snapshots";
+    let snapshotspath = PathBuf::from("timelines").join(timeline.to_string()).join("snapshots");
 
     let mut last_snapshot_lsn: u64 = 0;
 
     for direntry in fs::read_dir(&snapshotspath).unwrap() {
-        let filename = direntry.unwrap().file_name().to_str().unwrap().to_owned();
+        let direntry = direntry?;
+        let filename = direntry.file_name().to_str().unwrap().to_owned();
 
         let lsn = u64::from_str_radix(&filename, 16)?;
         last_snapshot_lsn = max(lsn, last_snapshot_lsn);
@@ -67,7 +68,7 @@ pub fn restore_timeline(conf: &PageServerConf, pcache: &PageCache, timeline: ZTi
     }
 
     if last_snapshot_lsn == 0 {
-        error!("could not find valid snapshot in {}", &snapshotspath);
+        error!("could not find valid snapshot in {}", snapshotspath.display());
         // TODO return error?
     }
     pcache.init_valid_lsn(last_snapshot_lsn);
@@ -98,54 +99,42 @@ pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Re
 
 fn restore_snapshot(conf: &PageServerConf, pcache: &PageCache, timeline: ZTimelineId, snapshot: &str) -> Result<()> {
 
-    let snapshotpath = "timelines/".to_owned() + &timeline.to_str() + "/snapshots/" + snapshot;
+    let snapshotpath = PathBuf::from("timelines").join(timeline.to_string()).join("snapshots").join(snapshot);
 
     // Scan 'global'
-    let paths = fs::read_dir(snapshotpath.clone() + "/global").unwrap();
+    for direntry in fs::read_dir(snapshotpath.join("global"))? {
+        let direntry = direntry?;
+        match direntry.file_name().to_str() {
+            None => continue,
 
-    for direntry in paths {
-        let path = direntry.unwrap().path();
-        let filename = path.file_name();
-        if filename.is_none() {
-            continue;
-        }
-        let filename = filename.unwrap().to_str();
+            // These special files appear in the snapshot, but are not needed by the page server
+            Some("pg_control") => continue,
+            Some("pg_filenode.map") => continue,
 
-        if filename == Some("pg_control") {
-            continue;
+            // Load any relation files into the page server
+            _ => restore_relfile(conf, pcache, timeline, snapshot, GLOBALTABLESPACE_OID, 0, &direntry.path())?,
         }
-        if filename == Some("pg_filenode.map") {
-            continue;
-        }
-
-        restore_relfile(conf, pcache, timeline, snapshot, GLOBALTABLESPACE_OID, 0, &path)?;
     }
 
-    // Scan 'base'
-    let paths = fs::read_dir(snapshotpath.clone() + "/base").unwrap();
-    for path in paths {
-        let path = path.unwrap();
-        let filename = path.file_name().to_str().unwrap().to_owned();
+    // Scan 'base'. It contains database dirs, the database OID is the filename.
+    // E.g. 'base/12345', where 12345 is the database OID.
+    for direntry in fs::read_dir(snapshotpath.join("base"))? {
+        let direntry = direntry?;
 
-        // Scan database dirs
-        let dboid = u32::from_str_radix(&filename, 10)?;
+        let dboid = u32::from_str_radix(direntry.file_name().to_str().unwrap(), 10)?;
 
-        let paths = fs::read_dir(path.path()).unwrap();
-        for direntry in paths {
-            let path = direntry.unwrap().path();
-            let filename = path.file_name();
-            if filename.is_none() {
-                continue;
-            }
-            let filename = filename.unwrap().to_str();
-            if filename == Some("PG_VERSION") {
-                continue;
-            }
-            if filename == Some("pg_filenode.map") {
-                continue;
-            }
+        for direntry in fs::read_dir(direntry.path())? {
+            let direntry = direntry?;
+            match direntry.file_name().to_str() {
+                None => continue,
 
-            restore_relfile(conf, pcache, timeline, snapshot, DEFAULTTABLESPACE_OID, dboid, &path)?;
+                // These special files appear in the snapshot, but are not needed by the page server
+                Some("PG_VERSION") => continue,
+                Some("pg_filenode.map") => continue,
+
+                // Load any relation files into the page server
+                _ => restore_relfile(conf, pcache, timeline, snapshot, DEFAULTTABLESPACE_OID, dboid, &direntry.path())?,
+            }
         }
     }
 

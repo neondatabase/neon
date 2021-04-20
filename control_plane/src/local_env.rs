@@ -12,7 +12,6 @@ use bytes::Bytes;
 use rand::Rng;
 use anyhow::Context;
 
-use hex;
 use serde_derive::{Deserialize, Serialize};
 use anyhow::Result;
 
@@ -53,10 +52,10 @@ impl LocalEnv {
     }
 }
 
-fn zenith_repo_dir() -> String {
+fn zenith_repo_dir() -> PathBuf {
     // Find repository path
     match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => String::from(val.to_str().unwrap()),
+        Some(val) => PathBuf::from(val.to_str().unwrap()),
         None => ".zenith".into(),
     }
 }
@@ -66,7 +65,7 @@ fn zenith_repo_dir() -> String {
 //
 pub fn init() -> Result<()> {
     // check if config already exists
-    let repo_path = PathBuf::from(zenith_repo_dir());
+    let repo_path = zenith_repo_dir();
     if repo_path.exists() {
         anyhow::bail!("{} already exists. Perhaps already initialized?",
                       repo_path.to_str().unwrap());
@@ -113,19 +112,19 @@ pub fn init() -> Result<()> {
 
 pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
 {
-    let repopath = String::from(local_env.repo_path.to_str().unwrap());
-    fs::create_dir(&repopath).with_context(|| format!("could not create directory {}", repopath))?;
-    fs::create_dir(repopath.clone() + "/pgdatadirs")?;
-    fs::create_dir(repopath.clone() + "/timelines")?;
-    fs::create_dir(repopath.clone() + "/refs")?;
-    fs::create_dir(repopath.clone() + "/refs/branches")?;
-    fs::create_dir(repopath.clone() + "/refs/tags")?;
-    println!("created directory structure in {}", repopath);
+    let repopath = &local_env.repo_path;
+    fs::create_dir(&repopath).with_context(|| format!("could not create directory {}", repopath.display()))?;
+    fs::create_dir(repopath.join("pgdatadirs"))?;
+    fs::create_dir(repopath.join("timelines"))?;
+    fs::create_dir(repopath.join("refs"))?;
+    fs::create_dir(repopath.join("refs").join("branches"))?;
+    fs::create_dir(repopath.join("refs").join("tags"))?;
+    println!("created directory structure in {}", repopath.display());
 
     // Create initial timeline
     let tli = create_timeline(&local_env, None)?;
-    let timelinedir = format!("{}/timelines/{}", repopath,  &hex::encode(tli));
-    println!("created initial timeline {}", timelinedir);
+    let timelinedir = repopath.join("timelines").join(tli.to_string());
+    println!("created initial timeline {}", timelinedir.display());
 
     // Run initdb
     //
@@ -151,7 +150,7 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
     let lsnstr = format!("{:016X}", lsn);
 
     // Move the initial WAL file
-    fs::rename("tmp/pg_wal/000000010000000000000001", timelinedir.clone() + "/wal/000000010000000000000001.partial")?;
+    fs::rename("tmp/pg_wal/000000010000000000000001", timelinedir.join("wal").join("000000010000000000000001.partial"))?;
     println!("moved initial WAL file");
 
     // Remove pg_wal
@@ -161,13 +160,13 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
     force_crash_recovery(&PathBuf::from("tmp"))?;
     println!("updated pg_control");
 
-    let target = timelinedir.clone() + "/snapshots/" + &lsnstr;
+    let target = timelinedir.join("snapshots").join(&lsnstr);
     fs::rename("tmp", &target)?;
-    println!("moved 'tmp' to {}", &target);
+    println!("moved 'tmp' to {}", target.display());
 
     // Create 'main' branch to refer to the initial timeline
-    let data = hex::encode(tli);
-    fs::write(repopath.clone() + "/refs/branches/main", data)?;
+    let data = tli.to_string();
+    fs::write(repopath.join("refs").join("branches").join("main"), data)?;
     println!("created main branch");
 
     // Also update the system id in the LocalEnv
@@ -175,9 +174,9 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
 
     // write config
     let toml = toml::to_string(&local_env)?;
-    fs::write(repopath.clone() + "/config", toml)?;
+    fs::write(repopath.join("config"), toml)?;
 
-    println!("new zenith repository was created in {}", &repopath);
+    println!("new zenith repository was created in {}", repopath.display());
 
     Ok(())
 }
@@ -195,9 +194,7 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
 fn force_crash_recovery(datadir: &Path) -> Result<()> {
 
     // Read in the control file
-    let mut controlfilepath = datadir.to_path_buf();
-    controlfilepath.push("global");
-    controlfilepath.push("pg_control");
+    let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
     let mut controlfile = postgres_ffi::decode_pg_control(
         Bytes::from(fs::read(controlfilepath.as_path())?))?;
 
@@ -258,28 +255,29 @@ pub struct PointInTime {
     pub lsn: u64
 }
 
-fn create_timeline(local_env: &LocalEnv, ancestor: Option<PointInTime>) -> Result<[u8; 16]> {
-    let repopath = String::from(local_env.repo_path.to_str().unwrap());
+fn create_timeline(local_env: &LocalEnv, ancestor: Option<PointInTime>) -> Result<ZTimelineId> {
+    let repopath = &local_env.repo_path;
 
     // Create initial timeline
-    let mut tli = [0u8; 16];
-    rand::thread_rng().fill(&mut tli);
+    let mut tli_buf = [0u8; 16];
+    rand::thread_rng().fill(&mut tli_buf);
+    let timelineid = ZTimelineId::from(tli_buf);
 
-    let timelinedir = format!("{}/timelines/{}", repopath, &hex::encode(tli));
+    let timelinedir = repopath.join("timelines").join(timelineid.to_string());
 
-    fs::create_dir(timelinedir.clone())?;
-    fs::create_dir(timelinedir.clone() + "/snapshots")?;
-    fs::create_dir(timelinedir.clone() + "/wal")?;
+    fs::create_dir(&timelinedir)?;
+    fs::create_dir(&timelinedir.join("snapshots"))?;
+    fs::create_dir(&timelinedir.join("wal"))?;
 
     if let Some(ancestor) = ancestor {
         let data = format!("{}@{:X}/{:X}",
-                           hex::encode(ancestor.timelineid.to_str()),
+                           ancestor.timelineid,
                            ancestor.lsn >> 32,
                            ancestor.lsn & 0xffffffff);
-        fs::write(timelinedir + "/ancestor", data)?;
+        fs::write(timelinedir.join("ancestor"), data)?;
     }
 
-    Ok(tli)
+    Ok(timelineid)
 }
 
 // Parse an LSN in the format used in filenames
@@ -292,26 +290,26 @@ fn parse_lsn(s: &str) -> std::result::Result<u64, std::num::ParseIntError> {
 
 // Create a new branch in the repository (for the "zenith branch" subcommand)
 pub fn create_branch(local_env: &LocalEnv, branchname: &str, startpoint: PointInTime) -> Result<()> {
-    let repopath = String::from(local_env.repo_path.to_str().unwrap());
+    let repopath = &local_env.repo_path;
 
     // create a new timeline for it
     let newtli = create_timeline(local_env, Some(startpoint))?;
-    let newtimelinedir = format!("{}/timelines/{}", repopath, &hex::encode(newtli));
+    let newtimelinedir = repopath.join("timelines").join(newtli.to_string());
 
-    let data = hex::encode(newtli);
-    fs::write(format!("{}/refs/branches/{}", repopath, branchname), data)?;
+    let data = newtli.to_string();
+    fs::write(repopath.join("refs").join("branches").join(branchname), data)?;
 
     // Copy the latest snapshot (TODO: before the startpoint) and all WAL
     // TODO: be smarter and avoid the copying...
     let (_maxsnapshot, oldsnapshotdir) = find_latest_snapshot(local_env, startpoint.timelineid)?;
     let copy_opts = fs_extra::dir::CopyOptions::new();
-    fs_extra::dir::copy(oldsnapshotdir, newtimelinedir.clone() + "/snapshots", &copy_opts)?;
+    fs_extra::dir::copy(oldsnapshotdir, newtimelinedir.join("snapshots"), &copy_opts)?;
 
-    let oldtimelinedir = format!("{}/timelines/{}", &repopath, startpoint.timelineid.to_str());
+    let oldtimelinedir = repopath.join("timelines").join(startpoint.timelineid.to_string());
     let mut copy_opts = fs_extra::dir::CopyOptions::new();
     copy_opts.content_only = true;
-    fs_extra::dir::copy(oldtimelinedir + "/wal/",
-                        newtimelinedir.clone() + "/wal",
+    fs_extra::dir::copy(oldtimelinedir.join("wal"),
+                        newtimelinedir.join("wal"),
                         &copy_opts)?;
 
     Ok(())
@@ -319,8 +317,8 @@ pub fn create_branch(local_env: &LocalEnv, branchname: &str, startpoint: PointIn
 
 // Find the end of valid WAL in a wal directory
 pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<u64> {
-    let repopath = String::from(local_env.repo_path.to_str().unwrap());
-    let waldir = PathBuf::from(format!("{}/timelines/{}/wal", repopath, timeline.to_str()));
+    let repopath = &local_env.repo_path;
+    let waldir = repopath.join("timelines").join(timeline.to_string()).join("wal");
 
     let (lsn, _tli) = xlog_utils::find_end_of_wal(&waldir, 16 * 1024 * 1024, true);
 
@@ -329,15 +327,14 @@ pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<u6
 
 // Find the latest snapshot for a timeline
 fn find_latest_snapshot(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<(u64, PathBuf)> {
-    let repopath = String::from(local_env.repo_path.to_str().unwrap());
+    let repopath = &local_env.repo_path;
 
-    let timelinedir = repopath + "/timelines/" + &timeline.to_str();
-    let snapshotsdir = timelinedir.clone() + "/snapshots";
-    let paths = fs::read_dir(&snapshotsdir).unwrap();
+    let snapshotsdir = repopath.join("timelines").join(timeline.to_string()).join("snapshots");
+    let paths = fs::read_dir(&snapshotsdir)?;
     let mut maxsnapshot: u64 = 0;
     let mut snapshotdir: Option<PathBuf> = None;
     for path in paths {
-        let path = path.unwrap();
+        let path = path?;
         let filename = path.file_name().to_str().unwrap().to_owned();
         if let Ok(lsn) = parse_lsn(&filename) {
             maxsnapshot = std::cmp::max(lsn, maxsnapshot);
@@ -346,7 +343,7 @@ fn find_latest_snapshot(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<(
     }
     if maxsnapshot == 0 {
         // TODO: check ancestor timeline
-        anyhow::bail!("no snapshot found in {}", snapshotsdir);
+        anyhow::bail!("no snapshot found in {}", snapshotsdir.display());
     }
 
     Ok((maxsnapshot, snapshotdir.unwrap()))

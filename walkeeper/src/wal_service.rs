@@ -601,9 +601,8 @@ impl Connection {
     fn set_timeline(&mut self, timelineid: ZTimelineId) -> Result<()> {
         let mut timelines = TIMELINES.lock().unwrap();
         if !timelines.contains_key(&timelineid) {
-            let timeline_dir = timelineid.to_str();
-            info!("creating timeline dir {}", &timeline_dir);
-            fs::create_dir_all(&timeline_dir)?;
+            info!("creating timeline dir {}", timelineid);
+            fs::create_dir_all(timelineid.to_string())?;
             timelines.insert(timelineid, Arc::new(Timeline::new(timelineid)));
         }
         self.timeline = Some(timelines.get(&timelineid).unwrap().clone());
@@ -1112,12 +1111,12 @@ impl Connection {
             let wal_file_path = self
                 .conf
                 .data_dir
-                .join(self.timeline().timelineid.to_str())
+                .join(self.timeline().timelineid.to_string())
                 .join(wal_file_name.clone());
             let wal_file_partial_path = self
                 .conf
                 .data_dir
-                .join(self.timeline().timelineid.to_str())
+                .join(self.timeline().timelineid.to_string())
                 .join(wal_file_name.clone() + ".partial");
 
             {

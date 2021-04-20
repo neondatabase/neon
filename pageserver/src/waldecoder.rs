@@ -1,10 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-
-use std::cmp::min;
-use std::error::Error;
-use std::fmt;
-
 use log::*;
+use std::cmp::min;
+use thiserror::Error;
 
 const XLOG_BLCKSZ: u32 = 8192;
 
@@ -54,28 +51,11 @@ pub struct WalStreamDecoder {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Error, Debug, Clone)]
+#[error("{msg} at {lsn}")]
 pub struct WalDecodeError {
     msg: String,
-}
-
-impl Error for WalDecodeError {
-    fn description(&self) -> &str {
-        &self.msg
-    }
-}
-impl WalDecodeError {
-    fn new(msg: &str) -> WalDecodeError {
-        WalDecodeError {
-            msg: msg.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for WalDecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "WAL decoding error: {}", self.msg)
-    }
+    lsn: u64
 }
 
 //
@@ -100,8 +80,14 @@ impl WalStreamDecoder {
         self.inputbuf.extend_from_slice(buf);
     }
 
-    // Returns a tuple:
-    // (end LSN, record)
+    /// Attempt to decode another WAL record from the input that has been fed to the
+    /// decoder so far.
+    ///
+    /// Returns one of the following:
+    ///     Ok((u64, Bytes)): a tuple containing the LSN of next record, and the record itself
+    ///     Ok(None): there is not enough data in the input buffer. Feed more by calling the `feed_bytes` function
+    ///     Err(WalDecodeError): an error occured while decoding, meaning the input was invalid.
+    ///
     pub fn poll_decode(&mut self) -> Result<Option<(u64, Bytes)>, WalDecodeError> {
         loop {
             // parse and verify page boundaries as we go
@@ -114,9 +100,7 @@ impl WalStreamDecoder {
 
                 let hdr = self.decode_XLogLongPageHeaderData();
                 if hdr.std.xlp_pageaddr != self.lsn {
-                    return Err(WalDecodeError::new(&format!("invalid xlog segment header at {:X}/{:X}",
-                                                            self.lsn >> 32,
-                                                            self.lsn & 0xffffffff)));
+                    return Err(WalDecodeError { msg: "invalid xlog segment header".into(), lsn: self.lsn });
                 }
                 // TODO: verify the remaining fields in the header
 
@@ -131,9 +115,7 @@ impl WalStreamDecoder {
 
                 let hdr = self.decode_XLogPageHeaderData();
                 if hdr.xlp_pageaddr != self.lsn {
-                    return Err(WalDecodeError::new(&format!("invalid xlog page header at {:X}/{:X}: {:?}",
-                                                            self.lsn >> 32,
-                                                            self.lsn & 0xffffffff, hdr)));
+                    return Err(WalDecodeError { msg: "invalid xlog page header".into(), lsn: self.lsn });
                 }
                 // TODO: verify the remaining fields in the header
 
@@ -159,10 +141,7 @@ impl WalStreamDecoder {
                 self.startlsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
                 if xl_tot_len < SizeOfXLogRecord {
-                    return Err(WalDecodeError::new(&format!("invalid xl_tot_len {} at {:X}/{:X}",
-                                                            xl_tot_len,
-                                                            self.lsn >> 32,
-                                                            self.lsn & 0xffffffff)));
+                    return Err(WalDecodeError {msg: format!("invalid xl_tot_len {}", xl_tot_len), lsn: self.lsn });
                 }
                 self.lsn += 4;
 

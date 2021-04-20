@@ -65,7 +65,7 @@ fn main() -> Result<()> {
         .get_matches();
 
     let systemid_str = arg_matches.value_of("systemid").unwrap();
-    let systemid = u64::from_str_radix(systemid_str, 10)?;
+    let systemid: u64 = systemid_str.parse()?;
 
     let mut conf = WalAcceptorConf {
         data_dir: PathBuf::from("./"),

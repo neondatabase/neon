@@ -15,6 +15,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::io;
 use std::thread;
+use std::str::FromStr;
 use std::sync::Arc;
 use regex::Regex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
@@ -247,13 +248,12 @@ impl FeDescribeMessage {
         }
         */
 
-        if kind != 0x53 { // 'S'
+        if kind != b'S' {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "only prepared statmement Describe is implemented",
             ));
         }
-
 
         Ok(FeMessage::Describe(FeDescribeMessage {kind}))
     }
@@ -262,7 +262,8 @@ impl FeDescribeMessage {
 // we only support unnamed prepared stmt or portal
 #[derive(Debug)]
 struct FeExecuteMessage {
-    maxrows: i32// max # of rows
+    /// max # of rows
+    maxrows: i32
 }
 
 impl FeExecuteMessage {
@@ -469,7 +470,7 @@ impl Connection {
             buffer: BytesMut::with_capacity(10 * 1024),
             init_done: false,
             conf,
-            runtime: runtime.clone(),
+            runtime: Arc::clone(runtime),
         }
     }
 
