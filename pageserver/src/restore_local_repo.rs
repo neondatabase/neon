@@ -203,7 +203,7 @@ fn restore_relfile(_conf: &PageServerConf, pcache: &PageCache, _timeline: ZTimel
         relnode: relnode,
         forknum: forknum as u8,
     };
-    pcache.relsize_inc(&tag, Some(blknum));
+    pcache.relsize_inc(&tag, blknum);
 
     Ok(())
 }
