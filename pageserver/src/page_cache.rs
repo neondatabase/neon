@@ -597,17 +597,19 @@ impl PageCache {
         }
     }
 
-    // FIXME: Shouldn't relation size also be tracked with an LSN?
-    // If a replica is lagging behind, it needs to get the size as it was on
-    // the replica's current replay LSN.
-    pub fn relsize_inc(&self, rel: &RelTag, to: Option<u32>) {
+    /// Remember a relation's size in blocks.
+    ///
+    /// If 'to' is larger than the previously remembered size, the remembered size is increased to 'to'.
+    /// But if it's smaller, there is no change.
+    pub fn relsize_inc(&self, rel: &RelTag, to: u32) {
+        // FIXME: Shouldn't relation size also be tracked with an LSN?
+        // If a replica is lagging behind, it needs to get the size as it was on
+        // the replica's current replay LSN.
         let mut shared = self.shared.lock().unwrap();
         let entry = shared.relsize_cache.entry(*rel).or_insert(0);
 
-        if let Some(to) = to {
-            if to >= *entry {
-                *entry = to + 1;
-            }
+        if to >= *entry {
+            *entry = to;
         }
     }
 

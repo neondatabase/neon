@@ -333,7 +333,7 @@ async fn slurp_base_file(
 
         pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));
 
-        pcache.relsize_inc(&reltag, Some(blknum));
+        pcache.relsize_inc(&reltag, blknum + 1);
         blknum += 1;
     }
 }

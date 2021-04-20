@@ -600,7 +600,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    pcache.relsize_inc(&tag, None);
+                    pcache.relsize_inc(&tag, 0);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: true,
@@ -616,7 +616,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    pcache.relsize_inc(&tag, Some(req.blkno));
+                    pcache.relsize_inc(&tag, req.blkno + 1);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: true,
