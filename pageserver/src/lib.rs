@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::str::FromStr;
+use std::fmt;
 
 pub mod page_cache;
 pub mod page_service;
@@ -23,9 +25,10 @@ pub struct PageServerConf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ZTimelineId([u8; 16]);
 
-impl ZTimelineId {
+impl FromStr for ZTimelineId {
+    type Err = hex::FromHexError;
 
-    pub fn from_str(s: &str) -> Result<ZTimelineId, hex::FromHexError> {
+    fn from_str(s: &str) -> Result<ZTimelineId, Self::Err> {
         let timelineid = hex::decode(s)?;
 
         let mut buf: [u8; 16] = [0u8; 16];
@@ -33,6 +36,9 @@ impl ZTimelineId {
         Ok(ZTimelineId(buf))
     }
 
+}
+
+impl ZTimelineId {
     pub fn from(b: [u8; 16]) -> ZTimelineId {
         ZTimelineId(b)
     }
@@ -46,14 +52,11 @@ impl ZTimelineId {
     pub fn as_arr(&self) -> [u8; 16] {
         self.0
     }
-
-    pub fn to_str(self: &ZTimelineId) -> String {
-         hex::encode(self.0)
-    }
 }
 
-impl std::fmt::Display for ZTimelineId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.to_str())
+impl fmt::Display for ZTimelineId {
+
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.write_str(&hex::encode(self.0))
     }
 }

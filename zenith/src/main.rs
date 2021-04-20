@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::str::FromStr;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use anyhow::Result;
-use anyhow::*;
+use anyhow::{anyhow, bail};
 
 use control_plane::{compute::ComputeControlPlane, local_env, storage};
 use control_plane::local_env::LocalEnv;
@@ -12,10 +13,10 @@ use control_plane::storage::PageServerNode;
 
 use pageserver::ZTimelineId;
 
-fn zenith_repo_dir() -> String {
+fn zenith_repo_dir() -> PathBuf {
     // Find repository path
     match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => String::from(val.to_str().unwrap()),
+        Some(val) => PathBuf::from(val.to_str().unwrap()),
         None => ".zenith".into(),
     }
 }
@@ -239,19 +240,20 @@ fn run_branch_cmd(local_env: &LocalEnv, args: ArgMatches) -> Result<()> {
         }
     } else {
         // No arguments, list branches
-        list_branches();
+        list_branches()?;
     }
     Ok(())
 }
 
-fn list_branches() {
+fn list_branches() -> Result<()> {
     // list branches
-    let paths = fs::read_dir(zenith_repo_dir() + "/refs/branches").unwrap();
+    let paths = fs::read_dir(zenith_repo_dir().join("refs").join("branches"))?;
 
     for path in paths {
-        let filename = path.unwrap().file_name().to_str().unwrap().to_owned();
-        println!("  {}", filename);
+        println!("  {}", path?.file_name().to_str().unwrap());
     }
+
+    Ok(())
 }
 
 //
@@ -281,8 +283,8 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
     let lsn: Option<u64>;
     if let Some(lsnstr) = strings.next() {
         let mut s = lsnstr.split("/");
-        let lsn_hi: u64 = s.next().unwrap().parse()?;
-        let lsn_lo: u64 = s.next().unwrap().parse()?;
+        let lsn_hi: u64 = s.next().ok_or(anyhow!("invalid LSN in point-in-time specification"))?.parse()?;
+        let lsn_lo: u64 = s.next().ok_or(anyhow!("invalid LSN in point-in-time specification"))?.parse()?;
         lsn = Some(lsn_hi << 32 | lsn_lo);
     }
     else {
@@ -291,7 +293,7 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
 
     // Check if it's a tag
     if lsn.is_none() {
-        let tagpath:PathBuf = PathBuf::from(zenith_repo_dir() + "/refs/tags/" + name);
+        let tagpath = zenith_repo_dir().join("refs").join("tags").join(name);
         if tagpath.exists() {
             let pointstr = fs::read_to_string(tagpath)?;
 
@@ -300,7 +302,7 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
     }
     // Check if it's a branch
     // Check if it's branch @ LSN
-    let branchpath:PathBuf = PathBuf::from(zenith_repo_dir() + "/refs/branches/" + name);
+    let branchpath = zenith_repo_dir().join("refs").join("branches").join(name);
     if branchpath.exists() {
         let pointstr = fs::read_to_string(branchpath)?;
 
@@ -315,7 +317,7 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
 
     // Check if it's a timelineid
     // Check if it's timelineid @ LSN
-    let tlipath:PathBuf = PathBuf::from(zenith_repo_dir() + "/timelines/" + name);
+    let tlipath = zenith_repo_dir().join("timelines").join(name);
     if tlipath.exists() {
         let result = local_env::PointInTime {
             timelineid: ZTimelineId::from_str(name)?,

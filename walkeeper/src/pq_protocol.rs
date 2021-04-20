@@ -3,6 +3,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use pageserver::ZTimelineId;
 use std::io;
 use std::str;
+use std::str::FromStr;
 
 pub type Oid = u32;
 pub type SystemId = u64;

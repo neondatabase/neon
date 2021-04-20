@@ -73,8 +73,8 @@ impl ComputeControlPlane {
         }
     }
 
-    // Connect to a page server, get base backup, and untar it to initialize a
-    // new data directory
+    /// Connect to a page server, get base backup, and untar it to initialize a
+    /// new data directory
     pub fn new_from_page_server(&mut self, is_test: bool, timelineid: ZTimelineId) -> Result<Arc<PostgresNode>> {
         let node_id = self.nodes.len() as u32 + 1;
 
@@ -215,7 +215,7 @@ impl PostgresNode {
 
         println!(
             "Extracting base backup to create postgres instance: path={} port={}",
-            pgdata.to_str().unwrap(),
+            pgdata.display(),
             self.address.port()
         );
 
@@ -225,66 +225,64 @@ impl PostgresNode {
         }
 
         let sql = format!("basebackup {}", self.timelineid);
-        let mut client = self.pageserver.page_server_psql_client()?;
-        println!("connected to page server");
+        let mut client = self.pageserver.page_server_psql_client().with_context(|| "connecting to page erver failed")?;
 
-        fs::create_dir_all(&pgdata)?;
-        fs::set_permissions(pgdata.as_path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir_all(&pgdata)
+            .with_context(|| format!("could not create data directory {}", pgdata.display()))?;
+        fs::set_permissions(pgdata.as_path(), fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("could not set permissions in data directory {}", pgdata.display()))?;
 
-        // Also create pg_wal directory, it's not included in the tarball
-        // FIXME: actually, it is currently.
+        // FIXME: The compute node should be able to stream the WAL it needs from the WAL safekeepers or archive.
+        // But that's not implemented yet. For now, 'pg_wal' is included in the base backup tarball that
+        // we receive from the Page Server, so we don't need to create the empty 'pg_wal' directory here.
         //fs::create_dir_all(pgdata.join("pg_wal"))?;
 
-        let mut copyreader = client.copy_out(sql.as_str())?;
+        let mut copyreader = client.copy_out(sql.as_str())
+            .with_context(|| "page server 'basebackup' command failed")?;
 
         // FIXME: Currently, we slurp the whole tarball into memory, and then extract it,
         // but we really should do this:
         //let mut ar = tar::Archive::new(copyreader);
         let mut buf = vec![];
-        copyreader.read_to_end(&mut buf)?;
-        println!("got tarball of size {}", buf.len());
+        copyreader.read_to_end(&mut buf)
+            .with_context(|| "reading base backup from page server failed")?;
         let mut ar = tar::Archive::new(buf.as_slice());
-        ar.unpack(&pgdata)?;
+        ar.unpack(&pgdata)
+            .with_context(|| "extracting page backup failed")?;
 
         // listen for selected port
         self.append_conf(
             "postgresql.conf",
-            format!(
+            &format!(
                 "max_wal_senders = 10\n\
-            max_replication_slots = 10\n\
-            hot_standby = on\n\
-            shared_buffers = 1MB\n\
-            max_connections = 100\n\
-            wal_level = replica\n\
-            listen_addresses = '{address}'\n\
-            port = {port}\n",
+                 max_replication_slots = 10\n\
+                 hot_standby = on\n\
+                 shared_buffers = 1MB\n\
+                 max_connections = 100\n\
+                 wal_level = replica\n\
+                 listen_addresses = '{address}'\n\
+                 port = {port}\n",
                 address = self.address.ip(),
                 port = self.address.port()
-            )
-            .as_str(),
-        );
+            ));
 
         // Never clean up old WAL. TODO: We should use a replication
         // slot or something proper, to prevent the compute node
         // from removing WAL that hasn't been streamed to the safekeepr or
         // page server yet. But this will do for now.
         self.append_conf("postgresql.conf",
-            format!("wal_keep_size='10TB'\n")
-            .as_str(),
-        );
+                         &format!("wal_keep_size='10TB'\n"));
 
         // Connect it to the page server.
 
         // Configure that node to take pages from pageserver
         self.append_conf("postgresql.conf",
-            format!("page_server_connstring = 'host={} port={}'\n\
-                     zenith_timeline='{}'\n",
-                    self.pageserver.address().ip(),
-                    self.pageserver.address().port(),
-                    self.timelineid,
-            )
-            .as_str(),
-        );
+            &format!("page_server_connstring = 'host={} port={}'\n\
+                      zenith_timeline='{}'\n",
+                     self.pageserver.address().ip(),
+                     self.pageserver.address().port(),
+                     self.timelineid
+            ));
 
         Ok(())
     }
@@ -317,6 +315,7 @@ impl PostgresNode {
 
     fn pg_ctl(&self, args: &[&str]) -> Result<()> {
         let pg_ctl_path = self.env.pg_bin_dir().join("pg_ctl");
+
         let pg_ctl = Command::new(pg_ctl_path)
             .args(
                 [
@@ -332,13 +331,11 @@ impl PostgresNode {
             )
             .env_clear()
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .status()?;
-
+            .status().with_context(|| "pg_ctl failed")?;
         if !pg_ctl.success() {
             anyhow::bail!("pg_ctl failed");
-        } else {
-            Ok(())
         }
+        Ok(())
     }
 
     pub fn start(&self) -> Result<()> {
@@ -404,7 +401,7 @@ impl PostgresNode {
     pub fn start_proxy(&self, wal_acceptors: &str) -> WalProposerNode {
         let proxy_path = self.env.pg_bin_dir().join("safekeeper_proxy");
         match Command::new(proxy_path.as_path())
-            .args(&["--ztimelineid", &self.timelineid.to_str()])
+            .args(&["--ztimelineid", &self.timelineid.to_string()])
             .args(&["-s", wal_acceptors])
             .args(&["-h", &self.address.ip().to_string()])
             .args(&["-p", &self.address.port().to_string()])
