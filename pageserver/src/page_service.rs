@@ -852,7 +852,7 @@ impl Connection {
                         blknum: req.blkno,
                     };
 
-                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn) {
+                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn).await {
                         Ok(p) => BeMessage::ZenithReadResponse(ZenithReadResponse {
                             ok: true,
                             n_blocks: 0,

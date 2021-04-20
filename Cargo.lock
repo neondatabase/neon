@@ -1339,6 +1339,7 @@ dependencies = [
  "tokio-stream",
  "tui",
  "walkdir",
+ "zenith_utils",
 ]
 
 [[package]]
