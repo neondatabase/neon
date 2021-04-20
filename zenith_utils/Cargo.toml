@@ -5,3 +5,8 @@ authors = ["Eric Seppanen <eric@zenith.tech>"]
 edition = "2018"
 
 [dependencies]
+tokio = { version = "1.5", features = ["sync", "time" ] }
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1.5", features = ["macros", "rt"] }
