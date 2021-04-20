@@ -36,12 +36,8 @@ enum FeMessage {
     // All that messages are actually CopyData from libpq point of view.
     //
     ZenithExistsRequest(ZenithRequest),
-    ZenithTruncRequest(ZenithRequest),
-    ZenithUnlinkRequest(ZenithRequest),
     ZenithNblocksRequest(ZenithRequest),
     ZenithReadRequest(ZenithRequest),
-    ZenithCreateRequest(ZenithRequest),
-    ZenithExtendRequest(ZenithRequest),
 }
 
 #[derive(Debug)]
@@ -193,12 +189,8 @@ impl FeMessage {
                 // serialization.
                 match smgr_tag {
                     0 => Ok(Some(FeMessage::ZenithExistsRequest(zreq))),
-                    1 => Ok(Some(FeMessage::ZenithTruncRequest(zreq))),
-                    2 => Ok(Some(FeMessage::ZenithUnlinkRequest(zreq))),
-                    3 => Ok(Some(FeMessage::ZenithNblocksRequest(zreq))),
-                    4 => Ok(Some(FeMessage::ZenithReadRequest(zreq))),
-                    5 => Ok(Some(FeMessage::ZenithCreateRequest(zreq))),
-                    6 => Ok(Some(FeMessage::ZenithExtendRequest(zreq))),
+                    1 => Ok(Some(FeMessage::ZenithNblocksRequest(zreq))),
+                    2 => Ok(Some(FeMessage::ZenithReadRequest(zreq))),
                     _ => Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!("unknown smgr message tag: {},'{:?}'", smgr_tag, buf),
@@ -527,24 +519,10 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let exist = pcache.relsize_exist(&tag);
+                    let exist = pcache.relsize_exist(&tag, req.lsn).unwrap_or(false);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: exist,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
-                Some(FeMessage::ZenithTruncRequest(_)) => {
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
-                Some(FeMessage::ZenithUnlinkRequest(_)) => {
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
                         n_blocks: 0,
                     }))
                     .await?
@@ -557,7 +535,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let n_blocks = pcache.relsize_get(&tag);
+                    let n_blocks = pcache.relsize_get(&tag, req.lsn).unwrap_or(0);
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
@@ -594,38 +572,6 @@ impl Connection {
                     };
 
                     self.write_message(&msg).await?
-                }
-                Some(FeMessage::ZenithCreateRequest(req)) => {
-                    let tag = page_cache::RelTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
-                    };
-
-                    pcache.relsize_inc(&tag, None);
-
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
-                Some(FeMessage::ZenithExtendRequest(req)) => {
-                    let tag = page_cache::RelTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
-                    };
-
-                    pcache.relsize_inc(&tag, Some(req.blkno));
-
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
                 }
                 _ => {}
             }

@@ -315,13 +315,6 @@ async fn slurp_base_file(
 
     let pcache = page_cache::get_pagecache(conf, sys_id);
 
-    let reltag = page_cache::RelTag {
-        spcnode: parsed.spcnode,
-        dbnode: parsed.dbnode,
-        relnode: parsed.relnode,
-        forknum: parsed.forknum as u8,
-    };
-
     while bytes.remaining() >= 8192 {
         let tag = page_cache::BufferTag {
             rel: page_cache::RelTag {
@@ -335,7 +328,6 @@ async fn slurp_base_file(
 
         pcache.put_page_image(tag, parsed.lsn, bytes.copy_to_bytes(8192));
 
-        pcache.relsize_inc(&reltag, Some(blknum));
         blknum += 1;
     }
 }

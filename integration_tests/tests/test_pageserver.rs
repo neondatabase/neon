@@ -50,7 +50,6 @@ fn test_redo_cases() {
 
 // Runs pg_regress on a compute node
 #[test]
-#[ignore]
 fn test_regress() {
     // Start pageserver that reads WAL directly from that postgres
     let storage_cplane = TestStorageControlPlane::one_page_server(String::new());
