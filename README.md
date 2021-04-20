@@ -19,7 +19,7 @@ cargo build
 >./target/debug/zenith init
 
 # start pageserver
-> ./target/debug/zenith start
+> ./target/debug/zenith pageserver start
 Starting pageserver at '127.0.0.1:64000'
 
 # create and configure postgres data dir
