@@ -4,7 +4,7 @@ on: [push]
 
 jobs:
   regression-check:
-    timeout-minutes: 10
+    timeout-minutes: 30
     name: run regression test suite
     runs-on: ubuntu-latest
 
