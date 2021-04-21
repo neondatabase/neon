@@ -21,6 +21,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::Error;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -171,7 +172,7 @@ impl WalRedoProcess {
             // Limit shared cache for wal-redo-postres
             let mut config = OpenOptions::new()
                 .append(true)
-                .open(datadir.join("postgresql.conf"))?;
+                .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
             config.write(b"shared_buffers=128kB\n")?;
             config.write(b"fsync=off\n")?;
         }

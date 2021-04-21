@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use postgres::{Client, NoTls};
 
-use crate::compute::PostgresNode;
 use crate::local_env::LocalEnv;
 use pageserver::ZTimelineId;
 

@@ -16,4 +16,4 @@ crc32c = "0.6.0"
 hex = "0.4.3"
 
 [build-dependencies]
-bindgen = "0.53.1"
+bindgen = "0.57"

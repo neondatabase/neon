@@ -4,12 +4,11 @@
 
 use log::*;
 use std::fs;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io;
 use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
-use std::fs::OpenOptions;
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -18,17 +17,10 @@ use daemonize::Daemonize;
 use slog::Drain;
 
 use pageserver::page_service;
+use pageserver::zenith_repo_dir;
 use pageserver::tui;
 //use pageserver::walreceiver;
 use pageserver::PageServerConf;
-
-fn zenith_repo_dir() -> String {
-    // Find repository path
-    match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => String::from(val.to_str().unwrap()),
-        None => ".zenith".into(),
-    }
-}
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
@@ -140,7 +132,7 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
         // does this for us.
         let repodir = zenith_repo_dir();
         std::env::set_current_dir(&repodir)?;
-        info!("Changed current directory to repository in {}", &repodir);
+        info!("Changed current directory to repository in {:?}", &repodir);
     }
 
     let mut threads = Vec::new();
@@ -186,7 +178,7 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
     if conf.interactive {
         Ok(tui::init_logging())
     } else if conf.daemonize {
-        let log = zenith_repo_dir() + "/pageserver.log";
+        let log = zenith_repo_dir().join("pageserver.log");
         let log_file = OpenOptions::new()
             .create(true)
             .append(true)

@@ -16,6 +16,7 @@ use anyhow::Result;
 use serde_derive::{Deserialize, Serialize};
 
 use pageserver::ZTimelineId;
+use pageserver::zenith_repo_dir;
 use walkeeper::xlog_utils;
 
 //
@@ -49,14 +50,6 @@ impl LocalEnv {
     }
     pub fn pg_lib_dir(&self) -> PathBuf {
         self.pg_distrib_dir.join("lib")
-    }
-}
-
-fn zenith_repo_dir() -> PathBuf {
-    // Find repository path
-    match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => PathBuf::from(val.to_str().unwrap()),
-        None => ".zenith".into(),
     }
 }
 

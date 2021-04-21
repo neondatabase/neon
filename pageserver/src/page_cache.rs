@@ -8,7 +8,7 @@
 
 use crate::restore_local_repo::restore_timeline;
 use crate::ZTimelineId;
-use crate::{walredo, PageServerConf};
+use crate::{walredo, PageServerConf, zenith_repo_dir};
 use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crossbeam_channel::unbounded;
@@ -150,8 +150,8 @@ pub fn get_or_restore_pagecache(
     }
 }
 
-fn open_rocksdb(conf: &PageServerConf, timelineid: u64) -> DB {
-    let path = conf.data_dir.join(timelineid.to_string());
+fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> DB {
+    let path = zenith_repo_dir().join(timelineid.to_string());
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.set_use_fsync(true);
@@ -159,7 +159,7 @@ fn open_rocksdb(conf: &PageServerConf, timelineid: u64) -> DB {
     DB::open(&opts, &path).unwrap()
 }
 
-fn init_page_cache(conf: &PageServerConf, timelineid: u64) -> PageCache {
+fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache {
     // Initialize the channel between the page cache and the WAL applicator
     let (s, r) = unbounded();
 

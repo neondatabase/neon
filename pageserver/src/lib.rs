@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::path::PathBuf;
 
 pub mod basebackup;
 pub mod page_cache;
@@ -56,5 +57,13 @@ impl ZTimelineId {
 impl fmt::Display for ZTimelineId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(self.0))
+    }
+}
+
+pub fn zenith_repo_dir() -> PathBuf {
+    // Find repository path
+    match std::env::var_os("ZENITH_REPO_DIR") {
+        Some(val) => PathBuf::from(val.to_str().unwrap()),
+        None => ".zenith".into(),
     }
 }

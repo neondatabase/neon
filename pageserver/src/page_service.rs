@@ -428,12 +428,8 @@ pub fn thread_main(conf: &PageServerConf) {
         loop {
             let (socket, peer_addr) = listener.accept().await.unwrap();
             debug!("accepted connection from {}", peer_addr);
-<<<<<<< HEAD
             socket.set_nodelay(true).unwrap();
-            let mut conn_handler = Connection::new(conf.clone(), socket);
-=======
             let mut conn_handler = Connection::new(conf.clone(), socket, &runtime_ref);
->>>>>>> main
 
             task::spawn(async move {
                 if let Err(err) = conn_handler.run().await {
@@ -788,19 +784,11 @@ impl Connection {
 
         loop {
             let message = self.read_message().await?;
-<<<<<<< HEAD
-            /*
-                        if let Some(m) = &message {
-                            trace!("query({}): {:?}", sysid, m);
-                        };
-            */
-=======
 
             if let Some(m) = &message {
-                info!("query({:?}): {:?}", timelineid, m);
+                trace!("query({:?}): {:?}", timelineid, m);
             };
 
->>>>>>> main
             if message.is_none() {
                 // connection was closed
                 return Ok(());
@@ -869,41 +857,6 @@ impl Connection {
 
                     self.write_message(&msg).await?
                 }
-<<<<<<< HEAD
-=======
-                Some(FeMessage::ZenithCreateRequest(req)) => {
-                    let tag = page_cache::RelTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
-                    };
-
-                    pcache.relsize_inc(&tag, 0);
-
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
-                Some(FeMessage::ZenithExtendRequest(req)) => {
-                    let tag = page_cache::RelTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
-                    };
-
-                    pcache.relsize_inc(&tag, req.blkno + 1);
-
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
->>>>>>> main
                 _ => {}
             }
         }
