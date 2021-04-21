@@ -1,3 +1,4 @@
+use crate::pg_constants;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::cmp::min;
@@ -248,6 +249,7 @@ const BLCKSZ: u16 = 8192;
 //
 // Constants from xlogrecord.h
 //
+
 const XLR_MAX_BLOCK_ID: u8 = 32;
 
 const XLR_BLOCK_ID_DATA_SHORT: u8 = 255;
@@ -276,6 +278,7 @@ pub struct DecodedBkpBlock {
     pub rnode_spcnode: u32,
     pub rnode_dbnode: u32,
     pub rnode_relnode: u32,
+    // Note that we have a few special forknum values for non-rel files.
     pub forknum: u8,
     pub blkno: u32,
 
@@ -294,8 +297,31 @@ pub struct DecodedBkpBlock {
 
     /* Buffer holding the rmgr-specific data associated with this block */
     has_data: bool,
-    //char	   *data;
     data_len: u16,
+}
+
+impl DecodedBkpBlock {
+    pub fn new() -> DecodedBkpBlock {
+        DecodedBkpBlock {
+            rnode_spcnode: 0,
+            rnode_dbnode: 0,
+            rnode_relnode: 0,
+            forknum: 0,
+            blkno: 0,
+
+            flags: 0,
+            has_image: false,
+            apply_image: false,
+            will_init: false,
+            hole_offset: 0,
+            hole_length: 0,
+            bimg_len: 0,
+            bimg_info: 0,
+
+            has_data: false,
+            data_len: 0,
+        }
+    }
 }
 
 #[allow(non_upper_case_globals)]
@@ -305,11 +331,8 @@ pub struct DecodedWALRecord {
     pub record: Bytes, // raw XLogRecord
 
     pub blocks: Vec<DecodedBkpBlock>,
+    pub main_data_offset: usize,
 }
-
-// From pg_control.h and rmgrlist.h
-const XLOG_SWITCH: u8 = 0x40;
-const RM_XLOG_ID: u8 = 0;
 
 // Is this record an XLOG_SWITCH record? They need some special processing,
 // so we need to check for that before the rest of the parsing.
@@ -327,23 +350,59 @@ fn is_xlog_switch_record(rec: &Bytes) -> bool {
     buf.advance(2); // 2 bytes of padding
     let _xl_crc = buf.get_u32_le();
 
-    return xl_info == XLOG_SWITCH && xl_rmid == RM_XLOG_ID;
+    return xl_info == pg_constants::XLOG_SWITCH && xl_rmid == pg_constants::RM_XLOG_ID;
+}
+
+#[derive(Clone, Copy)]
+pub struct RelFileNode {
+    pub spcnode: u32,
+    pub dbnode: u32,
+    pub relnode: u32,
 }
 
 //
 // Routines to decode a WAL record and figure out which blocks are modified
 //
+// See xlogrecord.h for details
+// The overall layout of an XLOG record is:
+//		Fixed-size header (XLogRecord struct)
+//      XLogRecordBlockHeader struct
+//          If BKPBLOCK_HAS_IMAGE, an XLogRecordBlockImageHeader struct follows
+//	           If BKPIMAGE_HAS_HOLE and BKPIMAGE_IS_COMPRESSED, an
+//	           XLogRecordBlockCompressHeader struct follows.
+//          If BKPBLOCK_SAME_REL is not set, a RelFileNode follows
+//          BlockNumber follows
+//      XLogRecordBlockHeader struct
+//      ...
+//      XLogRecordDataHeader[Short|Long] struct
+//      block data
+//      block data
+//      ...
+//      main data
 pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
+    let mut rnode_spcnode: u32 = 0;
+    let mut rnode_dbnode: u32 = 0;
+    let mut rnode_relnode: u32 = 0;
+    let mut got_rnode = false;
+
     let mut buf = rec.clone();
+
+    // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
     let xl_tot_len = buf.get_u32_le();
-    let _xl_xid = buf.get_u32_le();
-    let _xl_prev = buf.get_u64_le();
-    let _xl_info = buf.get_u8();
-    let _xl_rmid = buf.get_u8();
+    let xl_xid = buf.get_u32_le();
+    let xl_prev = buf.get_u64_le();
+    let xl_info = buf.get_u8();
+    let xl_rmid = buf.get_u8();
     buf.advance(2); // 2 bytes of padding
     let _xl_crc = buf.get_u32_le();
+
+    trace!(
+        "decode_wal_record xl_rmid = {} xl_info = {}",
+        xl_rmid,
+        xl_info
+    );
 
     let remaining = xl_tot_len - SizeOfXLogRecord;
 
@@ -351,31 +410,28 @@ pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
         //TODO error
     }
 
-    let mut rnode_spcnode: u32 = 0;
-    let mut rnode_dbnode: u32 = 0;
-    let mut rnode_relnode: u32 = 0;
-    let mut got_rnode = false;
-
-    // Decode the headers
-
     let mut max_block_id = 0;
+    let mut blocks_total_len: u32 = 0;
+    let mut main_data_len = 0;
     let mut datatotal: u32 = 0;
     let mut blocks: Vec<DecodedBkpBlock> = Vec::new();
+
+    // 2. Decode the headers.
+    // XLogRecordBlockHeaders if any,
+    // XLogRecordDataHeader[Short|Long]
     while buf.remaining() > datatotal as usize {
         let block_id = buf.get_u8();
 
         match block_id {
             XLR_BLOCK_ID_DATA_SHORT => {
                 /* XLogRecordDataHeaderShort */
-                let main_data_len = buf.get_u8() as u32;
-
+                main_data_len = buf.get_u8() as u32;
                 datatotal += main_data_len;
             }
 
             XLR_BLOCK_ID_DATA_LONG => {
-                /* XLogRecordDataHeaderShort */
-                let main_data_len = buf.get_u32();
-
+                /* XLogRecordDataHeaderLong */
+                main_data_len = buf.get_u32_le();
                 datatotal += main_data_len;
             }
 
@@ -391,25 +447,7 @@ pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
 
             0..=XLR_MAX_BLOCK_ID => {
                 /* XLogRecordBlockHeader */
-                let mut blk = DecodedBkpBlock {
-                    rnode_spcnode: 0,
-                    rnode_dbnode: 0,
-                    rnode_relnode: 0,
-                    forknum: 0,
-                    blkno: 0,
-
-                    flags: 0,
-                    has_image: false,
-                    apply_image: false,
-                    will_init: false,
-                    hole_offset: 0,
-                    hole_length: 0,
-                    bimg_len: 0,
-                    bimg_info: 0,
-
-                    has_data: false,
-                    data_len: 0,
-                };
+                let mut blk = DecodedBkpBlock::new();
                 let fork_flags: u8;
 
                 if block_id <= max_block_id {
@@ -429,28 +467,12 @@ pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
                 blk.has_image = (fork_flags & BKPBLOCK_HAS_IMAGE) != 0;
                 blk.has_data = (fork_flags & BKPBLOCK_HAS_DATA) != 0;
                 blk.will_init = (fork_flags & BKPBLOCK_WILL_INIT) != 0;
-
                 blk.data_len = buf.get_u16_le();
-                /* cross-check that the HAS_DATA flag is set iff data_length > 0 */
-                // TODO
-                /*
-                if (blk->has_data && blk->data_len == 0)
-                {
-                    report_invalid_record(state,
-                              "BKPBLOCK_HAS_DATA set, but no data included at %X/%X",
-                              (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                    goto err;
-                }
-                if (!blk->has_data && blk->data_len != 0)
-                {
-                    report_invalid_record(state,
-                              "BKPBLOCK_HAS_DATA not set, but data length is %u at %X/%X",
-                              (unsigned int) blk->data_len,
-                              (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                    goto err;
-                }
-                         */
+
+                /* TODO cross-check that the HAS_DATA flag is set iff data_length > 0 */
+
                 datatotal += blk.data_len as u32;
+                blocks_total_len += blk.data_len as u32;
 
                 if blk.has_image {
                     blk.bimg_len = buf.get_u16_le();
@@ -469,6 +491,7 @@ pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
                         blk.hole_length = BLCKSZ - blk.bimg_len;
                     }
                     datatotal += blk.bimg_len as u32;
+                    blocks_total_len += blk.bimg_len as u32;
 
                     /*
                      * cross-check that hole_offset > 0, hole_length > 0 and
@@ -544,28 +567,28 @@ pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
                     rnode_spcnode = buf.get_u32_le();
                     rnode_dbnode = buf.get_u32_le();
                     rnode_relnode = buf.get_u32_le();
-                    //rnode = &blk->rnode;
                     got_rnode = true;
-                } else {
-                    if !got_rnode {
-                        // TODO
-                        /*
-                        report_invalid_record(state,
-                                      "BKPBLOCK_SAME_REL set but no previous rel at %X/%X",
-                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                        goto err;
-                                     */
-                    }
-
-                    //blk->rnode = *rnode;
+                } else if !got_rnode {
+                    // TODO
+                    /*
+                    report_invalid_record(state,
+                                    "BKPBLOCK_SAME_REL set but no previous rel at %X/%X",
+                                    (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+                    goto err;           */
                 }
+
                 blk.rnode_spcnode = rnode_spcnode;
                 blk.rnode_dbnode = rnode_dbnode;
                 blk.rnode_relnode = rnode_relnode;
 
                 blk.blkno = buf.get_u32_le();
-
-                //println!("this record affects {}/{}/{} blk {}",rnode_spcnode, rnode_dbnode, rnode_relnode, blk.blkno);
+                trace!(
+                    "this record affects {}/{}/{} blk {}",
+                    rnode_spcnode,
+                    rnode_dbnode,
+                    rnode_relnode,
+                    blk.blkno
+                );
 
                 blocks.push(blk);
             }
@@ -576,20 +599,58 @@ pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
         }
     }
 
-    /*
-     * Ok, we've parsed the fragment headers, and verified that the total
-     * length of the payload in the fragments is equal to the amount of data
-     * left. Copy the data of each fragment to a separate buffer.
-     *
-     * We could just set up pointers into readRecordBuf, but we want to align
-     * the data for the convenience of the callers. Backup images are not
-     * copied, however; they don't need alignment.
-     */
+    // 3. Decode blocks.
+    // We don't need them, so just skip blocks_total_len bytes
+    buf.advance(blocks_total_len as usize);
 
-    // Since we don't care about the data payloads here, we're done.
+    let main_data_offset = (xl_tot_len - main_data_len) as usize;
 
-    return DecodedWALRecord {
+    // 4. Decode main_data
+    if main_data_len > 0 {
+        assert_eq!(buf.remaining(), main_data_len as usize);
+    }
+
+    //5. Handle special CLOG and XACT records
+    if xl_rmid == pg_constants::RM_CLOG_ID {
+        let mut blk = DecodedBkpBlock::new();
+        blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+        blk.blkno = buf.get_i32_le() as u32;
+        trace!("RM_CLOG_ID updates block {}", blk.blkno);
+        blocks.push(blk);
+    } else if xl_rmid == pg_constants::RM_XACT_ID {
+        let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
+        if info == pg_constants::XLOG_XACT_COMMIT {
+            let mut blk = DecodedBkpBlock::new();
+            blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+            blk.blkno = xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
+            trace!(
+                "XLOG_XACT_COMMIT xl_prev {:X}/{:X}  xid {} updates block {}",
+                (xl_prev >> 32),
+                xl_prev & 0xffffffff,
+                xl_xid,
+                blk.blkno
+            );
+            blocks.push(blk);
+            //TODO parse commit record to extract subtrans entries
+        } else if info == pg_constants::XLOG_XACT_ABORT {
+            let mut blk = DecodedBkpBlock::new();
+            blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+            blk.blkno = xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
+            trace!(
+                "XLOG_XACT_ABORT xl_prev {:X}/{:X} xid {} updates block {}",
+                (xl_prev >> 32),
+                xl_prev & 0xffffffff,
+                xl_xid,
+                blk.blkno
+            );
+            blocks.push(blk);
+            //TODO parse abort record to extract subtrans entries
+        }
+    }
+
+    DecodedWALRecord {
         record: rec,
         blocks,
-    };
+        main_data_offset: main_data_offset,
+    }
 }

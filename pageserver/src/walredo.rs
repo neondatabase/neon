@@ -29,13 +29,13 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::page_cache;
 use crate::page_cache::CacheEntry;
 use crate::page_cache::WALRecord;
 use crate::ZTimelineId;
-use crate::{page_cache::BufferTag, PageServerConf};
+use crate::{page_cache::BufferTag, pg_constants, PageServerConf};
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -89,6 +89,59 @@ pub fn wal_redo_main(conf: &PageServerConf, timelineid: ZTimelineId) {
     }
 }
 
+fn transaction_id_set_status_bit(
+    xl_info: u8,
+    xl_rmid: u8,
+    xl_xid: u32,
+    record: WALRecord,
+    page: &mut BytesMut,
+) {
+    let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
+    let mut status = 0;
+    if info == pg_constants::XLOG_XACT_COMMIT {
+        status = pg_constants::TRANSACTION_STATUS_COMMITTED;
+    } else if info == pg_constants::XLOG_XACT_ABORT {
+        status = pg_constants::TRANSACTION_STATUS_ABORTED;
+    } else {
+        trace!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {:X}/{:X} main_data_offset {}, rec.len {}",
+        status,
+        record.lsn >> 32,
+        record.lsn & 0xffffffff,
+        record.main_data_offset, record.rec.len());
+        return;
+    }
+
+    trace!("handle_apply_request for RM_XACT_ID-{} (1-commit, 2-abort) lsn {:X}/{:X} main_data_offset {}, rec.len {}",
+    status,
+    record.lsn >> 32,
+    record.lsn & 0xffffffff,
+    record.main_data_offset, record.rec.len());
+
+    let byteno: usize = ((xl_rmid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
+        / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
+
+    let byteptr = &mut page[byteno..byteno + 1];
+    let bshift: u8 = ((xl_xid % pg_constants::CLOG_XACTS_PER_BYTE)
+        * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
+
+    let mut curval = byteptr[0];
+    curval = (curval >> bshift) & pg_constants::CLOG_XACT_BITMASK;
+
+    let mut byteval = [0];
+    byteval[0] = curval;
+    byteval[0] &= !(((1 << pg_constants::CLOG_BITS_PER_XACT as u8) - 1) << bshift);
+    byteval[0] |= status << bshift;
+
+    byteptr.copy_from_slice(&byteval);
+    trace!(
+        "xl_xid {} byteno {} curval {} byteval {}",
+        xl_xid,
+        byteno,
+        curval,
+        byteval[0]
+    );
+}
+
 fn handle_apply_request(
     pcache: &page_cache::PageCache,
     process: &WalRedoProcess,
@@ -105,7 +158,46 @@ fn handle_apply_request(
     let nrecords = records.len();
 
     let start = Instant::now();
-    let apply_result = process.apply_wal_records(runtime, tag, base_img, records);
+
+    let apply_result: Result<Bytes, Error>;
+    if tag.forknum == pg_constants::PG_XACT_FORKNUM as u8 {
+        //TODO use base image if any
+        static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+        let zero_page_bytes: &[u8] = &ZERO_PAGE;
+        let mut page = BytesMut::from(zero_page_bytes);
+
+        for record in records {
+            let mut buf = record.rec.clone();
+
+            // 1. Parse XLogRecord struct
+            // FIXME: refactor to avoid code duplication.
+            let _xl_tot_len = buf.get_u32_le();
+            let xl_xid = buf.get_u32_le();
+            let _xl_prev = buf.get_u64_le();
+            let xl_info = buf.get_u8();
+            let xl_rmid = buf.get_u8();
+            buf.advance(2); // 2 bytes of padding
+            let _xl_crc = buf.get_u32_le();
+
+            if xl_rmid == pg_constants::RM_CLOG_ID {
+                let info = xl_info & !pg_constants::XLR_INFO_MASK;
+                if info == pg_constants::CLOG_ZEROPAGE {
+                    page.clone_from_slice(zero_page_bytes);
+                    trace!("handle_apply_request for RM_CLOG_ID-CLOG_ZEROPAGE lsn {:X}/{:X} main_data_offset {}, rec.len {}",
+                    record.lsn >> 32,
+                    record.lsn & 0xffffffff,
+                    record.main_data_offset, record.rec.len());
+                }
+            } else if xl_rmid == pg_constants::RM_XACT_ID {
+                transaction_id_set_status_bit(xl_info, xl_rmid, xl_xid, record, &mut page);
+            }
+        }
+
+        apply_result = Ok::<Bytes, Error>(page.freeze());
+    } else {
+        apply_result = process.apply_wal_records(runtime, tag, base_img, records);
+    }
+
     let duration = start.elapsed();
 
     let result;
