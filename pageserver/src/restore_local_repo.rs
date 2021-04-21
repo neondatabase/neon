@@ -29,7 +29,7 @@ use bytes::Bytes;
 use crate::page_cache;
 use crate::page_cache::BufferTag;
 use crate::page_cache::PageCache;
-use crate::waldecoder::WalStreamDecoder;
+use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 
@@ -300,8 +300,7 @@ fn restore_wal(
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
-                let decoded = crate::waldecoder::decode_wal_record(recdata.clone());
-
+                let decoded = decode_wal_record(recdata.clone());
                 // Put the WAL record to the page cache. We make a separate copy of
                 // it for every block it modifies. (The actual WAL record is kept in
                 // a Bytes, which uses a reference counter for the underlying buffer,
@@ -319,14 +318,14 @@ fn restore_wal(
                         lsn: lsn,
                         will_init: blk.will_init || blk.apply_image,
                         rec: recdata.clone(),
+                        main_data_offset: decoded.main_data_offset,
                     };
 
                     pcache.put_wal_record(tag, rec);
                 }
-
                 // Now that this record has been handled, let the page cache know that
                 // it is up-to-date to this LSN
-                pcache.advance_last_valid_lsn(lsn);
+                pcache.advance_last_valid_lsn(lsn, false);
                 last_lsn = lsn;
             } else {
                 break;

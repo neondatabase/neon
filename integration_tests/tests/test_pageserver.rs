@@ -3,6 +3,7 @@ use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env;
 use control_plane::local_env::PointInTime;
 use control_plane::storage::TestStorageControlPlane;
+use std::{thread, time};
 
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
@@ -95,6 +96,9 @@ fn test_pageserver_two_timelines() {
     let node2 = compute_cplane.new_test_node(experimentaltli);
     node1.start().unwrap();
     node2.start().unwrap();
+
+    //give walreceiver time to connect
+    thread::sleep(time::Duration::from_secs(3));
 
     // check node1
     node1.safe_psql(

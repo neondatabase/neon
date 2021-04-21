@@ -145,6 +145,7 @@ async fn walreceiver_main(
     // Start streaming the WAL, from where we left off previously.
     //
     let mut startpoint = pcache.get_last_valid_lsn();
+    let last_valid_lsn = pcache.get_last_valid_lsn();
     if startpoint == 0 {
         // If we start here with identify.xlogpos we will have race condition with
         // postgres start: insert into postgres may request page that was modified with lsn
@@ -167,7 +168,9 @@ async fn walreceiver_main(
         }
     }
     debug!(
-        "starting replication from {:X}/{:X} for timeline {}, server is at {:X}/{:X}...",
+        "last_valid_lsn {:X}/{:X} starting replication from {:X}/{:X}  for timeline {}, server is at {:X}/{:X}...",
+        (last_valid_lsn >> 32),
+        (last_valid_lsn & 0xffffffff),
         (startpoint >> 32),
         (startpoint & 0xffffffff),
         timelineid,
@@ -213,7 +216,6 @@ async fn walreceiver_main(
                 loop {
                     if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         let decoded = decode_wal_record(recdata.clone());
-
                         // Put the WAL record to the page cache. We make a separate copy of
                         // it for every block it modifies. (The actual WAL record is kept in
                         // a Bytes, which uses a reference counter for the underlying buffer,
@@ -231,11 +233,11 @@ async fn walreceiver_main(
                                 lsn,
                                 will_init: blk.will_init || blk.apply_image,
                                 rec: recdata.clone(),
+                                main_data_offset: decoded.main_data_offset,
                             };
 
                             pcache.put_wal_record(tag, rec);
                         }
-
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
                         pcache.advance_last_record_lsn(lsn);
@@ -250,7 +252,7 @@ async fn walreceiver_main(
                 // better reflect that, because GetPage@LSN requests might also point in the
                 // middle of a record, if the request LSN was taken from the server's current
                 // flush ptr.
-                pcache.advance_last_valid_lsn(endlsn);
+                pcache.advance_last_valid_lsn(endlsn, true);
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!(
