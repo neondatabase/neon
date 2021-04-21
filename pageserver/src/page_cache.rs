@@ -6,6 +6,8 @@
 // per-entry mutex.
 //
 
+use crate::restore_local_repo::restore_timeline;
+use crate::ZTimelineId;
 use crate::{walredo, PageServerConf};
 use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -99,34 +101,57 @@ struct PageCacheShared {
 }
 
 lazy_static! {
-    pub static ref PAGECACHES: Mutex<HashMap<u64, Arc<PageCache>>> = Mutex::new(HashMap::new());
+    pub static ref PAGECACHES: Mutex<HashMap<ZTimelineId, Arc<PageCache>>> =
+        Mutex::new(HashMap::new());
 }
 
-pub fn get_pagecache(conf: &PageServerConf, sys_id: u64) -> Arc<PageCache> {
+// Get Page Cache for given timeline. It is assumed to already exist.
+pub fn get_pagecache(_conf: &PageServerConf, timelineid: ZTimelineId) -> Option<Arc<PageCache>> {
+    let pcaches = PAGECACHES.lock().unwrap();
+
+    match pcaches.get(&timelineid) {
+        Some(pcache) => Some(pcache.clone()),
+        None => None,
+    }
+}
+
+pub fn get_or_restore_pagecache(
+    conf: &PageServerConf,
+    timelineid: ZTimelineId,
+) -> anyhow::Result<Arc<PageCache>> {
     let mut pcaches = PAGECACHES.lock().unwrap();
 
-    if !pcaches.contains_key(&sys_id) {
-        pcaches.insert(sys_id, Arc::new(init_page_cache(&conf, sys_id)));
+    match pcaches.get(&timelineid) {
+        Some(pcache) => Ok(pcache.clone()),
+        None => {
+            let pcache = init_page_cache(&conf, timelineid);
 
-        // Initialize the WAL redo thread
-        //
-        // Now join_handle is not saved any where and we won'try restart tharead
-        // if it is dead. We may later stop that treads after some inactivity period
-        // and restart them on demand.
-        let conf = conf.clone();
-        let _walredo_thread = thread::Builder::new()
-            .name("WAL redo thread".into())
-            .spawn(move || {
-                walredo::wal_redo_main(&conf, sys_id);
-            })
-            .unwrap();
+            restore_timeline(conf, &pcache, timelineid)?;
+
+            let result = Arc::new(pcache);
+
+            pcaches.insert(timelineid, result.clone());
+
+            // Initialize the WAL redo thread
+            //
+            // Now join_handle is not saved any where and we won'try restart tharead
+            // if it is dead. We may later stop that treads after some inactivity period
+            // and restart them on demand.
+            let conf_copy = conf.clone();
+            let _walredo_thread = thread::Builder::new()
+                .name("WAL redo thread".into())
+                .spawn(move || {
+                    walredo::wal_redo_main(&conf_copy, timelineid);
+                })
+                .unwrap();
+
+            return Ok(result);
+        }
     }
-
-    pcaches.get(&sys_id).unwrap().clone()
 }
 
-fn open_rocksdb(conf: &PageServerConf, sys_id: u64) -> DB {
-    let path = conf.data_dir.join(sys_id.to_string());
+fn open_rocksdb(conf: &PageServerConf, timelineid: u64) -> DB {
+    let path = conf.data_dir.join(timelineid.to_string());
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.set_use_fsync(true);
@@ -134,12 +159,12 @@ fn open_rocksdb(conf: &PageServerConf, sys_id: u64) -> DB {
     DB::open(&opts, &path).unwrap()
 }
 
-fn init_page_cache(conf: &PageServerConf, sys_id: u64) -> PageCache {
+fn init_page_cache(conf: &PageServerConf, timelineid: u64) -> PageCache {
     // Initialize the channel between the page cache and the WAL applicator
     let (s, r) = unbounded();
 
     PageCache {
-        db: open_rocksdb(&conf, sys_id),
+        db: open_rocksdb(&conf, timelineid),
         shared: Mutex::new(PageCacheShared {
             first_valid_lsn: 0,
             last_valid_lsn: 0,
@@ -520,7 +545,8 @@ impl PageCache {
     // Adds a WAL record to the page cache
     //
     pub fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
-        let key = CacheKey { tag, lsn: rec.lsn };
+        let lsn = rec.lsn;
+        let key = CacheKey { tag, lsn };
 
         let content = CacheEntryContent {
             page_image: None,
@@ -533,8 +559,8 @@ impl PageCache {
         let mut val_buf = BytesMut::new();
         content.pack(&mut val_buf);
 
-        trace!("put_wal_record lsn: {}", key.lsn);
         let _res = self.db.put(&key_buf[..], &val_buf[..]);
+        //trace!("put_wal_record lsn: {}", lsn);
 
         self.num_entries.fetch_add(1, Ordering::Relaxed);
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
@@ -599,17 +625,19 @@ impl PageCache {
         let mut shared = self.shared.lock().unwrap();
 
         // Can't move backwards.
-        //assert!(lsn >= shared.last_valid_lsn);
-        if lsn > shared.last_valid_lsn {
+        let oldlsn = shared.last_valid_lsn;
+        if lsn >= oldlsn {
             shared.last_valid_lsn = lsn;
             self.valid_lsn_condvar.notify_all();
 
             self.last_valid_lsn.store(lsn, Ordering::Relaxed);
         } else {
-            trace!(
-                "lsn={}, shared.last_valid_lsn={}",
-                lsn,
-                shared.last_valid_lsn
+            warn!(
+                "attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
+                oldlsn >> 32,
+                oldlsn & 0xffffffff,
+                lsn >> 32,
+                lsn & 0xffffffff
             );
         }
     }

@@ -1,14 +1,7 @@
-//#![allow(non_upper_case_globals)]
-//#![allow(non_camel_case_types)]
-//#![allow(non_snake_case)]
-//#![allow(dead_code)]
-//include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-
-use std::cmp::min;
-
 use log::*;
+use std::cmp::min;
+use thiserror::Error;
 
 const XLOG_BLCKSZ: u32 = 8192;
 
@@ -19,7 +12,7 @@ const WAL_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
 
 #[repr(C)]
 #[derive(Debug)]
-struct XLogPageHeaderData {
+pub struct XLogPageHeaderData {
     xlp_magic: u16,    /* magic value for correctness checks */
     xlp_info: u16,     /* flag bits, see below */
     xlp_tli: u32,      /* TimeLineID of first record on page */
@@ -33,7 +26,7 @@ const SizeOfXLogShortPHD: usize = 2 + 2 + 4 + 8 + 4 + 4;
 
 #[repr(C)]
 #[derive(Debug)]
-struct XLogLongPageHeaderData {
+pub struct XLogLongPageHeaderData {
     std: XLogPageHeaderData, /* standard header fields */
     xlp_sysid: u64,          /* system identifier from pg_control */
     xlp_seg_size: u32,       /* just as a cross-check */
@@ -55,6 +48,13 @@ pub struct WalStreamDecoder {
     inputbuf: BytesMut,
 
     recordbuf: BytesMut,
+}
+
+#[derive(Error, Debug, Clone)]
+#[error("{msg} at {lsn}")]
+pub struct WalDecodeError {
+    msg: String,
+    lsn: u64,
 }
 
 //
@@ -79,40 +79,56 @@ impl WalStreamDecoder {
         self.inputbuf.extend_from_slice(buf);
     }
 
-    // Returns a tuple:
-    // (end LSN, record)
-    pub fn poll_decode(&mut self) -> Option<(u64, Bytes)> {
+    /// Attempt to decode another WAL record from the input that has been fed to the
+    /// decoder so far.
+    ///
+    /// Returns one of the following:
+    ///     Ok((u64, Bytes)): a tuple containing the LSN of next record, and the record itself
+    ///     Ok(None): there is not enough data in the input buffer. Feed more by calling the `feed_bytes` function
+    ///     Err(WalDecodeError): an error occured while decoding, meaning the input was invalid.
+    ///
+    pub fn poll_decode(&mut self) -> Result<Option<(u64, Bytes)>, WalDecodeError> {
         loop {
             // parse and verify page boundaries as we go
             if self.lsn % WAL_SEGMENT_SIZE == 0 {
                 // parse long header
 
                 if self.inputbuf.remaining() < SizeOfXLogLongPHD {
-                    return None;
+                    return Ok(None);
                 }
 
-                self.decode_XLogLongPageHeaderData();
+                let hdr = self.decode_XLogLongPageHeaderData();
+                if hdr.std.xlp_pageaddr != self.lsn {
+                    return Err(WalDecodeError {
+                        msg: "invalid xlog segment header".into(),
+                        lsn: self.lsn,
+                    });
+                }
+                // TODO: verify the remaining fields in the header
+
                 self.lsn += SizeOfXLogLongPHD as u64;
-
-                // TODO: verify the fields in the header
-
                 continue;
             } else if self.lsn % (XLOG_BLCKSZ as u64) == 0 {
                 // parse page header
 
                 if self.inputbuf.remaining() < SizeOfXLogShortPHD {
-                    return None;
+                    return Ok(None);
                 }
 
-                self.decode_XLogPageHeaderData();
+                let hdr = self.decode_XLogPageHeaderData();
+                if hdr.xlp_pageaddr != self.lsn {
+                    return Err(WalDecodeError {
+                        msg: "invalid xlog page header".into(),
+                        lsn: self.lsn,
+                    });
+                }
+                // TODO: verify the remaining fields in the header
+
                 self.lsn += SizeOfXLogShortPHD as u64;
-
-                // TODO: verify the fields in the header
-
                 continue;
             } else if self.padlen > 0 {
                 if self.inputbuf.remaining() < self.padlen as usize {
-                    return None;
+                    return Ok(None);
                 }
 
                 // skip padding
@@ -123,20 +139,17 @@ impl WalStreamDecoder {
                 // need to have at least the xl_tot_len field
 
                 if self.inputbuf.remaining() < 4 {
-                    return None;
+                    return Ok(None);
                 }
 
                 // read xl_tot_len FIXME: assumes little-endian
                 self.startlsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
                 if xl_tot_len < SizeOfXLogRecord {
-                    error!(
-                        "invalid xl_tot_len {} at {:X}/{:X}",
-                        xl_tot_len,
-                        self.lsn >> 32,
-                        self.lsn & 0xffffffff
-                    );
-                    panic!();
+                    return Err(WalDecodeError {
+                        msg: format!("invalid xl_tot_len {}", xl_tot_len),
+                        lsn: self.lsn,
+                    });
                 }
                 self.lsn += 4;
 
@@ -154,7 +167,7 @@ impl WalStreamDecoder {
                 let n = min(self.contlen, pageleft) as usize;
 
                 if self.inputbuf.remaining() < n {
-                    return None;
+                    return Ok(None);
                 }
 
                 self.recordbuf.put(self.inputbuf.split_to(n));
@@ -182,7 +195,7 @@ impl WalStreamDecoder {
                     }
 
                     let result = (self.lsn, recordbuf);
-                    return Some(result);
+                    return Ok(Some(result));
                 }
                 continue;
             }
@@ -289,7 +302,6 @@ pub struct DecodedBkpBlock {
 const SizeOfXLogRecord: u32 = 24;
 
 pub struct DecodedWALRecord {
-    pub lsn: u64, // LSN at the *end* of the record
     pub xl_info: u8,
     pub xl_rmid: u8,
     pub record: Bytes, // raw XLogRecord
@@ -364,14 +376,7 @@ pub fn decode_truncate_record(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
 //
 // Routines to decode a WAL record and figure out which blocks are modified
 //
-pub fn decode_wal_record(lsn: u64, record: Bytes) -> DecodedWALRecord {
-    trace!(
-        "decoding record with LSN {:08X}/{:08X} ({} bytes)",
-        lsn >> 32,
-        lsn & 0xffff_ffff,
-        record.remaining()
-    );
-
+pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     let mut buf = record.clone();
 
     // FIXME: assume little-endian here
@@ -627,7 +632,6 @@ pub fn decode_wal_record(lsn: u64, record: Bytes) -> DecodedWALRecord {
     // Since we don't care about the data payloads here, we're done.
 
     return DecodedWALRecord {
-        lsn,
         xl_info,
         xl_rmid,
         record,

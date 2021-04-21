@@ -1,6 +1,9 @@
 // Restart acceptors one by one while compute is under the load.
 use control_plane::compute::ComputeControlPlane;
+use control_plane::local_env;
+use control_plane::local_env::PointInTime;
 use control_plane::storage::TestStorageControlPlane;
+use pageserver::ZTimelineId;
 
 use rand::Rng;
 use std::sync::Arc;
@@ -9,18 +12,20 @@ use std::{thread, time};
 
 #[test]
 fn test_acceptors_normal_work() {
-    // Start pageserver that reads WAL directly from that postgres
+    let local_env = local_env::test_env("test_acceptors_normal_work");
+
     const REDUNDANCY: usize = 3;
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
@@ -41,71 +46,97 @@ fn test_acceptors_normal_work() {
     // check wal files equality
 }
 
+// Run page server and multiple safekeepers, and multiple compute nodes running
+// against different timelines.
 #[test]
-fn test_multitenancy() {
-    // Start pageserver that reads WAL directly from that postgres
+fn test_many_timelines() {
+    // Initialize a new repository, and set up WAL safekeepers and page server.
     const REDUNDANCY: usize = 3;
-    const N_NODES: usize = 5;
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    const N_TIMELINES: usize = 5;
+    let local_env = local_env::test_env("test_many_timelines");
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
-    // start postgres
-	let mut nodes = Vec::new();
-	let mut proxies = Vec::new();
-	for _ in 0..N_NODES {
-		let node = compute_cplane.new_test_master_node();
-		nodes.push(node);
-		nodes.last().unwrap().start().unwrap();
-		proxies.push(nodes.last().unwrap().start_proxy(wal_acceptors.clone()));
-	}
+    // Create branches
+    let mut timelines: Vec<ZTimelineId> = Vec::new();
+    let maintli = storage_cplane.get_branch_timeline("main"); // main branch
+    timelines.push(maintli);
+    let startpoint = local_env::find_end_of_wal(&local_env, maintli).unwrap();
+    for i in 1..N_TIMELINES {
+        // additional branches
+        let branchname = format!("experimental{}", i);
+        local_env::create_branch(
+            &local_env,
+            &branchname,
+            PointInTime {
+                timelineid: maintli,
+                lsn: startpoint,
+            },
+        )
+        .unwrap();
+        let tli = storage_cplane.get_branch_timeline(&branchname);
+        timelines.push(tli);
+    }
+
+    // start postgres on each timeline
+    let mut nodes = Vec::new();
+    for tli in timelines {
+        let node = compute_cplane.new_test_node(tli);
+        nodes.push(node.clone());
+        node.start().unwrap();
+        node.start_proxy(&wal_acceptors);
+    }
 
     // create schema
-	for node in &nodes {
-		node.safe_psql(
-			"postgres",
-			"CREATE TABLE t(key int primary key, value text)",
-		);
-	}
+    for node in &nodes {
+        node.safe_psql(
+            "postgres",
+            "CREATE TABLE t(key int primary key, value text)",
+        );
+    }
 
-	// Populate data
-	for node in &nodes {
-		node.safe_psql(
-			"postgres",
-			"INSERT INTO t SELECT generate_series(1,100000), 'payload'",
-		);
-	}
+    // Populate data
+    for node in &nodes {
+        node.safe_psql(
+            "postgres",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        );
+    }
 
-	// Check data
-	for node in &nodes {
-		let count: i64 = node
-			.safe_psql("postgres", "SELECT sum(key) FROM t")
-			.first()
-			.unwrap()
-			.get(0);
-		println!("sum = {}", count);
-		assert_eq!(count, 5000050000);
-	}
+    // Check data
+    for node in &nodes {
+        let count: i64 = node
+            .safe_psql("postgres", "SELECT sum(key) FROM t")
+            .first()
+            .unwrap()
+            .get(0);
+        println!("sum = {}", count);
+        assert_eq!(count, 5000050000);
+    }
 }
 
 // Majority is always alive
 #[test]
 fn test_acceptors_restarts() {
+    let local_env = local_env::test_env("test_acceptors_restarts");
+
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
     const FAULT_PROBABILITY: f32 = 0.01;
 
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
     let mut rng = rand::thread_rng();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
     let mut failed_node: Option<usize> = None;
 
     // check basic work with table
@@ -150,20 +181,23 @@ fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize) {
 // them again and check that nothing was losed. Repeat.
 // N_CRASHES env var
 #[test]
-fn test_acceptors_unavalability() {
+fn test_acceptors_unavailability() {
+    let local_env = local_env::test_env("test_acceptors_unavailability");
+
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 2;
 
-    let storage_cplane = TestStorageControlPlane::fault_tolerant(REDUNDANCY);
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
@@ -226,19 +260,24 @@ fn simulate_failures(cplane: Arc<TestStorageControlPlane>) {
 // Race condition test
 #[test]
 fn test_race_conditions() {
+    let local_env = local_env::test_env("test_race_conditions");
+
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
 
-    let storage_cplane = Arc::new(TestStorageControlPlane::fault_tolerant(REDUNDANCY));
-    let mut compute_cplane = ComputeControlPlane::local(&storage_cplane.pageserver);
+    let storage_cplane = Arc::new(TestStorageControlPlane::fault_tolerant(
+        &local_env, REDUNDANCY,
+    ));
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node();
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
     node.start().unwrap();
 
     // start proxy
-    let _proxy = node.start_proxy(wal_acceptors);
+    let _proxy = node.start_proxy(&wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
