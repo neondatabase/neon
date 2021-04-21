@@ -99,6 +99,7 @@ struct PageCacheShared {
     first_valid_lsn: u64,
     last_valid_lsn: u64,
     last_record_lsn: u64,
+    walreceiver_works: bool,
 }
 
 lazy_static! {
@@ -184,6 +185,7 @@ fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache 
             first_valid_lsn: 0,
             last_valid_lsn: 0,
             last_record_lsn: 0,
+            walreceiver_works: false,
         }),
         valid_lsn_condvar: Condvar::new(),
 
@@ -342,6 +344,10 @@ pub struct WALRecord {
     pub will_init: bool,
     pub truncate: bool,
     pub rec: Bytes,
+    // Remember the offset of main_data in rec,
+    // so that we don't have to parse the record again.
+    // If record has no main_data, this offset equals rec.len().
+    pub main_data_offset: u32,
 }
 
 impl WALRecord {
@@ -349,6 +355,7 @@ impl WALRecord {
         buf.put_u64(self.lsn);
         buf.put_u8(self.will_init as u8);
         buf.put_u8(self.truncate as u8);
+		buf.put_u32(self.main_data_offset);
         buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
     }
@@ -356,6 +363,7 @@ impl WALRecord {
         let lsn = buf.get_u64();
         let will_init = buf.get_u8() != 0;
         let truncate = buf.get_u8() != 0;
+		let main_data_offset = buf.get_u32();
         let mut dst = vec![0u8; buf.get_u32() as usize];
         buf.copy_to_slice(&mut dst);
         WALRecord {
@@ -363,6 +371,7 @@ impl WALRecord {
             will_init,
             truncate,
             rec: Bytes::from(dst),
+			main_data_offset
         }
     }
 }
@@ -478,26 +487,41 @@ impl PageCache {
 		let mut shared = self.shared.lock().unwrap();
 		let mut waited = false;
 
-		while lsn > shared.last_valid_lsn {
-			// TODO: Wait for the WAL receiver to catch up
-			waited = true;
-			trace!(
-				"not caught up yet: {}, requested {}",
-				shared.last_valid_lsn,
-				lsn
-			);
-			let wait_result = self
-				.valid_lsn_condvar
-				.wait_timeout(shared, TIMEOUT)
-				.unwrap();
+        // There is a a race at postgres instance start
+        // when we request a page before walsender established connection
+        // and was able to stream the page. Just don't wait and return what we have.
+        // TODO is there any corner case when this is incorrect?
+        if !shared.walreceiver_works {
+            trace!(
+                " walreceiver doesn't work yet last_valid_lsn {}, requested {}",
+                shared.last_valid_lsn,
+                lsn
+            );
+        }
 
-			shared = wait_result.0;
-			if wait_result.1.timed_out() {
-				bail!(
-					"Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
-					lsn >> 32,
-					lsn & 0xffff_ffff
+        if shared.walreceiver_works {
+
+			while lsn > shared.last_valid_lsn {
+				// TODO: Wait for the WAL receiver to catch up
+				waited = true;
+				trace!(
+				"not caught up yet: {}, requested {}",
+					shared.last_valid_lsn,
+					lsn
 				);
+				let wait_result = self
+					.valid_lsn_condvar
+					.wait_timeout(shared, TIMEOUT)
+					.unwrap();
+
+				shared = wait_result.0;
+				if wait_result.1.timed_out() {
+					bail!(
+						"Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
+						lsn >> 32,
+						lsn & 0xffff_ffff
+					);
+				}
 			}
 		}
 		if waited {
@@ -528,6 +552,7 @@ impl PageCache {
         // ask the WAL redo service to reconstruct the page image from the WAL records.
         let minkey = CacheKey { tag, lsn: 0 };
         let maxkey = CacheKey { tag, lsn };
+
         let mut buf = BytesMut::new();
         minkey.pack(&mut buf);
 
@@ -718,12 +743,17 @@ impl PageCache {
     }
 
     //
-    pub fn advance_last_valid_lsn(&self, lsn: u64) {
+    pub fn advance_last_valid_lsn(&self, lsn: u64, from_walreceiver: bool) {
         let mut shared = self.shared.lock().unwrap();
 
         // Can't move backwards.
         let oldlsn = shared.last_valid_lsn;
         if lsn >= oldlsn {
+            // Now we receive entries from walreceiver and should wait
+            if from_walreceiver {
+                shared.walreceiver_works = true;
+            }
+
             shared.last_valid_lsn = lsn;
             self.valid_lsn_condvar.notify_all();
 

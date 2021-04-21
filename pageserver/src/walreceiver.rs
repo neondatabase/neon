@@ -8,6 +8,7 @@
 
 use crate::page_cache;
 use crate::page_cache::{BufferTag, RelTag};
+use crate::pg_constants;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -145,6 +146,7 @@ async fn walreceiver_main(
     // Start streaming the WAL, from where we left off previously.
     //
     let mut startpoint = pcache.get_last_valid_lsn();
+    let last_valid_lsn = pcache.get_last_valid_lsn();
     if startpoint == 0 {
         // If we start here with identify.xlogpos we will have race condition with
         // postgres start: insert into postgres may request page that was modified with lsn
@@ -167,7 +169,9 @@ async fn walreceiver_main(
         }
     }
     debug!(
-        "starting replication from {:X}/{:X} for timeline {}, server is at {:X}/{:X}...",
+        "last_valid_lsn {:X}/{:X} starting replication from {:X}/{:X}  for timeline {}, server is at {:X}/{:X}...",
+        (last_valid_lsn >> 32),
+        (last_valid_lsn & 0xffffffff),
         (startpoint >> 32),
         (startpoint & 0xffffffff),
         timelineid,
@@ -213,7 +217,6 @@ async fn walreceiver_main(
                 loop {
                     if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         let decoded = decode_wal_record(recdata.clone());
-
                         // Put the WAL record to the page cache. We make a separate copy of
                         // it for every block it modifies. (The actual WAL record is kept in
                         // a Bytes, which uses a reference counter for the underlying buffer,
@@ -234,13 +237,14 @@ async fn walreceiver_main(
                                 will_init: blk.will_init || blk.apply_image,
                                 truncate: false,
                                 rec: recdata.clone(),
+                                main_data_offset: decoded.main_data_offset as u32,
                             };
 
                             pcache.put_wal_record(tag, rec);
                         }
                         // include truncate wal record in all pages
-                        if decoded.xl_rmid == RM_SMGR_ID
-                            && (decoded.xl_info & XLR_RMGR_INFO_MASK) == XLOG_SMGR_TRUNCATE
+                        if decoded.xl_rmid == pg_constants::RM_SMGR_ID
+                            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_SMGR_TRUNCATE
                         {
                             let truncate = decode_truncate_record(&decoded);
                             if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
@@ -258,6 +262,7 @@ async fn walreceiver_main(
                                     will_init: false,
                                     truncate: true,
                                     rec: recdata.clone(),
+									main_data_offset: decoded.main_data_offset as u32,
                                 };
                                 pcache.put_rel_wal_record(tag, rec);
                             }
@@ -276,7 +281,7 @@ async fn walreceiver_main(
                 // better reflect that, because GetPage@LSN requests might also point in the
                 // middle of a record, if the request LSN was taken from the server's current
                 // flush ptr.
-                pcache.advance_last_valid_lsn(endlsn);
+                pcache.advance_last_valid_lsn(endlsn, true);
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!(
