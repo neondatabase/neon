@@ -1,14 +1,17 @@
 use log::*;
-use tar::{Builder};
+use regex::Regex;
 use std::fmt;
 use std::io::Write;
+use tar::Builder;
 use walkdir::WalkDir;
-use regex::Regex;
 
 use crate::ZTimelineId;
 
-
-pub fn send_snapshot_tarball(write: &mut dyn Write, timelineid: ZTimelineId, snapshotlsn: u64) -> Result<(), std::io::Error> {
+pub fn send_snapshot_tarball(
+    write: &mut dyn Write,
+    timelineid: ZTimelineId,
+    snapshotlsn: u64,
+) -> Result<(), std::io::Error> {
     let mut ar = Builder::new(write);
 
     let snappath = format!("timelines/{}/snapshots/{:016X}", timelineid, snapshotlsn);
@@ -27,12 +30,15 @@ pub fn send_snapshot_tarball(write: &mut dyn Write, timelineid: ZTimelineId, sna
         }
 
         if entry.file_type().is_dir() {
-            trace!("sending dir {} as {}", fullpath.display(), relpath.display());
+            trace!(
+                "sending dir {} as {}",
+                fullpath.display(),
+                relpath.display()
+            );
             ar.append_dir(relpath, fullpath)?;
         } else if entry.file_type().is_symlink() {
             error!("ignoring symlink in snapshot dir");
         } else if entry.file_type().is_file() {
-
             // Shared catalogs are exempt
             if relpath.starts_with("global/") {
                 trace!("sending shared catalog {}", relpath.display());
@@ -61,7 +67,9 @@ pub fn send_snapshot_tarball(write: &mut dyn Write, timelineid: ZTimelineId, sna
         }
 
         let archive_fname = relpath.to_str().unwrap().clone();
-        let archive_fname = archive_fname.strip_suffix(".partial").unwrap_or(&archive_fname);
+        let archive_fname = archive_fname
+            .strip_suffix(".partial")
+            .unwrap_or(&archive_fname);
         let archive_path = "pg_wal/".to_owned() + archive_fname;
         ar.append_path_with_name(fullpath, archive_path)?;
     }
@@ -71,13 +79,11 @@ pub fn send_snapshot_tarball(write: &mut dyn Write, timelineid: ZTimelineId, sna
     Ok(())
 }
 
-
 // formats:
 // <oid>
 // <oid>_<fork name>
 // <oid>.<segment number>
 // <oid>_<fork name>.<segment number>
-
 
 #[derive(Debug)]
 struct FilePathError {
@@ -144,7 +150,6 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
 
     return Ok((relnode, forknum, segno));
 }
-
 
 fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
     /*

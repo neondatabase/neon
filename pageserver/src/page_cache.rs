@@ -6,9 +6,9 @@
 // per-entry mutex.
 //
 
-use crate::{walredo, PageServerConf};
 use crate::restore_local_repo::restore_timeline;
 use crate::ZTimelineId;
+use crate::{walredo, PageServerConf};
 use anyhow::bail;
 use bytes::Bytes;
 use core::ops::Bound::Included;
@@ -109,7 +109,8 @@ struct PageCacheShared {
 }
 
 lazy_static! {
-    pub static ref PAGECACHES: Mutex<HashMap<ZTimelineId, Arc<PageCache>>> = Mutex::new(HashMap::new());
+    pub static ref PAGECACHES: Mutex<HashMap<ZTimelineId, Arc<PageCache>>> =
+        Mutex::new(HashMap::new());
 }
 
 // Get Page Cache for given timeline. It is assumed to already exist.
@@ -118,11 +119,14 @@ pub fn get_pagecache(_conf: &PageServerConf, timelineid: ZTimelineId) -> Option<
 
     match pcaches.get(&timelineid) {
         Some(pcache) => Some(pcache.clone()),
-        None => None
+        None => None,
     }
 }
 
-pub fn get_or_restore_pagecache(conf: &PageServerConf, timelineid: ZTimelineId) -> anyhow::Result<Arc<PageCache>> {
+pub fn get_or_restore_pagecache(
+    conf: &PageServerConf,
+    timelineid: ZTimelineId,
+) -> anyhow::Result<Arc<PageCache>> {
     let mut pcaches = PAGECACHES.lock().unwrap();
 
     match pcaches.get(&timelineid) {
@@ -475,8 +479,11 @@ impl PageCache {
         self.num_entries.fetch_add(1, Ordering::Relaxed);
 
         if !oldentry.is_none() {
-            error!("overwriting WAL record with LSN {:X}/{:X} in page cache",
-                   lsn >> 32, lsn & 0xffffffff);
+            error!(
+                "overwriting WAL record with LSN {:X}/{:X} in page cache",
+                lsn >> 32,
+                lsn & 0xffffffff
+            );
         }
 
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
@@ -511,14 +518,18 @@ impl PageCache {
         // Can't move backwards.
         let oldlsn = shared.last_valid_lsn;
         if lsn >= oldlsn {
-
             shared.last_valid_lsn = lsn;
             self.valid_lsn_condvar.notify_all();
 
             self.last_valid_lsn.store(lsn, Ordering::Relaxed);
         } else {
-            warn!("attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
-                  oldlsn >> 32, oldlsn & 0xffffffff, lsn >> 32, lsn & 0xffffffff);
+            warn!(
+                "attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
+                oldlsn >> 32,
+                oldlsn & 0xffffffff,
+                lsn >> 32,
+                lsn & 0xffffffff
+            );
         }
     }
 

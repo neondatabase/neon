@@ -13,25 +13,24 @@
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
+use regex::Regex;
 use std::io;
-use std::thread;
 use std::str::FromStr;
 use std::sync::Arc;
-use regex::Regex;
+use std::thread;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime;
 use tokio::runtime::Runtime;
-use tokio::task;
 use tokio::sync::mpsc;
+use tokio::task;
 
+use crate::basebackup;
 use crate::page_cache;
 use crate::restore_local_repo;
-use crate::basebackup;
 use crate::walreceiver;
 use crate::PageServerConf;
 use crate::ZTimelineId;
-
 
 type Result<T> = std::result::Result<T, io::Error>;
 
@@ -172,8 +171,7 @@ struct FeParseMessage {
     query_string: Bytes,
 }
 
-fn read_null_terminated(buf: &mut Bytes) -> Result<Bytes>
-{
+fn read_null_terminated(buf: &mut Bytes) -> Result<Bytes> {
     let mut result = BytesMut::new();
 
     loop {
@@ -221,15 +219,14 @@ impl FeParseMessage {
             ));
         }
 
-
-        Ok(FeMessage::Parse(FeParseMessage {query_string}))
+        Ok(FeMessage::Parse(FeParseMessage { query_string }))
     }
 }
 
 #[derive(Debug)]
 struct FeDescribeMessage {
-    kind: u8,	// 'S' to describe a prepared statement; or 'P' to describe a portal.
-    // we only support unnamed prepared stmt or portal
+    kind: u8, // 'S' to describe a prepared statement; or 'P' to describe a portal.
+              // we only support unnamed prepared stmt or portal
 }
 
 impl FeDescribeMessage {
@@ -255,7 +252,7 @@ impl FeDescribeMessage {
             ));
         }
 
-        Ok(FeMessage::Describe(FeDescribeMessage {kind}))
+        Ok(FeMessage::Describe(FeDescribeMessage { kind }))
     }
 }
 
@@ -263,7 +260,7 @@ impl FeDescribeMessage {
 #[derive(Debug)]
 struct FeExecuteMessage {
     /// max # of rows
-    maxrows: i32
+    maxrows: i32,
 }
 
 impl FeExecuteMessage {
@@ -286,14 +283,13 @@ impl FeExecuteMessage {
             ));
         }
 
-        Ok(FeMessage::Execute(FeExecuteMessage {maxrows}))
+        Ok(FeMessage::Execute(FeExecuteMessage { maxrows }))
     }
 }
 
 // we only support unnamed prepared stmt and portal
 #[derive(Debug)]
-struct FeBindMessage {
-}
+struct FeBindMessage {}
 
 impl FeBindMessage {
     pub fn parse(body: Bytes) -> Result<FeMessage> {
@@ -324,8 +320,7 @@ impl FeBindMessage {
 
 // we only support unnamed prepared stmt and portal
 #[derive(Debug)]
-struct FeCloseMessage {
-}
+struct FeCloseMessage {}
 
 impl FeCloseMessage {
     pub fn parse(body: Bytes) -> Result<FeMessage> {
@@ -370,9 +365,7 @@ impl FeMessage {
         let mut body = body.freeze();
 
         match tag {
-            b'Q' => Ok(Some(FeMessage::Query(FeQueryMessage {
-                body: body,
-            }))),
+            b'Q' => Ok(Some(FeMessage::Query(FeQueryMessage { body: body }))),
             b'P' => Ok(Some(FeParseMessage::parse(body)?)),
             b'D' => Ok(Some(FeDescribeMessage::parse(body)?)),
             b'E' => Ok(Some(FeExecuteMessage::parse(body)?)),
@@ -634,7 +627,6 @@ impl Connection {
     }
 
     async fn run(&mut self) -> Result<()> {
-
         let mut unnamed_query_string = Bytes::new();
         loop {
             let msg = self.read_message().await?;
@@ -666,7 +658,8 @@ impl Connection {
                     self.write_message(&BeMessage::ParseComplete).await?;
                 }
                 Some(FeMessage::Describe(_)) => {
-                    self.write_message_noflush(&BeMessage::ParameterDescription).await?;
+                    self.write_message_noflush(&BeMessage::ParameterDescription)
+                        .await?;
                     self.write_message(&BeMessage::NoData).await?;
                 }
                 Some(FeMessage::Bind(_)) => {
@@ -724,10 +717,13 @@ impl Connection {
 
             // Check that the timeline exists
             self.handle_basebackup_request(timelineid).await?;
-            self.write_message_noflush(&BeMessage::CommandComplete).await?;
+            self.write_message_noflush(&BeMessage::CommandComplete)
+                .await?;
             self.write_message(&BeMessage::ReadyForQuery).await
         } else if query_string.starts_with(b"callmemaybe ") {
-            let query_str = String::from_utf8(query_string.to_vec()).unwrap().to_string();
+            let query_str = String::from_utf8(query_string.to_vec())
+                .unwrap()
+                .to_string();
 
             // callmemaybe <zenith timelineid as hex string> <connstr>
             let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) (.*)$").unwrap();
@@ -777,7 +773,6 @@ impl Connection {
     }
 
     async fn handle_pagerequests(&mut self, timelineid: ZTimelineId) -> Result<()> {
-
         // Check that the timeline exists
         let pcache = page_cache::get_or_restore_pagecache(&self.conf, timelineid);
         if pcache.is_err() {
@@ -954,7 +949,7 @@ impl Connection {
             if joinres.is_err() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    joinres.unwrap_err()
+                    joinres.unwrap_err(),
                 ));
             }
             return joinres.unwrap();
@@ -1002,7 +997,6 @@ struct CopyDataSink(mpsc::Sender<Bytes>);
 
 impl std::io::Write for CopyDataSink {
     fn write(&mut self, data: &[u8]) -> std::result::Result<usize, std::io::Error> {
-
         let buf = Bytes::copy_from_slice(data);
 
         if let Err(e) = self.0.blocking_send(buf) {

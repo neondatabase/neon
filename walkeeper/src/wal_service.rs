@@ -354,7 +354,8 @@ impl Serializer for SafeKeeperResponse {
 }
 
 lazy_static! {
-    pub static ref TIMELINES: Mutex<HashMap<ZTimelineId, Arc<Timeline>>> = Mutex::new(HashMap::new());
+    pub static ref TIMELINES: Mutex<HashMap<ZTimelineId, Arc<Timeline>>> =
+        Mutex::new(HashMap::new());
 }
 
 pub fn thread_main(conf: WalAcceptorConf) {
@@ -450,11 +451,13 @@ impl Timeline {
 
     // Load and lock control file (prevent running more than one instance of safekeeper)
     fn load_control_file(&self, conf: &WalAcceptorConf) -> Result<()> {
-
         let mut shared_state = self.mutex.lock().unwrap();
 
         if shared_state.control_file.is_some() {
-            info!("control file for timeline {} is already open", self.timelineid);
+            info!(
+                "control file for timeline {} is already open",
+                self.timelineid
+            );
             return Ok(());
         }
 
@@ -476,7 +479,8 @@ impl Timeline {
                     Err(e) => {
                         io_error!(
                             "Control file {:?} is locked by some other process: {}",
-                            &control_file_path, e
+                            &control_file_path,
+                            e
                         );
                     }
                 }
@@ -501,7 +505,8 @@ impl Timeline {
                     if my_info.format_version != SK_FORMAT_VERSION {
                         io_error!(
                             "Incompatible format version: {} vs. {}",
-                            my_info.format_version, SK_FORMAT_VERSION
+                            my_info.format_version,
+                            SK_FORMAT_VERSION
                         );
                     }
                     shared_state.info = my_info;
@@ -583,7 +588,10 @@ impl Connection {
                 self.conf.listen_addr.port(),
                 self.timeline().timelineid
             );
-            info!("requesting page server to connect to us: start {} {}", ps_connstr, callme);
+            info!(
+                "requesting page server to connect to us: start {} {}",
+                ps_connstr, callme
+            );
             let (client, connection) = connect(&ps_connstr, NoTls).await?;
 
             // The connection object performs the actual communication with the database,
@@ -716,8 +724,14 @@ impl Connection {
             let rec_size = (end_pos - start_pos) as usize;
             assert!(rec_size <= MAX_SEND_SIZE);
 
-            debug!("received for {} bytes between {:X}/{:X} and {:X}/{:X}",
-                  rec_size, start_pos >> 32, start_pos & 0xffffffff, end_pos >> 32, end_pos & 0xffffffff);
+            debug!(
+                "received for {} bytes between {:X}/{:X} and {:X}/{:X}",
+                rec_size,
+                start_pos >> 32,
+                start_pos & 0xffffffff,
+                end_pos >> 32,
+                end_pos & 0xffffffff
+            );
 
             /* Receive message body */
             self.inbuf.resize(rec_size, 0u8);
@@ -1054,8 +1068,11 @@ impl Connection {
             self.stream.write_all(&self.outbuf[0..msg_size]).await?;
             start_pos += send_size as u64;
 
-            debug!("Sent WAL to page server up to {:X}/{:>08X}",
-                  (end_pos>>32) as u32, end_pos as u32);
+            debug!(
+                "Sent WAL to page server up to {:X}/{:>08X}",
+                (end_pos >> 32) as u32,
+                end_pos as u32
+            );
 
             if XLogSegmentOffset(start_pos, wal_seg_size) != 0 {
                 wal_file = Some(file);

@@ -19,7 +19,7 @@ use postgres_types::PgLsn;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{Write, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -38,11 +38,16 @@ struct WalReceiverEntry {
 }
 
 lazy_static! {
-    static ref WAL_RECEIVERS: Mutex<HashMap<ZTimelineId, WalReceiverEntry>> = Mutex::new(HashMap::new());
+    static ref WAL_RECEIVERS: Mutex<HashMap<ZTimelineId, WalReceiverEntry>> =
+        Mutex::new(HashMap::new());
 }
 
 // Launch a new WAL receiver, or tell one that's running about change in connection string
-pub fn launch_wal_receiver(conf: &PageServerConf, timelineid: ZTimelineId, wal_producer_connstr: &str) {
+pub fn launch_wal_receiver(
+    conf: &PageServerConf,
+    timelineid: ZTimelineId,
+    wal_producer_connstr: &str,
+) {
     let mut receivers = WAL_RECEIVERS.lock().unwrap();
 
     match receivers.get_mut(&timelineid) {
@@ -50,7 +55,9 @@ pub fn launch_wal_receiver(conf: &PageServerConf, timelineid: ZTimelineId, wal_p
             receiver.wal_producer_connstr = wal_producer_connstr.into();
         }
         None => {
-            let receiver = WalReceiverEntry { wal_producer_connstr: wal_producer_connstr.into() };
+            let receiver = WalReceiverEntry {
+                wal_producer_connstr: wal_producer_connstr.into(),
+            };
             receivers.insert(timelineid, receiver);
 
             // Also launch a new thread to handle this connection
@@ -59,7 +66,8 @@ pub fn launch_wal_receiver(conf: &PageServerConf, timelineid: ZTimelineId, wal_p
                 .name("WAL receiver thread".into())
                 .spawn(move || {
                     thread_main(&conf_copy, timelineid);
-                }).unwrap();
+                })
+                .unwrap();
         }
     };
 }
@@ -68,14 +76,21 @@ pub fn launch_wal_receiver(conf: &PageServerConf, timelineid: ZTimelineId, wal_p
 fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
     let receivers = WAL_RECEIVERS.lock().unwrap();
 
-    receivers.get(&timelineid).unwrap().wal_producer_connstr.clone()
+    receivers
+        .get(&timelineid)
+        .unwrap()
+        .wal_producer_connstr
+        .clone()
 }
 
 //
 // This is the entry point for the WAL receiver thread.
 //
 fn thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
-    info!("WAL receiver thread started for timeline : '{}'", timelineid);
+    info!(
+        "WAL receiver thread started for timeline : '{}'",
+        timelineid
+    );
 
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
@@ -100,7 +115,11 @@ fn thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
     });
 }
 
-async fn walreceiver_main(conf: &PageServerConf, timelineid: ZTimelineId, wal_producer_connstr: &str) -> Result<(), Error> {
+async fn walreceiver_main(
+    conf: &PageServerConf,
+    timelineid: ZTimelineId,
+    wal_producer_connstr: &str,
+) -> Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
     let connect_cfg = format!("{} replication=true", wal_producer_connstr);
@@ -174,10 +193,12 @@ async fn walreceiver_main(conf: &PageServerConf, timelineid: ZTimelineId, wal_pr
                 let startlsn = xlog_data.wal_start();
                 let endlsn = startlsn + data.len() as u64;
 
-                write_wal_file(startlsn,
-                               timelineid,
-                               16 * 1024 * 1024, // FIXME
-                               data)?;
+                write_wal_file(
+                    startlsn,
+                    timelineid,
+                    16 * 1024 * 1024, // FIXME
+                    data,
+                )?;
 
                 trace!(
                     "received XLogData between {:X}/{:X} and {:X}/{:X}",
@@ -376,7 +397,6 @@ pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLin
     return (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli);
 }
 
-
 fn write_wal_file(
     startpos: XLogRecPtr,
     timeline: ZTimelineId,
@@ -409,12 +429,13 @@ fn write_wal_file(
 
         /* Open file */
         let segno = XLByteToSeg(start_pos, wal_seg_size);
-        let wal_file_name = XLogFileName(1, // FIXME: always use Postgres timeline 1
-                                         segno, wal_seg_size);
-        let wal_file_path = wal_dir
-            .join(wal_file_name.clone());
-        let wal_file_partial_path = wal_dir
-            .join(wal_file_name.clone() + ".partial");
+        let wal_file_name = XLogFileName(
+            1, // FIXME: always use Postgres timeline 1
+            segno,
+            wal_seg_size,
+        );
+        let wal_file_path = wal_dir.join(wal_file_name.clone());
+        let wal_file_partial_path = wal_dir.join(wal_file_name.clone() + ".partial");
 
         {
             let mut wal_file: File;
@@ -422,8 +443,7 @@ fn write_wal_file(
             if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path) {
                 wal_file = file;
                 partial = false;
-            } else if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_partial_path)
-            {
+            } else if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_partial_path) {
                 /* Try to open existed partial file */
                 wal_file = file;
                 partial = true;

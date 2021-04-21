@@ -1,17 +1,17 @@
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{collections::BTreeMap, path::PathBuf};
-use std::io::{Read, Write};
-use std::net::SocketAddr;
 
-use regex::Regex;
-use lazy_static::lazy_static;
-use tar;
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
+use tar;
 
 use postgres::{Client, NoTls};
 
@@ -75,7 +75,11 @@ impl ComputeControlPlane {
 
     /// Connect to a page server, get base backup, and untar it to initialize a
     /// new data directory
-    pub fn new_from_page_server(&mut self, is_test: bool, timelineid: ZTimelineId) -> Result<Arc<PostgresNode>> {
+    pub fn new_from_page_server(
+        &mut self,
+        is_test: bool,
+        timelineid: ZTimelineId,
+    ) -> Result<Arc<PostgresNode>> {
         let node_id = self.nodes.len() as u32 + 1;
 
         let node = Arc::new(PostgresNode {
@@ -84,7 +88,7 @@ impl ComputeControlPlane {
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
             is_test,
-            timelineid
+            timelineid,
         });
 
         node.init_from_page_server()?;
@@ -157,8 +161,10 @@ impl PostgresNode {
         pageserver: &Arc<PageServerNode>,
     ) -> Result<PostgresNode> {
         if !entry.file_type()?.is_dir() {
-            anyhow::bail!("PostgresNode::from_dir_entry failed: '{}' is not a directory",
-                          entry.path().display());
+            anyhow::bail!(
+                "PostgresNode::from_dir_entry failed: '{}' is not a directory",
+                entry.path().display()
+            );
         }
 
         lazy_static! {
@@ -171,9 +177,12 @@ impl PostgresNode {
 
         // find out tcp port in config file
         let cfg_path = entry.path().join("postgresql.conf");
-        let config = fs::read_to_string(cfg_path.clone())
-            .with_context(|| format!("failed to read config file in {}",
-                                     cfg_path.to_str().unwrap()))?;
+        let config = fs::read_to_string(cfg_path.clone()).with_context(|| {
+            format!(
+                "failed to read config file in {}",
+                cfg_path.to_str().unwrap()
+            )
+        })?;
 
         let err_msg = format!(
             "failed to find port definition in config file {}",
@@ -203,14 +212,13 @@ impl PostgresNode {
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
             is_test: false,
-            timelineid
+            timelineid,
         })
     }
 
     // Connect to a page server, get base backup, and untar it to initialize a
     // new data directory
     pub fn init_from_page_server(&self) -> Result<()> {
-
         let pgdata = self.pgdata();
 
         println!(
@@ -225,26 +233,37 @@ impl PostgresNode {
         }
 
         let sql = format!("basebackup {}", self.timelineid);
-        let mut client = self.pageserver.page_server_psql_client().with_context(|| "connecting to page erver failed")?;
+        let mut client = self
+            .pageserver
+            .page_server_psql_client()
+            .with_context(|| "connecting to page erver failed")?;
 
         fs::create_dir_all(&pgdata)
             .with_context(|| format!("could not create data directory {}", pgdata.display()))?;
-        fs::set_permissions(pgdata.as_path(), fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("could not set permissions in data directory {}", pgdata.display()))?;
+        fs::set_permissions(pgdata.as_path(), fs::Permissions::from_mode(0o700)).with_context(
+            || {
+                format!(
+                    "could not set permissions in data directory {}",
+                    pgdata.display()
+                )
+            },
+        )?;
 
         // FIXME: The compute node should be able to stream the WAL it needs from the WAL safekeepers or archive.
         // But that's not implemented yet. For now, 'pg_wal' is included in the base backup tarball that
         // we receive from the Page Server, so we don't need to create the empty 'pg_wal' directory here.
         //fs::create_dir_all(pgdata.join("pg_wal"))?;
 
-        let mut copyreader = client.copy_out(sql.as_str())
+        let mut copyreader = client
+            .copy_out(sql.as_str())
             .with_context(|| "page server 'basebackup' command failed")?;
 
         // FIXME: Currently, we slurp the whole tarball into memory, and then extract it,
         // but we really should do this:
         //let mut ar = tar::Archive::new(copyreader);
         let mut buf = vec![];
-        copyreader.read_to_end(&mut buf)
+        copyreader
+            .read_to_end(&mut buf)
             .with_context(|| "reading base backup from page server failed")?;
         let mut ar = tar::Archive::new(buf.as_slice());
         ar.unpack(&pgdata)
@@ -264,25 +283,28 @@ impl PostgresNode {
                  port = {port}\n",
                 address = self.address.ip(),
                 port = self.address.port()
-            ));
+            ),
+        );
 
         // Never clean up old WAL. TODO: We should use a replication
         // slot or something proper, to prevent the compute node
         // from removing WAL that hasn't been streamed to the safekeepr or
         // page server yet. But this will do for now.
-        self.append_conf("postgresql.conf",
-                         &format!("wal_keep_size='10TB'\n"));
+        self.append_conf("postgresql.conf", &format!("wal_keep_size='10TB'\n"));
 
         // Connect it to the page server.
 
         // Configure that node to take pages from pageserver
-        self.append_conf("postgresql.conf",
-            &format!("page_server_connstring = 'host={} port={}'\n\
+        self.append_conf(
+            "postgresql.conf",
+            &format!(
+                "page_server_connstring = 'host={} port={}'\n\
                       zenith_timeline='{}'\n",
-                     self.pageserver.address().ip(),
-                     self.pageserver.address().port(),
-                     self.timelineid
-            ));
+                self.pageserver.address().ip(),
+                self.pageserver.address().port(),
+                self.timelineid
+            ),
+        );
 
         Ok(())
     }
@@ -331,7 +353,8 @@ impl PostgresNode {
             )
             .env_clear()
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .status().with_context(|| "pg_ctl failed")?;
+            .status()
+            .with_context(|| "pg_ctl failed")?;
         if !pg_ctl.success() {
             anyhow::bail!("pg_ctl failed");
         }
@@ -406,10 +429,13 @@ impl PostgresNode {
             .args(&["-h", &self.address.ip().to_string()])
             .args(&["-p", &self.address.port().to_string()])
             .arg("-v")
-            .stderr(OpenOptions::new()
+            .stderr(
+                OpenOptions::new()
                     .create(true)
-		    .append(true)
-		    .open(self.pgdata().join("safekeeper_proxy.log")).unwrap())
+                    .append(true)
+                    .open(self.pgdata().join("safekeeper_proxy.log"))
+                    .unwrap(),
+            )
             .spawn()
         {
             Ok(child) => WalProposerNode { pid: child.id() },

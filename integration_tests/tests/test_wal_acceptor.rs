@@ -1,8 +1,8 @@
 // Restart acceptors one by one while compute is under the load.
 use control_plane::compute::ComputeControlPlane;
-use control_plane::storage::TestStorageControlPlane;
 use control_plane::local_env;
 use control_plane::local_env::PointInTime;
+use control_plane::storage::TestStorageControlPlane;
 use pageserver::ZTimelineId;
 
 use rand::Rng;
@@ -63,11 +63,18 @@ fn test_many_timelines() {
     let maintli = storage_cplane.get_branch_timeline("main"); // main branch
     timelines.push(maintli);
     let startpoint = local_env::find_end_of_wal(&local_env, maintli).unwrap();
-    for i in 1..N_TIMELINES { // additional branches
+    for i in 1..N_TIMELINES {
+        // additional branches
         let branchname = format!("experimental{}", i);
-        local_env::create_branch(&local_env, &branchname,
-                                 PointInTime { timelineid: maintli,
-                                               lsn: startpoint }).unwrap();
+        local_env::create_branch(
+            &local_env,
+            &branchname,
+            PointInTime {
+                timelineid: maintli,
+                lsn: startpoint,
+            },
+        )
+        .unwrap();
         let tli = storage_cplane.get_branch_timeline(&branchname);
         timelines.push(tli);
     }
@@ -75,10 +82,10 @@ fn test_many_timelines() {
     // start postgres on each timeline
     let mut nodes = Vec::new();
     for tli in timelines {
-	let node = compute_cplane.new_test_node(tli);
-	nodes.push(node.clone());
-	node.start().unwrap();
-	node.start_proxy(&wal_acceptors);
+        let node = compute_cplane.new_test_node(tli);
+        nodes.push(node.clone());
+        node.start().unwrap();
+        node.start_proxy(&wal_acceptors);
     }
 
     // create schema
@@ -258,7 +265,9 @@ fn test_race_conditions() {
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
 
-    let storage_cplane = Arc::new(TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY));
+    let storage_cplane = Arc::new(TestStorageControlPlane::fault_tolerant(
+        &local_env, REDUNDANCY,
+    ));
     let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 

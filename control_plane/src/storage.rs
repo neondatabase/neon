@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
@@ -9,12 +10,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use anyhow::Result;
 
 use postgres::{Client, NoTls};
 
-use crate::local_env::LocalEnv;
 use crate::compute::PostgresNode;
+use crate::local_env::LocalEnv;
 use pageserver::ZTimelineId;
 
 //
@@ -31,10 +31,8 @@ pub struct TestStorageControlPlane {
 }
 
 impl TestStorageControlPlane {
-
     // Peek into the repository, to grab the timeline ID of given branch
     pub fn get_branch_timeline(&self, branchname: &str) -> ZTimelineId {
-
         let branchpath = self.repopath.join("refs/branches/".to_owned() + branchname);
 
         ZTimelineId::from_str(&(fs::read_to_string(&branchpath).unwrap())).unwrap()
@@ -171,10 +169,14 @@ impl PageServerNode {
     }
 
     pub fn start(&self) -> Result<()> {
-        println!("Starting pageserver at '{}' in {}", self.address(), self.repo_path().display());
+        println!(
+            "Starting pageserver at '{}' in {}",
+            self.address(),
+            self.repo_path().display()
+        );
 
         let mut cmd = Command::new(self.env.zenith_distrib_dir.join("pageserver"));
-        cmd .args(&["-l", self.address().to_string().as_str()])
+        cmd.args(&["-l", self.address().to_string().as_str()])
             .arg("-d")
             .env_clear()
             .env("RUST_BACKTRACE", "1")
@@ -183,8 +185,10 @@ impl PageServerNode {
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
 
         if !cmd.status()?.success() {
-            anyhow::bail!("Pageserver failed to start. See '{}' for details.",
-                          self.repo_path().join("pageserver.log").display());
+            anyhow::bail!(
+                "Pageserver failed to start. See '{}' for details.",
+                self.repo_path().join("pageserver.log").display()
+            );
         }
 
         // It takes a while for the page server to start up. Wait until it is
@@ -247,7 +251,9 @@ impl PageServerNode {
         client.simple_query(sql).unwrap()
     }
 
-    pub fn page_server_psql_client(&self) -> std::result::Result<postgres::Client, postgres::Error> {
+    pub fn page_server_psql_client(
+        &self,
+    ) -> std::result::Result<postgres::Client, postgres::Error> {
         let connstring = format!(
             "host={} port={} dbname={} user={}",
             self.address().ip(),
@@ -297,10 +303,10 @@ impl WalAcceptorNode {
             .args(&["-D", self.data_dir.to_str().unwrap()])
             .args(&["-l", self.listen.to_string().as_str()])
             .args(&["--systemid", &self.env.systemid.to_string()])
-        // Tell page server it can receive WAL from this WAL safekeeper
-        // FIXME: If there are multiple safekeepers, they will all inform
-        // the page server. Only the last "notification" will stay in effect.
-        // So it's pretty random which safekeeper the page server will connect to
+            // Tell page server it can receive WAL from this WAL safekeeper
+            // FIXME: If there are multiple safekeepers, they will all inform
+            // the page server. Only the last "notification" will stay in effect.
+            // So it's pretty random which safekeeper the page server will connect to
             .args(&["--pageserver", "127.0.0.1:64000"])
             .arg("-d")
             .arg("-n")

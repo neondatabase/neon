@@ -4,11 +4,11 @@
 
 use log::*;
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
-use std::fs::{File, OpenOptions};
-use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -32,27 +32,33 @@ fn zenith_repo_dir() -> String {
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
-        .arg(Arg::with_name("listen")
-                 .short("l")
-                 .long("listen")
-                 .takes_value(true)
-                 .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"))
-        .arg(Arg::with_name("interactive")
-                 .short("i")
-                 .long("interactive")
-                 .takes_value(false)
-                 .help("Interactive mode"))
-        .arg(Arg::with_name("daemonize")
-                 .short("d")
-                 .long("daemonize")
-                 .takes_value(false)
-                 .help("Run in the background"))
+        .arg(
+            Arg::with_name("listen")
+                .short("l")
+                .long("listen")
+                .takes_value(true)
+                .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"),
+        )
+        .arg(
+            Arg::with_name("interactive")
+                .short("i")
+                .long("interactive")
+                .takes_value(false)
+                .help("Interactive mode"),
+        )
+        .arg(
+            Arg::with_name("daemonize")
+                .short("d")
+                .long("daemonize")
+                .takes_value(false)
+                .help("Run in the background"),
+        )
         .get_matches();
 
     let mut conf = PageServerConf {
         daemonize: false,
         interactive: false,
-        listen_addr: "127.0.0.1:5430".parse().unwrap()
+        listen_addr: "127.0.0.1:5430".parse().unwrap(),
     };
 
     if arg_matches.is_present("daemonize") {
@@ -128,9 +134,7 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
             Ok(_) => info!("Success, daemonized"),
             Err(e) => error!("Error, {}", e),
         }
-    }
-    else
-    {
+    } else {
         // change into the repository directory. In daemon mode, Daemonize
         // does this for us.
         let repodir = zenith_repo_dir();

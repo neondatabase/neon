@@ -50,12 +50,11 @@ pub struct WalStreamDecoder {
     recordbuf: BytesMut,
 }
 
-
 #[derive(Error, Debug, Clone)]
 #[error("{msg} at {lsn}")]
 pub struct WalDecodeError {
     msg: String,
-    lsn: u64
+    lsn: u64,
 }
 
 //
@@ -100,7 +99,10 @@ impl WalStreamDecoder {
 
                 let hdr = self.decode_XLogLongPageHeaderData();
                 if hdr.std.xlp_pageaddr != self.lsn {
-                    return Err(WalDecodeError { msg: "invalid xlog segment header".into(), lsn: self.lsn });
+                    return Err(WalDecodeError {
+                        msg: "invalid xlog segment header".into(),
+                        lsn: self.lsn,
+                    });
                 }
                 // TODO: verify the remaining fields in the header
 
@@ -115,7 +117,10 @@ impl WalStreamDecoder {
 
                 let hdr = self.decode_XLogPageHeaderData();
                 if hdr.xlp_pageaddr != self.lsn {
-                    return Err(WalDecodeError { msg: "invalid xlog page header".into(), lsn: self.lsn });
+                    return Err(WalDecodeError {
+                        msg: "invalid xlog page header".into(),
+                        lsn: self.lsn,
+                    });
                 }
                 // TODO: verify the remaining fields in the header
 
@@ -141,7 +146,10 @@ impl WalStreamDecoder {
                 self.startlsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
                 if xl_tot_len < SizeOfXLogRecord {
-                    return Err(WalDecodeError {msg: format!("invalid xl_tot_len {}", xl_tot_len), lsn: self.lsn });
+                    return Err(WalDecodeError {
+                        msg: format!("invalid xl_tot_len {}", xl_tot_len),
+                        lsn: self.lsn,
+                    });
                 }
                 self.lsn += 4;
 

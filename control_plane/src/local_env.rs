@@ -4,19 +4,19 @@
 // Now it also provides init method which acts like a stub for proper installation
 // script which will use local paths.
 //
+use anyhow::Context;
+use bytes::Bytes;
+use rand::Rng;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use bytes::Bytes;
-use rand::Rng;
-use anyhow::Context;
 
-use serde_derive::{Deserialize, Serialize};
 use anyhow::Result;
+use serde_derive::{Deserialize, Serialize};
 
-use walkeeper::xlog_utils;
 use pageserver::ZTimelineId;
+use walkeeper::xlog_utils;
 
 //
 // This data structure represents deserialized zenith config, which should be
@@ -67,16 +67,20 @@ pub fn init() -> Result<()> {
     // check if config already exists
     let repo_path = zenith_repo_dir();
     if repo_path.exists() {
-        anyhow::bail!("{} already exists. Perhaps already initialized?",
-                      repo_path.to_str().unwrap());
+        anyhow::bail!(
+            "{} already exists. Perhaps already initialized?",
+            repo_path.to_str().unwrap()
+        );
     }
 
     // Now we can run init only from crate directory, so check that current dir is our crate.
     // Use 'pageserver/Cargo.toml' existence as evidendce.
     let cargo_path = env::current_dir()?;
     if !cargo_path.join("pageserver/Cargo.toml").exists() {
-        anyhow::bail!("Current dirrectory does not look like a zenith repo. \
-            Please, run 'init' from zenith repo root.");
+        anyhow::bail!(
+            "Current dirrectory does not look like a zenith repo. \
+            Please, run 'init' from zenith repo root."
+        );
     }
 
     // ok, now check that expected binaries are present
@@ -85,17 +89,21 @@ pub fn init() -> Result<()> {
     let pg_distrib_dir = cargo_path.join("tmp_install");
     let pg_path = pg_distrib_dir.join("bin/postgres");
     if !pg_path.exists() {
-        anyhow::bail!("Can't find postres binary at {}. \
+        anyhow::bail!(
+            "Can't find postres binary at {}. \
                        Perhaps './pgbuild.sh' is needed to build it first.",
-                      pg_path.to_str().unwrap());
+            pg_path.to_str().unwrap()
+        );
     }
 
     // check pageserver
     let zenith_distrib_dir = cargo_path.join("target/debug/");
     let pageserver_path = zenith_distrib_dir.join("pageserver");
     if !pageserver_path.exists() {
-        anyhow::bail!("Can't find pageserver binary at {}. Please build it.",
-                      pageserver_path.to_str().unwrap());
+        anyhow::bail!(
+            "Can't find pageserver binary at {}. Please build it.",
+            pageserver_path.to_str().unwrap()
+        );
     }
 
     // ok, we are good to go
@@ -110,10 +118,10 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
-pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
-{
+pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
     let repopath = &local_env.repo_path;
-    fs::create_dir(&repopath).with_context(|| format!("could not create directory {}", repopath.display()))?;
+    fs::create_dir(&repopath)
+        .with_context(|| format!("could not create directory {}", repopath.display()))?;
     fs::create_dir(repopath.join("pgdatadirs"))?;
     fs::create_dir(repopath.join("timelines"))?;
     fs::create_dir(repopath.join("refs"))?;
@@ -132,25 +140,30 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
     // the repository. Use "tempdir()" or something? Or just create it directly
     // in the repo?
     let initdb_path = local_env.pg_bin_dir().join("initdb");
-    let _initdb =
-        Command::new(initdb_path)
+    let _initdb = Command::new(initdb_path)
         .args(&["-D", "tmp"])
-            .arg("--no-instructions")
-            .env_clear()
-            .env("LD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
-            .stdout(Stdio::null())
+        .arg("--no-instructions")
+        .env_clear()
+        .env("LD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
+        .stdout(Stdio::null())
         .status()
         .with_context(|| "failed to execute initdb")?;
     println!("initdb succeeded");
 
     // Read control file to extract the LSN and system id
-    let controlfile = postgres_ffi::decode_pg_control(Bytes::from(fs::read("tmp/global/pg_control")?))?;
+    let controlfile =
+        postgres_ffi::decode_pg_control(Bytes::from(fs::read("tmp/global/pg_control")?))?;
     let systemid = controlfile.system_identifier;
     let lsn = controlfile.checkPoint;
     let lsnstr = format!("{:016X}", lsn);
 
     // Move the initial WAL file
-    fs::rename("tmp/pg_wal/000000010000000000000001", timelinedir.join("wal").join("000000010000000000000001.partial"))?;
+    fs::rename(
+        "tmp/pg_wal/000000010000000000000001",
+        timelinedir
+            .join("wal")
+            .join("000000010000000000000001.partial"),
+    )?;
     println!("moved initial WAL file");
 
     // Remove pg_wal
@@ -176,11 +189,13 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
     let toml = toml::to_string(&local_env)?;
     fs::write(repopath.join("config"), toml)?;
 
-    println!("new zenith repository was created in {}", repopath.display());
+    println!(
+        "new zenith repository was created in {}",
+        repopath.display()
+    );
 
     Ok(())
 }
-
 
 // If control file says the cluster was shut down cleanly, modify it, to mark
 // it as crashed. That forces crash recovery when you start the cluster.
@@ -192,16 +207,17 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()>
 // Or better yet, use a less hacky way of putting the cluster into recovery.
 // Perhaps create a backup label file in the data directory when it's restored.
 fn force_crash_recovery(datadir: &Path) -> Result<()> {
-
     // Read in the control file
     let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
-    let mut controlfile = postgres_ffi::decode_pg_control(
-        Bytes::from(fs::read(controlfilepath.as_path())?))?;
+    let mut controlfile =
+        postgres_ffi::decode_pg_control(Bytes::from(fs::read(controlfilepath.as_path())?))?;
 
     controlfile.state = postgres_ffi::DBState_DB_IN_PRODUCTION;
 
-    fs::write(controlfilepath.as_path(),
-              postgres_ffi::encode_pg_control(controlfile))?;
+    fs::write(
+        controlfilepath.as_path(),
+        postgres_ffi::encode_pg_control(controlfile),
+    )?;
 
     Ok(())
 }
@@ -209,8 +225,10 @@ fn force_crash_recovery(datadir: &Path) -> Result<()> {
 // check that config file is present
 pub fn load_config(repopath: &Path) -> Result<LocalEnv> {
     if !repopath.exists() {
-        anyhow::bail!("Zenith config is not found in {}. You need to run 'zenith init' first",
-                      repopath.to_str().unwrap());
+        anyhow::bail!(
+            "Zenith config is not found in {}. You need to run 'zenith init' first",
+            repopath.to_str().unwrap()
+        );
     }
 
     // load and parse file
@@ -222,7 +240,9 @@ pub fn load_config(repopath: &Path) -> Result<LocalEnv> {
 pub fn test_env(testname: &str) -> LocalEnv {
     fs::create_dir_all("../tmp_check").expect("could not create directory ../tmp_check");
 
-    let repo_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_check/").join(testname);
+    let repo_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tmp_check/")
+        .join(testname);
 
     // Remove remnants of old test repo
     let _ = fs::remove_dir_all(&repo_path);
@@ -252,7 +272,7 @@ pub fn cargo_bin_dir() -> PathBuf {
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
     pub timelineid: ZTimelineId,
-    pub lsn: u64
+    pub lsn: u64,
 }
 
 fn create_timeline(local_env: &LocalEnv, ancestor: Option<PointInTime>) -> Result<ZTimelineId> {
@@ -270,10 +290,12 @@ fn create_timeline(local_env: &LocalEnv, ancestor: Option<PointInTime>) -> Resul
     fs::create_dir(&timelinedir.join("wal"))?;
 
     if let Some(ancestor) = ancestor {
-        let data = format!("{}@{:X}/{:X}",
-                           ancestor.timelineid,
-                           ancestor.lsn >> 32,
-                           ancestor.lsn & 0xffffffff);
+        let data = format!(
+            "{}@{:X}/{:X}",
+            ancestor.timelineid,
+            ancestor.lsn >> 32,
+            ancestor.lsn & 0xffffffff
+        );
         fs::write(timelinedir.join("ancestor"), data)?;
     }
 
@@ -289,7 +311,11 @@ fn parse_lsn(s: &str) -> std::result::Result<u64, std::num::ParseIntError> {
 }
 
 // Create a new branch in the repository (for the "zenith branch" subcommand)
-pub fn create_branch(local_env: &LocalEnv, branchname: &str, startpoint: PointInTime) -> Result<()> {
+pub fn create_branch(
+    local_env: &LocalEnv,
+    branchname: &str,
+    startpoint: PointInTime,
+) -> Result<()> {
     let repopath = &local_env.repo_path;
 
     // create a new timeline for it
@@ -297,7 +323,10 @@ pub fn create_branch(local_env: &LocalEnv, branchname: &str, startpoint: PointIn
     let newtimelinedir = repopath.join("timelines").join(newtli.to_string());
 
     let data = newtli.to_string();
-    fs::write(repopath.join("refs").join("branches").join(branchname), data)?;
+    fs::write(
+        repopath.join("refs").join("branches").join(branchname),
+        data,
+    )?;
 
     // Copy the latest snapshot (TODO: before the startpoint) and all WAL
     // TODO: be smarter and avoid the copying...
@@ -305,12 +334,16 @@ pub fn create_branch(local_env: &LocalEnv, branchname: &str, startpoint: PointIn
     let copy_opts = fs_extra::dir::CopyOptions::new();
     fs_extra::dir::copy(oldsnapshotdir, newtimelinedir.join("snapshots"), &copy_opts)?;
 
-    let oldtimelinedir = repopath.join("timelines").join(startpoint.timelineid.to_string());
+    let oldtimelinedir = repopath
+        .join("timelines")
+        .join(startpoint.timelineid.to_string());
     let mut copy_opts = fs_extra::dir::CopyOptions::new();
     copy_opts.content_only = true;
-    fs_extra::dir::copy(oldtimelinedir.join("wal"),
-                        newtimelinedir.join("wal"),
-                        &copy_opts)?;
+    fs_extra::dir::copy(
+        oldtimelinedir.join("wal"),
+        newtimelinedir.join("wal"),
+        &copy_opts,
+    )?;
 
     Ok(())
 }
@@ -318,7 +351,10 @@ pub fn create_branch(local_env: &LocalEnv, branchname: &str, startpoint: PointIn
 // Find the end of valid WAL in a wal directory
 pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<u64> {
     let repopath = &local_env.repo_path;
-    let waldir = repopath.join("timelines").join(timeline.to_string()).join("wal");
+    let waldir = repopath
+        .join("timelines")
+        .join(timeline.to_string())
+        .join("wal");
 
     let (lsn, _tli) = xlog_utils::find_end_of_wal(&waldir, 16 * 1024 * 1024, true);
 
@@ -329,7 +365,10 @@ pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<u6
 fn find_latest_snapshot(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<(u64, PathBuf)> {
     let repopath = &local_env.repo_path;
 
-    let snapshotsdir = repopath.join("timelines").join(timeline.to_string()).join("snapshots");
+    let snapshotsdir = repopath
+        .join("timelines")
+        .join(timeline.to_string())
+        .join("snapshots");
     let paths = fs::read_dir(&snapshotsdir)?;
     let mut maxsnapshot: u64 = 0;
     let mut snapshotdir: Option<PathBuf> = None;

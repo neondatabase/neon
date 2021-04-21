@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::{fs::File, fs::OpenOptions};
 
-use clap::{App, Arg};
 use anyhow::Result;
+use clap::{App, Arg};
 
 use slog::Drain;
 

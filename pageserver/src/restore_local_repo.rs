@@ -14,6 +14,7 @@ use log::*;
 use regex::Regex;
 use std::fmt;
 
+use std::cmp::max;
 use std::error::Error;
 use std::fs;
 use std::fs::File;
@@ -21,18 +22,16 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::cmp::max;
 
 use anyhow::Result;
 use bytes::Bytes;
 
 use crate::page_cache;
-use crate::page_cache::PageCache;
-use crate:: PageServerConf;
 use crate::page_cache::BufferTag;
+use crate::page_cache::PageCache;
 use crate::waldecoder::WalStreamDecoder;
+use crate::PageServerConf;
 use crate::ZTimelineId;
-
 
 // From pg_tablespace_d.h
 //
@@ -43,8 +42,11 @@ const GLOBALTABLESPACE_OID: u32 = 1664;
 //
 // Load it all into the page cache.
 //
-pub fn restore_timeline(conf: &PageServerConf, pcache: &PageCache, timeline: ZTimelineId) -> Result<()> {
-
+pub fn restore_timeline(
+    conf: &PageServerConf,
+    pcache: &PageCache,
+    timeline: ZTimelineId,
+) -> Result<()> {
     let timelinepath = PathBuf::from("timelines").join(timeline.to_string());
 
     if !timelinepath.exists() {
@@ -52,7 +54,9 @@ pub fn restore_timeline(conf: &PageServerConf, pcache: &PageCache, timeline: ZTi
     }
 
     // Scan .zenith/timelines/<timeline>/snapshots
-    let snapshotspath = PathBuf::from("timelines").join(timeline.to_string()).join("snapshots");
+    let snapshotspath = PathBuf::from("timelines")
+        .join(timeline.to_string())
+        .join("snapshots");
 
     let mut last_snapshot_lsn: u64 = 0;
 
@@ -68,7 +72,10 @@ pub fn restore_timeline(conf: &PageServerConf, pcache: &PageCache, timeline: ZTi
     }
 
     if last_snapshot_lsn == 0 {
-        error!("could not find valid snapshot in {}", snapshotspath.display());
+        error!(
+            "could not find valid snapshot in {}",
+            snapshotspath.display()
+        );
         // TODO return error?
     }
     pcache.init_valid_lsn(last_snapshot_lsn);
@@ -79,7 +86,6 @@ pub fn restore_timeline(conf: &PageServerConf, pcache: &PageCache, timeline: ZTi
 }
 
 pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<u64> {
-
     let snapshotspath = format!("timelines/{}/snapshots", timeline);
 
     let mut last_snapshot_lsn = 0;
@@ -97,9 +103,16 @@ pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Re
     Ok(last_snapshot_lsn)
 }
 
-fn restore_snapshot(conf: &PageServerConf, pcache: &PageCache, timeline: ZTimelineId, snapshot: &str) -> Result<()> {
-
-    let snapshotpath = PathBuf::from("timelines").join(timeline.to_string()).join("snapshots").join(snapshot);
+fn restore_snapshot(
+    conf: &PageServerConf,
+    pcache: &PageCache,
+    timeline: ZTimelineId,
+    snapshot: &str,
+) -> Result<()> {
+    let snapshotpath = PathBuf::from("timelines")
+        .join(timeline.to_string())
+        .join("snapshots")
+        .join(snapshot);
 
     // Scan 'global'
     for direntry in fs::read_dir(snapshotpath.join("global"))? {
@@ -112,7 +125,15 @@ fn restore_snapshot(conf: &PageServerConf, pcache: &PageCache, timeline: ZTimeli
             Some("pg_filenode.map") => continue,
 
             // Load any relation files into the page server
-            _ => restore_relfile(conf, pcache, timeline, snapshot, GLOBALTABLESPACE_OID, 0, &direntry.path())?,
+            _ => restore_relfile(
+                conf,
+                pcache,
+                timeline,
+                snapshot,
+                GLOBALTABLESPACE_OID,
+                0,
+                &direntry.path(),
+            )?,
         }
     }
 
@@ -133,7 +154,15 @@ fn restore_snapshot(conf: &PageServerConf, pcache: &PageCache, timeline: ZTimeli
                 Some("pg_filenode.map") => continue,
 
                 // Load any relation files into the page server
-                _ => restore_relfile(conf, pcache, timeline, snapshot, DEFAULTTABLESPACE_OID, dboid, &direntry.path())?,
+                _ => restore_relfile(
+                    conf,
+                    pcache,
+                    timeline,
+                    snapshot,
+                    DEFAULTTABLESPACE_OID,
+                    dboid,
+                    &direntry.path(),
+                )?,
             }
         }
     }
@@ -143,8 +172,15 @@ fn restore_snapshot(conf: &PageServerConf, pcache: &PageCache, timeline: ZTimeli
     Ok(())
 }
 
-fn restore_relfile(_conf: &PageServerConf, pcache: &PageCache, _timeline: ZTimelineId, snapshot: &str, spcoid: u32, dboid: u32, path: &Path) -> Result<()> {
-
+fn restore_relfile(
+    _conf: &PageServerConf,
+    pcache: &PageCache,
+    _timeline: ZTimelineId,
+    snapshot: &str,
+    spcoid: u32,
+    dboid: u32,
+    path: &Path,
+) -> Result<()> {
     let lsn = u64::from_str_radix(snapshot, 16)?;
 
     // Does it look like a relation file?
@@ -187,12 +223,12 @@ fn restore_relfile(_conf: &PageServerConf, pcache: &PageCache, _timeline: ZTimel
                     // reached EOF. That's expected.
                     // FIXME: maybe check that we read the full length of the file?
                     break;
-                },
+                }
                 _ => {
                     error!("error reading file: {:?} ({})", path, e);
                     break;
                 }
-            }
+            },
         };
         blknum += 1;
     }
@@ -210,7 +246,12 @@ fn restore_relfile(_conf: &PageServerConf, pcache: &PageCache, _timeline: ZTimel
 
 // Scan WAL on a timeline, starting from gien LSN, and load all the records
 // into the page cache.
-fn restore_wal(_conf: &PageServerConf, pcache: &PageCache, timeline: ZTimelineId, startpoint: u64) -> Result<()> {
+fn restore_wal(
+    _conf: &PageServerConf,
+    pcache: &PageCache,
+    timeline: ZTimelineId,
+    startpoint: u64,
+) -> Result<()> {
     let walpath = format!("timelines/{}/wal", timeline);
 
     let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
@@ -259,8 +300,7 @@ fn restore_wal(_conf: &PageServerConf, pcache: &PageCache, timeline: ZTimelineId
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
-                let decoded =
-                    crate::waldecoder::decode_wal_record(recdata.clone());
+                let decoded = crate::waldecoder::decode_wal_record(recdata.clone());
 
                 // Put the WAL record to the page cache. We make a separate copy of
                 // it for every block it modifies. (The actual WAL record is kept in
@@ -299,7 +339,11 @@ fn restore_wal(_conf: &PageServerConf, pcache: &PageCache, timeline: ZTimelineId
         segno += 1;
         offset = 0;
     }
-    info!("reached end of WAL at {:X}/{:X}", last_lsn >> 32, last_lsn & 0xffffffff);
+    info!(
+        "reached end of WAL at {:X}/{:X}",
+        last_lsn >> 32,
+        last_lsn & 0xffffffff
+    );
 
     Ok(())
 }
@@ -319,7 +363,6 @@ pub fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> u32 {
 pub fn XLByteToSeg(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> XLogSegNo {
     return xlogptr / wal_segsz_bytes as u64;
 }
-
 
 #[allow(non_snake_case)]
 pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
@@ -357,7 +400,6 @@ pub fn IsPartialXLogFileName(fname: &str) -> bool {
         false
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct FilePathError {
@@ -446,4 +488,3 @@ fn parse_relfilename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
 
     return Ok((relnode, forknum, segno));
 }
-

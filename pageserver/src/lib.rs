@@ -1,7 +1,8 @@
+use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::fmt;
 
+pub mod basebackup;
 pub mod page_cache;
 pub mod page_service;
 pub mod pg_constants;
@@ -12,7 +13,6 @@ mod tui_logger;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
-pub mod basebackup;
 
 #[derive(Debug, Clone)]
 pub struct PageServerConf {
@@ -35,7 +35,6 @@ impl FromStr for ZTimelineId {
         buf.copy_from_slice(timelineid.as_slice());
         Ok(ZTimelineId(buf))
     }
-
 }
 
 impl ZTimelineId {
@@ -55,8 +54,7 @@ impl ZTimelineId {
 }
 
 impl fmt::Display for ZTimelineId {
-
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-         f.write_str(&hex::encode(self.0))
+        f.write_str(&hex::encode(self.0))
     }
 }

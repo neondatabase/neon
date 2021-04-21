@@ -19,10 +19,10 @@ use std::assert;
 use std::cell::RefCell;
 use std::fs;
 use std::io::Error;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -34,8 +34,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crate::page_cache;
 use crate::page_cache::CacheEntry;
 use crate::page_cache::WALRecord;
-use crate::{page_cache::BufferTag, PageServerConf};
 use crate::ZTimelineId;
+use crate::{page_cache::BufferTag, PageServerConf};
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 

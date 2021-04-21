@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::str::FromStr;
 
-use clap::{App, Arg, ArgMatches, SubCommand};
 use anyhow::Result;
 use anyhow::{anyhow, bail};
+use clap::{App, Arg, ArgMatches, SubCommand};
 
-use control_plane::{compute::ComputeControlPlane, local_env, storage};
 use control_plane::local_env::LocalEnv;
 use control_plane::storage::PageServerNode;
+use control_plane::{compute::ComputeControlPlane, local_env, storage};
 
 use pageserver::ZTimelineId;
 
@@ -34,34 +34,32 @@ fn main() -> Result<()> {
         .required(true);
     let matches = App::new("zenith")
         .about("Zenith CLI")
-        .subcommand(SubCommand::with_name("init")
-                    .about("Initialize a new Zenith repository in current directory"))
-        .subcommand(SubCommand::with_name("branch")
-                    .about("Create a new branch")
-                    .arg(Arg::with_name("branchname")
-                         .required(false)
-                         .index(1))
-                    .arg(Arg::with_name("start-point")
-                         .required(false)
-                         .index(2)))
+        .subcommand(
+            SubCommand::with_name("init")
+                .about("Initialize a new Zenith repository in current directory"),
+        )
+        .subcommand(
+            SubCommand::with_name("branch")
+                .about("Create a new branch")
+                .arg(Arg::with_name("branchname").required(false).index(1))
+                .arg(Arg::with_name("start-point").required(false).index(2)),
+        )
         .subcommand(
             SubCommand::with_name("pageserver")
                 .about("Manage pageserver instance")
                 .subcommand(SubCommand::with_name("status"))
                 .subcommand(SubCommand::with_name("start"))
-                .subcommand(SubCommand::with_name("stop"))
+                .subcommand(SubCommand::with_name("stop")),
         )
         .subcommand(
             SubCommand::with_name("pg")
                 .about("Manage postgres instances")
                 .subcommand(
                     SubCommand::with_name("create")
-                    // .arg(name_arg.clone()
-                    //     .required(false)
-                    //     .help("name of this postgres instance (will be pgN if omitted)"))
-                    .arg(Arg::with_name("timeline")
-                     .required(false)
-                     .index(1))
+                        // .arg(name_arg.clone()
+                        //     .required(false)
+                        //     .help("name of this postgres instance (will be pgN if omitted)"))
+                        .arg(Arg::with_name("timeline").required(false).index(1)),
                 )
                 .subcommand(SubCommand::with_name("list"))
                 .subcommand(SubCommand::with_name("start").arg(name_arg.clone()))
@@ -80,9 +78,11 @@ fn main() -> Result<()> {
 
     let repopath = PathBuf::from(zenith_repo_dir());
     if !repopath.exists() {
-        bail!("Zenith repository does not exists in {}.\n\
+        bail!(
+            "Zenith repository does not exists in {}.\n\
                Set ZENITH_REPO_DIR or initialize a new repository with 'zenith init'",
-              repopath.display());
+            repopath.display()
+        );
     }
     // TODO: check that it looks like a zenith repository
     let env = match local_env::load_config(&repopath) {
@@ -204,7 +204,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     Ok(())
 }
 
-
 // "zenith init" - Initialize a new Zenith repository in current dir
 fn run_init_cmd(_args: ArgMatches) -> Result<()> {
     local_env::init()?;
@@ -221,20 +220,22 @@ fn run_branch_cmd(local_env: &LocalEnv, args: ArgMatches) -> Result<()> {
         }
 
         if let Some(startpoint_str) = args.value_of("start-point") {
-
             let mut startpoint = parse_point_in_time(startpoint_str)?;
 
             if startpoint.lsn == 0 {
                 // Find end of WAL on the old timeline
                 let end_of_wal = local_env::find_end_of_wal(local_env, startpoint.timelineid)?;
 
-                println!("branching at end of WAL: {:X}/{:X}", end_of_wal >> 32, end_of_wal & 0xffffffff);
+                println!(
+                    "branching at end of WAL: {:X}/{:X}",
+                    end_of_wal >> 32,
+                    end_of_wal & 0xffffffff
+                );
 
                 startpoint.lsn = end_of_wal;
             }
 
             return local_env::create_branch(local_env, branchname, startpoint);
-
         } else {
             panic!("Missing start-point");
         }
@@ -276,18 +277,22 @@ fn list_branches() -> Result<()> {
 //
 //
 fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
-
     let mut strings = s.split("@");
     let name = strings.next().unwrap();
 
     let lsn: Option<u64>;
     if let Some(lsnstr) = strings.next() {
         let mut s = lsnstr.split("/");
-        let lsn_hi: u64 = s.next().ok_or(anyhow!("invalid LSN in point-in-time specification"))?.parse()?;
-        let lsn_lo: u64 = s.next().ok_or(anyhow!("invalid LSN in point-in-time specification"))?.parse()?;
+        let lsn_hi: u64 = s
+            .next()
+            .ok_or(anyhow!("invalid LSN in point-in-time specification"))?
+            .parse()?;
+        let lsn_lo: u64 = s
+            .next()
+            .ok_or(anyhow!("invalid LSN in point-in-time specification"))?
+            .parse()?;
         lsn = Some(lsn_hi << 32 | lsn_lo);
-    }
-    else {
+    } else {
         lsn = None
     }
 
@@ -321,7 +326,7 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
     if tlipath.exists() {
         let result = local_env::PointInTime {
             timelineid: ZTimelineId::from_str(name)?,
-            lsn: lsn.unwrap_or(0)
+            lsn: lsn.unwrap_or(0),
         };
 
         return Ok(result);
