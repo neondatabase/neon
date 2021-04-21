@@ -1382,8 +1382,6 @@ dependencies = [
  "crc32c",
  "crossbeam-channel",
  "daemonize",
- "fs2",
- "fs_extra",
  "futures",
  "hex",
  "lazy_static",
@@ -2544,31 +2542,24 @@ dependencies = [
  "anyhow",
  "byteorder",
  "bytes",
- "chrono",
  "clap",
  "crc32c",
- "crossbeam-channel",
  "daemonize",
  "fs2",
- "futures",
  "lazy_static",
  "log",
  "pageserver",
  "postgres",
  "postgres-protocol",
- "rand 0.8.3",
  "regex",
- "rust-s3",
  "slog",
  "slog-async",
  "slog-scope",
  "slog-stdlog",
  "slog-term",
- "termion",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
- "tui",
 ]
 
 [[package]]
@@ -2759,7 +2750,6 @@ dependencies = [
  "control_plane",
  "pageserver",
  "postgres_ffi",
- "walkeeper",
 ]
 
 [[package]]

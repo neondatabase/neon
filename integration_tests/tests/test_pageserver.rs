@@ -7,7 +7,6 @@ use control_plane::storage::TestStorageControlPlane;
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
 // -- pageserver api endpoint to check all rels
-/*
 #[test]
 fn test_redo_cases() {
     let local_env = local_env::test_env("test_redo_cases");
@@ -48,7 +47,7 @@ fn test_redo_cases() {
     println!("sum = {}", count);
     assert_eq!(count, 5000050000);
 }
-*/
+
 // Runs pg_regress on a compute node
 #[test]
 fn test_regress() {

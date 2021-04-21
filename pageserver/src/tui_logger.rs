@@ -167,7 +167,7 @@ impl<'b> Widget for TuiLoggerWidget<'b> {
                         Level::Debug => (self.style_debug, "DEBUG", true),
                         Level::Trace => (self.style_trace, "TRACE", true),
                     };
-                    line.push(Span::styled(txt, lvl_style.unwrap_or(Style::default())));
+                    line.push(Span::styled(txt, lvl_style.unwrap_or_default()));
 
                     if self.show_module {
                         line.push(Span::raw(" "));

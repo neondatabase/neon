@@ -238,7 +238,7 @@ impl PostgresNode {
         let mut client = self
             .pageserver
             .page_server_psql_client()
-            .with_context(|| "connecting to page erver failed")?;
+            .with_context(|| "connecting to page server failed")?;
 
         fs::create_dir_all(&pgdata)
             .with_context(|| format!("could not create data directory {}", pgdata.display()))?;

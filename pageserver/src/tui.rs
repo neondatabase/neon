@@ -91,7 +91,7 @@ pub fn init_logging() -> slog_scope::GlobalLoggerGuard {
     return slog_scope::set_global_logger(logger);
 }
 
-pub fn ui_main<'b>() -> Result<(), Box<dyn Error>> {
+pub fn ui_main() -> Result<(), Box<dyn Error>> {
     // Terminal initialization
     let stdout = io::stdout().into_raw_mode()?;
     let stdout = MouseTerminal::from(stdout);
@@ -229,7 +229,7 @@ impl<'a> Widget for LogWidget<'a> {
 // Render a widget to show some metrics
 struct MetricsWidget {}
 
-fn get_metric_u64<'a>(title: &'a str, value: u64) -> Spans<'a> {
+fn get_metric_u64(title: &str, value: u64) -> Spans {
     Spans::from(vec![
         Span::styled(format!("{:<20}", title), Style::default()),
         Span::raw(": "),
@@ -240,7 +240,7 @@ fn get_metric_u64<'a>(title: &'a str, value: u64) -> Spans<'a> {
     ])
 }
 
-fn get_metric_str<'a>(title: &'a str, value: &'a str) -> Spans<'a> {
+fn get_metric_str<'a>(title: &str, value: &'a str) -> Spans<'a> {
     Spans::from(vec![
         Span::styled(format!("{:<20}", title), Style::default()),
         Span::raw(": "),
