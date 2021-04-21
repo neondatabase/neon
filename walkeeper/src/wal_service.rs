@@ -3,8 +3,6 @@
 //   receive WAL from wal_proposer and send it to WAL receivers
 //
 
-extern crate fs2;
-
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fs2::FileExt;
