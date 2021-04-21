@@ -286,7 +286,8 @@ impl PageCache {
         let minkey = CacheKey { tag, lsn: 0 };
         let maxkey = CacheKey { tag, lsn };
 
-        if self.walreceiver_works.load(Ordering::Acquire) {
+        let walreceiver_works = self.walreceiver_works.load(Ordering::Acquire);
+        if walreceiver_works {
             self.seqwait_lsn
                 .wait_for_timeout(lsn, TIMEOUT)
                 .await
@@ -312,6 +313,10 @@ impl PageCache {
         let entry_rc: Arc<CacheEntry>;
         {
             let shared = self.shared.lock().unwrap();
+
+            if walreceiver_works {
+                assert!(lsn <= shared.last_valid_lsn);
+            }
 
             if lsn < shared.first_valid_lsn {
                 bail!(
