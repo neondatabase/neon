@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub mod basebackup;
 pub mod page_cache;
@@ -20,6 +21,8 @@ pub struct PageServerConf {
     pub daemonize: bool,
     pub interactive: bool,
     pub listen_addr: SocketAddr,
+	pub gc_horizon: u64,
+	pub gc_period: Duration,
 }
 
 // Zenith Timeline ID is a 32-byte random ID.

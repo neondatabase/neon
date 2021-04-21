@@ -24,6 +24,7 @@ use tokio::runtime;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::task;
+use std::time::Duration;
 
 use crate::basebackup;
 use crate::page_cache;
@@ -936,7 +937,7 @@ impl Connection {
         // FIXME: I'm getting an error from the tokio copyout driver without this.
         // I think it happens when the CommandComplete, CloseComplete and ReadyForQuery
         // are sent in the same TCP packet as the CopyDone. I don't understand why.
-        thread::sleep(std::time::Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(1));
 
         Ok(())
     }

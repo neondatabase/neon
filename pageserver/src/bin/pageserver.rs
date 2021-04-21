@@ -9,6 +9,8 @@ use std::io;
 use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
+use std::time::Duration;
+use parse_duration::parse;
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -21,6 +23,8 @@ use pageserver::zenith_repo_dir;
 use pageserver::tui;
 //use pageserver::walreceiver;
 use pageserver::PageServerConf;
+
+const DEFAULT_GC_HORIZON : u64 = 64*1024*1024;
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
@@ -46,11 +50,20 @@ fn main() -> Result<()> {
                 .takes_value(false)
                 .help("Run in the background"),
         )
+        .arg(
+            Arg::with_name("gc_horizon")
+                .short("g")
+                .long("gc_horizon")
+                .takes_value(true)
+                .help("Garbage colletor horizon"),
+        )
         .get_matches();
 
     let mut conf = PageServerConf {
         daemonize: false,
         interactive: false,
+        gc_horizon: DEFAULT_GC_HORIZON,
+		gc_period: Duration::from_secs(10),
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
     };
 
@@ -69,6 +82,14 @@ fn main() -> Result<()> {
 
     if let Some(addr) = arg_matches.value_of("listen") {
         conf.listen_addr = addr.parse()?;
+    }
+
+    if let Some(horizon) = arg_matches.value_of("gc_horizon") {
+        conf.gc_horizon = horizon.parse()?;
+    }
+
+    if let Some(period) = arg_matches.value_of("gc_period") {
+        conf.gc_period = parse(period)?;
     }
 
     start_pageserver(&conf)

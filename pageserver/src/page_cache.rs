@@ -15,6 +15,7 @@ use crossbeam_channel::unbounded;
 use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
 use log::*;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -124,7 +125,7 @@ pub fn get_or_restore_pagecache(
     match pcaches.get(&timelineid) {
         Some(pcache) => Ok(pcache.clone()),
         None => {
-            let pcache = init_page_cache(&conf, timelineid);
+            let pcache = init_page_cache(conf, timelineid);
 
             restore_timeline(conf, &pcache, timelineid)?;
 
@@ -145,9 +146,23 @@ pub fn get_or_restore_pagecache(
                 })
                 .unwrap();
 
+            let conf_copy = conf.clone();
+            let _gc_thread = thread::Builder::new()
+                .name("Garbage collection thread".into())
+                .spawn(move || {
+                    gc_thread_main(&conf_copy, timelineid);
+                })
+                .unwrap();
+
             return Ok(result);
         }
     }
+}
+
+fn gc_thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
+    info!("Garbage collection thread started {}", timelineid);
+	let pcache = get_pagecache(conf, timelineid).unwrap();
+	pcache.do_gc(conf).unwrap();
 }
 
 fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> DB {
@@ -355,6 +370,110 @@ impl WALRecord {
 // Public interface functions
 
 impl PageCache {
+	fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
+		let mut minbuf = BytesMut::new();
+		let mut maxbuf = BytesMut::new();
+		let cf = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
+		loop {
+			thread::sleep(conf.gc_period);
+			let last_lsn = self.get_last_valid_lsn();
+			if last_lsn > conf.gc_horizon {
+				let horizon = last_lsn - conf.gc_horizon;
+				let mut maxkey = CacheKey {
+					tag: BufferTag {
+						rel: RelTag {
+							spcnode: u32::MAX,
+							dbnode: u32::MAX,
+							relnode: u32::MAX,
+							forknum: u8::MAX,
+						},
+						blknum: u32::MAX,
+					},
+					lsn: u64::MAX
+				};
+				loop {
+					maxbuf.clear();
+					maxkey.pack(&mut maxbuf);
+					let mut iter = self.db.iterator(IteratorMode::From(&maxbuf[..], Direction::Reverse));
+					if let Some((k,v)) = iter.next() {
+						minbuf.clear();
+						minbuf.extend_from_slice(&v);
+						let content = CacheEntryContent::unpack(&mut minbuf);
+						minbuf.clear();
+						minbuf.extend_from_slice(&k);
+						let key = CacheKey::unpack(&mut minbuf);
+
+						// Construct boundaries for old records cleanup
+						maxkey.tag = key.tag;
+						let last_lsn = key.lsn;
+						maxkey.lsn = min(horizon, last_lsn); // do not remove last version
+
+						let mut minkey = maxkey.clone();
+						minkey.lsn = 0;
+
+						// reconstruct most recent page version
+						if content.wal_record.is_some() {
+							// force reconstruction of most recent page version
+							self.reconstruct_page(key, content)?;
+						}
+
+						maxbuf.clear();
+						maxkey.pack(&mut maxbuf);
+
+						if last_lsn > horizon {
+							// locate most recent record before horizon
+							let mut iter = self.db.iterator(IteratorMode::From(&maxbuf[..], Direction::Reverse));
+							if let Some((k,v)) = iter.next() {
+								minbuf.clear();
+								minbuf.extend_from_slice(&v);
+								let content = CacheEntryContent::unpack(&mut minbuf);
+								if content.wal_record.is_some() {
+									minbuf.clear();
+									minbuf.extend_from_slice(&k);
+									let key = CacheKey::unpack(&mut minbuf);
+									self.reconstruct_page(key, content)?;
+								}
+							}
+						}
+						// remove records prior to horizon
+						minbuf.clear();
+						minkey.pack(&mut minbuf);
+						self.db.delete_range_cf(cf, &minbuf[..], &maxbuf[..])?;
+
+						maxkey = minkey;
+					}
+				}
+			}
+		}
+	}
+
+	fn reconstruct_page(&self, key: CacheKey, content: CacheEntryContent) -> anyhow::Result<Bytes> {
+        let entry_rc = Arc::new(CacheEntry::new(key.clone(), content));
+
+        let mut entry_content = entry_rc.content.lock().unwrap();
+        entry_content.apply_pending = true;
+
+        let s = &self.walredo_sender;
+        s.send(entry_rc.clone())?;
+
+        while entry_content.apply_pending {
+            entry_content = entry_rc.walredo_condvar.wait(entry_content).unwrap();
+        }
+        // We should now have a page image. If we don't, it means that WAL redo
+        // failed to reconstruct it. WAL redo should've logged that error already.
+        let page_img = match &entry_content.page_image {
+            Some(p) => p.clone(),
+            None => {
+                error!(
+                    "could not apply WAL to reconstruct page image for GetPage@LSN request"
+                );
+                bail!("could not apply WAL to reconstruct page image");
+            }
+        };
+        self.put_page_image(key.tag, key.lsn, page_img.clone());
+		Ok(page_img)
+	}
+
 	fn wait_lsn(&self, lsn: u64) -> anyhow::Result<()> {
 		let mut shared = self.shared.lock().unwrap();
 		let mut waited = false;
@@ -437,30 +556,8 @@ impl PageCache {
         } else if content.wal_record.is_some() {
             buf.clear();
             buf.extend_from_slice(&k);
-            let entry_rc = Arc::new(CacheEntry::new(CacheKey::unpack(&mut buf), content));
-
-            let mut entry_content = entry_rc.content.lock().unwrap();
-            entry_content.apply_pending = true;
-
-            let s = &self.walredo_sender;
-            s.send(entry_rc.clone())?;
-
-            while entry_content.apply_pending {
-                entry_content = entry_rc.walredo_condvar.wait(entry_content).unwrap();
-            }
-
-            // We should now have a page image. If we don't, it means that WAL redo
-            // failed to reconstruct it. WAL redo should've logged that error already.
-            page_img = match &entry_content.page_image {
-                Some(p) => p.clone(),
-                None => {
-                    error!(
-                        "could not apply WAL to reconstruct page image for GetPage@LSN request"
-                    );
-                    bail!("could not apply WAL to reconstruct page image");
-                }
-            };
-            self.put_page_image(tag, lsn, page_img.clone());
+			let key = CacheKey::unpack(&mut buf);
+			page_img = self.reconstruct_page(key, content)?;
         } else {
             // No base image, and no WAL record. Huh?
             bail!("no page image or WAL record for requested page");
