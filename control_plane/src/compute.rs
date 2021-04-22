@@ -17,8 +17,7 @@ use postgres::{Client, NoTls};
 
 use crate::local_env::LocalEnv;
 use crate::storage::{PageServerNode, WalProposerNode};
-use pageserver::zenith_repo_dir;
-use pageserver::ZTimelineId;
+use pageserver::{zenith_repo_dir, ZTimelineId};
 
 //
 // ComputeControlPlane
@@ -450,7 +449,7 @@ impl PostgresNode {
         self.safe_psql("postgres", "CREATE DATABASE regression");
         let data_dir = zenith_repo_dir();
         let regress_run_path = data_dir.join("regress");
-        fs::create_dir_all(regress_run_path.clone()).unwrap();
+        fs::create_dir_all(&regress_run_path).unwrap();
         fs::create_dir_all(regress_run_path.join("testtablespace")).unwrap();
         std::env::set_current_dir(regress_run_path).unwrap();
 

@@ -4,8 +4,7 @@
 
 use log::*;
 use parse_duration::parse;
-use std::fs;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::process::exit;
@@ -18,11 +17,7 @@ use daemonize::Daemonize;
 
 use slog::Drain;
 
-use pageserver::page_service;
-use pageserver::tui;
-use pageserver::zenith_repo_dir;
-//use pageserver::walreceiver;
-use pageserver::PageServerConf;
+use pageserver::{page_service, tui, zenith_repo_dir, PageServerConf};
 
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 

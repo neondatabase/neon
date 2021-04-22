@@ -111,7 +111,7 @@ impl TestStorageControlPlane {
 
     pub fn stop(&self) {
         for wa in self.wal_acceptors.iter() {
-            let _unused = wa.stop();
+            let _ = wa.stop();
         }
         self.test_done.store(true, Ordering::Relaxed);
     }
