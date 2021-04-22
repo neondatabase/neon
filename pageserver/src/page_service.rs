@@ -619,7 +619,7 @@ impl Connection {
         let mut unnamed_query_string = Bytes::new();
         loop {
             let msg = self.read_message().await?;
-            info!("got message {:?}", msg);
+            trace!("got message {:?}", msg);
             match msg {
                 Some(FeMessage::StartupMessage(m)) => {
                     trace!("got message {:?}", m);
