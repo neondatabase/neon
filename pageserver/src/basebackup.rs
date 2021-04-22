@@ -66,7 +66,7 @@ pub fn send_snapshot_tarball(
             continue;
         }
 
-        let archive_fname = relpath.to_str().unwrap().clone();
+        let archive_fname = relpath.to_str().unwrap();
         let archive_fname = archive_fname
             .strip_suffix(".partial")
             .unwrap_or(&archive_fname);
@@ -148,7 +148,7 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
         u32::from_str_radix(segno_match.unwrap().as_str(), 10)?
     };
 
-    return Ok((relnode, forknum, segno));
+    Ok((relnode, forknum, segno))
 }
 
 fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
@@ -172,9 +172,9 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
     if let Some(fname) = path.strip_prefix("global/") {
         let (_relnode, _forknum, _segno) = parse_filename(fname)?;
 
-        return Ok(());
+        Ok(())
     } else if let Some(dbpath) = path.strip_prefix("base/") {
-        let mut s = dbpath.split("/");
+        let mut s = dbpath.split('/');
         let dbnode_str = s
             .next()
             .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
@@ -188,15 +188,15 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
 
         let (_relnode, _forknum, _segno) = parse_filename(fname)?;
 
-        return Ok(());
+        Ok(())
     } else if let Some(_) = path.strip_prefix("pg_tblspc/") {
         // TODO
-        return Err(FilePathError::new("tablespaces not supported"));
+        Err(FilePathError::new("tablespaces not supported"))
     } else {
-        return Err(FilePathError::new("invalid relation data file name"));
+        Err(FilePathError::new("invalid relation data file name"))
     }
 }
 
 fn is_rel_file_path(path: &str) -> bool {
-    return parse_rel_file_path(path).is_ok();
+    parse_rel_file_path(path).is_ok()
 }

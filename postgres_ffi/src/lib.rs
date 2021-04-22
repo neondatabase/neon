@@ -18,13 +18,13 @@ impl ControlFileData {
         controlfile =
             unsafe { std::mem::transmute::<[u8; SIZEOF_CONTROLDATA], ControlFileData>(b) };
 
-        return controlfile;
+        controlfile
     }
 }
 
-pub fn decode_pg_control(buf: Bytes) -> Result<ControlFileData, anyhow::Error> {
+pub fn decode_pg_control(mut buf: Bytes) -> Result<ControlFileData, anyhow::Error> {
     let mut b: [u8; SIZEOF_CONTROLDATA] = [0u8; SIZEOF_CONTROLDATA];
-    buf.clone().copy_to_slice(&mut b);
+    buf.copy_to_slice(&mut b);
 
     let controlfile: ControlFileData;
 
@@ -63,5 +63,5 @@ pub fn encode_pg_control(controlfile: ControlFileData) -> Bytes {
     // Fill the rest of the control file with zeros.
     buf.resize(PG_CONTROL_FILE_SIZE as usize, 0);
 
-    return buf.into();
+    buf.into()
 }

@@ -27,9 +27,9 @@ use anyhow::Result;
 use bytes::Bytes;
 
 use crate::page_cache;
-use crate::page_cache::RelTag;
 use crate::page_cache::BufferTag;
 use crate::page_cache::PageCache;
+use crate::page_cache::RelTag;
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -187,10 +187,9 @@ fn restore_relfile(
     // Does it look like a relation file?
 
     let p = parse_relfilename(path.file_name().unwrap().to_str().unwrap());
-    if p.is_err() {
-        let e = p.unwrap_err();
+    if let Err(e) = p {
         warn!("unrecognized file in snapshot: {:?} ({})", path, e);
-        return Err(e)?;
+        return Err(e.into());
     }
     let (relnode, forknum, segno) = p.unwrap();
 
@@ -205,12 +204,12 @@ fn restore_relfile(
             Ok(_) => {
                 let tag = BufferTag {
                     rel: RelTag {
-						spcnode: spcoid,
-						dbnode: dboid,
-						relnode: relnode,
-						forknum: forknum as u8,
-					},
-                    blknum: blknum,
+                        spcnode: spcoid,
+                        dbnode: dboid,
+                        relnode: relnode,
+                        forknum: forknum as u8,
+                    },
+                    blknum,
                 };
                 pcache.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
                 /*
@@ -249,7 +248,7 @@ fn restore_wal(
 ) -> Result<()> {
     let walpath = format!("timelines/{}/wal", timeline);
 
-    let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
+    let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let mut segno = XLByteToSeg(startpoint, 16 * 1024 * 1024);
     let mut offset = XLogSegmentOffset(startpoint, 16 * 1024 * 1024);
@@ -261,7 +260,7 @@ fn restore_wal(
 
         // It could be as .partial
         if !PathBuf::from(&path).exists() {
-            path = path + ".partial";
+            path += ".partial";
         }
 
         // Slurp the WAL file
@@ -303,18 +302,18 @@ fn restore_wal(
                 for blk in decoded.blocks.iter() {
                     let tag = BufferTag {
                         rel: RelTag {
-							spcnode: blk.rnode_spcnode,
-							dbnode: blk.rnode_dbnode,
-							relnode: blk.rnode_relnode,
-							forknum: blk.forknum as u8,
-						},
+                            spcnode: blk.rnode_spcnode,
+                            dbnode: blk.rnode_dbnode,
+                            relnode: blk.rnode_relnode,
+                            forknum: blk.forknum as u8,
+                        },
                         blknum: blk.blkno,
                     };
 
                     let rec = page_cache::WALRecord {
-                        lsn: lsn,
+                        lsn,
                         will_init: blk.will_init || blk.apply_image,
-						truncate: false,
+                        truncate: false,
                         rec: recdata.clone(),
                         main_data_offset: decoded.main_data_offset as u32,
                     };
@@ -483,5 +482,5 @@ fn parse_relfilename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
         u32::from_str_radix(segno_match.unwrap().as_str(), 10)?
     };
 
-    return Ok((relnode, forknum, segno));
+    Ok((relnode, forknum, segno))
 }

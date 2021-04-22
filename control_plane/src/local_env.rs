@@ -15,8 +15,8 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 use serde_derive::{Deserialize, Serialize};
 
-use pageserver::ZTimelineId;
 use pageserver::zenith_repo_dir;
+use pageserver::ZTimelineId;
 use walkeeper::xlog_utils;
 
 //
@@ -101,7 +101,7 @@ pub fn init() -> Result<()> {
 
     // ok, we are good to go
     let mut conf = LocalEnv {
-        repo_path: repo_path.clone(),
+        repo_path,
         pg_distrib_dir,
         zenith_distrib_dir,
         systemid: 0,
@@ -247,7 +247,7 @@ pub fn test_env(testname: &str) -> LocalEnv {
         systemid: 0,
     };
     init_repo(&mut local_env).expect("could not initialize zenith repository");
-    return local_env;
+    local_env
 }
 
 // Find the directory where the binaries were put (i.e. target/debug/)
@@ -259,7 +259,7 @@ pub fn cargo_bin_dir() -> PathBuf {
         pathbuf.pop();
     }
 
-    return pathbuf;
+    pathbuf
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -351,7 +351,7 @@ pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<u6
 
     let (lsn, _tli) = xlog_utils::find_end_of_wal(&waldir, 16 * 1024 * 1024, true);
 
-    return Ok(lsn);
+    Ok(lsn)
 }
 
 // Find the latest snapshot for a timeline

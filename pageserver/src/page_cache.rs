@@ -8,22 +8,23 @@
 
 use crate::restore_local_repo::restore_timeline;
 use crate::ZTimelineId;
-use crate::{walredo, PageServerConf, zenith_repo_dir};
-use anyhow::bail;
+use crate::{walredo, zenith_repo_dir, PageServerConf};
+use anyhow::{bail, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crossbeam_channel::unbounded;
 use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
 use log::*;
+use rocksdb::*;
 use std::cmp::min;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::{convert::TryInto, ops::AddAssign};
-use rocksdb::*;
+use zenith_utils::seqwait::SeqWait;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -38,7 +39,8 @@ pub struct PageCache {
     pub walredo_sender: Sender<Arc<CacheEntry>>,
     pub walredo_receiver: Receiver<Arc<CacheEntry>>,
 
-    valid_lsn_condvar: Condvar,
+    // Allows .await on the arrival of a particular LSN.
+    seqwait_lsn: SeqWait,
 
     // Counters, for metrics collection.
     pub num_entries: AtomicU64,
@@ -51,6 +53,7 @@ pub struct PageCache {
     pub first_valid_lsn: AtomicU64,
     pub last_valid_lsn: AtomicU64,
     pub last_record_lsn: AtomicU64,
+    walreceiver_works: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -99,7 +102,6 @@ struct PageCacheShared {
     first_valid_lsn: u64,
     last_valid_lsn: u64,
     last_record_lsn: u64,
-    walreceiver_works: bool,
 }
 
 lazy_static! {
@@ -155,15 +157,15 @@ pub fn get_or_restore_pagecache(
                 })
                 .unwrap();
 
-            return Ok(result);
+            Ok(result)
         }
     }
 }
 
 fn gc_thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
     info!("Garbage collection thread started {}", timelineid);
-	let pcache = get_pagecache(conf, timelineid).unwrap();
-	pcache.do_gc(conf).unwrap();
+    let pcache = get_pagecache(conf, timelineid).unwrap();
+    pcache.do_gc(conf).unwrap();
 }
 
 fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> DB {
@@ -185,9 +187,8 @@ fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache 
             first_valid_lsn: 0,
             last_valid_lsn: 0,
             last_record_lsn: 0,
-            walreceiver_works: false,
         }),
-        valid_lsn_condvar: Condvar::new(),
+        seqwait_lsn: SeqWait::new(0),
 
         walredo_sender: s,
         walredo_receiver: r,
@@ -200,6 +201,7 @@ fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache 
         first_valid_lsn: AtomicU64::new(0),
         last_valid_lsn: AtomicU64::new(0),
         last_record_lsn: AtomicU64::new(0),
+        walreceiver_works: AtomicBool::new(false),
     }
 }
 
@@ -355,7 +357,7 @@ impl WALRecord {
         buf.put_u64(self.lsn);
         buf.put_u8(self.will_init as u8);
         buf.put_u8(self.truncate as u8);
-		buf.put_u32(self.main_data_offset);
+        buf.put_u32(self.main_data_offset);
         buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
     }
@@ -363,7 +365,7 @@ impl WALRecord {
         let lsn = buf.get_u64();
         let will_init = buf.get_u8() != 0;
         let truncate = buf.get_u8() != 0;
-		let main_data_offset = buf.get_u32();
+        let main_data_offset = buf.get_u32();
         let mut dst = vec![0u8; buf.get_u32() as usize];
         buf.copy_to_slice(&mut dst);
         WALRecord {
@@ -371,7 +373,7 @@ impl WALRecord {
             will_init,
             truncate,
             rec: Bytes::from(dst),
-			main_data_offset
+            main_data_offset,
         }
     }
 }
@@ -379,84 +381,88 @@ impl WALRecord {
 // Public interface functions
 
 impl PageCache {
-	fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
-		let mut minbuf = BytesMut::new();
-		let mut maxbuf = BytesMut::new();
-		let cf = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
-		loop {
-			thread::sleep(conf.gc_period);
-			let last_lsn = self.get_last_valid_lsn();
-			if last_lsn > conf.gc_horizon {
-				let horizon = last_lsn - conf.gc_horizon;
-				let mut maxkey = CacheKey {
-					tag: BufferTag {
-						rel: RelTag {
-							spcnode: u32::MAX,
-							dbnode: u32::MAX,
-							relnode: u32::MAX,
-							forknum: u8::MAX,
-						},
-						blknum: u32::MAX,
-					},
-					lsn: u64::MAX
-				};
-				loop {
-					maxbuf.clear();
-					maxkey.pack(&mut maxbuf);
-					let mut iter = self.db.iterator(IteratorMode::From(&maxbuf[..], Direction::Reverse));
-					if let Some((k,v)) = iter.next() {
-						minbuf.clear();
-						minbuf.extend_from_slice(&v);
-						let content = CacheEntryContent::unpack(&mut minbuf);
-						minbuf.clear();
-						minbuf.extend_from_slice(&k);
-						let key = CacheKey::unpack(&mut minbuf);
+    fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
+        let mut minbuf = BytesMut::new();
+        let mut maxbuf = BytesMut::new();
+        let cf = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
+        loop {
+            thread::sleep(conf.gc_period);
+            let last_lsn = self.get_last_valid_lsn();
+            if last_lsn > conf.gc_horizon {
+                let horizon = last_lsn - conf.gc_horizon;
+                let mut maxkey = CacheKey {
+                    tag: BufferTag {
+                        rel: RelTag {
+                            spcnode: u32::MAX,
+                            dbnode: u32::MAX,
+                            relnode: u32::MAX,
+                            forknum: u8::MAX,
+                        },
+                        blknum: u32::MAX,
+                    },
+                    lsn: u64::MAX,
+                };
+                loop {
+                    maxbuf.clear();
+                    maxkey.pack(&mut maxbuf);
+                    let mut iter = self
+                        .db
+                        .iterator(IteratorMode::From(&maxbuf[..], Direction::Reverse));
+                    if let Some((k, v)) = iter.next() {
+                        minbuf.clear();
+                        minbuf.extend_from_slice(&v);
+                        let content = CacheEntryContent::unpack(&mut minbuf);
+                        minbuf.clear();
+                        minbuf.extend_from_slice(&k);
+                        let key = CacheKey::unpack(&mut minbuf);
 
-						// Construct boundaries for old records cleanup
-						maxkey.tag = key.tag;
-						let last_lsn = key.lsn;
-						maxkey.lsn = min(horizon, last_lsn); // do not remove last version
+                        // Construct boundaries for old records cleanup
+                        maxkey.tag = key.tag;
+                        let last_lsn = key.lsn;
+                        maxkey.lsn = min(horizon, last_lsn); // do not remove last version
 
-						let mut minkey = maxkey.clone();
-						minkey.lsn = 0;
+                        let mut minkey = maxkey.clone();
+                        minkey.lsn = 0;
 
-						// reconstruct most recent page version
-						if content.wal_record.is_some() {
-							// force reconstruction of most recent page version
-							self.reconstruct_page(key, content)?;
-						}
+                        // reconstruct most recent page version
+                        if content.wal_record.is_some() {
+                            // force reconstruction of most recent page version
+                            self.reconstruct_page(key, content)?;
+                        }
 
-						maxbuf.clear();
-						maxkey.pack(&mut maxbuf);
+                        maxbuf.clear();
+                        maxkey.pack(&mut maxbuf);
 
-						if last_lsn > horizon {
-							// locate most recent record before horizon
-							let mut iter = self.db.iterator(IteratorMode::From(&maxbuf[..], Direction::Reverse));
-							if let Some((k,v)) = iter.next() {
-								minbuf.clear();
-								minbuf.extend_from_slice(&v);
-								let content = CacheEntryContent::unpack(&mut minbuf);
-								if content.wal_record.is_some() {
-									minbuf.clear();
-									minbuf.extend_from_slice(&k);
-									let key = CacheKey::unpack(&mut minbuf);
-									self.reconstruct_page(key, content)?;
-								}
-							}
-						}
-						// remove records prior to horizon
-						minbuf.clear();
-						minkey.pack(&mut minbuf);
-						self.db.delete_range_cf(cf, &minbuf[..], &maxbuf[..])?;
+                        if last_lsn > horizon {
+                            // locate most recent record before horizon
+                            let mut iter = self
+                                .db
+                                .iterator(IteratorMode::From(&maxbuf[..], Direction::Reverse));
+                            if let Some((k, v)) = iter.next() {
+                                minbuf.clear();
+                                minbuf.extend_from_slice(&v);
+                                let content = CacheEntryContent::unpack(&mut minbuf);
+                                if content.wal_record.is_some() {
+                                    minbuf.clear();
+                                    minbuf.extend_from_slice(&k);
+                                    let key = CacheKey::unpack(&mut minbuf);
+                                    self.reconstruct_page(key, content)?;
+                                }
+                            }
+                        }
+                        // remove records prior to horizon
+                        minbuf.clear();
+                        minkey.pack(&mut minbuf);
+                        self.db.delete_range_cf(cf, &minbuf[..], &maxbuf[..])?;
 
-						maxkey = minkey;
-					}
-				}
-			}
-		}
-	}
+                        maxkey = minkey;
+                    }
+                }
+            }
+        }
+    }
 
-	fn reconstruct_page(&self, key: CacheKey, content: CacheEntryContent) -> anyhow::Result<Bytes> {
+    fn reconstruct_page(&self, key: CacheKey, content: CacheEntryContent) -> anyhow::Result<Bytes> {
         let entry_rc = Arc::new(CacheEntry::new(key.clone(), content));
 
         let mut entry_content = entry_rc.content.lock().unwrap();
@@ -473,80 +479,56 @@ impl PageCache {
         let page_img = match &entry_content.page_image {
             Some(p) => p.clone(),
             None => {
-                error!(
-                    "could not apply WAL to reconstruct page image for GetPage@LSN request"
-                );
+                error!("could not apply WAL to reconstruct page image for GetPage@LSN request");
                 bail!("could not apply WAL to reconstruct page image");
             }
         };
         self.put_page_image(key.tag, key.lsn, page_img.clone());
-		Ok(page_img)
-	}
+        Ok(page_img)
+    }
 
-	fn wait_lsn(&self, lsn: u64) -> anyhow::Result<()> {
-		let mut shared = self.shared.lock().unwrap();
-		let mut waited = false;
-
-        // There is a a race at postgres instance start
-        // when we request a page before walsender established connection
-        // and was able to stream the page. Just don't wait and return what we have.
-        // TODO is there any corner case when this is incorrect?
-        if !shared.walreceiver_works {
+    async fn wait_lsn(&self, lsn: u64) -> anyhow::Result<()> {
+        let walreceiver_works = self.walreceiver_works.load(Ordering::Acquire);
+        if walreceiver_works {
+            self.seqwait_lsn
+                .wait_for_timeout(lsn, TIMEOUT)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
+                        lsn >> 32,
+                        lsn & 0xffff_ffff
+                    )
+                })?;
+        } else {
+            // There is a a race at postgres instance start
+            // when we request a page before walsender established connection
+            // and was able to stream the page. Just don't wait and return what we have.
+            // TODO is there any corner case when this is incorrect?
             trace!(
-                " walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                shared.last_valid_lsn,
+                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
+                self.last_valid_lsn.load(Ordering::Acquire),
                 lsn
             );
         }
 
-        if shared.walreceiver_works {
+        let shared = self.shared.lock().unwrap();
 
-			while lsn > shared.last_valid_lsn {
-				// TODO: Wait for the WAL receiver to catch up
-				waited = true;
-				trace!(
-				"not caught up yet: {}, requested {}",
-					shared.last_valid_lsn,
-					lsn
-				);
-				let wait_result = self
-					.valid_lsn_condvar
-					.wait_timeout(shared, TIMEOUT)
-					.unwrap();
-
-				shared = wait_result.0;
-				if wait_result.1.timed_out() {
-					bail!(
-						"Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
-						lsn >> 32,
-						lsn & 0xffff_ffff
-					);
-				}
-			}
-		}
-		if waited {
-			trace!("caught up now, continuing");
-		}
-
-		if lsn < shared.first_valid_lsn {
-			bail!(
-				"LSN {:X}/{:X} has already been removed",
-				lsn >> 32,
-				lsn & 0xffff_ffff
-			);
-		}
-		Ok(())
-	}
+        if walreceiver_works {
+            assert!(lsn <= shared.last_valid_lsn);
+        }
+        Ok(())
+    }
 
     //
     // GetPage@LSN
     //
     // Returns an 8k page image
     //
-    pub fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> anyhow::Result<Bytes> {
+    pub async fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
-		self.wait_lsn(lsn)?;
+        self.wait_lsn(lsn).await?;
 
         // Look up cache entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
@@ -581,8 +563,8 @@ impl PageCache {
         } else if content.wal_record.is_some() {
             buf.clear();
             buf.extend_from_slice(&k);
-			let key = CacheKey::unpack(&mut buf);
-			page_img = self.reconstruct_page(key, content)?;
+            let key = CacheKey::unpack(&mut buf);
+            page_img = self.reconstruct_page(key, content)?;
         } else {
             // No base image, and no WAL record. Huh?
             bail!("no page image or WAL record for requested page");
@@ -602,7 +584,7 @@ impl PageCache {
             tag.blknum
         );
 
-        return Ok(page_img);
+        Ok(page_img)
     }
 
     //
@@ -660,7 +642,7 @@ impl PageCache {
         }
 
         records.reverse();
-        return (base_img, records);
+        (base_img, records)
     }
 
     //
@@ -692,9 +674,9 @@ impl PageCache {
     // Adds a relation-wide WAL record (like truncate) to the page cache,
     // associating it with all pages started with specified block number
     //
-    pub fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) {
+    pub async fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) -> anyhow::Result<()> {
         let mut key = CacheKey { tag, lsn: rec.lsn };
-        let old_rel_size = self.relsize_get(&tag.rel, u64::MAX).unwrap();
+        let old_rel_size = self.relsize_get(&tag.rel, u64::MAX).await?;
         let content = CacheEntryContent {
             page_image: None,
             wal_record: Some(rec),
@@ -716,6 +698,7 @@ impl PageCache {
         let n = (old_rel_size - tag.blknum) as u64;
         self.num_entries.fetch_add(n, Ordering::Relaxed);
         self.num_wal_records.fetch_add(n, Ordering::Relaxed);
+        Ok(())
     }
 
     //
@@ -751,11 +734,11 @@ impl PageCache {
         if lsn >= oldlsn {
             // Now we receive entries from walreceiver and should wait
             if from_walreceiver {
-                shared.walreceiver_works = true;
+                self.walreceiver_works.store(true, Ordering::Release);
             }
 
             shared.last_valid_lsn = lsn;
-            self.valid_lsn_condvar.notify_all();
+            self.seqwait_lsn.advance(lsn);
 
             self.last_valid_lsn.store(lsn, Ordering::Relaxed);
         } else {
@@ -781,7 +764,7 @@ impl PageCache {
 
         shared.last_valid_lsn = lsn;
         shared.last_record_lsn = lsn;
-        self.valid_lsn_condvar.notify_all();
+        self.seqwait_lsn.advance(lsn);
 
         self.last_valid_lsn.store(lsn, Ordering::Relaxed);
         self.last_record_lsn.store(lsn, Ordering::Relaxed);
@@ -821,13 +804,13 @@ impl PageCache {
     pub fn get_last_valid_lsn(&self) -> u64 {
         let shared = self.shared.lock().unwrap();
 
-        return shared.last_record_lsn;
+        shared.last_record_lsn
     }
 
-    pub fn relsize_get(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
-		if lsn != u64::MAX {
-			self.wait_lsn(lsn)?;
-		}
+    pub async fn relsize_get(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
+        if lsn != u64::MAX {
+            self.wait_lsn(lsn).await?;
+        }
 
         let mut key = CacheKey {
             tag: BufferTag {
@@ -867,11 +850,11 @@ impl PageCache {
             }
             break;
         }
-        return Ok(0);
+        Ok(0)
     }
 
-    pub fn relsize_exist(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<bool> {
-		self.wait_lsn(lsn)?;
+    pub async fn relsize_exist(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<bool> {
+        self.wait_lsn(lsn).await?;
 
         let key = CacheKey {
             tag: BufferTag {
@@ -893,7 +876,7 @@ impl PageCache {
                 return Ok(true);
             }
         }
-        return Ok(false);
+        Ok(false)
     }
 
     pub fn get_stats(&self) -> PageCacheStats {

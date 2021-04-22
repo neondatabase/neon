@@ -51,7 +51,7 @@ impl Drain for TuiLogger {
             events.pop_back();
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 

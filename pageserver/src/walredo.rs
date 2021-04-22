@@ -226,7 +226,7 @@ fn handle_apply_request(
     // Wake up the requester, whether the operation succeeded or not.
     entry_rc.walredo_condvar.notify_all();
 
-    return result;
+    result
 }
 
 struct WalRedoProcess {
@@ -325,7 +325,7 @@ impl WalRedoProcess {
     ) -> Result<Bytes, Error> {
         let mut stdin = self.stdin.borrow_mut();
         let mut stdout = self.stdout.borrow_mut();
-        return runtime.block_on(async {
+        runtime.block_on(async {
             //
             // This async block sends all the commands to the process.
             //
@@ -388,7 +388,7 @@ impl WalRedoProcess {
             let buf = res.0;
 
             Ok::<Bytes, Error>(Bytes::from(std::vec::Vec::from(buf)))
-        });
+        })
     }
 }
 
@@ -396,13 +396,13 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
     let len = 4 + 5 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('B' as u8);
+    buf.put_u8(b'B');
     buf.put_u32(len as u32);
     tag.pack(&mut buf);
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }
 
 fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
@@ -411,39 +411,39 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
     let len = 4 + 5 * 4 + base_img.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('P' as u8);
+    buf.put_u8(b'P');
     buf.put_u32(len as u32);
     tag.pack(&mut buf);
     buf.put(base_img);
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }
 
 fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
     let len = 4 + 8 + rec.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('A' as u8);
+    buf.put_u8(b'A');
     buf.put_u32(len as u32);
     buf.put_u64(endlsn);
     buf.put(rec);
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }
 
 fn build_get_page_msg(tag: BufferTag) -> Bytes {
     let len = 4 + 5 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('G' as u8);
+    buf.put_u8(b'G');
     buf.put_u32(len as u32);
     tag.pack(&mut buf);
 
     assert!(buf.len() == 1 + len);
 
-    return buf.freeze();
+    buf.freeze()
 }

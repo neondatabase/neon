@@ -3,6 +3,7 @@
 //
 
 use log::*;
+use parse_duration::parse;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io;
@@ -10,7 +11,6 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
-use parse_duration::parse;
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -19,12 +19,12 @@ use daemonize::Daemonize;
 use slog::Drain;
 
 use pageserver::page_service;
-use pageserver::zenith_repo_dir;
 use pageserver::tui;
+use pageserver::zenith_repo_dir;
 //use pageserver::walreceiver;
 use pageserver::PageServerConf;
 
-const DEFAULT_GC_HORIZON : u64 = 64*1024*1024;
+const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
         daemonize: false,
         interactive: false,
         gc_horizon: DEFAULT_GC_HORIZON,
-		gc_period: Duration::from_secs(10),
+        gc_period: Duration::from_secs(10),
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
     };
 
@@ -139,7 +139,7 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
             .with_context(|| format!("failed to open {:?}", &log_filename))?;
 
         let daemonize = Daemonize::new()
-            .pid_file(repodir.clone().join("pageserver.pid"))
+            .pid_file(repodir.join("pageserver.pid"))
             .working_directory(repodir)
             .stdout(stdout)
             .stderr(stderr);
@@ -183,9 +183,9 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
         .unwrap();
     threads.push(page_server_thread);
 
-    if tui_thread.is_some() {
+    if let Some(tui_thread) = tui_thread {
         // The TUI thread exits when the user asks to Quit.
-        tui_thread.unwrap().join().unwrap();
+        tui_thread.join().unwrap();
     } else {
         // In non-interactive mode, wait forever.
         for t in threads {
@@ -203,18 +203,19 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
         let log_file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&log).map_err(|err| {
-            // We failed to initialize logging, so we can't log this message with error!
-            eprintln!("Could not create log file {:?}: {}", log, err);
-            err
-        })?;
+            .open(&log)
+            .map_err(|err| {
+                // We failed to initialize logging, so we can't log this message with error!
+                eprintln!("Could not create log file {:?}: {}", log, err);
+                err
+            })?;
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {
             if record.level().is_at_least(slog::Level::Debug) {
                 return true;
             }
-            return false;
+            false
         });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());
@@ -232,7 +233,7 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
             {
                 return true;
             }
-            return false;
+            false
         })
         .fuse();
         let logger = slog::Logger::root(drain, slog::o!());

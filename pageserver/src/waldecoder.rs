@@ -227,7 +227,7 @@ impl WalStreamDecoder {
         // FIXME: check that hdr.xlp_rem_len matches self.contlen
         //println!("next xlog page (xlp_rem_len: {})", hdr.xlp_rem_len);
 
-        return hdr;
+        hdr
     }
 
     #[allow(non_snake_case)]
@@ -239,7 +239,7 @@ impl WalStreamDecoder {
             xlp_xlog_blcksz: self.inputbuf.get_u32_le(),
         };
 
-        return hdr;
+        hdr
     }
 }
 
@@ -352,7 +352,7 @@ fn is_xlog_switch_record(rec: &Bytes) -> bool {
     buf.advance(2); // 2 bytes of padding
     let _xl_crc = buf.get_u32_le();
 
-    return xl_info == pg_constants::XLOG_SWITCH && xl_rmid == pg_constants::RM_XLOG_ID;
+    xl_info == pg_constants::XLOG_SWITCH && xl_rmid == pg_constants::RM_XLOG_ID
 }
 
 pub type Oid = u32;
@@ -680,7 +680,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     }
 
     DecodedWALRecord {
-		xl_info,
+        xl_info,
         xl_rmid,
         record,
         blocks,

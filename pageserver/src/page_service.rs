@@ -18,13 +18,13 @@ use std::io;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::task;
-use std::time::Duration;
 
 use crate::basebackup;
 use crate::page_cache;
@@ -186,12 +186,11 @@ fn read_null_terminated(buf: &mut Bytes) -> Result<Bytes> {
         }
         result.put_u8(byte);
     }
-    return Ok(result.freeze());
+    Ok(result.freeze())
 }
 
 impl FeParseMessage {
-    pub fn parse(body: Bytes) -> Result<FeMessage> {
-        let mut buf = body.clone();
+    pub fn parse(mut buf: Bytes) -> Result<FeMessage> {
         let _pstmt_name = read_null_terminated(&mut buf)?;
         let query_string = read_null_terminated(&mut buf)?;
         let nparams = buf.get_i16();
@@ -201,7 +200,7 @@ impl FeParseMessage {
         // now, just ignore the statement name, assuming that the client never
         // uses more than one prepared statement at a time.
         /*
-        if pstmt_name.len() != 0 {
+        if !pstmt_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named prepared statements not implemented in Parse",
@@ -227,14 +226,13 @@ struct FeDescribeMessage {
 }
 
 impl FeDescribeMessage {
-    pub fn parse(body: Bytes) -> Result<FeMessage> {
-        let mut buf = body.clone();
+    pub fn parse(mut buf: Bytes) -> Result<FeMessage> {
         let kind = buf.get_u8();
         let _pstmt_name = read_null_terminated(&mut buf)?;
 
         // FIXME: see FeParseMessage::parse
         /*
-        if pstmt_name.len() != 0 {
+        if !pstmt_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named prepared statements not implemented in Describe",
@@ -261,12 +259,11 @@ struct FeExecuteMessage {
 }
 
 impl FeExecuteMessage {
-    pub fn parse(body: Bytes) -> Result<FeMessage> {
-        let mut buf = body.clone();
+    pub fn parse(mut buf: Bytes) -> Result<FeMessage> {
         let portal_name = read_null_terminated(&mut buf)?;
         let maxrows = buf.get_i32();
 
-        if portal_name.len() != 0 {
+        if !portal_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named portals not implemented",
@@ -289,12 +286,11 @@ impl FeExecuteMessage {
 struct FeBindMessage {}
 
 impl FeBindMessage {
-    pub fn parse(body: Bytes) -> Result<FeMessage> {
-        let mut buf = body.clone();
+    pub fn parse(mut buf: Bytes) -> Result<FeMessage> {
         let portal_name = read_null_terminated(&mut buf)?;
         let _pstmt_name = read_null_terminated(&mut buf)?;
 
-        if portal_name.len() != 0 {
+        if !portal_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named portals not implemented",
@@ -303,7 +299,7 @@ impl FeBindMessage {
 
         // FIXME: see FeParseMessage::parse
         /*
-        if pstmt_name.len() != 0 {
+        if !pstmt_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named prepared statements not implemented",
@@ -320,8 +316,7 @@ impl FeBindMessage {
 struct FeCloseMessage {}
 
 impl FeCloseMessage {
-    pub fn parse(body: Bytes) -> Result<FeMessage> {
-        let mut buf = body.clone();
+    pub fn parse(mut buf: Bytes) -> Result<FeMessage> {
         let _kind = buf.get_u8();
         let _pstmt_or_portal_name = read_null_terminated(&mut buf)?;
 
@@ -362,7 +357,7 @@ impl FeMessage {
         let mut body = body.freeze();
 
         match tag {
-            b'Q' => Ok(Some(FeMessage::Query(FeQueryMessage { body: body }))),
+            b'Q' => Ok(Some(FeMessage::Query(FeQueryMessage { body }))),
             b'P' => Ok(Some(FeParseMessage::parse(body)?)),
             b'D' => Ok(Some(FeDescribeMessage::parse(body)?)),
             b'E' => Ok(Some(FeExecuteMessage::parse(body)?)),
@@ -423,7 +418,7 @@ pub fn thread_main(conf: &PageServerConf) {
 
     let runtime_ref = Arc::new(runtime);
 
-    runtime_ref.clone().block_on(async {
+    runtime_ref.block_on(async {
         let listener = TcpListener::bind(conf.listen_addr).await.unwrap();
 
         loop {
@@ -534,7 +529,7 @@ impl Connection {
 
             BeMessage::RowDescription => {
                 // XXX
-                let mut b = Bytes::from("data\0");
+                let b = Bytes::from("data\0");
 
                 self.stream.write_u8(b'T').await?;
                 self.stream
@@ -542,7 +537,7 @@ impl Connection {
                     .await?;
 
                 self.stream.write_i16(1).await?;
-                self.stream.write_all(&mut b).await?;
+                self.stream.write_all(&b).await?;
                 self.stream.write_i32(0).await?; /* table oid */
                 self.stream.write_i16(0).await?; /* attnum */
                 self.stream.write_i32(25).await?; /* TEXTOID */
@@ -554,34 +549,34 @@ impl Connection {
             // XXX: accept some text data
             BeMessage::DataRow => {
                 // XXX
-                let mut b = Bytes::from("hello world");
+                let b = Bytes::from("hello world");
 
                 self.stream.write_u8(b'D').await?;
                 self.stream.write_i32(4 + 2 + 4 + b.len() as i32).await?;
 
                 self.stream.write_i16(1).await?;
                 self.stream.write_i32(b.len() as i32).await?;
-                self.stream.write_all(&mut b).await?;
+                self.stream.write_all(&b).await?;
             }
 
             BeMessage::ControlFile => {
                 // TODO pass checkpoint and xid info in this message
-                let mut b = Bytes::from("hello pg_control");
+                let b = Bytes::from("hello pg_control");
 
                 self.stream.write_u8(b'D').await?;
                 self.stream.write_i32(4 + 2 + 4 + b.len() as i32).await?;
 
                 self.stream.write_i16(1).await?;
                 self.stream.write_i32(b.len() as i32).await?;
-                self.stream.write_all(&mut b).await?;
+                self.stream.write_all(&b).await?;
             }
 
             BeMessage::CommandComplete => {
-                let mut b = Bytes::from("SELECT 1\0");
+                let b = Bytes::from("SELECT 1\0");
 
                 self.stream.write_u8(b'C').await?;
                 self.stream.write_i32(4 + b.len() as i32).await?;
-                self.stream.write_all(&mut b).await?;
+                self.stream.write_all(&b).await?;
             }
 
             BeMessage::ZenithStatusResponse(resp) => {
@@ -608,7 +603,7 @@ impl Connection {
                 self.stream.write_u8(102).await?; /* tag from pagestore_client.h */
                 self.stream.write_u8(resp.ok as u8).await?;
                 self.stream.write_u32(resp.n_blocks).await?;
-                self.stream.write_all(&mut resp.page.clone()).await?;
+                self.stream.write_all(&resp.page.clone()).await?;
             }
         }
 
@@ -631,8 +626,8 @@ impl Connection {
 
                     match m.kind {
                         StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
-                            let mut b = Bytes::from("N");
-                            self.stream.write_all(&mut b).await?;
+                            let b = Bytes::from("N");
+                            self.stream.write_all(&b).await?;
                             self.stream.flush().await?;
                         }
                         StartupRequestCode::Normal => {
@@ -724,7 +719,7 @@ impl Connection {
             let caps = re.captures(&query_str);
             let caps = caps.unwrap();
 
-            let timelineid = ZTimelineId::from_str(caps.get(1).unwrap().as_str().clone()).unwrap();
+            let timelineid = ZTimelineId::from_str(caps.get(1).unwrap().as_str()).unwrap();
             let connstr: String = String::from(caps.get(2).unwrap().as_str());
 
             // Check that the timeline exists
@@ -804,7 +799,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let exist = pcache.relsize_exist(&tag, req.lsn).unwrap_or(false);
+                    let exist = pcache.relsize_exist(&tag, req.lsn).await.unwrap_or(false);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: exist,
@@ -820,7 +815,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let n_blocks = pcache.relsize_get(&tag, req.lsn).unwrap_or(0);
+                    let n_blocks = pcache.relsize_get(&tag, req.lsn).await.unwrap_or(0);
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
@@ -839,7 +834,7 @@ impl Connection {
                         blknum: req.blkno,
                     };
 
-                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn) {
+                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn).await {
                         Ok(p) => BeMessage::ZenithReadResponse(ZenithReadResponse {
                             ok: true,
                             n_blocks: 0,
@@ -896,13 +891,10 @@ impl Connection {
         let f_tar2 = async {
             let joinres = f_tar.await;
 
-            if joinres.is_err() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    joinres.unwrap_err(),
-                ));
+            if let Err(joinreserr) = joinres {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, joinreserr));
             }
-            return joinres.unwrap();
+            joinres.unwrap()
         };
 
         let f_pump = async move {
@@ -911,12 +903,12 @@ impl Connection {
                 if buf.is_none() {
                     break;
                 }
-                let mut buf = buf.unwrap();
+                let buf = buf.unwrap();
 
                 // CopyData
                 stream.write_u8(b'd').await?;
                 stream.write_u32((4 + buf.len()) as u32).await?;
-                stream.write_all(&mut buf).await?;
+                stream.write_all(&buf).await?;
                 trace!("CopyData sent for {} bytes!", buf.len());
 
                 // FIXME: flush isn't really required, but makes it easier

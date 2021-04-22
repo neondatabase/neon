@@ -3,23 +3,22 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{collections::BTreeMap, path::PathBuf};
-use std::path::Path;
 
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
-use tar;
 
 use postgres::{Client, NoTls};
 
 use crate::local_env::LocalEnv;
 use crate::storage::{PageServerNode, WalProposerNode};
-use pageserver::ZTimelineId;
 use pageserver::zenith_repo_dir;
+use pageserver::ZTimelineId;
 
 //
 // ComputeControlPlane
@@ -192,11 +191,11 @@ impl PostgresNode {
         );
         let port: u16 = CONF_PORT_RE
             .captures(config.as_str())
-            .ok_or(anyhow::Error::msg(err_msg.clone() + " 1"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 1"))?
             .iter()
             .last()
-            .ok_or(anyhow::Error::msg(err_msg.clone() + " 2"))?
-            .ok_or(anyhow::Error::msg(err_msg.clone() + " 3"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 2"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 3"))?
             .as_str()
             .parse()
             .with_context(|| err_msg)?;
@@ -294,7 +293,7 @@ impl PostgresNode {
         // slot or something proper, to prevent the compute node
         // from removing WAL that hasn't been streamed to the safekeepr or
         // page server yet. But this will do for now.
-        self.append_conf("postgresql.conf", &format!("wal_keep_size='10TB'\n"));
+        self.append_conf("postgresql.conf", "wal_keep_size='10TB'\n");
 
         // Connect it to the page server.
 
@@ -447,10 +446,9 @@ impl PostgresNode {
         }
     }
 
-
     pub fn pg_regress(&self) {
         self.safe_psql("postgres", "CREATE DATABASE regression");
-		let data_dir = zenith_repo_dir();
+        let data_dir = zenith_repo_dir();
         let regress_run_path = data_dir.join("regress");
         fs::create_dir_all(regress_run_path.clone()).unwrap();
         fs::create_dir_all(regress_run_path.join("testtablespace")).unwrap();

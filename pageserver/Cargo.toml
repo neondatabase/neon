@@ -42,3 +42,4 @@ tar = "0.4.33"
 parse_duration = "*"
 
 postgres_ffi = { path = "../postgres_ffi" }
+zenith_utils = { path = "../zenith_utils" }

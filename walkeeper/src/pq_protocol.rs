@@ -91,9 +91,9 @@ impl FeStartupMessage {
                 options = true;
             } else if options {
                 for opt in p.split(' ') {
-                    if opt.starts_with("ztimelineid=") {
+                    if let Some(ztimelineid_str) = opt.strip_prefix("ztimelineid=") {
                         // FIXME: rethrow parsing error, don't unwrap
-                        timelineid = Some(ZTimelineId::from_str(&opt[12..]).unwrap());
+                        timelineid = Some(ZTimelineId::from_str(ztimelineid_str).unwrap());
                         break;
                     }
                 }

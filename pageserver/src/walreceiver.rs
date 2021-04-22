@@ -244,7 +244,8 @@ async fn walreceiver_main(
                         }
                         // include truncate wal record in all pages
                         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
-                            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_SMGR_TRUNCATE
+                            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                                == pg_constants::XLOG_SMGR_TRUNCATE
                         {
                             let truncate = decode_truncate_record(&decoded);
                             if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
@@ -262,9 +263,9 @@ async fn walreceiver_main(
                                     will_init: false,
                                     truncate: true,
                                     rec: recdata.clone(),
-									main_data_offset: decoded.main_data_offset as u32,
+                                    main_data_offset: decoded.main_data_offset as u32,
                                 };
-                                pcache.put_rel_wal_record(tag, rec);
+                                pcache.put_rel_wal_record(tag, rec).await?;
                             }
                         }
                         // Now that this record has been handled, let the page cache know that
@@ -438,7 +439,7 @@ fn write_wal_file(
     let mut bytes_written: usize = 0;
     let mut partial;
     let mut start_pos = startpos;
-    const ZERO_BLOCK: &'static [u8] = &[0u8; XLOG_BLCKSZ];
+    const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
     let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
 

@@ -31,7 +31,7 @@ pub fn init_logging() -> slog_scope::GlobalLoggerGuard {
             {
                 return true;
             }
-            return false;
+            false
         })
         .fuse();
 
@@ -41,7 +41,7 @@ pub fn init_logging() -> slog_scope::GlobalLoggerGuard {
         {
             return true;
         }
-        return false;
+        false
     })
     .fuse();
 
@@ -52,7 +52,7 @@ pub fn init_logging() -> slog_scope::GlobalLoggerGuard {
             {
                 return true;
             }
-            return false;
+            false
         })
         .fuse();
 
@@ -65,7 +65,7 @@ pub fn init_logging() -> slog_scope::GlobalLoggerGuard {
         {
             return true;
         }
-        return false;
+        false
     })
     .fuse();
 
@@ -84,11 +84,11 @@ pub fn init_logging() -> slog_scope::GlobalLoggerGuard {
             return true;
         }
 
-        return false;
+        false
     })
     .fuse();
     let logger = slog::Logger::root(drain, slog::o!());
-    return slog_scope::set_global_logger(logger);
+    slog_scope::set_global_logger(logger)
 }
 
 pub fn ui_main() -> Result<(), Box<dyn Error>> {
