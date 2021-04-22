@@ -81,11 +81,11 @@ pub fn wal_redo_main(conf: &PageServerConf, timelineid: ZTimelineId) {
             let result = handle_apply_request(&pcache, &process, &runtime, request);
             if result.is_err() {
                 // On error, kill the process.
-                error!("Kill wal redo process on error");
                 break;
             }
         }
 
+        info!("killing WAL redo postgres process");
         let _ = runtime.block_on(process.stdin.get_mut().shutdown());
         let mut child = process.child;
         drop(process.stdin);

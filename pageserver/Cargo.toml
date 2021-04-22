@@ -32,7 +32,7 @@ tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
-rocksdb = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev="7dd6258b07861b9332f827b416e50e5aee69aea1" }
+rocksdb = "0.16.0"
 anyhow = "1.0"
 crc32c = "0.6.0"
 walkdir = "2"

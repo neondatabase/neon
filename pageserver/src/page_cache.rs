@@ -148,15 +148,15 @@ pub fn get_or_restore_pagecache(
                     walredo::wal_redo_main(&conf_copy, timelineid);
                 })
                 .unwrap();
-
-            let conf_copy = conf.clone();
-            let _gc_thread = thread::Builder::new()
-                .name("Garbage collection thread".into())
-                .spawn(move || {
-                    gc_thread_main(&conf_copy, timelineid);
-                })
-                .unwrap();
-
+            if conf.gc_horizon != 0 {
+                let conf_copy = conf.clone();
+                let _gc_thread = thread::Builder::new()
+                    .name("Garbage collection thread".into())
+                    .spawn(move || {
+                        gc_thread_main(&conf_copy, timelineid);
+                    })
+                    .unwrap();
+            }
             Ok(result)
         }
     }
@@ -381,11 +381,13 @@ impl WALRecord {
 // Public interface functions
 
 impl PageCache {
-
     fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
         let mut minbuf = BytesMut::new();
         let mut maxbuf = BytesMut::new();
-        let cf = self.db.cf_handle(rocksdb::DEFAULT_COLUMN_FAMILY_NAME).unwrap();
+        let cf = self
+            .db
+            .cf_handle(rocksdb::DEFAULT_COLUMN_FAMILY_NAME)
+            .unwrap();
         loop {
             thread::sleep(conf.gc_period);
             let last_lsn = self.get_last_valid_lsn();
@@ -406,9 +408,10 @@ impl PageCache {
                 loop {
                     maxbuf.clear();
                     maxkey.pack(&mut maxbuf);
-                    let mut iter = self
-                        .db
-                        .iterator(rocksdb::IteratorMode::From(&maxbuf[..], rocksdb::Direction::Reverse));
+                    let mut iter = self.db.iterator(rocksdb::IteratorMode::From(
+                        &maxbuf[..],
+                        rocksdb::Direction::Reverse,
+                    ));
                     if let Some((k, v)) = iter.next() {
                         minbuf.clear();
                         minbuf.extend_from_slice(&v);
@@ -436,9 +439,10 @@ impl PageCache {
 
                         if last_lsn > horizon {
                             // locate most recent record before horizon
-                            let mut iter = self
-                                .db
-                                .iterator(rocksdb::IteratorMode::From(&maxbuf[..], rocksdb::Direction::Reverse));
+                            let mut iter = self.db.iterator(rocksdb::IteratorMode::From(
+                                &maxbuf[..],
+                                rocksdb::Direction::Reverse,
+                            ));
                             if let Some((k, v)) = iter.next() {
                                 minbuf.clear();
                                 minbuf.extend_from_slice(&v);
@@ -544,9 +548,10 @@ impl PageCache {
 
         buf.clear();
         maxkey.pack(&mut buf);
-        let mut iter = self
-            .db
-            .iterator_opt(rocksdb::IteratorMode::From(&buf[..], rocksdb::Direction::Reverse), readopts);
+        let mut iter = self.db.iterator_opt(
+            rocksdb::IteratorMode::From(&buf[..], rocksdb::Direction::Reverse),
+            readopts,
+        );
         let entry_opt = iter.next();
 
         if entry_opt.is_none() {
@@ -612,9 +617,10 @@ impl PageCache {
 
         buf.clear();
         entry.key.pack(&mut buf);
-        let iter = self
-            .db
-            .iterator_opt(rocksdb::IteratorMode::From(&buf[..], rocksdb::Direction::Reverse), readopts);
+        let iter = self.db.iterator_opt(
+            rocksdb::IteratorMode::From(&buf[..], rocksdb::Direction::Reverse),
+            readopts,
+        );
 
         let mut base_img: Option<Bytes> = None;
         let mut records: Vec<WALRecord> = Vec::new();
@@ -825,9 +831,10 @@ impl PageCache {
         loop {
             buf.clear();
             key.pack(&mut buf);
-            let mut iter = self
-                .db
-                .iterator(rocksdb::IteratorMode::From(&buf[..], rocksdb::Direction::Reverse));
+            let mut iter = self.db.iterator(rocksdb::IteratorMode::From(
+                &buf[..],
+                rocksdb::Direction::Reverse,
+            ));
             if let Some((k, v)) = iter.next() {
                 buf.clear();
                 buf.extend_from_slice(&k);
@@ -866,9 +873,10 @@ impl PageCache {
         };
         let mut buf = BytesMut::new();
         key.pack(&mut buf);
-        let mut iter = self
-            .db
-            .iterator(rocksdb::IteratorMode::From(&buf[..], rocksdb::Direction::Reverse));
+        let mut iter = self.db.iterator(rocksdb::IteratorMode::From(
+            &buf[..],
+            rocksdb::Direction::Reverse,
+        ));
         if let Some((k, _v)) = iter.next() {
             buf.clear();
             buf.extend_from_slice(&k);
