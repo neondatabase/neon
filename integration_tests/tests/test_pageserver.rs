@@ -51,7 +51,6 @@ fn test_redo_cases() {
 
 // Runs pg_regress on a compute node
 #[test]
-#[ignore]
 fn test_regress() {
     let local_env = local_env::test_env("test_regress");
 
@@ -64,7 +63,24 @@ fn test_regress() {
     let node = compute_cplane.new_test_node(maintli);
     node.start().unwrap();
 
-    control_plane::storage::regress_check(&node);
+    node.pg_regress();
+}
+
+// Runs pg_bench on a compute node
+#[test]
+fn pgbench() {
+    let local_env = local_env::test_env("pgbench");
+
+    // Start pageserver that reads WAL directly from that postgres
+    let storage_cplane = TestStorageControlPlane::one_page_server(&local_env);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
+
+    // start postgres
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_node(maintli);
+    node.start().unwrap();
+
+    node.pg_bench(10, 100);
 }
 
 // Run two postgres instances on one pageserver, on different timelines

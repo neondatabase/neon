@@ -44,10 +44,13 @@ pub const XACT_XINFO_HAS_RELFILENODES: u32 = 4;
 
 // From pg_control.h and rmgrlist.h
 pub const XLOG_SWITCH: u8 = 0x40;
+pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
 pub const RM_XLOG_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;
+pub const RM_SMGR_ID: u8 = 2;
 pub const RM_CLOG_ID: u8 = 3;
 // pub const RM_MULTIXACT_ID:u8 = 6;
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;
+pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;

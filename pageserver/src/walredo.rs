@@ -18,7 +18,10 @@ use log::*;
 use std::assert;
 use std::cell::RefCell;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::prelude::*;
 use std::io::Error;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,21 +69,28 @@ pub fn wal_redo_main(conf: &PageServerConf, timelineid: ZTimelineId) {
             let _guard = runtime.enter();
             process = WalRedoProcess::launch(&datadir, &runtime).unwrap();
         }
+        info!("WAL redo postgres started");
 
         // Pretty arbitrarily, reuse the same Postgres process for 100 requests.
         // After that, kill it and start a new one. This is mostly to avoid
         // using up all shared buffers in Postgres's shared buffer cache; we don't
         // want to write any pages to disk in the WAL redo process.
-        for _i in 1..100 {
+        for _i in 1..100000 {
             let request = walredo_channel_receiver.recv().unwrap();
 
             let result = handle_apply_request(&pcache, &process, &runtime, request);
             if result.is_err() {
-                // On error, kill the process.
+                // Something went wrong with handling the request. It's not clear
+                // if the request was faulty, and the next request would succeed
+                // again, or if the 'postgres' process went haywire. To be safe,
+                // kill the 'postgres' process so that we will start from a clean
+                // slate, with a new process, for the next request.
                 break;
             }
         }
 
+        // Time to kill the 'postgres' process. A new one will be launched on next
+        // iteration of the loop.
         info!("killing WAL redo postgres process");
         let _ = runtime.block_on(process.stdin.get_mut().shutdown());
         let mut child = process.child;
@@ -153,6 +163,7 @@ fn handle_apply_request(
     let (base_img, records) = pcache.collect_records_for_apply(entry_rc.as_ref());
 
     let mut entry = entry_rc.content.lock().unwrap();
+    assert!(entry.apply_pending);
     entry.apply_pending = false;
 
     let nrecords = records.len();
@@ -160,7 +171,7 @@ fn handle_apply_request(
     let start = Instant::now();
 
     let apply_result: Result<Bytes, Error>;
-    if tag.forknum == pg_constants::PG_XACT_FORKNUM as u8 {
+    if tag.rel.forknum == pg_constants::PG_XACT_FORKNUM as u8 {
         //TODO use base image if any
         static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         let zero_page_bytes: &[u8] = &ZERO_PAGE;
@@ -215,9 +226,6 @@ fn handle_apply_request(
         result = Err(e);
     } else {
         entry.page_image = Some(apply_result.unwrap());
-        pcache
-            .num_page_images
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         result = Ok(());
     }
 
@@ -258,8 +266,14 @@ impl WalRedoProcess {
                 std::str::from_utf8(&initdb.stdout).unwrap(),
                 std::str::from_utf8(&initdb.stderr).unwrap()
             );
+        } else {
+            // Limit shared cache for wal-redo-postres
+            let mut config = OpenOptions::new()
+                .append(true)
+                .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
+            config.write(b"shared_buffers=128kB\n")?;
+            config.write(b"fsync=off\n")?;
         }
-
         // Start postgres itself
         let mut child = Command::new("postgres")
             .arg("--wal-redo")
@@ -290,7 +304,7 @@ impl WalRedoProcess {
                 if res.unwrap() == 0 {
                     break;
                 }
-                debug!("wal-redo-postgres: {}", line.trim());
+                error!("wal-redo-postgres: {}", line.trim());
                 line.clear();
             }
             Ok::<(), Error>(())
@@ -390,11 +404,7 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
 
     buf.put_u8(b'B');
     buf.put_u32(len as u32);
-    buf.put_u32(tag.spcnode);
-    buf.put_u32(tag.dbnode);
-    buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum as u32);
-    buf.put_u32(tag.blknum);
+    tag.pack(&mut buf);
 
     assert!(buf.len() == 1 + len);
 
@@ -409,11 +419,7 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
 
     buf.put_u8(b'P');
     buf.put_u32(len as u32);
-    buf.put_u32(tag.spcnode);
-    buf.put_u32(tag.dbnode);
-    buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum as u32);
-    buf.put_u32(tag.blknum);
+    tag.pack(&mut buf);
     buf.put(base_img);
 
     assert!(buf.len() == 1 + len);
@@ -441,11 +447,7 @@ fn build_get_page_msg(tag: BufferTag) -> Bytes {
 
     buf.put_u8(b'G');
     buf.put_u32(len as u32);
-    buf.put_u32(tag.spcnode);
-    buf.put_u32(tag.dbnode);
-    buf.put_u32(tag.relnode);
-    buf.put_u32(tag.forknum as u32);
-    buf.put_u32(tag.blknum);
+    tag.pack(&mut buf);
 
     assert!(buf.len() == 1 + len);
 

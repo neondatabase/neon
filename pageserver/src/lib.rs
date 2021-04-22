@@ -1,6 +1,8 @@
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 pub mod basebackup;
 pub mod page_cache;
@@ -19,6 +21,8 @@ pub struct PageServerConf {
     pub daemonize: bool,
     pub interactive: bool,
     pub listen_addr: SocketAddr,
+    pub gc_horizon: u64,
+    pub gc_period: Duration,
 }
 
 /// Zenith Timeline ID is a 128-bit random ID.
@@ -79,5 +83,13 @@ impl ZTimelineId {
 impl fmt::Display for ZTimelineId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(self.0))
+    }
+}
+
+pub fn zenith_repo_dir() -> PathBuf {
+    // Find repository path
+    match std::env::var_os("ZENITH_REPO_DIR") {
+        Some(val) => PathBuf::from(val.to_str().unwrap()),
+        None => ".zenith".into(),
     }
 }

@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use postgres::{Client, NoTls};
 
 use crate::local_env::LocalEnv;
 use crate::storage::{PageServerNode, WalProposerNode};
-use pageserver::ZTimelineId;
+use pageserver::{zenith_repo_dir, ZTimelineId};
 
 //
 // ComputeControlPlane
@@ -276,7 +277,9 @@ impl PostgresNode {
                  max_replication_slots = 10\n\
                  hot_standby = on\n\
                  shared_buffers = 1MB\n\
+				 fsync = off\n\
                  max_connections = 100\n\
+				 wal_sender_timeout = 0\n\
                  wal_level = replica\n\
                  listen_addresses = '{address}'\n\
                  port = {port}\n",
@@ -443,8 +446,71 @@ impl PostgresNode {
         }
     }
 
-    // TODO
-    pub fn pg_bench() {}
+    pub fn pg_regress(&self) {
+        self.safe_psql("postgres", "CREATE DATABASE regression");
+        let data_dir = zenith_repo_dir();
+        let regress_run_path = data_dir.join("regress");
+        fs::create_dir_all(&regress_run_path).unwrap();
+        fs::create_dir_all(regress_run_path.join("testtablespace")).unwrap();
+        std::env::set_current_dir(regress_run_path).unwrap();
+
+        let regress_build_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install/build/src/test/regress");
+        let regress_src_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/postgres/src/test/regress");
+
+        let _regress_check = Command::new(regress_build_path.join("pg_regress"))
+            .args(&[
+                "--bindir=''",
+                "--use-existing",
+                format!("--bindir={}", self.env.pg_bin_dir().to_str().unwrap()).as_str(),
+                format!("--dlpath={}", regress_build_path.to_str().unwrap()).as_str(),
+                format!(
+                    "--schedule={}",
+                    regress_src_path.join("parallel_schedule").to_str().unwrap()
+                )
+                .as_str(),
+                format!("--inputdir={}", regress_src_path.to_str().unwrap()).as_str(),
+            ])
+            .env_clear()
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("PGPORT", self.address.port().to_string())
+            .env("PGUSER", self.whoami())
+            .env("PGHOST", self.address.ip().to_string())
+            .status()
+            .expect("pg_regress failed");
+    }
+
+    pub fn pg_bench(&self, clients: u32, seconds: u32) {
+        let port = self.address.port().to_string();
+        let clients = clients.to_string();
+        let seconds = seconds.to_string();
+        let _pg_bench_init = Command::new(self.env.pg_bin_dir().join("pgbench"))
+            .args(&["-i", "-p", port.as_str(), "postgres"])
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .status()
+            .expect("pgbench -i");
+        let _pg_bench_run = Command::new(self.env.pg_bin_dir().join("pgbench"))
+            .args(&[
+                "-p",
+                port.as_str(),
+                "-T",
+                seconds.as_str(),
+                "-P",
+                "1",
+                "-c",
+                clients.as_str(),
+                "-M",
+                "prepared",
+                "postgres",
+            ])
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .status()
+            .expect("pgbench run");
+    }
 }
 
 impl Drop for PostgresNode {

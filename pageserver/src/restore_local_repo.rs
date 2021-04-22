@@ -29,6 +29,7 @@ use bytes::Bytes;
 use crate::page_cache;
 use crate::page_cache::BufferTag;
 use crate::page_cache::PageCache;
+use crate::page_cache::RelTag;
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -202,11 +203,13 @@ fn restore_relfile(
         let r = file.read_exact(&mut buf);
         match r {
             Ok(_) => {
-                let tag = page_cache::BufferTag {
-                    spcnode: spcoid,
-                    dbnode: dboid,
-                    relnode,
-                    forknum: forknum as u8,
+                let tag = BufferTag {
+                    rel: RelTag {
+                        spcnode: spcoid,
+                        dbnode: dboid,
+                        relnode: relnode,
+                        forknum: forknum as u8,
+                    },
                     blknum,
                 };
                 pcache.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
@@ -232,14 +235,6 @@ fn restore_relfile(
         };
         blknum += 1;
     }
-
-    let tag = page_cache::RelTag {
-        spcnode: spcoid,
-        dbnode: dboid,
-        relnode,
-        forknum: forknum as u8,
-    };
-    pcache.relsize_inc(&tag, blknum);
 
     Ok(())
 }
@@ -307,18 +302,21 @@ fn restore_wal(
                 // so having multiple copies of it doesn't cost that much)
                 for blk in decoded.blocks.iter() {
                     let tag = BufferTag {
-                        spcnode: blk.rnode_spcnode,
-                        dbnode: blk.rnode_dbnode,
-                        relnode: blk.rnode_relnode,
-                        forknum: blk.forknum as u8,
+                        rel: RelTag {
+                            spcnode: blk.rnode_spcnode,
+                            dbnode: blk.rnode_dbnode,
+                            relnode: blk.rnode_relnode,
+                            forknum: blk.forknum as u8,
+                        },
                         blknum: blk.blkno,
                     };
 
                     let rec = page_cache::WALRecord {
                         lsn,
                         will_init: blk.will_init || blk.apply_image,
+                        truncate: false,
                         rec: recdata.clone(),
-                        main_data_offset: decoded.main_data_offset,
+                        main_data_offset: decoded.main_data_offset as u32,
                     };
 
                     pcache.put_wal_record(tag, rec);

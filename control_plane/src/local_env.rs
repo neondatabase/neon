@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 use serde_derive::{Deserialize, Serialize};
 
+use pageserver::zenith_repo_dir;
 use pageserver::ZTimelineId;
 use postgres_ffi::xlog_utils;
 
@@ -49,14 +50,6 @@ impl LocalEnv {
     }
     pub fn pg_lib_dir(&self) -> PathBuf {
         self.pg_distrib_dir.join("lib")
-    }
-}
-
-fn zenith_repo_dir() -> PathBuf {
-    // Find repository path
-    match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => PathBuf::from(val.to_str().unwrap()),
-        None => ".zenith".into(),
     }
 }
 
@@ -145,7 +138,10 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
+        .env(
+            "DYLD_LIBRARY_PATH",
+            local_env.pg_lib_dir().to_str().unwrap(),
+        )
         .stdout(Stdio::null())
         .status()
         .with_context(|| "failed to execute initdb")?;

@@ -17,4 +17,4 @@ hex = "0.4.3"
 log = "0.4.14"
 
 [build-dependencies]
-bindgen = "0.53.1"
+bindgen = "0.57"

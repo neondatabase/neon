@@ -7,8 +7,9 @@
 //!
 
 use crate::page_cache;
-use crate::page_cache::BufferTag;
-use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
+use crate::page_cache::{BufferTag, RelTag};
+use crate::pg_constants;
+use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use anyhow::Error;
@@ -223,21 +224,50 @@ async fn walreceiver_main(
                         // so having multiple copies of it doesn't cost that much)
                         for blk in decoded.blocks.iter() {
                             let tag = BufferTag {
-                                spcnode: blk.rnode_spcnode,
-                                dbnode: blk.rnode_dbnode,
-                                relnode: blk.rnode_relnode,
-                                forknum: blk.forknum as u8,
+                                rel: RelTag {
+                                    spcnode: blk.rnode_spcnode,
+                                    dbnode: blk.rnode_dbnode,
+                                    relnode: blk.rnode_relnode,
+                                    forknum: blk.forknum as u8,
+                                },
                                 blknum: blk.blkno,
                             };
 
                             let rec = page_cache::WALRecord {
                                 lsn,
                                 will_init: blk.will_init || blk.apply_image,
+                                truncate: false,
                                 rec: recdata.clone(),
-                                main_data_offset: decoded.main_data_offset,
+                                main_data_offset: decoded.main_data_offset as u32,
                             };
 
                             pcache.put_wal_record(tag, rec);
+                        }
+                        // include truncate wal record in all pages
+                        if decoded.xl_rmid == pg_constants::RM_SMGR_ID
+                            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                                == pg_constants::XLOG_SMGR_TRUNCATE
+                        {
+                            let truncate = decode_truncate_record(&decoded);
+                            if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
+                                let tag = BufferTag {
+                                    rel: RelTag {
+                                        spcnode: truncate.rnode.spcnode,
+                                        dbnode: truncate.rnode.dbnode,
+                                        relnode: truncate.rnode.relnode,
+                                        forknum: MAIN_FORKNUM,
+                                    },
+                                    blknum: truncate.blkno,
+                                };
+                                let rec = page_cache::WALRecord {
+                                    lsn: lsn,
+                                    will_init: false,
+                                    truncate: true,
+                                    rec: recdata.clone(),
+                                    main_data_offset: decoded.main_data_offset as u32,
+                                };
+                                pcache.put_rel_wal_record(tag, rec).await?;
+                            }
                         }
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN

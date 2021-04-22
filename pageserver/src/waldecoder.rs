@@ -328,6 +328,8 @@ impl DecodedBkpBlock {
 const SizeOfXLogRecord: u32 = 24;
 
 pub struct DecodedWALRecord {
+    pub xl_info: u8,
+    pub xl_rmid: u8,
     pub record: Bytes, // raw XLogRecord
 
     pub blocks: Vec<DecodedBkpBlock>,
@@ -353,11 +355,40 @@ fn is_xlog_switch_record(rec: &Bytes) -> bool {
     xl_info == pg_constants::XLOG_SWITCH && xl_rmid == pg_constants::RM_XLOG_ID
 }
 
-#[derive(Clone, Copy)]
+pub type Oid = u32;
+pub type BlockNumber = u32;
+
+pub const MAIN_FORKNUM: u8 = 0;
+pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct RelFileNode {
-    pub spcnode: u32,
-    pub dbnode: u32,
-    pub relnode: u32,
+    pub spcnode: Oid, /* tablespace */
+    pub dbnode: Oid,  /* database */
+    pub relnode: Oid, /* relation */
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlSmgrTruncate {
+    pub blkno: BlockNumber,
+    pub rnode: RelFileNode,
+    pub flags: u32,
+}
+
+pub fn decode_truncate_record(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
+    let mut buf = decoded.record.clone();
+    buf.advance((SizeOfXLogRecord + 2) as usize);
+    XlSmgrTruncate {
+        blkno: buf.get_u32_le(),
+        rnode: RelFileNode {
+            spcnode: buf.get_u32_le(), /* tablespace */
+            dbnode: buf.get_u32_le(),  /* database */
+            relnode: buf.get_u32_le(), /* relation */
+        },
+        flags: buf.get_u32_le(),
+    }
 }
 
 //
@@ -379,13 +410,13 @@ pub struct RelFileNode {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
+pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
     let mut got_rnode = false;
 
-    let mut buf = rec.clone();
+    let mut buf = record.clone();
 
     // 1. Parse XLogRecord struct
 
@@ -649,7 +680,9 @@ pub fn decode_wal_record(rec: Bytes) -> DecodedWALRecord {
     }
 
     DecodedWALRecord {
-        record: rec,
+        xl_info,
+        xl_rmid,
+        record,
         blocks,
         main_data_offset,
     }

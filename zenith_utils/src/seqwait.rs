@@ -196,5 +196,4 @@ mod tests {
         // because the waiter already dropped its Receiver.
         seq.advance(99);
     }
-
 }

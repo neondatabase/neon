@@ -3,12 +3,13 @@
 //
 
 use log::*;
-use std::fs;
-use std::fs::{File, OpenOptions};
+use parse_duration::parse;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -16,18 +17,10 @@ use daemonize::Daemonize;
 
 use slog::Drain;
 
-use pageserver::page_service;
-use pageserver::tui;
-//use pageserver::walreceiver;
-use pageserver::PageServerConf;
+use pageserver::{page_service, tui, zenith_repo_dir, PageServerConf};
 
-fn zenith_repo_dir() -> String {
-    // Find repository path
-    match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => String::from(val.to_str().unwrap()),
-        None => ".zenith".into(),
-    }
-}
+const DEFAULT_GC_HORIZON: u64 = 0; //64 * 1024 * 1024;
+const DEFAULT_GC_PERIOD_SEC: u64 = 1;
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
@@ -53,11 +46,25 @@ fn main() -> Result<()> {
                 .takes_value(false)
                 .help("Run in the background"),
         )
+        .arg(
+            Arg::with_name("gc_horizon")
+                .long("gc_horizon")
+                .takes_value(true)
+                .help("Distance from current LSN to perform all wal records cleanup"),
+        )
+        .arg(
+            Arg::with_name("gc_period")
+                .long("gc_period")
+                .takes_value(true)
+                .help("Interval between garbage collector iterations"),
+        )
         .get_matches();
 
     let mut conf = PageServerConf {
         daemonize: false,
         interactive: false,
+        gc_horizon: DEFAULT_GC_HORIZON,
+        gc_period: Duration::from_secs(DEFAULT_GC_PERIOD_SEC),
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
     };
 
@@ -76,6 +83,14 @@ fn main() -> Result<()> {
 
     if let Some(addr) = arg_matches.value_of("listen") {
         conf.listen_addr = addr.parse()?;
+    }
+
+    if let Some(horizon) = arg_matches.value_of("gc_horizon") {
+        conf.gc_horizon = horizon.parse()?;
+    }
+
+    if let Some(period) = arg_matches.value_of("gc_period") {
+        conf.gc_period = parse(period)?;
     }
 
     start_pageserver(&conf)
@@ -139,7 +154,7 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
         // does this for us.
         let repodir = zenith_repo_dir();
         std::env::set_current_dir(&repodir)?;
-        info!("Changed current directory to repository in {}", &repodir);
+        info!("Changed current directory to repository in {:?}", &repodir);
     }
 
     let mut threads = Vec::new();
@@ -185,12 +200,16 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
     if conf.interactive {
         Ok(tui::init_logging())
     } else if conf.daemonize {
-        let log = zenith_repo_dir() + "/pageserver.log";
-        let log_file = File::create(&log).map_err(|err| {
-            // We failed to initialize logging, so we can't log this message with error!
-            eprintln!("Could not create log file {:?}: {}", log, err);
-            err
-        })?;
+        let log = zenith_repo_dir().join("pageserver.log");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .map_err(|err| {
+                // We failed to initialize logging, so we can't log this message with error!
+                eprintln!("Could not create log file {:?}: {}", log, err);
+                err
+            })?;
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {

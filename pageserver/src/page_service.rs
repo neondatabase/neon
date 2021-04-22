@@ -18,6 +18,7 @@ use std::io;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime;
@@ -50,12 +51,8 @@ enum FeMessage {
     // All that messages are actually CopyData from libpq point of view.
     //
     ZenithExistsRequest(ZenithRequest),
-    ZenithTruncRequest(ZenithRequest),
-    ZenithUnlinkRequest(ZenithRequest),
     ZenithNblocksRequest(ZenithRequest),
     ZenithReadRequest(ZenithRequest),
-    ZenithCreateRequest(ZenithRequest),
-    ZenithExtendRequest(ZenithRequest),
 }
 
 #[derive(Debug)]
@@ -383,12 +380,8 @@ impl FeMessage {
                 // serialization.
                 match smgr_tag {
                     0 => Ok(Some(FeMessage::ZenithExistsRequest(zreq))),
-                    1 => Ok(Some(FeMessage::ZenithTruncRequest(zreq))),
-                    2 => Ok(Some(FeMessage::ZenithUnlinkRequest(zreq))),
-                    3 => Ok(Some(FeMessage::ZenithNblocksRequest(zreq))),
-                    4 => Ok(Some(FeMessage::ZenithReadRequest(zreq))),
-                    5 => Ok(Some(FeMessage::ZenithCreateRequest(zreq))),
-                    6 => Ok(Some(FeMessage::ZenithExtendRequest(zreq))),
+                    1 => Ok(Some(FeMessage::ZenithNblocksRequest(zreq))),
+                    2 => Ok(Some(FeMessage::ZenithReadRequest(zreq))),
                     _ => Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!("unknown smgr message tag: {},'{:?}'", smgr_tag, buf),
@@ -431,6 +424,7 @@ pub fn thread_main(conf: &PageServerConf) {
         loop {
             let (socket, peer_addr) = listener.accept().await.unwrap();
             debug!("accepted connection from {}", peer_addr);
+            socket.set_nodelay(true).unwrap();
             let mut conn_handler = Connection::new(conf.clone(), socket, &runtime_ref);
 
             task::spawn(async move {
@@ -625,7 +619,7 @@ impl Connection {
         let mut unnamed_query_string = Bytes::new();
         loop {
             let msg = self.read_message().await?;
-            info!("got message {:?}", msg);
+            trace!("got message {:?}", msg);
             match msg {
                 Some(FeMessage::StartupMessage(m)) => {
                     trace!("got message {:?}", m);
@@ -788,7 +782,7 @@ impl Connection {
             let message = self.read_message().await?;
 
             if let Some(m) = &message {
-                info!("query({:?}): {:?}", timelineid, m);
+                trace!("query({:?}): {:?}", timelineid, m);
             };
 
             if message.is_none() {
@@ -805,24 +799,10 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let exist = pcache.relsize_exist(&tag);
+                    let exist = pcache.relsize_exist(&tag, req.lsn).await.unwrap_or(false);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: exist,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
-                Some(FeMessage::ZenithTruncRequest(_)) => {
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
-                Some(FeMessage::ZenithUnlinkRequest(_)) => {
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
                         n_blocks: 0,
                     }))
                     .await?
@@ -835,7 +815,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let n_blocks = pcache.relsize_get(&tag);
+                    let n_blocks = pcache.relsize_get(&tag, req.lsn).await.unwrap_or(0);
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
@@ -845,10 +825,12 @@ impl Connection {
                 }
                 Some(FeMessage::ZenithReadRequest(req)) => {
                     let buf_tag = page_cache::BufferTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
+                        rel: page_cache::RelTag {
+                            spcnode: req.spcnode,
+                            dbnode: req.dbnode,
+                            relnode: req.relnode,
+                            forknum: req.forknum,
+                        },
                         blknum: req.blkno,
                     };
 
@@ -870,38 +852,6 @@ impl Connection {
                     };
 
                     self.write_message(&msg).await?
-                }
-                Some(FeMessage::ZenithCreateRequest(req)) => {
-                    let tag = page_cache::RelTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
-                    };
-
-                    pcache.relsize_inc(&tag, 0);
-
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
-                }
-                Some(FeMessage::ZenithExtendRequest(req)) => {
-                    let tag = page_cache::RelTag {
-                        spcnode: req.spcnode,
-                        dbnode: req.dbnode,
-                        relnode: req.relnode,
-                        forknum: req.forknum,
-                    };
-
-                    pcache.relsize_inc(&tag, req.blkno + 1);
-
-                    self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
-                        ok: true,
-                        n_blocks: 0,
-                    }))
-                    .await?
                 }
                 _ => {}
             }
@@ -942,10 +892,7 @@ impl Connection {
             let joinres = f_tar.await;
 
             if let Err(joinreserr) = joinres {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    joinreserr,
-                ));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, joinreserr));
             }
             joinres.unwrap()
         };
@@ -982,7 +929,7 @@ impl Connection {
         // FIXME: I'm getting an error from the tokio copyout driver without this.
         // I think it happens when the CommandComplete, CloseComplete and ReadyForQuery
         // are sent in the same TCP packet as the CopyDone. I don't understand why.
-        thread::sleep(std::time::Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(1));
 
         Ok(())
     }
