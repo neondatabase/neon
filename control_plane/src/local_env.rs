@@ -150,7 +150,7 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
         .status()
         .with_context(|| "failed to execute initdb")?;
     if !initdb.success() {
-        anyhow::bail!("pg_ctl failed");
+        anyhow::bail!("initdb failed");
     }
     println!("initdb succeeded");
 
