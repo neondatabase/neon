@@ -182,7 +182,8 @@ impl PageServerNode {
             .env("RUST_BACKTRACE", "1")
             .env("ZENITH_REPO_DIR", self.repo_path())
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
 
         if !cmd.status()?.success() {
             anyhow::bail!(
@@ -394,6 +395,7 @@ pub fn regress_check(pg: &PostgresNode) {
         ])
         .env_clear()
         .env("LD_LIBRARY_PATH", pg.env.pg_lib_dir().to_str().unwrap())
+        .env("DYLD_LIBRARY_PATH", pg.env.pg_lib_dir().to_str().unwrap())
         .env("PGHOST", pg.address.ip().to_string())
         .env("PGPORT", pg.address.port().to_string())
         .env("PGUSER", pg.whoami())

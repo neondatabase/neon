@@ -352,6 +352,7 @@ impl PostgresNode {
             )
             .env_clear()
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .with_context(|| "pg_ctl failed")?;
         if !pg_ctl.success() {
