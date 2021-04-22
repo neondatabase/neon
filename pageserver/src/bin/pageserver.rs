@@ -169,9 +169,9 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
         .unwrap();
     threads.push(page_server_thread);
 
-    if tui_thread.is_some() {
+    if let Some(tui_thread) = tui_thread {
         // The TUI thread exits when the user asks to Quit.
-        tui_thread.unwrap().join().unwrap();
+        tui_thread.join().unwrap();
     } else {
         // In non-interactive mode, wait forever.
         for t in threads {

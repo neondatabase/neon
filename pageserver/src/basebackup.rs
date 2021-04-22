@@ -174,7 +174,7 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
 
         Ok(())
     } else if let Some(dbpath) = path.strip_prefix("base/") {
-        let mut s = dbpath.split("/");
+        let mut s = dbpath.split('/');
         let dbnode_str = s
             .next()
             .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;

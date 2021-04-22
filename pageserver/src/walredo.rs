@@ -388,7 +388,7 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
     let len = 4 + 5 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('B' as u8);
+    buf.put_u8(b'B');
     buf.put_u32(len as u32);
     buf.put_u32(tag.spcnode);
     buf.put_u32(tag.dbnode);
@@ -407,7 +407,7 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
     let len = 4 + 5 * 4 + base_img.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('P' as u8);
+    buf.put_u8(b'P');
     buf.put_u32(len as u32);
     buf.put_u32(tag.spcnode);
     buf.put_u32(tag.dbnode);
@@ -425,7 +425,7 @@ fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
     let len = 4 + 8 + rec.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('A' as u8);
+    buf.put_u8(b'A');
     buf.put_u32(len as u32);
     buf.put_u64(endlsn);
     buf.put(rec);
@@ -439,7 +439,7 @@ fn build_get_page_msg(tag: BufferTag) -> Bytes {
     let len = 4 + 5 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
-    buf.put_u8('G' as u8);
+    buf.put_u8(b'G');
     buf.put_u32(len as u32);
     buf.put_u32(tag.spcnode);
     buf.put_u32(tag.dbnode);

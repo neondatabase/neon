@@ -186,10 +186,9 @@ fn restore_relfile(
     // Does it look like a relation file?
 
     let p = parse_relfilename(path.file_name().unwrap().to_str().unwrap());
-    if p.is_err() {
-        let e = p.unwrap_err();
+    if let Err(e) = p {
         warn!("unrecognized file in snapshot: {:?} ({})", path, e);
-        return Err(e)?;
+        return Err(e.into());
     }
     let (relnode, forknum, segno) = p.unwrap();
 
@@ -266,7 +265,7 @@ fn restore_wal(
 
         // It could be as .partial
         if !PathBuf::from(&path).exists() {
-            path = path + ".partial";
+            path += ".partial";
         }
 
         // Slurp the WAL file

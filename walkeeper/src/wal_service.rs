@@ -554,7 +554,7 @@ impl Connection {
     async fn run(&mut self) -> Result<()> {
         self.inbuf.resize(4, 0u8);
         self.stream.read_exact(&mut self.inbuf[0..4]).await?;
-        let startup_pkg_len = BigEndian::read_u32(&mut self.inbuf[0..4]);
+        let startup_pkg_len = BigEndian::read_u32(&self.inbuf[0..4]);
         if startup_pkg_len == 0 {
             self.receive_wal().await?; // internal protocol between wal_proposer and wal_acceptor
         } else {
@@ -997,12 +997,12 @@ impl Connection {
             // Try to fetch replica's feedback
             match self.stream.try_read_buf(&mut self.inbuf) {
                 Ok(0) => break,
-                Ok(_) => match self.parse_message()? {
-                    Some(FeMessage::CopyData(m)) => self
-                        .timeline()
-                        .add_hs_feedback(HotStandbyFeedback::parse(&m.body)),
-                    _ => {}
-                },
+                Ok(_) => {
+                    if let Some(FeMessage::CopyData(m)) = self.parse_message()? {
+                        self.timeline()
+                            .add_hs_feedback(HotStandbyFeedback::parse(&m.body))
+                    }
+                }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) => {
                     return Err(e);
@@ -1102,7 +1102,7 @@ impl Connection {
         let mut bytes_written: usize = 0;
         let mut partial;
         let mut start_pos = startpos;
-        const ZERO_BLOCK: &'static [u8] = &[0u8; XLOG_BLCKSZ];
+        const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
         /* Extract WAL location for this block */
         let mut xlogoff = XLogSegmentOffset(start_pos, wal_seg_size) as usize;

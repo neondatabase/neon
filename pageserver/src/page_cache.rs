@@ -487,7 +487,7 @@ impl PageCache {
         let oldentry = shared.pagecache.insert(key, Arc::new(entry));
         self.num_entries.fetch_add(1, Ordering::Relaxed);
 
-        if !oldentry.is_none() {
+        if oldentry.is_some() {
             error!(
                 "overwriting WAL record with LSN {:X}/{:X} in page cache",
                 lsn >> 32,

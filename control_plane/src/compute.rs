@@ -189,11 +189,11 @@ impl PostgresNode {
         );
         let port: u16 = CONF_PORT_RE
             .captures(config.as_str())
-            .ok_or(anyhow::Error::msg(err_msg.clone() + " 1"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 1"))?
             .iter()
             .last()
-            .ok_or(anyhow::Error::msg(err_msg.clone() + " 2"))?
-            .ok_or(anyhow::Error::msg(err_msg.clone() + " 3"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 2"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 3"))?
             .as_str()
             .parse()
             .with_context(|| err_msg)?;

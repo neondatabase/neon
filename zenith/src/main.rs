@@ -186,7 +186,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let node = cplane
                 .nodes
                 .get(name)
-                .ok_or(anyhow!("postgres {} is not found", name))?;
+                .ok_or_else(|| anyhow!("postgres {} is not found", name))?;
             node.start()?;
         }
         ("stop", Some(sub_m)) => {
@@ -194,7 +194,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let node = cplane
                 .nodes
                 .get(name)
-                .ok_or(anyhow!("postgres {} is not found", name))?;
+                .ok_or_else(|| anyhow!("postgres {} is not found", name))?;
             node.stop()?;
         }
 
@@ -277,19 +277,19 @@ fn list_branches() -> Result<()> {
 //
 //
 fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
-    let mut strings = s.split("@");
+    let mut strings = s.split('@');
     let name = strings.next().unwrap();
 
     let lsn: Option<u64>;
     if let Some(lsnstr) = strings.next() {
-        let mut s = lsnstr.split("/");
+        let mut s = lsnstr.split('/');
         let lsn_hi: u64 = s
             .next()
-            .ok_or(anyhow!("invalid LSN in point-in-time specification"))?
+            .ok_or_else(|| anyhow!("invalid LSN in point-in-time specification"))?
             .parse()?;
         let lsn_lo: u64 = s
             .next()
-            .ok_or(anyhow!("invalid LSN in point-in-time specification"))?
+            .ok_or_else(|| anyhow!("invalid LSN in point-in-time specification"))?
             .parse()?;
         lsn = Some(lsn_hi << 32 | lsn_lo);
     } else {
@@ -312,11 +312,8 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
         let pointstr = fs::read_to_string(branchpath)?;
 
         let mut result = parse_point_in_time(&pointstr)?;
-        if lsn.is_some() {
-            result.lsn = lsn.unwrap();
-        } else {
-            result.lsn = 0;
-        }
+
+        result.lsn = lsn.unwrap_or(0);
         return Ok(result);
     }
 

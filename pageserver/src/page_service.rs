@@ -203,7 +203,7 @@ impl FeParseMessage {
         // now, just ignore the statement name, assuming that the client never
         // uses more than one prepared statement at a time.
         /*
-        if pstmt_name.len() != 0 {
+        if !pstmt_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named prepared statements not implemented in Parse",
@@ -235,7 +235,7 @@ impl FeDescribeMessage {
 
         // FIXME: see FeParseMessage::parse
         /*
-        if pstmt_name.len() != 0 {
+        if !pstmt_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named prepared statements not implemented in Describe",
@@ -266,7 +266,7 @@ impl FeExecuteMessage {
         let portal_name = read_null_terminated(&mut buf)?;
         let maxrows = buf.get_i32();
 
-        if portal_name.len() != 0 {
+        if !portal_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named portals not implemented",
@@ -293,7 +293,7 @@ impl FeBindMessage {
         let portal_name = read_null_terminated(&mut buf)?;
         let _pstmt_name = read_null_terminated(&mut buf)?;
 
-        if portal_name.len() != 0 {
+        if !portal_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named portals not implemented",
@@ -302,7 +302,7 @@ impl FeBindMessage {
 
         // FIXME: see FeParseMessage::parse
         /*
-        if pstmt_name.len() != 0 {
+        if !pstmt_name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "named prepared statements not implemented",
@@ -941,10 +941,10 @@ impl Connection {
         let f_tar2 = async {
             let joinres = f_tar.await;
 
-            if joinres.is_err() {
+            if let Err(joinreserr) = joinres {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    joinres.unwrap_err(),
+                    joinreserr,
                 ));
             }
             joinres.unwrap()
