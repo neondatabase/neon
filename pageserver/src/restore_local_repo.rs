@@ -32,6 +32,7 @@ use crate::page_cache::PageCache;
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
+use postgres_ffi::xlog_utils::*;
 
 // From pg_tablespace_d.h
 //
@@ -344,59 +345,6 @@ fn restore_wal(
     );
 
     Ok(())
-}
-
-// FIXME: copied from xlog_utils.rs
-pub const XLOG_FNAME_LEN: usize = 24;
-pub type XLogRecPtr = u64;
-pub type XLogSegNo = u64;
-pub type TimeLineID = u32;
-
-#[allow(non_snake_case)]
-pub fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> u32 {
-    return (xlogptr as u32) & (wal_segsz_bytes as u32 - 1);
-}
-
-#[allow(non_snake_case)]
-pub fn XLByteToSeg(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> XLogSegNo {
-    return xlogptr / wal_segsz_bytes as u64;
-}
-
-#[allow(non_snake_case)]
-pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
-    return format!(
-        "{:>08X}{:>08X}{:>08X}",
-        tli,
-        logSegNo / XLogSegmentsPerXLogId(wal_segsz_bytes),
-        logSegNo % XLogSegmentsPerXLogId(wal_segsz_bytes)
-    );
-}
-
-#[allow(non_snake_case)]
-pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
-    return (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo;
-}
-
-#[allow(non_snake_case)]
-pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
-    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
-    let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
-    let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
-    return (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli);
-}
-
-#[allow(non_snake_case)]
-pub fn IsXLogFileName(fname: &str) -> bool {
-    return fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit());
-}
-
-#[allow(non_snake_case)]
-pub fn IsPartialXLogFileName(fname: &str) -> bool {
-    if let Some(basefname) = fname.strip_suffix(".partial") {
-        IsXLogFileName(basefname)
-    } else {
-        false
-    }
 }
 
 #[derive(Debug, Clone)]

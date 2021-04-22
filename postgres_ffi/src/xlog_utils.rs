@@ -1,3 +1,12 @@
+//
+// This file contains common utilities for dealing with PostgreSQL WAL files and
+// LSNs.
+//
+// Many of these functions have been copied from PostgreSQL, and rewritten in
+// Rust. That's why they don't follow the usual Rust naming conventions, they
+// have been named the same as the corresponding PostgreSQL functions instead.
+//
+
 use byteorder::{ByteOrder, LittleEndian};
 use crc32c::*;
 use log::*;
@@ -184,6 +193,9 @@ fn find_end_of_wal_segment(
     last_valid_rec_pos as u32
 }
 
+///
+/// Scan a directory that contains PostgreSQL WAL files, for the end of WAL.
+///
 pub fn find_end_of_wal(
     data_dir: &Path,
     wal_seg_size: usize,

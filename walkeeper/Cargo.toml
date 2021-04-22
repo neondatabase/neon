@@ -30,3 +30,4 @@ crc32c = "0.6.0"
 
 # FIXME: 'pageserver' is needed for ZTimelineId. Refactor
 pageserver = { path = "../pageserver" }
+postgres_ffi = { path = "../postgres_ffi" }
