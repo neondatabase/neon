@@ -283,7 +283,7 @@ async fn walreceiver_main(
                 // better reflect that, because GetPage@LSN requests might also point in the
                 // middle of a record, if the request LSN was taken from the server's current
                 // flush ptr.
-                pcache.advance_last_valid_lsn(endlsn, true);
+                pcache.advance_last_valid_lsn(endlsn);
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!(
