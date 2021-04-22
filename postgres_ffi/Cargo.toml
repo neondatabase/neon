@@ -14,6 +14,7 @@ byteorder = "1.4.3"
 anyhow = "1.0"
 crc32c = "0.6.0"
 hex = "0.4.3"
+log = "0.4.14"
 
 [build-dependencies]
 bindgen = "0.57"

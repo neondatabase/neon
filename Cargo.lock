@@ -1586,6 +1586,7 @@ dependencies = [
  "chrono",
  "crc32c",
  "hex",
+ "log",
  "rand 0.8.3",
 ]
 
@@ -2554,6 +2555,7 @@ dependencies = [
  "pageserver",
  "postgres",
  "postgres-protocol",
+ "postgres_ffi",
  "regex",
  "slog",
  "slog-async",

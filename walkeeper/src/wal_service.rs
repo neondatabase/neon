@@ -29,9 +29,9 @@ use tokio::task;
 use tokio_postgres::{connect, Error, NoTls};
 
 use crate::pq_protocol::*;
-use crate::xlog_utils::*;
 use crate::WalAcceptorConf;
 use pageserver::ZTimelineId;
+use postgres_ffi::xlog_utils::*;
 
 type FullTransactionId = u64;
 

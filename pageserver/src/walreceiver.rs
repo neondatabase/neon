@@ -30,6 +30,7 @@ use tokio::time::{sleep, Duration};
 use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
 use tokio_postgres::{NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
+use postgres_ffi::xlog_utils::*;
 
 //
 // We keep one WAL Receiver active per timeline.
@@ -371,62 +372,6 @@ pub async fn identify_system(client: &tokio_postgres::Client) -> Result<Identify
     } else {
         Err(IdentifyError)?
     }
-}
-
-pub const XLOG_FNAME_LEN: usize = 24;
-pub const XLOG_BLCKSZ: usize = 8192;
-pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
-pub const XLOG_PAGE_MAGIC: u16 = 0xD109;
-pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
-pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = XLP_REM_LEN_OFFS + 4 + 4;
-pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = XLOG_SIZE_OF_XLOG_SHORT_PHD + 8 + 4 + 4;
-pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
-pub const XLOG_SIZE_OF_XLOG_RECORD: usize = XLOG_RECORD_CRC_OFFS + 4;
-pub type XLogRecPtr = u64;
-pub type TimeLineID = u32;
-pub type TimestampTz = u64;
-pub type XLogSegNo = u64;
-
-#[allow(non_snake_case)]
-pub fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> u32 {
-    return (xlogptr as u32) & (wal_segsz_bytes as u32 - 1);
-}
-
-#[allow(non_snake_case)]
-pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
-    return (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo;
-}
-
-#[allow(non_snake_case)]
-pub fn XLByteToSeg(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> XLogSegNo {
-    return xlogptr / wal_segsz_bytes as u64;
-}
-
-#[allow(non_snake_case)]
-pub fn XLogSegNoOffsetToRecPtr(
-    segno: XLogSegNo,
-    offset: u32,
-    wal_segsz_bytes: usize,
-) -> XLogRecPtr {
-    return segno * (wal_segsz_bytes as u64) + (offset as u64);
-}
-
-#[allow(non_snake_case)]
-pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
-    return format!(
-        "{:>08X}{:>08X}{:>08X}",
-        tli,
-        logSegNo / XLogSegmentsPerXLogId(wal_segsz_bytes),
-        logSegNo % XLogSegmentsPerXLogId(wal_segsz_bytes)
-    );
-}
-
-#[allow(non_snake_case)]
-pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
-    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
-    let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
-    let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
-    return (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli);
 }
 
 fn write_wal_file(

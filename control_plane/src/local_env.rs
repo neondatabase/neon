@@ -17,7 +17,7 @@ use serde_derive::{Deserialize, Serialize};
 
 use pageserver::zenith_repo_dir;
 use pageserver::ZTimelineId;
-use walkeeper::xlog_utils;
+use postgres_ffi::xlog_utils;
 
 //
 // This data structure represents deserialized zenith config, which should be

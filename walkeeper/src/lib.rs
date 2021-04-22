@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 mod pq_protocol;
 pub mod wal_service;
-pub mod xlog_utils;
 
 use crate::pq_protocol::SystemId;
 
