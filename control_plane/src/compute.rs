@@ -355,6 +355,7 @@ impl PostgresNode {
             )
             .env_clear()
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .with_context(|| "pg_ctl failed")?;
         if !pg_ctl.success() {
@@ -473,6 +474,7 @@ impl PostgresNode {
             ])
             .env_clear()
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .env("PGPORT", self.address.port().to_string())
             .env("PGUSER", self.whoami())
             .env("PGHOST", self.address.ip().to_string())
@@ -487,6 +489,7 @@ impl PostgresNode {
         let _pg_bench_init = Command::new(self.env.pg_bin_dir().join("pgbench"))
             .args(&["-i", "-p", port.as_str(), "postgres"])
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("pgbench -i");
         let _pg_bench_run = Command::new(self.env.pg_bin_dir().join("pgbench"))
@@ -504,6 +507,7 @@ impl PostgresNode {
                 "postgres",
             ])
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("pgbench run");
     }

@@ -184,7 +184,8 @@ impl PageServerNode {
             .env("RUST_BACKTRACE", "1")
             .env("ZENITH_REPO_DIR", self.repo_path())
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
+            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
 
         if !cmd.status()?.success() {
             anyhow::bail!(

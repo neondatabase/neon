@@ -133,14 +133,18 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
     // the repository. Use "tempdir()" or something? Or just create it directly
     // in the repo?
     let initdb_path = local_env.pg_bin_dir().join("initdb");
-    let _initdb = Command::new(initdb_path)
+    let initdb = Command::new(initdb_path)
         .args(&["-D", "tmp"])
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
+        .env("DYLD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
         .stdout(Stdio::null())
         .status()
         .with_context(|| "failed to execute initdb")?;
+    if !initdb.success() {
+        anyhow::bail!("initdb failed");
+    }
     println!("initdb succeeded");
 
     // Read control file to extract the LSN and system id
