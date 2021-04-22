@@ -138,7 +138,10 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
+        .env(
+            "DYLD_LIBRARY_PATH",
+            local_env.pg_lib_dir().to_str().unwrap(),
+        )
         .stdout(Stdio::null())
         .status()
         .with_context(|| "failed to execute initdb")?;
