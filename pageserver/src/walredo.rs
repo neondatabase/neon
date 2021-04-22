@@ -80,11 +80,17 @@ pub fn wal_redo_main(conf: &PageServerConf, timelineid: ZTimelineId) {
 
             let result = handle_apply_request(&pcache, &process, &runtime, request);
             if result.is_err() {
-                // On error, kill the process.
+                // Something went wrong with handling the request. It's not clear
+                // if the request was faulty, and the next request would succeed
+                // again, or if the 'postgres' process went haywire. To be safe,
+                // kill the 'postgres' process so that we will start from a clean
+                // slate, with a new process, for the next request.
                 break;
             }
         }
 
+        // Time to kill the 'postgres' process. A new one will be launched on next
+        // iteration of the loop.
         info!("killing WAL redo postgres process");
         let _ = runtime.block_on(process.stdin.get_mut().shutdown());
         let mut child = process.child;

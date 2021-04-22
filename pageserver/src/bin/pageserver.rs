@@ -20,6 +20,7 @@ use slog::Drain;
 use pageserver::{page_service, tui, zenith_repo_dir, PageServerConf};
 
 const DEFAULT_GC_HORIZON: u64 = 0; //64 * 1024 * 1024;
+const DEFAULT_GC_PERIOD_SEC: u32 = 1; 
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
@@ -63,7 +64,7 @@ fn main() -> Result<()> {
         daemonize: false,
         interactive: false,
         gc_horizon: DEFAULT_GC_HORIZON,
-        gc_period: Duration::from_secs(10),
+        gc_period: Duration::from_secs(DEFAULT_GC_PERIOD_SEC),
         listen_addr: "127.0.0.1:5430".parse().unwrap(),
     };
 
