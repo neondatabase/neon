@@ -1,9 +1,7 @@
 //
 // Page Cache holds all the different page versions and WAL records
 //
-// The Page Cache is a BTreeMap, keyed by the RelFileNode an blocknumber, and the LSN.
-// The BTreeMap is protected by a Mutex, and each cache entry is protected by another
-// per-entry mutex.
+// The Page Cache is currenusing RocksDB for storing wal records and full page images, keyed by the RelFileNode, blocknumber, and the LSN.
 //
 
 use crate::restore_local_repo::restore_timeline;
@@ -174,7 +172,8 @@ fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB 
     opts.create_if_missing(true);
     opts.set_use_fsync(true);
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-    rocksdb::DB::open(&opts, &path).unwrap()
+	opts.create_missing_column_families(true);
+    rocksdb::DB::open_cf(&opts, &path, &[rocksdb::DEFAULT_COLUMN_FAMILY_NAME]).unwrap()
 }
 
 fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache {
@@ -218,7 +217,7 @@ fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache 
 // stored directly in the cache entry in that you still need to run the WAL redo
 // routine to generate the page image.
 //
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct CacheKey {
     pub tag: BufferTag,
     pub lsn: u64,
@@ -430,6 +429,7 @@ impl PageCache {
 
                         // reconstruct most recent page version
                         if content.wal_record.is_some() {
+							trace!("Reconstruct most recent page {:?}", key);
                             // force reconstruction of most recent page version
                             self.reconstruct_page(key, content)?;
                         }
@@ -451,6 +451,7 @@ impl PageCache {
                                     minbuf.clear();
                                     minbuf.extend_from_slice(&k);
                                     let key = CacheKey::unpack(&mut minbuf);
+									trace!("Reconstruct horizon page {:?}", key);
                                     self.reconstruct_page(key, content)?;
                                 }
                             }
@@ -458,6 +459,7 @@ impl PageCache {
                         // remove records prior to horizon
                         minbuf.clear();
                         minkey.pack(&mut minbuf);
+						trace!("Delete records in range {:?}..{:?}", minkey, maxkey);
                         self.db.delete_range_cf(cf, &minbuf[..], &maxbuf[..])?;
 
                         maxkey = minkey;

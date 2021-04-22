@@ -213,7 +213,7 @@ fn handle_apply_request(
 
     let result;
 
-    debug!(
+    trace!(
         "applied {} WAL records in {} ms to reconstruct page image at LSN {:X}/{:X}",
         nrecords,
         duration.as_millis(),
