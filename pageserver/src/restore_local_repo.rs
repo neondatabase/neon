@@ -325,7 +325,7 @@ fn restore_wal(
                 }
                 // Now that this record has been handled, let the page cache know that
                 // it is up-to-date to this LSN
-                pcache.advance_last_valid_lsn(lsn, false);
+                pcache.advance_last_valid_lsn(lsn);
                 last_lsn = lsn;
             } else {
                 break;

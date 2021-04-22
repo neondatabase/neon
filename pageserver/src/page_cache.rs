@@ -106,7 +106,6 @@ struct PageCacheShared {
     first_valid_lsn: u64,
     last_valid_lsn: u64,
     last_record_lsn: u64,
-    walreceiver_works: bool,
 }
 
 lazy_static! {
@@ -170,7 +169,6 @@ fn init_page_cache() -> PageCache {
             first_valid_lsn: 0,
             last_valid_lsn: 0,
             last_record_lsn: 0,
-            walreceiver_works: false,
         }),
         valid_lsn_condvar: Condvar::new(),
 
@@ -276,9 +274,17 @@ impl PageCache {
     //
     // Returns an 8k page image
     //
-    pub fn get_page_at_lsn(&self, tag: BufferTag, lsn: u64) -> anyhow::Result<Bytes> {
+    pub fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: u64) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
+        let mut lsn = req_lsn;
+        //When invalid LSN is requested, it means "don't wait, return latest version of the page"
+        //This is necessary for bootstrap.
+        //TODO should we use last_valid_lsn here instead of maxvalue?
+        if lsn == 0
+        {
+            lsn = 0xffff_ffff_ffff_eeee;
+        }
         // Look up cache entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
         let minkey = CacheKey { tag, lsn: 0 };
@@ -292,16 +298,15 @@ impl PageCache {
             // There is a a race at postgres instance start
             // when we request a page before walsender established connection
             // and was able to stream the page. Just don't wait and return what we have.
-            // TODO is there any corner case when this is incorrect?
-            if !shared.walreceiver_works {
+            if req_lsn == 0
+            {
                 trace!(
-                    " walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                    shared.last_valid_lsn,
-                    lsn
-                );
+                    "walsender hasn't started yet. Don't wait. last_valid_lsn {}, requested {}",
+                    shared.last_valid_lsn, lsn);
             }
 
-            if shared.walreceiver_works {
+            if req_lsn != 0
+            {
                 while lsn > shared.last_valid_lsn {
                     // TODO: Wait for the WAL receiver to catch up
                     waited = true;
@@ -325,6 +330,7 @@ impl PageCache {
                     }
                 }
             }
+
             if waited {
                 trace!("caught up now, continuing");
             }
@@ -532,16 +538,12 @@ impl PageCache {
     }
 
     //
-    pub fn advance_last_valid_lsn(&self, lsn: u64, from_walreceiver: bool) {
+    pub fn advance_last_valid_lsn(&self, lsn: u64) {
         let mut shared = self.shared.lock().unwrap();
 
         // Can't move backwards.
         let oldlsn = shared.last_valid_lsn;
         if lsn >= oldlsn {
-            // Now we receive entries from walreceiver and should wait
-            if from_walreceiver {
-                shared.walreceiver_works = true;
-            }
 
             shared.last_valid_lsn = lsn;
             self.valid_lsn_condvar.notify_all();
