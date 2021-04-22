@@ -404,10 +404,13 @@ impl PostgresNode {
         for entry in fs::read_dir(dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            let mut file = File::open(&path).unwrap();
-            let mut buffer = String::new();
-            file.read_to_string(&mut buffer).unwrap();
-            println!("File {:?}:\n{}", &path, buffer);
+			if path.is_dir() {
+				if let Ok(mut file) = File::open(path.join("pageserver.log")) {
+					let mut buffer = String::new();
+					file.read_to_string(&mut buffer).unwrap();
+					println!("File {:?}:\n{}", &path, buffer);
+				}
+			}
         }
     }
 
