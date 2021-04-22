@@ -463,7 +463,9 @@ impl PageCache {
                         self.db.delete_range_cf(cf, &minbuf[..], &maxbuf[..])?;
 
                         maxkey = minkey;
-                    }
+                    } else {
+						break;
+					}
                 }
             }
         }
