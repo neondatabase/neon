@@ -49,8 +49,17 @@ pub const RM_XLOG_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;
 pub const RM_SMGR_ID: u8 = 2;
 pub const RM_CLOG_ID: u8 = 3;
+pub const RM_DBASE_ID: u8 = 4;
+pub const RM_TBLSPC_ID: u8 = 5;
 // pub const RM_MULTIXACT_ID:u8 = 6;
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;
 pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
+
+// from dbcommands_xlog.h
+pub const XLOG_DBASE_CREATE: u8 = 0x00;
+pub const XLOG_DBASE_DROP: u8 = 0x10;
+
+pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
+pub const XLOG_TBLSPC_DROP: u8 = 0x10;
