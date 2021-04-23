@@ -399,19 +399,12 @@ impl PostgresNode {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
-    fn dump_log_files(&self) {
-        let dir = zenith_repo_dir();
-        for entry in fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-			if path.is_dir() {
-				if let Ok(mut file) = File::open(path.join("pageserver.log")) {
-					let mut buffer = String::new();
-					file.read_to_string(&mut buffer).unwrap();
-					println!("File {:?}:\n{}", &path, buffer);
-				}
-			}
-        }
+    fn dump_log_file(&self) {
+		if let Ok(mut file) = File::open(zenith_repo_dir().join("pageserver.log")) {
+			let mut buffer = String::new();
+			file.read_to_string(&mut buffer).unwrap();
+			println!("--------------- Dump pageserver.log:\n{}", buffer);
+		}
     }
 
     pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<tokio_postgres::Row> {
@@ -427,7 +420,7 @@ impl PostgresNode {
         println!("Running {}", sql);
         let result = client.query(sql, &[]);
         if result.is_err() {
-            self.dump_log_files();
+            self.dump_log_file();
         }
         result.unwrap()
     }
