@@ -25,6 +25,7 @@ use tokio::runtime;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::task;
+use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
 use crate::page_cache;
@@ -84,7 +85,7 @@ struct ZenithRequest {
     relnode: u32,
     forknum: u8,
     blkno: u32,
-    lsn: u64,
+    lsn: Lsn,
 }
 
 #[derive(Debug)]
@@ -373,7 +374,7 @@ impl FeMessage {
                     relnode: body.get_u32(),
                     forknum: body.get_u8(),
                     blkno: body.get_u32(),
-                    lsn: body.get_u64(),
+                    lsn: Lsn::from(body.get_u64()),
                 };
 
                 // TODO: consider using protobuf or serde bincode for less error prone

@@ -4,6 +4,7 @@ use log::*;
 use std::cmp::min;
 use std::str;
 use thiserror::Error;
+use zenith_utils::lsn::Lsn;
 
 const XLOG_BLCKSZ: u32 = 8192;
 
@@ -41,9 +42,9 @@ const SizeOfXLogLongPHD: usize = (2 + 2 + 4 + 8 + 4) + 4 + 8 + 4 + 4;
 
 #[allow(dead_code)]
 pub struct WalStreamDecoder {
-    lsn: u64,
+    lsn: Lsn,
 
-    startlsn: u64, // LSN where this record starts
+    startlsn: Lsn, // LSN where this record starts
     contlen: u32,
     padlen: u32,
 
@@ -56,7 +57,7 @@ pub struct WalStreamDecoder {
 #[error("{msg} at {lsn}")]
 pub struct WalDecodeError {
     msg: String,
-    lsn: u64,
+    lsn: Lsn,
 }
 
 //
@@ -64,11 +65,11 @@ pub struct WalDecodeError {
 // FIXME: This isn't a proper rust stream
 //
 impl WalStreamDecoder {
-    pub fn new(lsn: u64) -> WalStreamDecoder {
+    pub fn new(lsn: Lsn) -> WalStreamDecoder {
         WalStreamDecoder {
             lsn,
 
-            startlsn: 0,
+            startlsn: Lsn(0),
             contlen: 0,
             padlen: 0,
 
@@ -89,10 +90,10 @@ impl WalStreamDecoder {
     ///     Ok(None): there is not enough data in the input buffer. Feed more by calling the `feed_bytes` function
     ///     Err(WalDecodeError): an error occured while decoding, meaning the input was invalid.
     ///
-    pub fn poll_decode(&mut self) -> Result<Option<(u64, Bytes)>, WalDecodeError> {
+    pub fn poll_decode(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError> {
         loop {
             // parse and verify page boundaries as we go
-            if self.lsn % WAL_SEGMENT_SIZE == 0 {
+            if self.lsn.segment_offset(WAL_SEGMENT_SIZE) == 0 {
                 // parse long header
 
                 if self.inputbuf.remaining() < SizeOfXLogLongPHD {
@@ -100,7 +101,7 @@ impl WalStreamDecoder {
                 }
 
                 let hdr = self.decode_XLogLongPageHeaderData();
-                if hdr.std.xlp_pageaddr != self.lsn {
+                if hdr.std.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
                         msg: "invalid xlog segment header".into(),
                         lsn: self.lsn,
@@ -110,7 +111,8 @@ impl WalStreamDecoder {
 
                 self.lsn += SizeOfXLogLongPHD as u64;
                 continue;
-            } else if self.lsn % (XLOG_BLCKSZ as u64) == 0 {
+            } else if self.lsn.0 % (XLOG_BLCKSZ as u64) == 0 {
+                // FIXME: make this a member of Lsn, but what should it be called?
                 // parse page header
 
                 if self.inputbuf.remaining() < SizeOfXLogShortPHD {
@@ -118,7 +120,7 @@ impl WalStreamDecoder {
                 }
 
                 let hdr = self.decode_XLogPageHeaderData();
-                if hdr.xlp_pageaddr != self.lsn {
+                if hdr.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
                         msg: "invalid xlog page header".into(),
                         lsn: self.lsn,
@@ -163,7 +165,8 @@ impl WalStreamDecoder {
                 continue;
             } else {
                 // we're continuing a record, possibly from previous page.
-                let pageleft: u32 = XLOG_BLCKSZ - (self.lsn % (XLOG_BLCKSZ as u64)) as u32;
+                // FIXME: Should any of this math be captured into Lsn or a related type?
+                let pageleft: u32 = XLOG_BLCKSZ - (self.lsn.0 % (XLOG_BLCKSZ as u64)) as u32;
 
                 // read the rest of the record, or as much as fits on this page.
                 let n = min(self.contlen, pageleft) as usize;
@@ -184,16 +187,13 @@ impl WalStreamDecoder {
                     // XLOG_SWITCH records are special. If we see one, we need to skip
                     // to the next WAL segment.
                     if is_xlog_switch_record(&recordbuf) {
-                        trace!(
-                            "saw xlog switch record at {:X}/{:X}",
-                            (self.lsn >> 32),
-                            self.lsn & 0xffffffff
-                        );
-                        self.padlen = (WAL_SEGMENT_SIZE - (self.lsn % WAL_SEGMENT_SIZE)) as u32;
+                        trace!("saw xlog switch record at {}", self.lsn);
+                        self.padlen = (WAL_SEGMENT_SIZE - (self.lsn.0 % WAL_SEGMENT_SIZE)) as u32;
                     }
 
-                    if self.lsn % 8 != 0 {
-                        self.padlen = 8 - (self.lsn % 8) as u32;
+                    // FIXME: what does this code do?
+                    if self.lsn.0 % 8 != 0 {
+                        self.padlen = 8 - (self.lsn.0 % 8) as u32;
                     }
 
                     let result = (self.lsn, recordbuf);
