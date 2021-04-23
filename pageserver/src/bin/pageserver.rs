@@ -229,11 +229,13 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
             if record.level().is_at_least(slog::Level::Info) {
                 return true;
             }
+            /* let's do not be too verbose
             if record.level().is_at_least(slog::Level::Debug)
                 && record.module().starts_with("pageserver")
             {
                 return true;
             }
+            */
             false
         })
         .fuse();

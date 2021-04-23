@@ -5,6 +5,7 @@
 //
 
 use crate::restore_local_repo::restore_timeline;
+use crate::waldecoder::Oid;
 use crate::ZTimelineId;
 use crate::{walredo, zenith_repo_dir, PageServerConf};
 use anyhow::{bail, Context};
@@ -16,8 +17,8 @@ use log::*;
 use rocksdb;
 use std::cmp::min;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicU64};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -494,7 +495,18 @@ impl PageCache {
         Ok(page_img)
     }
 
-    async fn wait_lsn(&self, lsn: u64) -> anyhow::Result<()> {
+    async fn wait_lsn(&self, req_lsn: u64) -> anyhow::Result<u64> {
+        let mut lsn = req_lsn;
+        //When invalid LSN is requested, it means "don't wait, return latest version of the page"
+        //This is necessary for bootstrap.
+        if lsn == 0 {
+            lsn = self.last_valid_lsn.load(Ordering::Acquire);
+            trace!(
+                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
+                self.last_valid_lsn.load(Ordering::Acquire),
+                lsn
+            );
+        }
         self.seqwait_lsn
             .wait_for_timeout(lsn, TIMEOUT)
             .await
@@ -506,7 +518,7 @@ impl PageCache {
                 )
             })?;
 
-        Ok(())
+        Ok(lsn)
     }
 
     //
@@ -517,22 +529,7 @@ impl PageCache {
     pub async fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: u64) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
-        let mut lsn = req_lsn;
-        //When invalid LSN is requested, it means "don't wait, return latest version of the page"
-        //This is necessary for bootstrap.
-        if lsn == 0
-        {
-            lsn = self.last_valid_lsn.load(Ordering::Acquire);
-            trace!(
-                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                self.last_valid_lsn.load(Ordering::Acquire),
-                lsn
-            );
-        }
-        else
-        {
-            self.wait_lsn(lsn).await?;
-        }
+        let lsn = self.wait_lsn(req_lsn).await?;
 
         // Look up cache entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
@@ -555,6 +552,7 @@ impl PageCache {
 
         if entry_opt.is_none() {
             static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+            debug!("Page {:?} at {}({}) not found", tag, req_lsn, lsn);
             return Ok(Bytes::from_static(&ZERO_PAGE));
             /* return Err("could not find page image")?; */
         }
@@ -578,7 +576,7 @@ impl PageCache {
         // FIXME: assumes little-endian. Only used for the debugging log though
         let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
         let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
-        trace!(
+        debug!(
             "Returning page with LSN {:X}/{:X} for {}/{}/{}.{} blk {}",
             page_lsn_hi,
             page_lsn_lo,
@@ -738,7 +736,6 @@ impl PageCache {
         // Can't move backwards.
         let oldlsn = shared.last_valid_lsn;
         if lsn >= oldlsn {
-
             shared.last_valid_lsn = lsn;
             self.seqwait_lsn.advance(lsn);
 
@@ -809,9 +806,10 @@ impl PageCache {
         shared.last_record_lsn
     }
 
-    pub async fn relsize_get(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
+    pub async fn relsize_get(&self, rel: &RelTag, req_lsn: u64) -> anyhow::Result<u32> {
+        let mut lsn = req_lsn;
         if lsn != u64::MAX {
-            self.wait_lsn(lsn).await?;
+            lsn = self.wait_lsn(lsn).await?;
         }
 
         let mut key = CacheKey {
@@ -848,18 +846,18 @@ impl PageCache {
                         }
                     }
                     let relsize = tag.blknum + 1;
-                    trace!("Size of relation {:?} at {} is {}", rel, lsn, relsize);
+                    debug!("Size of relation {:?} at {} is {}", rel, lsn, relsize);
                     return Ok(relsize);
                 }
             }
             break;
         }
-        trace!("Size of relation {:?} at {} is zero", rel, lsn);
+        debug!("Size of relation {:?} at {} is zero", rel, lsn);
         Ok(0)
     }
 
-    pub async fn relsize_exist(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<bool> {
-        self.wait_lsn(lsn).await?;
+    pub async fn relsize_exist(&self, rel: &RelTag, req_lsn: u64) -> anyhow::Result<bool> {
+        let lsn = self.wait_lsn(req_lsn).await?;
 
         let key = CacheKey {
             tag: BufferTag {
@@ -879,11 +877,11 @@ impl PageCache {
             buf.extend_from_slice(&k);
             let tag = BufferTag::unpack(&mut buf);
             if tag.rel == *rel {
-                trace!("Relation {:?} exists at {}", rel, lsn);
+                debug!("Relation {:?} exists at {}", rel, lsn);
                 return Ok(true);
             }
         }
-        trace!("Relation {:?} doesn't exist at {}", rel, lsn);
+        debug!("Relation {:?} doesn't exist at {}", rel, lsn);
         Ok(false)
     }
 
@@ -897,6 +895,56 @@ impl PageCache {
             last_valid_lsn: self.last_valid_lsn.load(Ordering::Relaxed),
             last_record_lsn: self.last_record_lsn.load(Ordering::Relaxed),
         }
+    }
+
+    pub fn create_database(
+        &self,
+        lsn: u64,
+        db_id: Oid,
+        tablespace_id: Oid,
+        src_db_id: Oid,
+        src_tablespace_id: Oid,
+    ) -> anyhow::Result<()> {
+        let mut buf = BytesMut::new();
+        let key = CacheKey {
+            tag: BufferTag {
+                rel: RelTag {
+                    spcnode: src_tablespace_id,
+                    dbnode: src_db_id,
+                    relnode: 0,
+                    forknum: 0u8,
+                },
+                blknum: 0,
+            },
+            lsn: 0,
+        };
+        key.pack(&mut buf);
+        let iter = self.db.iterator(rocksdb::IteratorMode::From(
+            &buf[..],
+            rocksdb::Direction::Forward,
+        ));
+        let mut n = 0;
+        for (k, v) in iter {
+            buf.clear();
+            buf.extend_from_slice(&k);
+            let mut key = CacheKey::unpack(&mut buf);
+            if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
+                break;
+            }
+            key.tag.rel.spcnode = tablespace_id;
+            key.tag.rel.dbnode = db_id;
+            key.lsn = lsn;
+            buf.clear();
+            key.pack(&mut buf);
+
+            self.db.put(&buf[..], v)?;
+            n += 1;
+        }
+        info!(
+            "Create database {}/{}, copy {} entries",
+            tablespace_id, db_id, n
+        );
+        Ok(())
     }
 }
 

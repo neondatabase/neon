@@ -248,7 +248,7 @@ async fn walreceiver_main(
                             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                                 == pg_constants::XLOG_SMGR_TRUNCATE
                         {
-                            let truncate = decode_truncate_record(&decoded);
+                            let truncate = XlSmgrTruncate::decode(&decoded);
                             if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
                                 let tag = BufferTag {
                                     rel: RelTag {
@@ -268,6 +268,18 @@ async fn walreceiver_main(
                                 };
                                 pcache.put_rel_wal_record(tag, rec).await?;
                             }
+                        } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
+                            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                                == pg_constants::XLOG_DBASE_CREATE
+                        {
+                            let createdb = XlCreateDatabase::decode(&decoded);
+                            pcache.create_database(
+                                lsn,
+                                createdb.db_id,
+                                createdb.tablespace_id,
+                                createdb.src_db_id,
+                                createdb.src_tablespace_id,
+                            )?;
                         }
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN

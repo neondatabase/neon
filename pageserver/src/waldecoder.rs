@@ -2,8 +2,8 @@ use crate::pg_constants;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::cmp::min;
-use thiserror::Error;
 use std::str;
+use thiserror::Error;
 
 const XLOG_BLCKSZ: u32 = 8192;
 
@@ -378,17 +378,41 @@ pub struct XlSmgrTruncate {
     pub flags: u32,
 }
 
-pub fn decode_truncate_record(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
-    let mut buf = decoded.record.clone();
-    buf.advance((SizeOfXLogRecord + 2) as usize);
-    XlSmgrTruncate {
-        blkno: buf.get_u32_le(),
-        rnode: RelFileNode {
-            spcnode: buf.get_u32_le(), /* tablespace */
-            dbnode: buf.get_u32_le(),  /* database */
-            relnode: buf.get_u32_le(), /* relation */
-        },
-        flags: buf.get_u32_le(),
+impl XlSmgrTruncate {
+    pub fn decode(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
+        let mut buf = decoded.record.clone();
+        buf.advance((SizeOfXLogRecord + 2) as usize);
+        XlSmgrTruncate {
+            blkno: buf.get_u32_le(),
+            rnode: RelFileNode {
+                spcnode: buf.get_u32_le(), /* tablespace */
+                dbnode: buf.get_u32_le(),  /* database */
+                relnode: buf.get_u32_le(), /* relation */
+            },
+            flags: buf.get_u32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlCreateDatabase {
+    pub db_id: Oid,
+    pub tablespace_id: Oid,
+    pub src_db_id: Oid,
+    pub src_tablespace_id: Oid,
+}
+
+impl XlCreateDatabase {
+    pub fn decode(decoded: &DecodedWALRecord) -> XlCreateDatabase {
+        let mut buf = decoded.record.clone();
+        buf.advance((SizeOfXLogRecord + 2) as usize);
+        XlCreateDatabase {
+            db_id: buf.get_u32_le(),
+            tablespace_id: buf.get_u32_le(),
+            src_db_id: buf.get_u32_le(),
+            src_tablespace_id: buf.get_u32_le(),
+        }
     }
 }
 
@@ -678,38 +702,34 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             blocks.push(blk);
             //TODO parse abort record to extract subtrans entries
         }
-    }
-    else if xl_rmid == pg_constants::RM_DBASE_ID
-    {
+    } else if xl_rmid == pg_constants::RM_DBASE_ID {
         let info = xl_info & !pg_constants::XLR_INFO_MASK;
-        if info == pg_constants::XLOG_DBASE_CREATE
-        {
+        if info == pg_constants::XLOG_DBASE_CREATE {
             //buf points to main_data
-            let db_id =  buf.get_u32_le();
-            let tablespace_id =  buf.get_u32_le();
-            let src_db_id =  buf.get_u32_le();
-            let src_tablespace_id =  buf.get_u32_le();
-            trace!("XLOG_DBASE_CREATE db_id {} src_db_id {}", db_id, src_db_id);
+            let db_id = buf.get_u32_le();
+            let tablespace_id = buf.get_u32_le();
+            let src_db_id = buf.get_u32_le();
+            let src_tablespace_id = buf.get_u32_le();
+            trace!(
+                "XLOG_DBASE_CREATE tablespace_id/db_id {}/{} src_db_id {}/{}",
+                tablespace_id,
+                db_id,
+                src_tablespace_id,
+                src_db_id
+            );
             // in postgres it is implemented as copydir
             // we need to copy all pages in page_cache
-        }
-        else
-        {
+        } else {
             trace!("XLOG_DBASE_DROP is not handled yet");
         }
-    }
-    else if xl_rmid == pg_constants::RM_TBLSPC_ID
-    {
+    } else if xl_rmid == pg_constants::RM_TBLSPC_ID {
         let info = xl_info & !pg_constants::XLR_INFO_MASK;
-        if info == pg_constants::XLOG_TBLSPC_CREATE
-        {
+        if info == pg_constants::XLOG_TBLSPC_CREATE {
             //buf points to main_data
-            let ts_id =  buf.get_u32_le();
+            let ts_id = buf.get_u32_le();
             let ts_path = str::from_utf8(&buf).unwrap();
             trace!("XLOG_TBLSPC_CREATE ts_id {} ts_path {}", ts_id, ts_path);
-        }
-        else
-        {
+        } else {
             trace!("XLOG_TBLSPC_DROP is not handled yet");
         }
     }
