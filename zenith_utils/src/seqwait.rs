@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 use std::collections::BTreeMap;
 use std::mem;
 use std::sync::Mutex;
