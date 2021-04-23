@@ -15,6 +15,7 @@ use crate::ZTimelineId;
 use anyhow::Error;
 use lazy_static::lazy_static;
 use log::*;
+use postgres_ffi::xlog_utils::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use std::collections::HashMap;
@@ -30,7 +31,6 @@ use tokio::time::{sleep, Duration};
 use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
 use tokio_postgres::{NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
-use postgres_ffi::xlog_utils::*;
 
 //
 // We keep one WAL Receiver active per timeline.

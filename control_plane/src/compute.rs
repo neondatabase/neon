@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::TcpStream;
@@ -399,6 +399,14 @@ impl PostgresNode {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
+    fn dump_log_file(&self) {
+        if let Ok(mut file) = File::open(self.env.repo_path.join("pageserver.log")) {
+            let mut buffer = String::new();
+            file.read_to_string(&mut buffer).unwrap();
+            println!("--------------- Dump pageserver.log:\n{}", buffer);
+        }
+    }
+
     pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<tokio_postgres::Row> {
         let connstring = format!(
             "host={} port={} dbname={} user={}",
@@ -410,7 +418,11 @@ impl PostgresNode {
         let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
 
         println!("Running {}", sql);
-        client.query(sql, &[]).unwrap()
+        let result = client.query(sql, &[]);
+        if result.is_err() {
+            self.dump_log_file();
+        }
+        result.unwrap()
     }
 
     pub fn open_psql(&self, db: &str) -> Client {
