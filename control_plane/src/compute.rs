@@ -400,11 +400,11 @@ impl PostgresNode {
     }
 
     fn dump_log_file(&self) {
-		if let Ok(mut file) = File::open(self.env.repo_path.join("pageserver.log")) {
-			let mut buffer = String::new();
-			file.read_to_string(&mut buffer).unwrap();
-			println!("--------------- Dump pageserver.log:\n{}", buffer);
-		}
+        if let Ok(mut file) = File::open(self.env.repo_path.join("pageserver.log")) {
+            let mut buffer = String::new();
+            file.read_to_string(&mut buffer).unwrap();
+            println!("--------------- Dump pageserver.log:\n{}", buffer);
+        }
     }
 
     pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<tokio_postgres::Row> {

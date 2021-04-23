@@ -497,35 +497,36 @@ impl PageCache {
     }
 
     async fn wait_lsn(&self, lsn: u64) -> anyhow::Result<()> {
-        let walreceiver_works = self.walreceiver_works.load(Ordering::Acquire);
-        if walreceiver_works {
-            self.seqwait_lsn
-                .wait_for_timeout(lsn, TIMEOUT)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
-                        lsn >> 32,
-                        lsn & 0xffff_ffff
-                    )
-                })?;
-        } else {
-            // There is a a race at postgres instance start
-            // when we request a page before walsender established connection
-            // and was able to stream the page. Just don't wait and return what we have.
-            // TODO is there any corner case when this is incorrect?
-            trace!(
-                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                self.last_valid_lsn.load(Ordering::Acquire),
-                lsn
-            );
+        loop {
+            let walreceiver_works = self.walreceiver_works.load(Ordering::Acquire);
+            if walreceiver_works {
+                self.seqwait_lsn
+                    .wait_for_timeout(lsn, TIMEOUT)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
+                            lsn >> 32,
+                            lsn & 0xffff_ffff
+                        )
+                    })?;
+                break;
+            } else {
+                // There is a a race at postgres instance start
+                // when we request a page before walsender established connection
+                // and was able to stream the page. Just don't wait and return what we have.
+                // TODO is there any corner case when this is incorrect?
+                info!(
+                    "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
+                    self.last_valid_lsn.load(Ordering::Acquire),
+                    lsn
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
 
         let shared = self.shared.lock().unwrap();
-
-        if walreceiver_works {
-            assert!(lsn <= shared.last_valid_lsn);
-        }
+        assert!(lsn <= shared.last_valid_lsn);
         Ok(())
     }
 
@@ -857,13 +858,13 @@ impl PageCache {
                         }
                     }
                     let relsize = tag.blknum + 1;
-                    info!("Size of relation {:?} at {} is {}", rel, lsn, relsize);
+                    trace!("Size of relation {:?} at {} is {}", rel, lsn, relsize);
                     return Ok(relsize);
                 }
             }
             break;
         }
-        info!("Size of relation {:?} at {} is zero", rel, lsn);
+        trace!("Size of relation {:?} at {} is zero", rel, lsn);
         Ok(0)
     }
 
@@ -888,11 +889,11 @@ impl PageCache {
             buf.extend_from_slice(&k);
             let tag = BufferTag::unpack(&mut buf);
             if tag.rel == *rel {
-                info!("Relation {:?} exists at {}", rel, lsn);
+                trace!("Relation {:?} exists at {}", rel, lsn);
                 return Ok(true);
             }
         }
-        info!("Relation {:?} doesn't exist at {}", rel, lsn);
+        trace!("Relation {:?} doesn't exist at {}", rel, lsn);
         Ok(false)
     }
 
