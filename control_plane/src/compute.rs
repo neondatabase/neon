@@ -400,7 +400,7 @@ impl PostgresNode {
     }
 
     fn dump_log_file(&self) {
-		if let Ok(mut file) = File::open(zenith_repo_dir().join("pageserver.log")) {
+		if let Ok(mut file) = File::open(self.env.repo_path.join("pageserver.log")) {
 			let mut buffer = String::new();
 			file.read_to_string(&mut buffer).unwrap();
 			println!("--------------- Dump pageserver.log:\n{}", buffer);
