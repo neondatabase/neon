@@ -19,8 +19,8 @@ use slog::Drain;
 
 use pageserver::{page_service, tui, zenith_repo_dir, PageServerConf};
 
-const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-const DEFAULT_GC_PERIOD_SEC: u64 = 10;
+const DEFAULT_GC_HORIZON: u64 = 1024 * 1024 * 1024;
+const DEFAULT_GC_PERIOD_SEC: u64 = 600;
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
@@ -213,7 +213,7 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {
-            if record.level().is_at_least(slog::Level::Debug) {
+            if record.level().is_at_least(slog::Level::Info) {
                 return true;
             }
             false
@@ -229,13 +229,11 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
             if record.level().is_at_least(slog::Level::Info) {
                 return true;
             }
-            /* let's do not be too verbose
             if record.level().is_at_least(slog::Level::Debug)
                 && record.module().starts_with("pageserver")
             {
                 return true;
             }
-            */
             false
         })
         .fuse();

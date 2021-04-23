@@ -21,7 +21,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{convert::TryInto, ops::AddAssign};
 use zenith_utils::seqwait::SeqWait;
 
@@ -122,7 +122,6 @@ pub fn get_or_restore_pagecache(
     timelineid: ZTimelineId,
 ) -> anyhow::Result<Arc<PageCache>> {
     let mut pcaches = PAGECACHES.lock().unwrap();
-
     match pcaches.get(&timelineid) {
         Some(pcache) => Ok(pcache.clone()),
         None => {
@@ -403,6 +402,9 @@ impl PageCache {
                     },
                     lsn: u64::MAX,
                 };
+                let now = Instant::now();
+                let mut reconstructed = 0u64;
+                let mut truncated = 0u64;
                 loop {
                     maxbuf.clear();
                     maxkey.pack(&mut maxbuf);
@@ -431,6 +433,7 @@ impl PageCache {
                             trace!("Reconstruct most recent page {:?}", key);
                             // force reconstruction of most recent page version
                             self.reconstruct_page(key, content)?;
+                            reconstructed += 1;
                         }
 
                         maxbuf.clear();
@@ -452,6 +455,7 @@ impl PageCache {
                                     let key = CacheKey::unpack(&mut minbuf);
                                     trace!("Reconstruct horizon page {:?}", key);
                                     self.reconstruct_page(key, content)?;
+                                    truncated += 1;
                                 }
                             }
                         }
@@ -466,6 +470,7 @@ impl PageCache {
                         break;
                     }
                 }
+                info!("Garbage collection completed in {:?}: {} pages reconstructed, {} version histories truncated", now.elapsed(), reconstructed, truncated);
             }
         }
     }
