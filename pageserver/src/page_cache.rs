@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{convert::TryInto, ops::AddAssign};
+use zenith_utils::lsn::Lsn;
 use zenith_utils::seqwait::SeqWait;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
@@ -62,7 +63,7 @@ pub struct PageCache {
     walredo_mgr: WalRedoManager,
 
     // Allows .await on the arrival of a particular LSN.
-    seqwait_lsn: SeqWait,
+    seqwait_lsn: SeqWait<Lsn>,
 
     // Counters, for metrics collection.
     pub num_entries: AtomicU64,
@@ -120,9 +121,9 @@ struct PageCacheShared {
     // walreceiver.rs instead of here, but it seems convenient to keep all three
     // values together.
     //
-    first_valid_lsn: u64,
-    last_valid_lsn: u64,
-    last_record_lsn: u64,
+    first_valid_lsn: Lsn,
+    last_valid_lsn: Lsn,
+    last_record_lsn: Lsn,
 }
 
 lazy_static! {
@@ -204,16 +205,16 @@ fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB 
 fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache {
     PageCache {
         shared: Mutex::new(PageCacheShared {
-            first_valid_lsn: 0,
-            last_valid_lsn: 0,
-            last_record_lsn: 0,
+            first_valid_lsn: Lsn(0),
+            last_valid_lsn: Lsn(0),
+            last_record_lsn: Lsn(0),
         }),
 
         db: open_rocksdb(&conf, timelineid),
 
         walredo_mgr: WalRedoManager::new(conf, timelineid),
 
-        seqwait_lsn: SeqWait::new(0),
+        seqwait_lsn: SeqWait::new(Lsn(0)),
 
         num_entries: AtomicU64::new(0),
         num_page_images: AtomicU64::new(0),
@@ -242,18 +243,18 @@ fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct CacheKey {
     pub tag: BufferTag,
-    pub lsn: u64,
+    pub lsn: Lsn,
 }
 
 impl CacheKey {
     pub fn pack(&self, buf: &mut BytesMut) {
         self.tag.pack(buf);
-        buf.put_u64(self.lsn);
+        buf.put_u64(self.lsn.0);
     }
     pub fn unpack(buf: &mut BytesMut) -> CacheKey {
         CacheKey {
             tag: BufferTag::unpack(buf),
-            lsn: buf.get_u64(),
+            lsn: Lsn::from(buf.get_u64()),
         }
     }
 }
@@ -343,7 +344,7 @@ impl BufferTag {
 
 #[derive(Debug, Clone)]
 pub struct WALRecord {
-    pub lsn: u64, // LSN at the *end* of the record
+    pub lsn: Lsn, // LSN at the *end* of the record
     pub will_init: bool,
     pub truncate: bool,
     pub rec: Bytes,
@@ -355,7 +356,7 @@ pub struct WALRecord {
 
 impl WALRecord {
     pub fn pack(&self, buf: &mut BytesMut) {
-        buf.put_u64(self.lsn);
+        buf.put_u64(self.lsn.0);
         buf.put_u8(self.will_init as u8);
         buf.put_u8(self.truncate as u8);
         buf.put_u32(self.main_data_offset);
@@ -363,7 +364,7 @@ impl WALRecord {
         buf.put_slice(&self.rec[..]);
     }
     pub fn unpack(buf: &mut BytesMut) -> WALRecord {
-        let lsn = buf.get_u64();
+        let lsn = Lsn::from(buf.get_u64());
         let will_init = buf.get_u8() != 0;
         let truncate = buf.get_u8() != 0;
         let main_data_offset = buf.get_u32();
@@ -387,7 +388,7 @@ impl PageCache {
     ///
     /// Returns an 8k page image
     ///
-    pub async fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: u64) -> anyhow::Result<Bytes> {
+    pub async fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: Lsn) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
         let lsn = self.wait_lsn(req_lsn).await?;
@@ -448,7 +449,7 @@ impl PageCache {
     ///
     /// Get size of relation at given LSN.
     ///
-    pub async fn relsize_get(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
+    pub async fn relsize_get(&self, rel: &RelTag, lsn: Lsn) -> anyhow::Result<u32> {
         self.wait_lsn(lsn).await?;
         return self.relsize_get_nowait(rel, lsn);
     }
@@ -456,7 +457,7 @@ impl PageCache {
     ///
     /// Does relation exist at given LSN?
     ///
-    pub async fn relsize_exist(&self, rel: &RelTag, req_lsn: u64) -> anyhow::Result<bool> {
+    pub async fn relsize_exist(&self, rel: &RelTag, req_lsn: Lsn) -> anyhow::Result<bool> {
         let lsn = self.wait_lsn(req_lsn).await?;
 
         let key = CacheKey {
@@ -497,7 +498,7 @@ impl PageCache {
     pub fn collect_records_for_apply(
         &self,
         tag: BufferTag,
-        lsn: u64,
+        lsn: Lsn,
     ) -> (Option<Bytes>, Vec<WALRecord>) {
         let mut buf = BytesMut::new();
         let key = CacheKey { tag, lsn };
@@ -576,7 +577,7 @@ impl PageCache {
         let mut key = CacheKey { tag, lsn: rec.lsn };
 
         // What was the size of the relation before this record?
-        let last_lsn = self.last_valid_lsn.load(Ordering::Acquire);
+        let last_lsn = Lsn::from(self.last_valid_lsn.load(Ordering::Acquire));
         let old_rel_size = self.relsize_get_nowait(&tag.rel, last_lsn)?;
 
         let content = CacheEntryContent {
@@ -606,7 +607,7 @@ impl PageCache {
     ///
     /// Memorize a full image of a page version
     ///
-    pub fn put_page_image(&self, tag: BufferTag, lsn: u64, img: Bytes) {
+    pub fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) {
         let key = CacheKey { tag, lsn };
         let content = CacheEntryContent {
             page_image: Some(img),
@@ -629,7 +630,7 @@ impl PageCache {
 
     pub fn create_database(
         &self,
-        lsn: u64,
+        lsn: Lsn,
         db_id: Oid,
         tablespace_id: Oid,
         src_db_id: Oid,
@@ -646,7 +647,7 @@ impl PageCache {
                 },
                 blknum: 0,
             },
-            lsn: 0,
+            lsn: Lsn(0),
         };
         key.pack(&mut buf);
         let mut iter = self.db.raw_iterator();
@@ -679,22 +680,19 @@ impl PageCache {
     }
 
     /// Remember that WAL has been received and added to the page cache up to the given LSN
-    pub fn advance_last_valid_lsn(&self, lsn: u64) {
+    pub fn advance_last_valid_lsn(&self, lsn: Lsn) {
         let mut shared = self.shared.lock().unwrap();
 
         // Can't move backwards.
         let oldlsn = shared.last_valid_lsn;
         if lsn >= oldlsn {
             shared.last_valid_lsn = lsn;
-            self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+            self.last_valid_lsn.store(lsn.0, Ordering::Relaxed);
             self.seqwait_lsn.advance(lsn);
         } else {
             warn!(
-                "attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
-                oldlsn >> 32,
-                oldlsn & 0xffffffff,
-                lsn >> 32,
-                lsn & 0xffffffff
+                "attempted to move last valid LSN backwards (was {}, new {})",
+                oldlsn, lsn
             );
         }
     }
@@ -704,7 +702,7 @@ impl PageCache {
     ///
     /// NOTE: this updates last_valid_lsn as well.
     ///
-    pub fn advance_last_record_lsn(&self, lsn: u64) {
+    pub fn advance_last_record_lsn(&self, lsn: Lsn) {
         let mut shared = self.shared.lock().unwrap();
 
         // Can't move backwards.
@@ -713,8 +711,8 @@ impl PageCache {
 
         shared.last_valid_lsn = lsn;
         shared.last_record_lsn = lsn;
-        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
-        self.last_record_lsn.store(lsn, Ordering::Relaxed);
+        self.last_valid_lsn.store(lsn.0, Ordering::Relaxed);
+        self.last_record_lsn.store(lsn.0, Ordering::Relaxed);
         self.seqwait_lsn.advance(lsn);
     }
 
@@ -723,7 +721,7 @@ impl PageCache {
     ///
     /// TODO: This should be called by garbage collection, so that if an older
     /// page is requested, we will return an error to the requestor.
-    pub fn _advance_first_valid_lsn(&self, lsn: u64) {
+    pub fn _advance_first_valid_lsn(&self, lsn: Lsn) {
         let mut shared = self.shared.lock().unwrap();
 
         // Can't move backwards.
@@ -731,29 +729,29 @@ impl PageCache {
 
         // Can't overtake last_valid_lsn (except when we're
         // initializing the system and last_valid_lsn hasn't been set yet.
-        assert!(shared.last_valid_lsn == 0 || lsn < shared.last_valid_lsn);
+        assert!(shared.last_valid_lsn == Lsn(0) || lsn < shared.last_valid_lsn);
 
         shared.first_valid_lsn = lsn;
-        self.first_valid_lsn.store(lsn, Ordering::Relaxed);
+        self.first_valid_lsn.store(lsn.0, Ordering::Relaxed);
     }
 
-    pub fn init_valid_lsn(&self, lsn: u64) {
+    pub fn init_valid_lsn(&self, lsn: Lsn) {
         let mut shared = self.shared.lock().unwrap();
 
-        assert!(shared.first_valid_lsn == 0);
-        assert!(shared.last_valid_lsn == 0);
-        assert!(shared.last_record_lsn == 0);
+        assert!(shared.first_valid_lsn == Lsn(0));
+        assert!(shared.last_valid_lsn == Lsn(0));
+        assert!(shared.last_record_lsn == Lsn(0));
 
         shared.first_valid_lsn = lsn;
         shared.last_valid_lsn = lsn;
         shared.last_record_lsn = lsn;
 
-        self.first_valid_lsn.store(lsn, Ordering::Relaxed);
-        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
-        self.last_record_lsn.store(lsn, Ordering::Relaxed);
+        self.first_valid_lsn.store(lsn.0, Ordering::Relaxed);
+        self.last_valid_lsn.store(lsn.0, Ordering::Relaxed);
+        self.last_record_lsn.store(lsn.0, Ordering::Relaxed);
     }
 
-    pub fn get_last_valid_lsn(&self) -> u64 {
+    pub fn get_last_valid_lsn(&self) -> Lsn {
         let shared = self.shared.lock().unwrap();
 
         shared.last_record_lsn
@@ -781,8 +779,8 @@ impl PageCache {
     //
     // The caller must ensure that WAL has been received up to 'lsn'.
     //
-    fn relsize_get_nowait(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
-        assert!(lsn <= self.last_valid_lsn.load(Ordering::Acquire));
+    fn relsize_get_nowait(&self, rel: &RelTag, lsn: Lsn) -> anyhow::Result<u32> {
+        assert!(lsn.0 <= self.last_valid_lsn.load(Ordering::Acquire));
 
         let mut key = CacheKey {
             tag: BufferTag {
@@ -833,7 +831,7 @@ impl PageCache {
         loop {
             thread::sleep(conf.gc_period);
             let last_lsn = self.get_last_valid_lsn();
-            if last_lsn > conf.gc_horizon {
+            if last_lsn.0 > conf.gc_horizon {
                 let horizon = last_lsn - conf.gc_horizon;
                 let mut maxkey = CacheKey {
                     tag: BufferTag {
@@ -845,7 +843,7 @@ impl PageCache {
                         },
                         blknum: u32::MAX,
                     },
-                    lsn: u64::MAX,
+                    lsn: Lsn::MAX,
                 };
                 let now = Instant::now();
                 let mut reconstructed = 0u64;
@@ -873,7 +871,7 @@ impl PageCache {
                         maxkey.lsn = min(horizon, last_lsn); // do not remove last version
 
                         let mut minkey = maxkey.clone();
-                        minkey.lsn = 0; // first version
+                        minkey.lsn = Lsn(0); // first version
 
                         // reconstruct most recent page version
                         if (v[0] & PAGE_IMAGE_FLAG) == 0 {
@@ -942,12 +940,12 @@ impl PageCache {
     //
     // Wait until WAL has been received up to the given LSN.
     //
-    async fn wait_lsn(&self, req_lsn: u64) -> anyhow::Result<u64> {
+    async fn wait_lsn(&self, req_lsn: Lsn) -> anyhow::Result<Lsn> {
         let mut lsn = req_lsn;
         //When invalid LSN is requested, it means "don't wait, return latest version of the page"
         //This is necessary for bootstrap.
-        if lsn == 0 {
-            lsn = self.last_valid_lsn.load(Ordering::Acquire);
+        if lsn == Lsn(0) {
+            lsn = Lsn::from(self.last_valid_lsn.load(Ordering::Acquire));
             trace!(
                 "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
                 self.last_valid_lsn.load(Ordering::Acquire),
@@ -960,9 +958,8 @@ impl PageCache {
             .await
             .with_context(|| {
                 format!(
-                    "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
-                    lsn >> 32,
-                    lsn & 0xffff_ffff
+                    "Timed out while waiting for WAL record at LSN {} to arrive",
+                    lsn
                 )
             })?;
 

@@ -34,6 +34,7 @@ use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::xlog_utils::*;
+use zenith_utils::lsn::Lsn;
 
 // From pg_tablespace_d.h
 //
@@ -60,20 +61,21 @@ pub fn restore_timeline(
         .join(timeline.to_string())
         .join("snapshots");
 
-    let mut last_snapshot_lsn: u64 = 0;
+    let mut last_snapshot_lsn: Lsn = Lsn(0);
 
     for direntry in fs::read_dir(&snapshotspath).unwrap() {
         let direntry = direntry?;
-        let filename = direntry.file_name().to_str().unwrap().to_owned();
-
-        let lsn = u64::from_str_radix(&filename, 16)?;
+        let filename = direntry.file_name();
+        let lsn = Lsn::from_filename(&filename)?;
         last_snapshot_lsn = max(lsn, last_snapshot_lsn);
 
-        restore_snapshot(conf, pcache, timeline, &filename)?;
-        info!("restored snapshot at {}", filename);
+        // FIXME: pass filename as Path instead of str?
+        let filename_str = filename.into_string().unwrap();
+        restore_snapshot(conf, pcache, timeline, &filename_str)?;
+        info!("restored snapshot at {:?}", filename_str);
     }
 
-    if last_snapshot_lsn == 0 {
+    if last_snapshot_lsn == Lsn(0) {
         error!(
             "could not find valid snapshot in {}",
             snapshotspath.display()
@@ -183,7 +185,7 @@ fn restore_relfile(
     dboid: u32,
     path: &Path,
 ) -> Result<()> {
-    let lsn = u64::from_str_radix(snapshot, 16)?;
+    let lsn = Lsn::from_hex(snapshot)?;
 
     // Does it look like a relation file?
 
@@ -245,15 +247,16 @@ fn restore_wal(
     _conf: &PageServerConf,
     pcache: &PageCache,
     timeline: ZTimelineId,
-    startpoint: u64,
+    startpoint: Lsn,
 ) -> Result<()> {
     let walpath = format!("timelines/{}/wal", timeline);
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
-    let mut segno = XLByteToSeg(startpoint, 16 * 1024 * 1024);
-    let mut offset = XLogSegmentOffset(startpoint, 16 * 1024 * 1024);
-    let mut last_lsn = 0;
+    const SEG_SIZE: u64 = 16 * 1024 * 1024;
+    let mut segno = startpoint.segment_number(SEG_SIZE);
+    let mut offset = startpoint.segment_offset(SEG_SIZE);
+    let mut last_lsn = Lsn(0);
     loop {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, 16 * 1024 * 1024);
@@ -336,11 +339,7 @@ fn restore_wal(
         segno += 1;
         offset = 0;
     }
-    info!(
-        "reached end of WAL at {:X}/{:X}",
-        last_lsn >> 32,
-        last_lsn & 0xffffffff
-    );
+    info!("reached end of WAL at {}", last_lsn);
 
     Ok(())
 }

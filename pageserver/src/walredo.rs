@@ -14,6 +14,7 @@
 // TODO: Even though the postgres code runs in a separate process,
 // it's not a secure sandbox.
 //
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::assert;
 use std::cell::RefCell;
@@ -31,8 +32,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
-
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use zenith_utils::lsn::Lsn;
 
 use crate::page_cache::BufferTag;
 use crate::page_cache::PageCache;
@@ -67,7 +67,7 @@ struct WalRedoManagerInternal {
 #[derive(Debug)]
 struct WalRedoRequest {
     tag: BufferTag,
-    lsn: u64,
+    lsn: Lsn,
 
     response_channel: oneshot::Sender<Result<Bytes, WalRedoError>>,
 }
@@ -138,7 +138,7 @@ impl WalRedoManager {
     /// Request the WAL redo manager to apply WAL records, to reconstruct the page image
     /// of the given page version.
     ///
-    pub async fn request_redo(&self, tag: BufferTag, lsn: u64) -> Result<Bytes, WalRedoError> {
+    pub async fn request_redo(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes, WalRedoError> {
         // Create a channel where to receive the response
         let (tx, rx) = oneshot::channel::<Result<Bytes, WalRedoError>>();
 
@@ -225,18 +225,16 @@ impl WalRedoManagerInternal {
         } else if info == pg_constants::XLOG_XACT_ABORT {
             status = pg_constants::TRANSACTION_STATUS_ABORTED;
         } else {
-            trace!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {:X}/{:X} main_data_offset {}, rec.len {}",
+            trace!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {} main_data_offset {}, rec.len {}",
                    status,
-                   record.lsn >> 32,
-                   record.lsn & 0xffffffff,
+                   record.lsn,
                    record.main_data_offset, record.rec.len());
             return;
         }
 
-        trace!("handle_apply_request for RM_XACT_ID-{} (1-commit, 2-abort) lsn {:X}/{:X} main_data_offset {}, rec.len {}",
+        trace!("handle_apply_request for RM_XACT_ID-{} (1-commit, 2-abort) lsn {} main_data_offset {}, rec.len {}",
                status,
-               record.lsn >> 32,
-               record.lsn & 0xffffffff,
+               record.lsn,
                record.main_data_offset, record.rec.len());
 
         let byteno: usize = ((xl_rmid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
@@ -305,9 +303,8 @@ impl WalRedoManagerInternal {
                     let info = xl_info & !pg_constants::XLR_INFO_MASK;
                     if info == pg_constants::CLOG_ZEROPAGE {
                         page.clone_from_slice(zero_page_bytes);
-                        trace!("handle_apply_request for RM_CLOG_ID-CLOG_ZEROPAGE lsn {:X}/{:X} main_data_offset {}, rec.len {}",
-                               record.lsn >> 32,
-                               record.lsn & 0xffffffff,
+                        trace!("handle_apply_request for RM_CLOG_ID-CLOG_ZEROPAGE lsn {} main_data_offset {}, rec.len {}",
+                               record.lsn,
                                record.main_data_offset, record.rec.len());
                     }
                 } else if xl_rmid == pg_constants::RM_XACT_ID {
@@ -325,11 +322,10 @@ impl WalRedoManagerInternal {
         let result: Result<Bytes, WalRedoError>;
 
         trace!(
-            "applied {} WAL records in {} ms to reconstruct page image at LSN {:X}/{:X}",
+            "applied {} WAL records in {} ms to reconstruct page image at LSN {}",
             nrecords,
             duration.as_millis(),
-            lsn >> 32,
-            lsn & 0xffff_ffff
+            lsn
         );
 
         if let Err(e) = apply_result {
@@ -536,13 +532,13 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
     buf.freeze()
 }
 
-fn build_apply_record_msg(endlsn: u64, rec: Bytes) -> Bytes {
+fn build_apply_record_msg(endlsn: Lsn, rec: Bytes) -> Bytes {
     let len = 4 + 8 + rec.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'A');
     buf.put_u32(len as u32);
-    buf.put_u64(endlsn);
+    buf.put_u64(endlsn.0);
     buf.put(rec);
 
     assert!(buf.len() == 1 + len);

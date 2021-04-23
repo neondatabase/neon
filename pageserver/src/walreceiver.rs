@@ -31,6 +31,7 @@ use tokio::time::{sleep, Duration};
 use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
 use tokio_postgres::{NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
+use zenith_utils::lsn::Lsn;
 
 //
 // We keep one WAL Receiver active per timeline.
@@ -138,7 +139,7 @@ async fn walreceiver_main(
 
     let identify = identify_system(&rclient).await?;
     info!("{:?}", identify);
-    let end_of_wal = u64::from(identify.xlogpos);
+    let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
     let pcache = page_cache::get_pagecache(&conf, timelineid).unwrap();
@@ -148,7 +149,7 @@ async fn walreceiver_main(
     //
     let mut startpoint = pcache.get_last_valid_lsn();
     let last_valid_lsn = pcache.get_last_valid_lsn();
-    if startpoint == 0 {
+    if startpoint == Lsn(0) {
         // If we start here with identify.xlogpos we will have race condition with
         // postgres start: insert into postgres may request page that was modified with lsn
         // smaller than identify.xlogpos.
@@ -157,37 +158,31 @@ async fn walreceiver_main(
         // different like having 'initdb' method on a pageserver (or importing some shared
         // empty database snapshot), so for now I just put start of first segment which
         // seems to be a valid record.
-        pcache.init_valid_lsn(0x_1_000_000_u64);
-        startpoint = 0x_1_000_000_u64;
+        pcache.init_valid_lsn(Lsn(0x_1_000_000));
+        startpoint = Lsn(0x_1_000_000);
     } else {
         // There might be some padding after the last full record, skip it.
         //
         // FIXME: It probably would be better to always start streaming from the beginning
         // of the page, or the segment, so that we could check the page/segment headers
         // too. Just for the sake of paranoia.
-        if startpoint % 8 != 0 {
-            startpoint += 8 - (startpoint % 8);
+        // FIXME: should any of this logic move inside the Lsn type?
+        if startpoint.0 % 8 != 0 {
+            startpoint += 8 - (startpoint.0 % 8);
         }
     }
     debug!(
-        "last_valid_lsn {:X}/{:X} starting replication from {:X}/{:X}  for timeline {}, server is at {:X}/{:X}...",
-        (last_valid_lsn >> 32),
-        (last_valid_lsn & 0xffffffff),
-        (startpoint >> 32),
-        (startpoint & 0xffffffff),
-        timelineid,
-        (end_of_wal >> 32),
-        (end_of_wal & 0xffffffff)
+        "last_valid_lsn {} starting replication from {}  for timeline {}, server is at {}...",
+        last_valid_lsn, startpoint, timelineid, end_of_wal
     );
 
-    let startpoint = PgLsn::from(startpoint);
     let query = format!("START_REPLICATION PHYSICAL {}", startpoint);
     let copy_stream = rclient.copy_both_simple::<bytes::Bytes>(&query).await?;
 
     let physical_stream = ReplicationStream::new(copy_stream);
     tokio::pin!(physical_stream);
 
-    let mut waldecoder = WalStreamDecoder::new(u64::from(startpoint));
+    let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     while let Some(replication_message) = physical_stream.next().await {
         match replication_message? {
@@ -195,7 +190,7 @@ async fn walreceiver_main(
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.
                 let data = xlog_data.data();
-                let startlsn = xlog_data.wal_start();
+                let startlsn = Lsn::from(xlog_data.wal_start());
                 let endlsn = startlsn + data.len() as u64;
 
                 write_wal_file(
@@ -205,13 +200,7 @@ async fn walreceiver_main(
                     data,
                 )?;
 
-                trace!(
-                    "received XLogData between {:X}/{:X} and {:X}/{:X}",
-                    (startlsn >> 32),
-                    (startlsn & 0xffffffff),
-                    (endlsn >> 32),
-                    (endlsn & 0xffffffff)
-                );
+                trace!("received XLogData between {} and {}", startlsn, endlsn);
 
                 waldecoder.feed_bytes(data);
 
@@ -298,11 +287,7 @@ async fn walreceiver_main(
                 pcache.advance_last_valid_lsn(endlsn);
 
                 if !caught_up && endlsn >= end_of_wal {
-                    info!(
-                        "caught up at LSN {:X}/{:X}",
-                        (endlsn >> 32),
-                        (endlsn & 0xffffffff)
-                    );
+                    info!("caught up at LSN {}", endlsn);
                     caught_up = true;
                 }
             }
@@ -320,7 +305,7 @@ async fn walreceiver_main(
                 );
                 if reply_requested {
                     // TODO: More thought should go into what values are sent here.
-                    let last_lsn = PgLsn::from(pcache.get_last_valid_lsn());
+                    let last_lsn = PgLsn::from(u64::from(pcache.get_last_valid_lsn()));
                     let write_lsn = last_lsn;
                     let flush_lsn = last_lsn;
                     let apply_lsn = PgLsn::INVALID;
@@ -387,7 +372,7 @@ pub async fn identify_system(client: &tokio_postgres::Client) -> Result<Identify
 }
 
 fn write_wal_file(
-    startpos: XLogRecPtr,
+    startpos: Lsn,
     timeline: ZTimelineId,
     wal_seg_size: usize,
     buf: &[u8],
@@ -401,7 +386,7 @@ fn write_wal_file(
     let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
 
     /* Extract WAL location for this block */
-    let mut xlogoff = XLogSegmentOffset(start_pos, wal_seg_size) as usize;
+    let mut xlogoff = start_pos.segment_offset(wal_seg_size as u64) as usize;
 
     while bytes_left != 0 {
         let bytes_to_write;
@@ -417,7 +402,7 @@ fn write_wal_file(
         }
 
         /* Open file */
-        let segno = XLByteToSeg(start_pos, wal_seg_size);
+        let segno = start_pos.segment_number(wal_seg_size as u64);
         let wal_file_name = XLogFileName(
             1, // FIXME: always use Postgres timeline 1
             segno,
@@ -469,7 +454,7 @@ fn write_wal_file(
         xlogoff += bytes_to_write;
 
         /* Did we reach the end of a WAL segment? */
-        if XLogSegmentOffset(start_pos, wal_seg_size) == 0 {
+        if start_pos.segment_offset(wal_seg_size as u64) == 0 {
             xlogoff = 0;
             if partial {
                 fs::rename(&wal_file_partial_path, &wal_file_path)?;
