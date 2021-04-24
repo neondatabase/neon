@@ -831,8 +831,9 @@ impl PageCache {
         loop {
             thread::sleep(conf.gc_period);
             let last_lsn = self.get_last_valid_lsn();
-            if last_lsn.0 > conf.gc_horizon {
-                let horizon = last_lsn - conf.gc_horizon;
+
+            // checked_sub() returns None on overflow.
+            if let Some(horizon) = last_lsn.checked_sub(conf.gc_horizon) {
                 let mut maxkey = CacheKey {
                     tag: BufferTag {
                         rel: RelTag {
