@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 use std::collections::BTreeMap;
 use std::mem;
 use std::sync::Mutex;
@@ -63,7 +65,7 @@ impl SeqWait {
 
             // This will steal the entire waiters map.
             // When we drop it all waiters will be woken.
-            mem::take(&mut internal.waiters);
+            mem::take(&mut internal.waiters)
 
             // Drop the lock as we exit this scope.
         };

@@ -266,7 +266,7 @@ async fn walreceiver_main(
                                     rec: recdata.clone(),
                                     main_data_offset: decoded.main_data_offset as u32,
                                 };
-                                pcache.put_rel_wal_record(tag, rec).await?;
+                                pcache.put_rel_wal_record(tag, rec)?;
                             }
                         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
                             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)

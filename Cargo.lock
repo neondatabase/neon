@@ -1381,7 +1381,6 @@ dependencies = [
  "chrono",
  "clap",
  "crc32c",
- "crossbeam-channel",
  "daemonize",
  "futures",
  "hex",

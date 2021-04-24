@@ -1,17 +1,40 @@
 //
 // Page Cache holds all the different page versions and WAL records
 //
-// The Page Cache is currenusing RocksDB for storing wal records and full page images, keyed by the RelFileNode, blocknumber, and the LSN.
+// Currently, the page cache uses RocksDB to store WAL wal records and
+// full page images, keyed by the RelFileNode, blocknumber, and the
+// LSN.
+//
+// On async vs blocking:
+//
+// All the functions that can block for any significant length use
+// Tokio async, and are marked as 'async'. That currently includes all
+// the "Get" functions that get a page image or a relation size.  The
+// "Put" functions that add base images or WAL records to the cache
+// cannot block.
+//
+// However, we have a funny definition of blocking: waiting on a Mutex
+// that protects the in-memory data structures is not considered as
+// blocking, as those are short waits, and there is no deadlock
+// risk. It is *not* OK to do I/O or wait on other threads while
+// holding a Mutex, however.
+//
+// Another wart is that we currently consider the RocksDB operations
+// to be non-blocking, and we do those while holding a lock, and
+// without async. That's fantasy, as RocksDB will do I/O, possibly a
+// lot of it. But that's not a correctness issue, since the RocksDB
+// calls will not call back to any of the other functions in page
+// server. RocksDB is just a stopgap solution, to be replaced with
+// something else, so it doesn't seem worth it to wrangle those calls
+// into async model.
 //
 
 use crate::restore_local_repo::restore_timeline;
 use crate::waldecoder::Oid;
 use crate::ZTimelineId;
-use crate::{walredo, zenith_repo_dir, PageServerConf};
+use crate::{zenith_repo_dir, PageServerConf};
 use anyhow::{bail, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crossbeam_channel::unbounded;
-use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
 use log::*;
 use rocksdb;
@@ -19,11 +42,12 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{convert::TryInto, ops::AddAssign};
 use zenith_utils::seqwait::SeqWait;
+use crate::walredo::WalRedoManager;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -34,9 +58,8 @@ pub struct PageCache {
     // RocksDB handle
     db: rocksdb::DB,
 
-    // Channel for communicating with the WAL redo process here.
-    pub walredo_sender: Sender<Arc<CacheEntry>>,
-    pub walredo_receiver: Receiver<Arc<CacheEntry>>,
+    // WAL redo manager
+    walredo_mgr: WalRedoManager,
 
     // Allows .await on the arrival of a particular LSN.
     seqwait_lsn: SeqWait,
@@ -131,20 +154,11 @@ pub fn get_or_restore_pagecache(
 
             let result = Arc::new(pcache);
 
+            // Launch the WAL redo thread
+            result.walredo_mgr.launch(result.clone());
+
             pcaches.insert(timelineid, result.clone());
 
-            // Initialize the WAL redo thread
-            //
-            // Now join_handle is not saved any where and we won'try restart tharead
-            // if it is dead. We may later stop that treads after some inactivity period
-            // and restart them on demand.
-            let conf_copy = conf.clone();
-            let _walredo_thread = thread::Builder::new()
-                .name("WAL redo thread".into())
-                .spawn(move || {
-                    walredo::wal_redo_main(&conf_copy, timelineid);
-                })
-                .unwrap();
             if conf.gc_horizon != 0 {
                 let conf_copy = conf.clone();
                 let _gc_thread = thread::Builder::new()
@@ -162,7 +176,10 @@ pub fn get_or_restore_pagecache(
 fn gc_thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
     info!("Garbage collection thread started {}", timelineid);
     let pcache = get_pagecache(conf, timelineid).unwrap();
-    pcache.do_gc(conf).unwrap();
+
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+    runtime.block_on(pcache.do_gc(conf)).unwrap();
 }
 
 fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB {
@@ -182,20 +199,19 @@ fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB 
 }
 
 fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache {
-    // Initialize the channel between the page cache and the WAL applicator
-    let (s, r) = unbounded();
 
     PageCache {
-        db: open_rocksdb(&conf, timelineid),
         shared: Mutex::new(PageCacheShared {
             first_valid_lsn: 0,
             last_valid_lsn: 0,
             last_record_lsn: 0,
         }),
-        seqwait_lsn: SeqWait::new(0),
 
-        walredo_sender: s,
-        walredo_receiver: r,
+        db: open_rocksdb(&conf, timelineid),
+
+        walredo_mgr: WalRedoManager::new(conf, timelineid),
+
+        seqwait_lsn: SeqWait::new(0),
 
         num_entries: AtomicU64::new(0),
         num_page_images: AtomicU64::new(0),
@@ -240,20 +256,6 @@ impl CacheKey {
     }
 }
 
-pub struct CacheEntry {
-    pub key: CacheKey,
-
-    pub content: Mutex<CacheEntryContent>,
-
-    // Condition variable used by the WAL redo service, to wake up
-    // requester.
-    //
-    // FIXME: this takes quite a lot of space. Consider using parking_lot::Condvar
-    // or something else.
-    pub walredo_condvar: Condvar,
-}
-
-#[derive(Debug, Clone)]
 pub struct CacheEntryContent {
     pub page_image: Option<Bytes>,
     pub wal_record: Option<WALRecord>,
@@ -289,16 +291,6 @@ impl CacheEntryContent {
                 wal_record: Some(WALRecord::unpack(buf)),
                 apply_pending: false,
             }
-        }
-    }
-}
-
-impl CacheEntry {
-    fn new(key: CacheKey, content: CacheEntryContent) -> CacheEntry {
-        CacheEntry {
-            key,
-            content: Mutex::new(content),
-            walredo_condvar: Condvar::new(),
         }
     }
 }
@@ -385,187 +377,15 @@ impl WALRecord {
     }
 }
 
-// Public interface functions
-
 impl PageCache {
-    fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
-        let mut buf = BytesMut::new();
-        loop {
-            thread::sleep(conf.gc_period);
-            let last_lsn = self.get_last_valid_lsn();
-            if last_lsn > conf.gc_horizon {
-                let horizon = last_lsn - conf.gc_horizon;
-                let mut maxkey = CacheKey {
-                    tag: BufferTag {
-                        rel: RelTag {
-                            spcnode: u32::MAX,
-                            dbnode: u32::MAX,
-                            relnode: u32::MAX,
-                            forknum: u8::MAX,
-                        },
-                        blknum: u32::MAX,
-                    },
-                    lsn: u64::MAX,
-                };
-                let now = Instant::now();
-                let mut reconstructed = 0u64;
-                let mut truncated = 0u64;
-                let mut inspected = 0u64;
-                let mut deleted = 0u64;
-                loop {
-                    buf.clear();
-                    maxkey.pack(&mut buf);
-                    let mut iter = self.db.raw_iterator();
-                    iter.seek_for_prev(&buf[..]);
-                    if iter.valid() {
-                        let k = iter.key().unwrap();
-                        let v = iter.value().unwrap();
 
-                        inspected += 1;
+    // Public GET interface functions
 
-                        buf.clear();
-                        buf.extend_from_slice(&v);
-                        let content = CacheEntryContent::unpack(&mut buf);
-
-                        buf.clear();
-                        buf.extend_from_slice(&k);
-                        let key = CacheKey::unpack(&mut buf);
-
-                        // Construct boundaries for old records cleanup
-                        maxkey.tag = key.tag;
-                        let last_lsn = key.lsn;
-                        maxkey.lsn = min(horizon, last_lsn); // do not remove last version
-
-                        let mut minkey = maxkey.clone();
-                        minkey.lsn = 0; // first version
-
-                        // reconstruct most recent page version
-                        if content.wal_record.is_some() {
-                            trace!("Reconstruct most recent page {:?}", key);
-                            // force reconstruction of most recent page version
-                            self.reconstruct_page(key, content)?;
-                            reconstructed += 1;
-                        } else {
-                            assert!(content.page_image.is_some());
-                        }
-
-                        buf.clear();
-                        maxkey.pack(&mut buf);
-
-                        iter.seek_for_prev(&buf[..]);
-                        if iter.valid() {
-                            // do not remove last version
-                            if last_lsn > horizon {
-                                // locate most recent record before horizon
-                                let k = iter.key().unwrap();
-                                buf.clear();
-                                buf.extend_from_slice(&k);
-                                let key = CacheKey::unpack(&mut buf);
-                                if key.tag == maxkey.tag {
-                                    let v = iter.value().unwrap();
-                                    buf.clear();
-                                    buf.extend_from_slice(&v);
-                                    let content = CacheEntryContent::unpack(&mut buf);
-                                    if content.wal_record.is_some() {
-                                        trace!("Reconstruct horizon page {:?}", key);
-                                        self.reconstruct_page(key, content)?;
-                                        truncated += 1;
-                                    } else {
-                                        assert!(content.page_image.is_some());
-                                    }
-                                }
-                            }
-                            // remove records prior to horizon
-                            loop {
-                                iter.prev();
-                                if !iter.valid() {
-                                    break;
-                                }
-                                let k = iter.key().unwrap();
-                                buf.clear();
-                                buf.extend_from_slice(&k);
-                                let key = CacheKey::unpack(&mut buf);
-                                if key.tag != maxkey.tag {
-                                    break;
-                                }
-                                let v = iter.value().unwrap();
-                                if (v[0] & UNUSED_VERSION_FLAG) == 0 {
-                                    let mut v = v.to_owned();
-                                    v[0] |= UNUSED_VERSION_FLAG;
-                                    self.db.put(k, &v[..])?;
-                                    deleted += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        maxkey = minkey;
-                    } else {
-                        break;
-                    }
-                }
-                info!("Garbage collection completed in {:?}:\n{} version chains inspected, {} pages reconstructed, {} version histories truncated, {} versions deleted",
-					  now.elapsed(), inspected, reconstructed, truncated, deleted);
-            }
-        }
-    }
-
-    fn reconstruct_page(&self, key: CacheKey, content: CacheEntryContent) -> anyhow::Result<Bytes> {
-        let entry_rc = Arc::new(CacheEntry::new(key.clone(), content));
-
-        let mut entry_content = entry_rc.content.lock().unwrap();
-        entry_content.apply_pending = true;
-
-        let s = &self.walredo_sender;
-        s.send(entry_rc.clone())?;
-
-        while entry_content.apply_pending {
-            entry_content = entry_rc.walredo_condvar.wait(entry_content).unwrap();
-        }
-        // We should now have a page image. If we don't, it means that WAL redo
-        // failed to reconstruct it. WAL redo should've logged that error already.
-        let page_img = match &entry_content.page_image {
-            Some(p) => p.clone(),
-            None => {
-                error!("could not apply WAL to reconstruct page {:?} image", &key);
-                bail!("could not apply WAL to reconstruct page {:?} image", &key);
-            }
-        };
-        self.put_page_image(key.tag, key.lsn, page_img.clone());
-        Ok(page_img)
-    }
-
-    async fn wait_lsn(&self, req_lsn: u64) -> anyhow::Result<u64> {
-        let mut lsn = req_lsn;
-        //When invalid LSN is requested, it means "don't wait, return latest version of the page"
-        //This is necessary for bootstrap.
-        if lsn == 0 {
-            lsn = self.last_valid_lsn.load(Ordering::Acquire);
-            trace!(
-                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                self.last_valid_lsn.load(Ordering::Acquire),
-                lsn
-            );
-        }
-        self.seqwait_lsn
-            .wait_for_timeout(lsn, TIMEOUT)
-            .await
-            .with_context(|| {
-                format!(
-                    "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
-                    lsn >> 32,
-                    lsn & 0xffff_ffff
-                )
-            })?;
-
-        Ok(lsn)
-    }
-
-    //
-    // GetPage@LSN
-    //
-    // Returns an 8k page image
-    //
+    ///
+    /// GetPage@LSN
+    ///
+    /// Returns an 8k page image
+    ///
     pub async fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: u64) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
@@ -594,7 +414,8 @@ impl PageCache {
                 if let Some(img) = &content.page_image {
                     page_img = img.clone();
                 } else if content.wal_record.is_some() {
-                    page_img = self.reconstruct_page(key, content)?;
+					// Request the WAL redo manager to apply the WAL records for us.
+					page_img = self.walredo_mgr.request_redo(tag, lsn).await?;
                 } else {
                     // No base image, and no WAL record. Huh?
                     bail!("no page image or WAL record for requested page");
@@ -623,265 +444,17 @@ impl PageCache {
         /* return Err("could not find page image")?; */
     }
 
-    //
-    // Collect all the WAL records that are needed to reconstruct a page
-    // image for the given cache entry.
-    //
-    // Returns an old page image (if any), and a vector of WAL records to apply
-    // over it.
-    //
-    pub fn collect_records_for_apply(&self, entry: &CacheEntry) -> (Option<Bytes>, Vec<WALRecord>) {
-        let mut buf = BytesMut::new();
-        entry.key.pack(&mut buf);
-
-        let mut base_img: Option<Bytes> = None;
-        let mut records: Vec<WALRecord> = Vec::new();
-
-        let mut iter = self.db.raw_iterator();
-        iter.seek_for_prev(&buf[..]);
-
-        // Scan backwards, collecting the WAL records, until we hit an
-        // old page image.
-        while iter.valid() {
-            let k = iter.key().unwrap();
-            buf.clear();
-            buf.extend_from_slice(&k);
-            let key = CacheKey::unpack(&mut buf);
-            if key.tag != entry.key.tag {
-                break;
-            }
-            let v = iter.value().unwrap();
-            buf.clear();
-            buf.extend_from_slice(&v);
-            let content = CacheEntryContent::unpack(&mut buf);
-            if let Some(img) = &content.page_image {
-                // We have a base image. No need to dig deeper into the list of
-                // records
-                base_img = Some(img.clone());
-                break;
-            } else if let Some(rec) = &content.wal_record {
-                records.push(rec.clone());
-                // If this WAL record initializes the page, no need to dig deeper.
-                if rec.will_init {
-                    break;
-                }
-            } else {
-                panic!("no base image and no WAL record on cache entry");
-            }
-            iter.prev();
-        }
-
-        records.reverse();
-        (base_img, records)
+    ///
+    /// Get size of relation at given LSN.
+    ///
+    pub async fn relsize_get(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
+        self.wait_lsn(lsn).await?;
+        return self.relsize_get_nowait(rel, lsn);
     }
 
-    //
-    // Adds a WAL record to the page cache
-    //
-    pub fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
-        let lsn = rec.lsn;
-        let key = CacheKey { tag, lsn };
-
-        let content = CacheEntryContent {
-            page_image: None,
-            wal_record: Some(rec),
-            apply_pending: false,
-        };
-
-        let mut key_buf = BytesMut::new();
-        key.pack(&mut key_buf);
-        let mut val_buf = BytesMut::new();
-        content.pack(&mut val_buf);
-
-        let _res = self.db.put(&key_buf[..], &val_buf[..]);
-        //trace!("put_wal_record lsn: {}", lsn);
-
-        self.num_entries.fetch_add(1, Ordering::Relaxed);
-        self.num_wal_records.fetch_add(1, Ordering::Relaxed);
-    }
-
-    //
-    // Adds a relation-wide WAL record (like truncate) to the page cache,
-    // associating it with all pages started with specified block number
-    //
-    pub async fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) -> anyhow::Result<()> {
-        let mut key = CacheKey { tag, lsn: rec.lsn };
-        let old_rel_size = self.relsize_get(&tag.rel, u64::MAX).await?;
-        let content = CacheEntryContent {
-            page_image: None,
-            wal_record: Some(rec),
-            apply_pending: false,
-        };
-        // set new relation size
-        trace!("Truncate relation {:?}", tag);
-        let mut key_buf = BytesMut::new();
-        let mut val_buf = BytesMut::new();
-        content.pack(&mut val_buf);
-
-        for blknum in tag.blknum..old_rel_size {
-            key_buf.clear();
-            key.tag.blknum = blknum;
-            key.pack(&mut key_buf);
-            trace!("put_wal_record lsn: {}", key.lsn);
-            let _res = self.db.put(&key_buf[..], &val_buf[..]);
-        }
-        let n = (old_rel_size - tag.blknum) as u64;
-        self.num_entries.fetch_add(n, Ordering::Relaxed);
-        self.num_wal_records.fetch_add(n, Ordering::Relaxed);
-        Ok(())
-    }
-
-    //
-    // Memorize a full image of a page version
-    //
-    pub fn put_page_image(&self, tag: BufferTag, lsn: u64, img: Bytes) {
-        let key = CacheKey { tag, lsn };
-        let content = CacheEntryContent {
-            page_image: Some(img),
-            wal_record: None,
-            apply_pending: false,
-        };
-
-        let mut key_buf = BytesMut::new();
-        key.pack(&mut key_buf);
-        let mut val_buf = BytesMut::new();
-        content.pack(&mut val_buf);
-
-        trace!("put_wal_record lsn: {}", key.lsn);
-        let _res = self.db.put(&key_buf[..], &val_buf[..]);
-
-        //debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
-        //        tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
-        self.num_page_images.fetch_add(1, Ordering::Relaxed);
-    }
-
-    //
-    pub fn advance_last_valid_lsn(&self, lsn: u64) {
-        let mut shared = self.shared.lock().unwrap();
-
-        // Can't move backwards.
-        let oldlsn = shared.last_valid_lsn;
-        if lsn >= oldlsn {
-            shared.last_valid_lsn = lsn;
-            self.seqwait_lsn.advance(lsn);
-
-            self.last_valid_lsn.store(lsn, Ordering::Relaxed);
-        } else {
-            warn!(
-                "attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
-                oldlsn >> 32,
-                oldlsn & 0xffffffff,
-                lsn >> 32,
-                lsn & 0xffffffff
-            );
-        }
-    }
-
-    //
-    // NOTE: this updates last_valid_lsn as well.
-    //
-    pub fn advance_last_record_lsn(&self, lsn: u64) {
-        let mut shared = self.shared.lock().unwrap();
-
-        // Can't move backwards.
-        assert!(lsn >= shared.last_valid_lsn);
-        assert!(lsn >= shared.last_record_lsn);
-
-        shared.last_valid_lsn = lsn;
-        shared.last_record_lsn = lsn;
-        self.seqwait_lsn.advance(lsn);
-
-        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
-        self.last_record_lsn.store(lsn, Ordering::Relaxed);
-    }
-
-    //
-    pub fn _advance_first_valid_lsn(&self, lsn: u64) {
-        let mut shared = self.shared.lock().unwrap();
-
-        // Can't move backwards.
-        assert!(lsn >= shared.first_valid_lsn);
-
-        // Can't overtake last_valid_lsn (except when we're
-        // initializing the system and last_valid_lsn hasn't been set yet.
-        assert!(shared.last_valid_lsn == 0 || lsn < shared.last_valid_lsn);
-
-        shared.first_valid_lsn = lsn;
-        self.first_valid_lsn.store(lsn, Ordering::Relaxed);
-    }
-
-    pub fn init_valid_lsn(&self, lsn: u64) {
-        let mut shared = self.shared.lock().unwrap();
-
-        assert!(shared.first_valid_lsn == 0);
-        assert!(shared.last_valid_lsn == 0);
-        assert!(shared.last_record_lsn == 0);
-
-        shared.first_valid_lsn = lsn;
-        shared.last_valid_lsn = lsn;
-        shared.last_record_lsn = lsn;
-
-        self.first_valid_lsn.store(lsn, Ordering::Relaxed);
-        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
-        self.last_record_lsn.store(lsn, Ordering::Relaxed);
-    }
-
-    pub fn get_last_valid_lsn(&self) -> u64 {
-        let shared = self.shared.lock().unwrap();
-
-        shared.last_record_lsn
-    }
-
-    pub async fn relsize_get(&self, rel: &RelTag, req_lsn: u64) -> anyhow::Result<u32> {
-        let mut lsn = req_lsn;
-        if lsn != u64::MAX {
-            lsn = self.wait_lsn(lsn).await?;
-        }
-
-        let mut key = CacheKey {
-            tag: BufferTag {
-                rel: *rel,
-                blknum: u32::MAX,
-            },
-            lsn,
-        };
-        let mut buf = BytesMut::new();
-        let mut iter = self.db.raw_iterator();
-
-        loop {
-            buf.clear();
-            key.pack(&mut buf);
-            iter.seek_for_prev(&buf[..]);
-            if iter.valid() {
-                let k = iter.key().unwrap();
-                let v = iter.value().unwrap();
-                buf.clear();
-                buf.extend_from_slice(&k);
-                let tag = BufferTag::unpack(&mut buf);
-                if tag.rel == *rel {
-                    buf.clear();
-                    buf.extend_from_slice(&v);
-                    let content = CacheEntryContent::unpack(&mut buf);
-                    if let Some(rec) = &content.wal_record {
-                        if rec.truncate {
-                            if tag.blknum > 0 {
-                                key.tag.blknum = tag.blknum - 1;
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    let relsize = tag.blknum + 1;
-                    debug!("Size of relation {:?} at {} is {}", rel, lsn, relsize);
-                    return Ok(relsize);
-                }
-            }
-            break;
-        }
-        debug!("Size of relation {:?} at {} is zero", rel, lsn);
-        Ok(0)
-    }
-
+    ///
+    /// Does relation exist at given LSN?
+    ///
     pub async fn relsize_exist(&self, rel: &RelTag, req_lsn: u64) -> anyhow::Result<bool> {
         let lsn = self.wait_lsn(req_lsn).await?;
 
@@ -910,16 +483,143 @@ impl PageCache {
         Ok(false)
     }
 
-    pub fn get_stats(&self) -> PageCacheStats {
-        PageCacheStats {
-            num_entries: self.num_entries.load(Ordering::Relaxed),
-            num_page_images: self.num_page_images.load(Ordering::Relaxed),
-            num_wal_records: self.num_wal_records.load(Ordering::Relaxed),
-            num_getpage_requests: self.num_getpage_requests.load(Ordering::Relaxed),
-            first_valid_lsn: self.first_valid_lsn.load(Ordering::Relaxed),
-            last_valid_lsn: self.last_valid_lsn.load(Ordering::Relaxed),
-            last_record_lsn: self.last_record_lsn.load(Ordering::Relaxed),
+    // Other public functions, for updating the page cache.
+    // These are used by the WAL receiver and WAL redo.
+
+    ///
+    /// Collect all the WAL records that are needed to reconstruct a page
+    /// image for the given cache entry.
+    ///
+    /// Returns an old page image (if any), and a vector of WAL records to apply
+    /// over it.
+    ///
+    pub fn collect_records_for_apply(&self, tag: BufferTag, lsn: u64) -> (Option<Bytes>, Vec<WALRecord>) {
+        let mut buf = BytesMut::new();
+		let key = CacheKey { tag, lsn };
+        key.pack(&mut buf);
+
+        let mut base_img: Option<Bytes> = None;
+        let mut records: Vec<WALRecord> = Vec::new();
+
+        let mut iter = self.db.raw_iterator();
+        iter.seek_for_prev(&buf[..]);
+
+        // Scan backwards, collecting the WAL records, until we hit an
+        // old page image.
+        while iter.valid() {
+            let k = iter.key().unwrap();
+            buf.clear();
+            buf.extend_from_slice(&k);
+            let key = CacheKey::unpack(&mut buf);
+            if key.tag != tag {
+                break;
+            }
+            let v = iter.value().unwrap();
+            buf.clear();
+            buf.extend_from_slice(&v);
+            let content = CacheEntryContent::unpack(&mut buf);
+            if let Some(img) = &content.page_image {
+                // We have a base image. No need to dig deeper into the list of
+                // records
+                base_img = Some(img.clone());
+                break;
+            } else if let Some(rec) = &content.wal_record {
+                records.push(rec.clone());
+                // If this WAL record initializes the page, no need to dig deeper.
+                if rec.will_init {
+                    break;
+                }
+            } else {
+                panic!("no base image and no WAL record on cache entry");
+            }
+            iter.prev();
         }
+        records.reverse();
+        (base_img, records)
+    }
+
+    ///
+    /// Adds a WAL record to the page cache
+    ///
+    pub fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
+        let lsn = rec.lsn;
+        let key = CacheKey { tag, lsn };
+
+        let content = CacheEntryContent {
+            page_image: None,
+            wal_record: Some(rec),
+            apply_pending: false,
+        };
+
+        let mut key_buf = BytesMut::new();
+        key.pack(&mut key_buf);
+        let mut val_buf = BytesMut::new();
+        content.pack(&mut val_buf);
+
+        let _res = self.db.put(&key_buf[..], &val_buf[..]);
+        //trace!("put_wal_record lsn: {}", lsn);
+
+        self.num_entries.fetch_add(1, Ordering::Relaxed);
+        self.num_wal_records.fetch_add(1, Ordering::Relaxed);
+    }
+
+    ///
+    /// Adds a relation-wide WAL record (like truncate) to the page cache,
+    /// associating it with all pages started with specified block number
+    ///
+    pub fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) -> anyhow::Result<()> {
+        let mut key = CacheKey { tag, lsn: rec.lsn };
+
+        // What was the size of the relation before this record?
+        let last_lsn = self.last_valid_lsn.load(Ordering::Acquire);
+        let old_rel_size = self.relsize_get_nowait(&tag.rel, last_lsn)?;
+
+        let content = CacheEntryContent {
+            page_image: None,
+            wal_record: Some(rec),
+            apply_pending: false,
+        };
+        // set new relation size
+        trace!("Truncate relation {:?}", tag);
+        let mut key_buf = BytesMut::new();
+        let mut val_buf = BytesMut::new();
+        content.pack(&mut val_buf);
+
+        for blknum in tag.blknum..old_rel_size {
+            key_buf.clear();
+            key.tag.blknum = blknum;
+            key.pack(&mut key_buf);
+            trace!("put_wal_record lsn: {}", key.lsn);
+            let _res = self.db.put(&key_buf[..], &val_buf[..]);
+        }
+        let n = (old_rel_size - tag.blknum) as u64;
+        self.num_entries.fetch_add(n, Ordering::Relaxed);
+        self.num_wal_records.fetch_add(n, Ordering::Relaxed);
+        Ok(())
+    }
+
+    ///
+    /// Memorize a full image of a page version
+    ///
+    pub fn put_page_image(&self, tag: BufferTag, lsn: u64, img: Bytes) {
+        let key = CacheKey { tag, lsn };
+        let content = CacheEntryContent {
+            page_image: Some(img),
+            wal_record: None,
+            apply_pending: false,
+        };
+
+        let mut key_buf = BytesMut::new();
+        key.pack(&mut key_buf);
+        let mut val_buf = BytesMut::new();
+        content.pack(&mut val_buf);
+
+        trace!("put_wal_record lsn: {}", key.lsn);
+        let _res = self.db.put(&key_buf[..], &val_buf[..]);
+
+        //debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
+        //        tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
+        self.num_page_images.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn create_database(
@@ -972,8 +672,308 @@ impl PageCache {
         );
         Ok(())
     }
+
+    /// Remember that WAL has been received and added to the page cache up to the given LSN
+    pub fn advance_last_valid_lsn(&self, lsn: u64) {
+        let mut shared = self.shared.lock().unwrap();
+
+        // Can't move backwards.
+        let oldlsn = shared.last_valid_lsn;
+        if lsn >= oldlsn {
+            shared.last_valid_lsn = lsn;
+            self.seqwait_lsn.advance(lsn);
+
+            self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+        } else {
+            warn!(
+                "attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
+                oldlsn >> 32,
+                oldlsn & 0xffffffff,
+                lsn >> 32,
+                lsn & 0xffffffff
+            );
+        }
+    }
+
+    ///
+    /// Remember the (end of) last valid WAL record remembered in the page cache.
+    ///
+    /// NOTE: this updates last_valid_lsn as well.
+    ///
+    pub fn advance_last_record_lsn(&self, lsn: u64) {
+        let mut shared = self.shared.lock().unwrap();
+
+        // Can't move backwards.
+        assert!(lsn >= shared.last_valid_lsn);
+        assert!(lsn >= shared.last_record_lsn);
+
+        shared.last_valid_lsn = lsn;
+        shared.last_record_lsn = lsn;
+        self.seqwait_lsn.advance(lsn);
+
+        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+        self.last_record_lsn.store(lsn, Ordering::Relaxed);
+    }
+
+    ///
+    /// Remember the beginning of valid WAL.
+    ///
+    /// TODO: This should be called by garbage collection, so that if an older
+    /// page is requested, we will return an error to the requestor.
+    pub fn _advance_first_valid_lsn(&self, lsn: u64) {
+        let mut shared = self.shared.lock().unwrap();
+
+        // Can't move backwards.
+        assert!(lsn >= shared.first_valid_lsn);
+
+        // Can't overtake last_valid_lsn (except when we're
+        // initializing the system and last_valid_lsn hasn't been set yet.
+        assert!(shared.last_valid_lsn == 0 || lsn < shared.last_valid_lsn);
+
+        shared.first_valid_lsn = lsn;
+        self.first_valid_lsn.store(lsn, Ordering::Relaxed);
+    }
+
+    pub fn init_valid_lsn(&self, lsn: u64) {
+        let mut shared = self.shared.lock().unwrap();
+
+        assert!(shared.first_valid_lsn == 0);
+        assert!(shared.last_valid_lsn == 0);
+        assert!(shared.last_record_lsn == 0);
+
+        shared.first_valid_lsn = lsn;
+        shared.last_valid_lsn = lsn;
+        shared.last_record_lsn = lsn;
+
+        self.first_valid_lsn.store(lsn, Ordering::Relaxed);
+        self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+        self.last_record_lsn.store(lsn, Ordering::Relaxed);
+    }
+
+    pub fn get_last_valid_lsn(&self) -> u64 {
+        let shared = self.shared.lock().unwrap();
+
+        shared.last_record_lsn
+    }
+
+    //
+    // Get statistics to be displayed in the user interface.
+    //
+    pub fn get_stats(&self) -> PageCacheStats {
+        PageCacheStats {
+            num_entries: self.num_entries.load(Ordering::Relaxed),
+            num_page_images: self.num_page_images.load(Ordering::Relaxed),
+            num_wal_records: self.num_wal_records.load(Ordering::Relaxed),
+            num_getpage_requests: self.num_getpage_requests.load(Ordering::Relaxed),
+            first_valid_lsn: self.first_valid_lsn.load(Ordering::Relaxed),
+            last_valid_lsn: self.last_valid_lsn.load(Ordering::Relaxed),
+            last_record_lsn: self.last_record_lsn.load(Ordering::Relaxed),
+        }
+    }
+
+    // Internal functions
+
+    //
+    // Internal function to get relation size at given LSN.
+    //
+    // The caller must ensure that WAL has been received up to 'lsn'.
+    //
+    fn relsize_get_nowait(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
+
+        //assert!(lsn <= self.last_valid_lsn.load(Ordering::Acquire));
+
+        let mut key = CacheKey {
+            tag: BufferTag {
+                rel: *rel,
+                blknum: u32::MAX,
+            },
+            lsn,
+        };
+        let mut buf = BytesMut::new();
+        let mut iter = self.db.raw_iterator();
+
+        loop {
+            buf.clear();
+            key.pack(&mut buf);
+            iter.seek_for_prev(&buf[..]);
+            if iter.valid() {
+                let k = iter.key().unwrap();
+                let v = iter.value().unwrap();
+                buf.clear();
+                buf.extend_from_slice(&k);
+                let tag = BufferTag::unpack(&mut buf);
+                if tag.rel == *rel {
+                    buf.clear();
+                    buf.extend_from_slice(&v);
+                    let content = CacheEntryContent::unpack(&mut buf);
+                    if let Some(rec) = &content.wal_record {
+                        if rec.truncate {
+                            if tag.blknum > 0 {
+                                key.tag.blknum = tag.blknum - 1;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    let relsize = tag.blknum + 1;
+                    debug!("Size of relation {:?} at {} is {}", rel, lsn, relsize);
+                    return Ok(relsize);
+                }
+            }
+            break;
+        }
+        debug!("Size of relation {:?} at {} is zero", rel, lsn);
+        Ok(0)
+    }
+
+    async fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
+
+        let mut buf = BytesMut::new();
+        loop {
+            thread::sleep(conf.gc_period);
+            let last_lsn = self.get_last_valid_lsn();
+            if last_lsn > conf.gc_horizon {
+                let horizon = last_lsn - conf.gc_horizon;
+                let mut maxkey = CacheKey {
+                    tag: BufferTag {
+                        rel: RelTag {
+                            spcnode: u32::MAX,
+                            dbnode: u32::MAX,
+                            relnode: u32::MAX,
+                            forknum: u8::MAX,
+                        },
+                        blknum: u32::MAX,
+                    },
+                    lsn: u64::MAX,
+                };
+                let now = Instant::now();
+                let mut reconstructed = 0u64;
+                let mut truncated = 0u64;
+                let mut inspected = 0u64;
+                let mut deleted = 0u64;
+                loop {
+                    buf.clear();
+                    maxkey.pack(&mut buf);
+                    let mut iter = self.db.raw_iterator();
+                    iter.seek_for_prev(&buf[..]);
+                    if iter.valid() {
+                        let k = iter.key().unwrap();
+                        let v = iter.value().unwrap();
+
+                        inspected += 1;
+
+                        buf.clear();
+                        buf.extend_from_slice(&k);
+                        let key = CacheKey::unpack(&mut buf);
+
+                        // Construct boundaries for old records cleanup
+                        maxkey.tag = key.tag;
+                        let last_lsn = key.lsn;
+                        maxkey.lsn = min(horizon, last_lsn); // do not remove last version
+
+                        let mut minkey = maxkey.clone();
+                        minkey.lsn = 0; // first version
+
+                        // reconstruct most recent page version
+                        if (v[0] & PAGE_IMAGE_FLAG) == 0 {
+                            trace!("Reconstruct most recent page {:?}", key);
+                            // force reconstruction of most recent page version
+                            self.walredo_mgr.request_redo(key.tag, key.lsn).await?;
+                            reconstructed += 1;
+                        }
+
+                        buf.clear();
+                        maxkey.pack(&mut buf);
+
+                        iter.seek_for_prev(&buf[..]);
+                        if iter.valid() {
+                            // do not remove last version
+                            if last_lsn > horizon {
+                                // locate most recent record before horizon
+                                let k = iter.key().unwrap();
+                                buf.clear();
+                                buf.extend_from_slice(&k);
+                                let key = CacheKey::unpack(&mut buf);
+                                if key.tag == maxkey.tag {
+                                    let v = iter.value().unwrap();
+									if (v[0] & PAGE_IMAGE_FLAG) == 0 {
+                                        trace!("Reconstruct horizon page {:?}", key);
+                                        self.walredo_mgr.request_redo(key.tag, key.lsn).await?;
+                                        truncated += 1;
+                                    }
+                                }
+                            }
+                            // remove records prior to horizon
+                            loop {
+                                iter.prev();
+                                if !iter.valid() {
+                                    break;
+                                }
+                                let k = iter.key().unwrap();
+                                buf.clear();
+                                buf.extend_from_slice(&k);
+                                let key = CacheKey::unpack(&mut buf);
+                                if key.tag != maxkey.tag {
+                                    break;
+                                }
+                                let v = iter.value().unwrap();
+                                if (v[0] & UNUSED_VERSION_FLAG) == 0 {
+                                    let mut v = v.to_owned();
+                                    v[0] |= UNUSED_VERSION_FLAG;
+                                    self.db.put(k, &v[..])?;
+                                    deleted += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        maxkey = minkey;
+                    } else {
+                        break;
+                    }
+                }
+                info!("Garbage collection completed in {:?}:\n{} version chains inspected, {} pages reconstructed, {} version histories truncated, {} versions deleted",
+					  now.elapsed(), inspected, reconstructed, truncated, deleted);
+            }
+        }
+    }
+
+    //
+    // Wait until WAL has been received up to the given LSN.
+    //
+    async fn wait_lsn(&self, req_lsn: u64) -> anyhow::Result<u64> {
+        let mut lsn = req_lsn;
+        //When invalid LSN is requested, it means "don't wait, return latest version of the page"
+        //This is necessary for bootstrap.
+        if lsn == 0 {
+            lsn = self.last_valid_lsn.load(Ordering::Acquire);
+            trace!(
+                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
+                self.last_valid_lsn.load(Ordering::Acquire),
+                lsn
+            );
+        }
+
+        self.seqwait_lsn
+            .wait_for_timeout(lsn, TIMEOUT)
+            .await
+            .with_context(|| {
+                format!(
+                    "Timed out while waiting for WAL record at LSN {:X}/{:X} to arrive",
+                    lsn >> 32,
+                    lsn & 0xffff_ffff
+                )
+            })?;
+
+        Ok(lsn)
+    }
 }
 
+//
+// Get statistics to be displayed in the user interface.
+//
+// This combines the stats from all PageCache instances
+//
 pub fn get_stats() -> PageCacheStats {
     let pcaches = PAGECACHES.lock().unwrap();
 
