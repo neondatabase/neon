@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 
 use std::fmt;
-use std::ops::{Add, AddAssign, Sub};
+use std::ops::{Add, AddAssign};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -17,6 +17,12 @@ pub struct LsnParseError;
 impl Lsn {
     /// Maximum possible value for an LSN
     pub const MAX: Lsn = Lsn(u64::MAX);
+
+    /// Subtract a number, returning None on overflow.
+    pub fn checked_sub<T: Into<u64>>(self, other: T) -> Option<Lsn> {
+        let other: u64 = other.into();
+        self.0.checked_sub(other).map(Lsn)
+    }
 
     /// Parse an LSN from a filename in the form `0000000000000000`
     pub fn from_filename<F>(filename: F) -> Result<Self, LsnParseError>
@@ -83,15 +89,6 @@ impl FromStr for Lsn {
 impl fmt::Display for Lsn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:X}/{:X}", self.0 >> 32, self.0 & 0xffffffff)
-    }
-}
-
-impl Sub<u64> for Lsn {
-    type Output = Lsn;
-
-    fn sub(self, other: u64) -> Self::Output {
-        // panic if the subtraction overflows/underflows.
-        Lsn(self.0.checked_sub(other).unwrap())
     }
 }
 
