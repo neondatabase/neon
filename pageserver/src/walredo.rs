@@ -29,7 +29,7 @@ use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{oneshot, mpsc};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -82,22 +82,20 @@ pub enum WalRedoError {
 ///
 /// Public interface of WAL redo manager
 ///
-impl WalRedoManager
-{
+impl WalRedoManager {
     ///
     /// Create a new WalRedoManager.
     ///
     /// This only initializes the struct. You need to call WalRedoManager::launch to
     /// start the thread that processes the requests.
     pub fn new(conf: &PageServerConf, timelineid: ZTimelineId) -> WalRedoManager {
-
         let (tx, rx) = mpsc::unbounded_channel();
 
         WalRedoManager {
             conf: conf.clone(),
             timelineid,
             request_tx: tx,
-            request_rx: Mutex::new(Some(rx))
+            request_rx: Mutex::new(Some(rx)),
         }
     }
 
@@ -105,7 +103,6 @@ impl WalRedoManager
     /// Launch the WAL redo thread
     ///
     pub fn launch(&self, pcache: Arc<PageCache>) {
-
         // Get mutable references to the values that we need to pass to the
         // thread.
         let request_rx = self.request_rx.lock().unwrap().take().unwrap();
@@ -117,7 +114,6 @@ impl WalRedoManager
         let _walredo_thread = std::thread::Builder::new()
             .name("WAL redo thread".into())
             .spawn(move || {
-
                 // We block on waiting for requests on the walredo request channel, but
                 // use async I/O to communicate with the child process. Initialize the
                 // runtime for the async part.
@@ -143,18 +139,21 @@ impl WalRedoManager
     /// of the given page version.
     ///
     pub async fn request_redo(&self, tag: BufferTag, lsn: u64) -> Result<Bytes, WalRedoError> {
-
         // Create a channel where to receive the response
         let (tx, rx) = oneshot::channel::<Result<Bytes, WalRedoError>>();
 
         let request = WalRedoRequest {
-            tag, lsn,
+            tag,
+            lsn,
             response_channel: tx,
         };
 
-        self.request_tx.send(request).expect("could not send WAL redo request");
+        self.request_tx
+            .send(request)
+            .expect("could not send WAL redo request");
 
-        rx.await.expect("could not receive response to WAL redo request")
+        rx.await
+            .expect("could not receive response to WAL redo request")
     }
 }
 
@@ -162,12 +161,10 @@ impl WalRedoManager
 /// WAL redo thread
 ///
 impl WalRedoManagerInternal {
-
     //
     // Main entry point for the WAL applicator thread.
     //
     async fn wal_redo_main(&mut self) {
-
         info!("WAL redo thread started {}", self.timelineid);
 
         // Loop forever, handling requests as they come.
@@ -213,12 +210,13 @@ impl WalRedoManagerInternal {
         }
     }
 
-    fn transaction_id_set_status_bit(&self,
-                                     xl_info: u8,
-                                     xl_rmid: u8,
-                                     xl_xid: u32,
-                                     record: WALRecord,
-                                     page: &mut BytesMut,
+    fn transaction_id_set_status_bit(
+        &self,
+        xl_info: u8,
+        xl_rmid: u8,
+        xl_xid: u32,
+        record: WALRecord,
+        page: &mut BytesMut,
     ) {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         let mut status = 0;
@@ -242,11 +240,11 @@ impl WalRedoManagerInternal {
                record.main_data_offset, record.rec.len());
 
         let byteno: usize = ((xl_rmid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
-                             / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
+            / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
 
         let byteptr = &mut page[byteno..byteno + 1];
         let bshift: u8 = ((xl_xid % pg_constants::CLOG_XACTS_PER_BYTE)
-                          * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
+            * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
 
         let mut curval = byteptr[0];
         curval = (curval >> bshift) & pg_constants::CLOG_XACT_BITMASK;
@@ -269,9 +267,10 @@ impl WalRedoManagerInternal {
     ///
     /// Process one request for WAL redo.
     ///
-    async fn handle_apply_request(&self,
-                                  process: &WalRedoProcess,
-                                  request: &WalRedoRequest,
+    async fn handle_apply_request(
+        &self,
+        process: &WalRedoProcess,
+        request: &WalRedoRequest,
     ) -> Result<Bytes, WalRedoError> {
         let pcache = &self.pcache;
         let tag = request.tag;
@@ -372,7 +371,8 @@ impl WalRedoProcess {
             .args(&["-D", datadir])
             .arg("-N")
             .output()
-            .await.expect("failed to execute initdb");
+            .await
+            .expect("failed to execute initdb");
 
         if !initdb.status.success() {
             panic!(
@@ -436,7 +436,8 @@ impl WalRedoProcess {
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
-    async fn apply_wal_records(&self,
+    async fn apply_wal_records(
+        &self,
         tag: BufferTag,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
@@ -451,13 +452,13 @@ impl WalRedoProcess {
                 TIMEOUT,
                 stdin.write_all(&build_begin_redo_for_block_msg(tag)),
             )
-                .await??;
+            .await??;
             if base_img.is_some() {
                 timeout(
                     TIMEOUT,
                     stdin.write_all(&build_push_page_msg(tag, base_img.unwrap())),
                 )
-                    .await??;
+                .await??;
             }
 
             // Send WAL records.

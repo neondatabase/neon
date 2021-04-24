@@ -31,6 +31,7 @@
 
 use crate::restore_local_repo::restore_timeline;
 use crate::waldecoder::Oid;
+use crate::walredo::WalRedoManager;
 use crate::ZTimelineId;
 use crate::{zenith_repo_dir, PageServerConf};
 use anyhow::{bail, Context};
@@ -47,7 +48,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::{convert::TryInto, ops::AddAssign};
 use zenith_utils::seqwait::SeqWait;
-use crate::walredo::WalRedoManager;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -177,7 +177,10 @@ fn gc_thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
     info!("Garbage collection thread started {}", timelineid);
     let pcache = get_pagecache(conf, timelineid).unwrap();
 
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     runtime.block_on(pcache.do_gc(conf)).unwrap();
 }
@@ -199,7 +202,6 @@ fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB 
 }
 
 fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache {
-
     PageCache {
         shared: Mutex::new(PageCacheShared {
             first_valid_lsn: 0,
@@ -378,7 +380,6 @@ impl WALRecord {
 }
 
 impl PageCache {
-
     // Public GET interface functions
 
     ///
@@ -414,8 +415,8 @@ impl PageCache {
                 if let Some(img) = &content.page_image {
                     page_img = img.clone();
                 } else if content.wal_record.is_some() {
-					// Request the WAL redo manager to apply the WAL records for us.
-					page_img = self.walredo_mgr.request_redo(tag, lsn).await?;
+                    // Request the WAL redo manager to apply the WAL records for us.
+                    page_img = self.walredo_mgr.request_redo(tag, lsn).await?;
                 } else {
                     // No base image, and no WAL record. Huh?
                     bail!("no page image or WAL record for requested page");
@@ -493,9 +494,13 @@ impl PageCache {
     /// Returns an old page image (if any), and a vector of WAL records to apply
     /// over it.
     ///
-    pub fn collect_records_for_apply(&self, tag: BufferTag, lsn: u64) -> (Option<Bytes>, Vec<WALRecord>) {
+    pub fn collect_records_for_apply(
+        &self,
+        tag: BufferTag,
+        lsn: u64,
+    ) -> (Option<Bytes>, Vec<WALRecord>) {
         let mut buf = BytesMut::new();
-		let key = CacheKey { tag, lsn };
+        let key = CacheKey { tag, lsn };
         key.pack(&mut buf);
 
         let mut base_img: Option<Bytes> = None;
@@ -779,7 +784,6 @@ impl PageCache {
     // The caller must ensure that WAL has been received up to 'lsn'.
     //
     fn relsize_get_nowait(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
-
         //assert!(lsn <= self.last_valid_lsn.load(Ordering::Acquire));
 
         let mut key = CacheKey {
@@ -827,7 +831,6 @@ impl PageCache {
     }
 
     async fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
-
         let mut buf = BytesMut::new();
         loop {
             thread::sleep(conf.gc_period);
@@ -896,7 +899,7 @@ impl PageCache {
                                 let key = CacheKey::unpack(&mut buf);
                                 if key.tag == maxkey.tag {
                                     let v = iter.value().unwrap();
-									if (v[0] & PAGE_IMAGE_FLAG) == 0 {
+                                    if (v[0] & PAGE_IMAGE_FLAG) == 0 {
                                         trace!("Reconstruct horizon page {:?}", key);
                                         self.walredo_mgr.request_redo(key.tag, key.lsn).await?;
                                         truncated += 1;
