@@ -248,13 +248,6 @@ fn get_metric_str<'a>(title: &str, value: &'a str) -> Spans<'a> {
     ])
 }
 
-// FIXME: We really should define a datatype for LSNs, with Display trait and
-// helper functions. There's one in tokio-postgres, but I don't think we want
-// to rely on that.
-fn format_lsn(lsn: u64) -> String {
-    return format!("{:X}/{:X}", lsn >> 32, lsn & 0xffff_ffff);
-}
-
 impl tui::widgets::Widget for MetricsWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
@@ -270,10 +263,9 @@ impl tui::widgets::Widget for MetricsWidget {
         let page_cache_stats = crate::page_cache::get_stats();
         let lsnrange = format!(
             "{} - {}",
-            format_lsn(page_cache_stats.first_valid_lsn),
-            format_lsn(page_cache_stats.last_valid_lsn)
+            page_cache_stats.first_valid_lsn, page_cache_stats.last_valid_lsn
         );
-        let last_valid_recordlsn_str = format_lsn(page_cache_stats.last_record_lsn);
+        let last_valid_recordlsn_str = page_cache_stats.last_record_lsn.to_string();
         lines.push(get_metric_str("Valid LSN range", &lsnrange));
         lines.push(get_metric_str("Last record LSN", &last_valid_recordlsn_str));
         lines.push(get_metric_u64(
