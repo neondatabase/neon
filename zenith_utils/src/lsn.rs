@@ -4,6 +4,7 @@ use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -105,6 +106,41 @@ impl AddAssign<u64> for Lsn {
     fn add_assign(&mut self, other: u64) {
         // panic if the addition overflows.
         self.0 = self.0.checked_add(other).unwrap();
+    }
+}
+
+/// An [`Lsn`] that can be accessed atomically.
+pub struct AtomicLsn {
+    inner: AtomicU64,
+}
+
+impl AtomicLsn {
+    /// Creates a new atomic `Lsn`.
+    pub fn new(val: u64) -> Self {
+        AtomicLsn {
+            inner: AtomicU64::new(val),
+        }
+    }
+
+    /// Atomically retrieve the `Lsn` value from memory.
+    pub fn load(&self) -> Lsn {
+        Lsn(self.inner.load(Ordering::Acquire))
+    }
+
+    /// Atomically store a new `Lsn` value to memory.
+    pub fn store(&self, lsn: Lsn) {
+        self.inner.store(lsn.0, Ordering::Release);
+    }
+
+    /// Adds to the current value, returning the previous value.
+    ///
+    /// This operation will panic on overflow.
+    pub fn fetch_add(&self, val: u64) -> Lsn {
+        let prev = self.inner.fetch_add(val, Ordering::AcqRel);
+        if prev.checked_add(val).is_none() {
+            panic!("AtomicLsn overflow");
+        }
+        Lsn(prev)
     }
 }
 
