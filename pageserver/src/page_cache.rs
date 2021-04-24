@@ -634,9 +634,13 @@ impl PageCache {
     // Adds a relation-wide WAL record (like truncate) to the page cache,
     // associating it with all pages started with specified block number
     //
-    pub async fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) -> anyhow::Result<()> {
+    pub fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) -> anyhow::Result<()> {
         let mut key = CacheKey { tag, lsn: rec.lsn };
-        let old_rel_size = self.relsize_get(&tag.rel, u64::MAX).await?;
+
+        // What was the size of the relation before this record?
+        let last_lsn = self.last_valid_lsn.load(Ordering::Acquire);
+        let old_rel_size = self.relsize_get_nowait(&tag.rel, last_lsn)?;
+
         let content = CacheEntryContent {
             page_image: None,
             wal_record: Some(rec),
@@ -762,11 +766,14 @@ impl PageCache {
         shared.last_record_lsn
     }
 
-    pub async fn relsize_get(&self, rel: &RelTag, req_lsn: u64) -> anyhow::Result<u32> {
-        let mut lsn = req_lsn;
-        if lsn != u64::MAX {
-            lsn = self.wait_lsn(lsn).await?;
-        }
+    pub async fn relsize_get(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
+        self.wait_lsn(lsn).await?;
+        self.relsize_get_nowait(rel, lsn)
+    }
+
+    fn relsize_get_nowait(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
+
+        assert!(lsn <= self.last_valid_lsn.load(Ordering::Acquire));
 
         let mut key = CacheKey {
             tag: BufferTag {
