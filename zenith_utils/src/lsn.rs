@@ -6,6 +6,9 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Transaction log block size in bytes
+pub const XLOG_BLCKSZ: u32 = 8192;
+
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Lsn(pub u64);
@@ -53,6 +56,32 @@ impl Lsn {
     /// Compute the segment number
     pub fn segment_number(self, seg_sz: u64) -> u64 {
         self.0 / seg_sz
+    }
+
+    /// Compute the offset into a block
+    pub fn block_offset(self) -> u64 {
+        const BLCKSZ: u64 = XLOG_BLCKSZ as u64;
+        self.0 % BLCKSZ
+    }
+
+    /// Compute the bytes remaining in this block
+    ///
+    /// If the LSN is already at the block boundary, it will return `XLOG_BLCKSZ`.
+    pub fn remaining_in_block(self) -> u64 {
+        const BLCKSZ: u64 = XLOG_BLCKSZ as u64;
+        BLCKSZ - (self.0 % BLCKSZ)
+    }
+
+    /// Compute the bytes remaining to fill a chunk of some size
+    ///
+    /// If the LSN is already at the chunk boundary, it will return 0.
+    pub fn calc_padding<T: Into<u64>>(self, sz: T) -> u64 {
+        let sz: u64 = sz.into();
+        // By using wrapping_sub, we can subtract first and then mod second.
+        // If it's done the other way around, then we would return a full
+        // chunk size if we're already at the chunk boundary.
+        // (Regular subtraction will panic on overflow in debug builds.)
+        (sz.wrapping_sub(self.0)) % sz
     }
 }
 

@@ -6,8 +6,6 @@ use std::str;
 use thiserror::Error;
 use zenith_utils::lsn::Lsn;
 
-const XLOG_BLCKSZ: u32 = 8192;
-
 // FIXME: this is configurable in PostgreSQL, 16 MB is the default
 const WAL_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
 
@@ -111,10 +109,7 @@ impl WalStreamDecoder {
 
                 self.lsn += SizeOfXLogLongPHD as u64;
                 continue;
-            } else if self.lsn.0 % (XLOG_BLCKSZ as u64) == 0 {
-                // FIXME: make this a member of Lsn, but what should it be called?
-                // parse page header
-
+            } else if self.lsn.block_offset() == 0 {
                 if self.inputbuf.remaining() < SizeOfXLogShortPHD {
                     return Ok(None);
                 }
@@ -165,8 +160,7 @@ impl WalStreamDecoder {
                 continue;
             } else {
                 // we're continuing a record, possibly from previous page.
-                // FIXME: Should any of this math be captured into Lsn or a related type?
-                let pageleft: u32 = XLOG_BLCKSZ - (self.lsn.0 % (XLOG_BLCKSZ as u64)) as u32;
+                let pageleft = self.lsn.remaining_in_block() as u32;
 
                 // read the rest of the record, or as much as fits on this page.
                 let n = min(self.contlen, pageleft) as usize;
@@ -188,12 +182,10 @@ impl WalStreamDecoder {
                     // to the next WAL segment.
                     if is_xlog_switch_record(&recordbuf) {
                         trace!("saw xlog switch record at {}", self.lsn);
-                        self.padlen = (WAL_SEGMENT_SIZE - (self.lsn.0 % WAL_SEGMENT_SIZE)) as u32;
-                    }
-
-                    // FIXME: what does this code do?
-                    if self.lsn.0 % 8 != 0 {
-                        self.padlen = 8 - (self.lsn.0 % 8) as u32;
+                        self.padlen = self.lsn.calc_padding(WAL_SEGMENT_SIZE) as u32;
+                    } else {
+                        // Pad to an 8-byte boundary
+                        self.padlen = self.lsn.calc_padding(8u32) as u32;
                     }
 
                     let result = (self.lsn, recordbuf);

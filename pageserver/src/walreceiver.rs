@@ -166,10 +166,7 @@ async fn walreceiver_main(
         // FIXME: It probably would be better to always start streaming from the beginning
         // of the page, or the segment, so that we could check the page/segment headers
         // too. Just for the sake of paranoia.
-        // FIXME: should any of this logic move inside the Lsn type?
-        if startpoint.0 % 8 != 0 {
-            startpoint += 8 - (startpoint.0 % 8);
-        }
+        startpoint += startpoint.calc_padding(8u32);
     }
     debug!(
         "last_valid_lsn {} starting replication from {}  for timeline {}, server is at {}...",
