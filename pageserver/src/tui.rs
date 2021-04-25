@@ -240,7 +240,9 @@ fn get_metric_u64(title: &str, value: u64) -> Spans {
     ])
 }
 
-fn get_metric_str<'a>(title: &str, value: &'a str) -> Spans<'a> {
+// This is not used since LSNs were removed from page cache stats.
+// Maybe it will be used in the future?
+fn _get_metric_str<'a>(title: &str, value: &'a str) -> Spans<'a> {
     Spans::from(vec![
         Span::styled(format!("{:<20}", title), Style::default()),
         Span::raw(": "),
@@ -261,6 +263,10 @@ impl tui::widgets::Widget for MetricsWidget {
         let mut lines: Vec<Spans> = Vec::new();
 
         let page_cache_stats = crate::page_cache::get_stats();
+
+        // This is not used since LSNs were removed from page cache stats.
+        // Maybe it will be used in the future?
+        /*
         let lsnrange = format!(
             "{} - {}",
             page_cache_stats.first_valid_lsn, page_cache_stats.last_valid_lsn
@@ -268,6 +274,8 @@ impl tui::widgets::Widget for MetricsWidget {
         let last_valid_recordlsn_str = page_cache_stats.last_record_lsn.to_string();
         lines.push(get_metric_str("Valid LSN range", &lsnrange));
         lines.push(get_metric_str("Last record LSN", &last_valid_recordlsn_str));
+        */
+
         lines.push(get_metric_u64(
             "# of cache entries",
             page_cache_stats.num_entries,
