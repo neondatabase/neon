@@ -686,9 +686,8 @@ impl PageCache {
         let oldlsn = shared.last_valid_lsn;
         if lsn >= oldlsn {
             shared.last_valid_lsn = lsn;
-            self.seqwait_lsn.advance(lsn);
-
             self.last_valid_lsn.store(lsn, Ordering::Relaxed);
+            self.seqwait_lsn.advance(lsn);
         } else {
             warn!(
                 "attempted to move last valid LSN backwards (was {:X}/{:X}, new {:X}/{:X})",
@@ -714,10 +713,9 @@ impl PageCache {
 
         shared.last_valid_lsn = lsn;
         shared.last_record_lsn = lsn;
-        self.seqwait_lsn.advance(lsn);
-
         self.last_valid_lsn.store(lsn, Ordering::Relaxed);
         self.last_record_lsn.store(lsn, Ordering::Relaxed);
+        self.seqwait_lsn.advance(lsn);
     }
 
     ///
@@ -784,7 +782,7 @@ impl PageCache {
     // The caller must ensure that WAL has been received up to 'lsn'.
     //
     fn relsize_get_nowait(&self, rel: &RelTag, lsn: u64) -> anyhow::Result<u32> {
-        //assert!(lsn <= self.last_valid_lsn.load(Ordering::Acquire));
+        assert!(lsn <= self.last_valid_lsn.load(Ordering::Acquire));
 
         let mut key = CacheKey {
             tag: BufferTag {
