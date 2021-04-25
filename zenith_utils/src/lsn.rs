@@ -196,4 +196,44 @@ mod tests {
         assert_eq!(Lsn::from_hex("0"), Ok(Lsn(0)));
         assert_eq!(Lsn::from_hex("F12345678AAAA5555"), Err(LsnParseError));
     }
+
+    #[test]
+    fn test_lsn_math() {
+        assert_eq!(Lsn(1234) + 11u64, Lsn(1245));
+
+        assert_eq!(
+            {
+                let mut lsn = Lsn(1234);
+                lsn += 11u64;
+                lsn
+            },
+            Lsn(1245)
+        );
+
+        assert_eq!(Lsn(1234).checked_sub(1233u64), Some(Lsn(1)));
+        assert_eq!(Lsn(1234).checked_sub(1235u64), None);
+
+        let seg_sz = 16u64 * 1024 * 1024;
+        assert_eq!(Lsn(0x1000007).segment_offset(seg_sz), 7u64);
+        assert_eq!(Lsn(0x1000007).segment_number(seg_sz), 1u64);
+
+        assert_eq!(Lsn(0x4007).block_offset(), 7u64);
+        assert_eq!(Lsn(0x4000).block_offset(), 0u64);
+        assert_eq!(Lsn(0x4007).remaining_in_block(), 8185u64);
+        assert_eq!(Lsn(0x4000).remaining_in_block(), 8192u64);
+
+        assert_eq!(Lsn(0xffff01).calc_padding(seg_sz), 255u64);
+        assert_eq!(Lsn(0x2000000).calc_padding(seg_sz), 0u64);
+        assert_eq!(Lsn(0xffff01).calc_padding(8u32), 7u64);
+        assert_eq!(Lsn(0xffff00).calc_padding(8u32), 0u64);
+    }
+
+    #[test]
+    fn test_atomic_lsn() {
+        let lsn = AtomicLsn::new(0);
+        assert_eq!(lsn.fetch_add(1234), Lsn(0));
+        assert_eq!(lsn.load(), Lsn(1234));
+        lsn.store(Lsn(5678));
+        assert_eq!(lsn.load(), Lsn(5678));
+    }
 }
