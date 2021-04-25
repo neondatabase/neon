@@ -39,7 +39,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
 use rocksdb;
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -84,25 +84,14 @@ pub struct PageCacheStats {
     pub num_page_images: u64,
     pub num_wal_records: u64,
     pub num_getpage_requests: u64,
-    pub first_valid_lsn: Lsn,
-    pub last_valid_lsn: Lsn,
-    pub last_record_lsn: Lsn,
 }
 
 impl AddAssign for PageCacheStats {
     fn add_assign(&mut self, other: Self) {
-        *self = Self {
-            num_entries: self.num_entries + other.num_entries,
-            num_page_images: self.num_page_images + other.num_page_images,
-            num_wal_records: self.num_wal_records + other.num_wal_records,
-            num_getpage_requests: self.num_getpage_requests + other.num_getpage_requests,
-
-            // FIXME: needs review
-            // What should be happening here? I'm not sure what is the desired result.
-            first_valid_lsn: min(self.first_valid_lsn, other.first_valid_lsn),
-            last_valid_lsn: max(self.last_valid_lsn, other.last_valid_lsn),
-            last_record_lsn: max(self.last_record_lsn, other.last_record_lsn),
-        }
+        self.num_entries += other.num_entries;
+        self.num_page_images += other.num_page_images;
+        self.num_wal_records += other.num_wal_records;
+        self.num_getpage_requests += other.num_getpage_requests;
     }
 }
 
@@ -769,9 +758,6 @@ impl PageCache {
             num_page_images: self.num_page_images.load(Ordering::Relaxed),
             num_wal_records: self.num_wal_records.load(Ordering::Relaxed),
             num_getpage_requests: self.num_getpage_requests.load(Ordering::Relaxed),
-            first_valid_lsn: self.first_valid_lsn.load(),
-            last_valid_lsn: self.last_valid_lsn.load(),
-            last_record_lsn: self.last_record_lsn.load(),
         }
     }
 
@@ -984,9 +970,6 @@ pub fn get_stats() -> PageCacheStats {
         num_page_images: 0,
         num_wal_records: 0,
         num_getpage_requests: 0,
-        first_valid_lsn: Lsn(0),
-        last_valid_lsn: Lsn(0),
-        last_record_lsn: Lsn(0),
     };
 
     pcaches.iter().for_each(|(_sys_id, pcache)| {
