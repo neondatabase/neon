@@ -4,30 +4,6 @@
 // Currently, the page cache uses RocksDB to store WAL wal records and
 // full page images, keyed by the RelFileNode, blocknumber, and the
 // LSN.
-//
-// On async vs blocking:
-//
-// All the functions that can block for any significant length use
-// Tokio async, and are marked as 'async'. That currently includes all
-// the "Get" functions that get a page image or a relation size.  The
-// "Put" functions that add base images or WAL records to the cache
-// cannot block.
-//
-// However, we have a funny definition of blocking: waiting on a Mutex
-// that protects the in-memory data structures is not considered as
-// blocking, as those are short waits, and there is no deadlock
-// risk. It is *not* OK to do I/O or wait on other threads while
-// holding a Mutex, however.
-//
-// Another wart is that we currently consider the RocksDB operations
-// to be non-blocking, and we do those while holding a lock, and
-// without async. That's fantasy, as RocksDB will do I/O, possibly a
-// lot of it. But that's not a correctness issue, since the RocksDB
-// calls will not call back to any of the other functions in page
-// server. RocksDB is just a stopgap solution, to be replaced with
-// something else, so it doesn't seem worth it to wrangle those calls
-// into async model.
-//
 
 use crate::restore_local_repo::restore_timeline;
 use crate::waldecoder::Oid;
