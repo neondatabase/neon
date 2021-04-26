@@ -168,8 +168,8 @@ fn walreceiver_main(
         // different like having 'initdb' method on a pageserver (or importing some shared
         // empty database snapshot), so for now I just put start of first segment which
         // seems to be a valid record.
-        pcache.init_valid_lsn(Lsn(0x_1_000_000));
-        startpoint = Lsn(0x_1_000_000);
+        pcache.init_valid_lsn(Lsn(0x0100_0000));
+        startpoint = Lsn(0x0100_0000);
     } else {
         // There might be some padding after the last full record, skip it.
         //
@@ -257,7 +257,7 @@ fn walreceiver_main(
                                     blknum: truncate.blkno,
                                 };
                                 let rec = page_cache::WALRecord {
-                                    lsn: lsn,
+                                    lsn,
                                     will_init: false,
                                     truncate: true,
                                     rec: recdata.clone(),
@@ -330,7 +330,7 @@ fn walreceiver_main(
             _ => (),
         }
     }
-    return Ok(());
+    Ok(())
 }
 
 /// Data returned from the postgres `IDENTIFY_SYSTEM` command

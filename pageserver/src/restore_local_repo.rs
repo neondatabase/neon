@@ -209,7 +209,7 @@ fn restore_relfile(
                     rel: RelTag {
                         spcnode: spcoid,
                         dbnode: dboid,
-                        relnode: relnode,
+                        relnode,
                         forknum: forknum as u8,
                     },
                     blknum,
@@ -269,13 +269,12 @@ fn restore_wal(
 
         // Slurp the WAL file
         let open_result = File::open(&path);
-        if let Err(e) = open_result {
+        if let Err(e) = &open_result {
             if e.kind() == std::io::ErrorKind::NotFound {
                 break;
             }
-            return Err(e)?;
         }
-        let mut file = open_result.unwrap();
+        let mut file = open_result?;
 
         if offset > 0 {
             file.seek(SeekFrom::Start(offset as u64))?;
@@ -414,12 +413,7 @@ fn parse_relfilename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
     let relnode_str = caps.name("relnode").unwrap().as_str();
     let relnode = u32::from_str_radix(relnode_str, 10)?;
 
-    let forkname_match = caps.name("forkname");
-    let forkname = if forkname_match.is_none() {
-        None
-    } else {
-        Some(forkname_match.unwrap().as_str())
-    };
+    let forkname = caps.name("forkname").map(|f| f.as_str());
     let forknum = forkname_to_forknum(forkname)?;
 
     let segno_match = caps.name("segno");

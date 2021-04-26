@@ -116,9 +116,9 @@ impl WalRedoManager {
             .spawn(move || {
                 let mut internal = WalRedoManagerInternal {
                     _conf: conf_copy,
-                    timelineid: timelineid,
-                    pcache: pcache,
-                    request_rx: request_rx,
+                    timelineid,
+                    pcache,
+                    request_rx,
                 };
                 internal.wal_redo_main();
             })

@@ -198,12 +198,7 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
     let relnode_str = caps.name("relnode").unwrap().as_str();
     let relnode: u32 = relnode_str.parse()?;
 
-    let forkname_match = caps.name("forkname");
-    let forkname = if forkname_match.is_none() {
-        None
-    } else {
-        Some(forkname_match.unwrap().as_str())
-    };
+    let forkname = caps.name("forkname").map(|f| f.as_str());
     let forknum = forkname_to_forknum(forkname)?;
 
     let segno_match = caps.name("segno");
