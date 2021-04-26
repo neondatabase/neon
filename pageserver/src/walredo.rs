@@ -187,7 +187,7 @@ impl WalRedoManagerInternal {
             let _ = request.response_channel.send(result);
 
             if !result_ok {
-				error!("wal-redo-postgres filed to apply request {:?}", request);
+                error!("wal-redo-postgres filed to apply request {:?}", request);
             }
         }
     }
