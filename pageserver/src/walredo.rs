@@ -30,7 +30,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 use zenith_utils::lsn::Lsn;
 
@@ -168,48 +168,27 @@ impl WalRedoManagerInternal {
             .build()
             .unwrap();
 
+        let process: WalRedoProcess;
+        let datadir = format!("wal-redo/{}", self.timelineid);
+
+        info!("launching WAL redo postgres process {}", self.timelineid);
+
+        process = runtime.block_on(WalRedoProcess::launch(&datadir)).unwrap();
+        info!("WAL redo postgres started");
+
         // Loop forever, handling requests as they come.
         loop {
-            let mut process: WalRedoProcess;
-            let datadir = format!("wal-redo/{}", self.timelineid);
+            let request = self.request_rx.recv().unwrap();
 
-            info!("launching WAL redo postgres process {}", self.timelineid);
+            let result = runtime.block_on(self.handle_apply_request(&process, &request));
+            let result_ok = result.is_ok();
 
-            process = runtime.block_on(WalRedoProcess::launch(&datadir)).unwrap();
-            info!("WAL redo postgres started");
+            // Send the result to the requester
+            let _ = request.response_channel.send(result);
 
-            // Pretty arbitrarily, reuse the same Postgres process for 100000 requests.
-            // After that, kill it and start a new one. This is mostly to avoid
-            // using up all shared buffers in Postgres's shared buffer cache; we don't
-            // want to write any pages to disk in the WAL redo process.
-            for _i in 1..100000 {
-                let request = self.request_rx.recv().unwrap();
-
-                let result = runtime.block_on(self.handle_apply_request(&process, &request));
-                let result_ok = result.is_ok();
-
-                // Send the result to the requester
-                let _ = request.response_channel.send(result);
-
-                if !result_ok {
-                    // Something went wrong with handling the request. It's not clear
-                    // if the request was faulty, and the next request would succeed
-                    // again, or if the 'postgres' process went haywire. To be safe,
-                    // kill the 'postgres' process so that we will start from a clean
-                    // slate, with a new process, for the next request.
-                    break;
-                }
+            if !result_ok {
+				error!("wal-redo-postgres filed to apply request {:?}", request);
             }
-
-            // Time to kill the 'postgres' process. A new one will be launched on next
-            // iteration of the loop.
-            //
-            // TODO: SIGKILL if needed
-            info!("killing WAL redo postgres process");
-            let _ = process.stdin.get_mut().shutdown();
-            let mut child = process.child;
-            drop(process.stdin);
-            let _ = child.wait();
         }
     }
 
@@ -351,7 +330,6 @@ impl WalRedoManagerInternal {
 }
 
 struct WalRedoProcess {
-    child: Child,
     stdin: RefCell<ChildStdin>,
     stdout: RefCell<ChildStdout>,
 }
@@ -425,7 +403,6 @@ impl WalRedoProcess {
         tokio::spawn(f_stderr);
 
         Ok(WalRedoProcess {
-            child,
             stdin: RefCell::new(stdin),
             stdout: RefCell::new(stdout),
         })

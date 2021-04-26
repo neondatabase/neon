@@ -403,7 +403,7 @@ impl PostgresNode {
         if let Ok(mut file) = File::open(self.env.repo_path.join("pageserver.log")) {
             let mut buffer = String::new();
             file.read_to_string(&mut buffer).unwrap();
-            println!("--------------- Dump pageserver.log:\n{}", buffer);
+            println!("--------------- pageserver.log:\n{}", buffer);
         }
     }
 
@@ -499,6 +499,11 @@ impl PostgresNode {
 				println!("--------------- regression.diffs:\n{}", buffer);
 			}
 			self.dump_log_file();
+			if let Ok(mut file) = File::open(self.env.repo_path.join("pgdatadirs").join("pg1").join("log")) {
+				let mut buffer = String::new();
+				file.read_to_string(&mut buffer).unwrap();
+				println!("--------------- pgdatadirs/pg1/log:\n{}", buffer);
+			}
 		}
         regress_check
     }
