@@ -672,27 +672,128 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
             blk.blkno = xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
             trace!(
-                "XLOG_XACT_COMMIT xl_prev {:X}/{:X}  xid {} updates block {}",
-                (xl_prev >> 32),
+                "XLOG_XACT_COMMIT xl_info {} xl_prev {:X}/{:X}  xid {} updates block {} main_data_len {}",
+                xl_info, (xl_prev >> 32),
                 xl_prev & 0xffffffff,
                 xl_xid,
-                blk.blkno
+                blk.blkno,
+                main_data_len
             );
             blocks.push(blk);
-            //TODO parse commit record to extract subtrans entries
+
+            //parse commit record to extract subtrans entries
+            // xl_xact_commit starts with time of commit
+            let _xact_time = buf.get_i64_le();
+
+            let mut xinfo = 0;
+            if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+                xinfo = buf.get_u32_le();
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
+                let _dbid = buf.get_u32_le();
+                let _tsid = buf.get_u32_le();
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
+                let nsubxacts = buf.get_i32_le();
+                let mut prev_blkno = u32::MAX;
+                for _i in 0..nsubxacts {
+                    let subxact = buf.get_u32_le();
+                    let blkno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
+                    if prev_blkno != blkno {
+                        prev_blkno = blkno;
+                        let mut blk = DecodedBkpBlock::new();
+                        blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+                        blk.blkno = blkno;
+                        blocks.push(blk);
+                    }
+                }
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
+                let nrels = buf.get_i32_le();
+                for _i in 0..nrels {
+                    let spcnode = buf.get_u32_le();
+                    let dbnode = buf.get_u32_le();
+                    let relnode = buf.get_u32_le();
+                    //TODO handle this too?
+                    trace!(
+                        "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
+                        spcnode,
+                        dbnode,
+                        relnode
+                    );
+                }
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
+                let nmsgs = buf.get_i32_le();
+                for _i in 0..nmsgs {
+                    let sizeof_shared_invalidation_message = 0;
+                    buf.advance(sizeof_shared_invalidation_message);
+                }
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
+                let _xid = buf.get_u32_le();
+                trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
+                //TODO handle this to be able to restore pg_twophase on node start
+            }
         } else if info == pg_constants::XLOG_XACT_ABORT {
             let mut blk = DecodedBkpBlock::new();
             blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
             blk.blkno = xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
             trace!(
-                "XLOG_XACT_ABORT xl_prev {:X}/{:X} xid {} updates block {}",
-                (xl_prev >> 32),
+                "XLOG_XACT_ABORT xl_info {} xl_prev {:X}/{:X} xid {} updates block {} main_data_len {}",
+                xl_info, (xl_prev >> 32),
                 xl_prev & 0xffffffff,
                 xl_xid,
-                blk.blkno
+                blk.blkno,
+                main_data_len
             );
             blocks.push(blk);
-            //TODO parse abort record to extract subtrans entries
+            //parse abort record to extract subtrans entries
+            // xl_xact_abort starts with time of commit
+            let _xact_time = buf.get_i64_le();
+
+            let mut xinfo = 0;
+            if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+                xinfo = buf.get_u32_le();
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
+                let _dbid = buf.get_u32_le();
+                let _tsid = buf.get_u32_le();
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
+                let nsubxacts = buf.get_i32_le();
+                let mut prev_blkno = u32::MAX;
+                for _i in 0..nsubxacts {
+                    let subxact = buf.get_u32_le();
+                    let blkno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
+                    if prev_blkno != blkno {
+                        prev_blkno = blkno;
+                        let mut blk = DecodedBkpBlock::new();
+                        blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+                        blk.blkno = blkno;
+                        blocks.push(blk);
+                    }
+                }
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
+                let nrels = buf.get_i32_le();
+                for _i in 0..nrels {
+                    let spcnode = buf.get_u32_le();
+                    let dbnode = buf.get_u32_le();
+                    let relnode = buf.get_u32_le();
+                    //TODO save these too
+                    trace!(
+                        "XLOG_XACT_ABORT relfilenode {}/{}/{}",
+                        spcnode,
+                        dbnode,
+                        relnode
+                    );
+                }
+            }
+            if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
+                let _xid = buf.get_u32_le();
+                trace!("XLOG_XACT_ABORT-XACT_XINFO_HAS_TWOPHASE");
+            }
         }
     } else if xl_rmid == pg_constants::RM_DBASE_ID {
         let info = xl_info & !pg_constants::XLR_INFO_MASK;

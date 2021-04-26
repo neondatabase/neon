@@ -38,9 +38,14 @@ pub const XLOG_XACT_HAS_INFO: u8 = 0x80;
  * The following flags, stored in xinfo, determine which information is
  * contained in commit/abort records.
  */
-pub const XACT_XINFO_HAS_DBINFO: u32 = 1;
-pub const XACT_XINFO_HAS_SUBXACTS: u32 = 2;
-pub const XACT_XINFO_HAS_RELFILENODES: u32 = 4;
+pub const XACT_XINFO_HAS_DBINFO: u32 = 1u32 << 0;
+pub const XACT_XINFO_HAS_SUBXACTS: u32 = 1u32 << 1;
+pub const XACT_XINFO_HAS_RELFILENODES: u32 = 1u32 << 2;
+pub const XACT_XINFO_HAS_INVALS: u32 = 1u32 << 3;
+pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
+// pub const XACT_XINFO_HAS_ORIGIN: u32 = 1u32 << 5;
+// pub const XACT_XINFO_HAS_AE_LOCKS: u32 = 1u32 << 6;
+// pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
 
 // From pg_control.h and rmgrlist.h
 pub const XLOG_SWITCH: u8 = 0x40;
@@ -63,3 +68,5 @@ pub const XLOG_DBASE_DROP: u8 = 0x10;
 
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
+
+pub const SIZEOF_XLOGRECORD: u32 = 24;
