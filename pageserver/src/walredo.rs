@@ -182,37 +182,17 @@ impl WalRedoManagerInternal {
         }
     }
 
-    fn transaction_id_set_status_bit(
-        &self,
-        xl_info: u8,
-        xl_xid: u32,
-        record: &WALRecord,
-        page: &mut BytesMut,
-    ) {
-        let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
-        let mut status = 0;
-        if info == pg_constants::XLOG_XACT_COMMIT {
-            status = pg_constants::TRANSACTION_STATUS_COMMITTED;
-        } else if info == pg_constants::XLOG_XACT_ABORT {
-            status = pg_constants::TRANSACTION_STATUS_ABORTED;
-        } else {
-            trace!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {} main_data_offset {}, rec.len {}",
-                   status,
-                   record.lsn,
-                   record.main_data_offset, record.rec.len());
-            return;
-        }
+    fn transaction_id_set_status_bit(&self, xid: u32, status: u8, page: &mut BytesMut) {
+        trace!(
+            "handle_apply_request for RM_XACT_ID-{} (1-commit, 2-abort, 3-sub_commit)",
+            status
+        );
 
-        trace!("handle_apply_request for RM_XACT_ID-{} (1-commit, 2-abort) lsn {} main_data_offset {}, rec.len {}",
-               status,
-               record.lsn,
-               record.main_data_offset, record.rec.len());
-
-        let byteno: usize = ((xl_xid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
+        let byteno: usize = ((xid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
             / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
 
         let byteptr = &mut page[byteno..byteno + 1];
-        let bshift: u8 = ((xl_xid % pg_constants::CLOG_XACTS_PER_BYTE)
+        let bshift: u8 = ((xid % pg_constants::CLOG_XACTS_PER_BYTE)
             * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
 
         let mut curval = byteptr[0];
@@ -225,8 +205,8 @@ impl WalRedoManagerInternal {
 
         byteptr.copy_from_slice(&byteval);
         trace!(
-            "xl_xid {} byteno {} curval {} byteval {}",
-            xl_xid,
+            "xid {} byteno {} curval {} byteval {}",
+            xid,
             byteno,
             curval,
             byteval[0]
@@ -270,16 +250,80 @@ impl WalRedoManagerInternal {
                 buf.advance(2); // 2 bytes of padding
                 let _xl_crc = buf.get_u32_le();
 
+                //move to main data
+                // TODO probably, we should store some records in our special format
+                // to avoid this weird parsing on replay
+                let skip = (record.main_data_offset - pg_constants::SIZEOF_XLOGRECORD) as usize;
+                if buf.remaining() > skip {
+                    buf.advance(skip);
+                }
+
                 if xl_rmid == pg_constants::RM_CLOG_ID {
                     let info = xl_info & !pg_constants::XLR_INFO_MASK;
                     if info == pg_constants::CLOG_ZEROPAGE {
                         page.clone_from_slice(zero_page_bytes);
-                        trace!("handle_apply_request for RM_CLOG_ID-CLOG_ZEROPAGE lsn {} main_data_offset {}, rec.len {}",
+                    }
+                } else if xl_rmid == pg_constants::RM_XACT_ID {
+                    let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
+                    let mut status = 0;
+                    if info == pg_constants::XLOG_XACT_COMMIT {
+                        status = pg_constants::TRANSACTION_STATUS_COMMITTED;
+                        self.transaction_id_set_status_bit(xl_xid, status, &mut page);
+                        //handle subtrans
+                        let _xact_time = buf.get_i64_le();
+                        let mut xinfo = 0;
+                        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+                            xinfo = buf.get_u32_le();
+                            if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
+                                let _dbid = buf.get_u32_le();
+                                let _tsid = buf.get_u32_le();
+                            }
+                        }
+
+                        if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
+                            let nsubxacts = buf.get_i32_le();
+                            for _i in 0..nsubxacts {
+                                let subxact = buf.get_u32_le();
+                                let blkno = subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                                // only update xids on the requested page
+                                if tag.blknum == blkno {
+                                    status = pg_constants::TRANSACTION_STATUS_SUB_COMMITTED;
+                                    self.transaction_id_set_status_bit(subxact, status, &mut page);
+                                }
+                            }
+                        }
+                    } else if info == pg_constants::XLOG_XACT_ABORT {
+                        status = pg_constants::TRANSACTION_STATUS_ABORTED;
+                        self.transaction_id_set_status_bit(xl_xid, status, &mut page);
+                        //handle subtrans
+                        let _xact_time = buf.get_i64_le();
+                        let mut xinfo = 0;
+                        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+                            xinfo = buf.get_u32_le();
+                            if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
+                                let _dbid = buf.get_u32_le();
+                                let _tsid = buf.get_u32_le();
+                            }
+                        }
+
+                        if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
+                            let nsubxacts = buf.get_i32_le();
+                            for _i in 0..nsubxacts {
+                                let subxact = buf.get_u32_le();
+                                let blkno = subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                                // only update xids on the requested page
+                                if tag.blknum == blkno {
+                                    status = pg_constants::TRANSACTION_STATUS_ABORTED;
+                                    self.transaction_id_set_status_bit(subxact, status, &mut page);
+                                }
+                            }
+                        }
+                    } else {
+                        trace!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {} main_data_offset {}, rec.len {}",
+                               status,
                                record.lsn,
                                record.main_data_offset, record.rec.len());
                     }
-                } else if xl_rmid == pg_constants::RM_XACT_ID {
-                    self.transaction_id_set_status_bit(xl_info, xl_xid, record, &mut page);
                 }
             }
 
