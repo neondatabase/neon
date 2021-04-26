@@ -492,6 +492,14 @@ impl PostgresNode {
             .env("PGHOST", self.address.ip().to_string())
             .status()
             .expect("pg_regress failed");
+		if !regress_check.success() {
+			if let Ok(mut file) = File::open("regression.diffs") {
+				let mut buffer = String::new();
+				file.read_to_string(&mut buffer).unwrap();
+				println!("--------------- regression.diffs:\n{}", buffer);
+			}
+			self.dump_log_file();
+		}
         regress_check
     }
 
