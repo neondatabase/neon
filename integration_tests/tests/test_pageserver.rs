@@ -62,7 +62,8 @@ fn test_regress() {
     let node = compute_cplane.new_test_node(maintli);
     node.start().unwrap();
 
-    node.pg_regress();
+    let status = node.pg_regress();
+	assert!(status.success());
 }
 
 // Runs pg_bench on a compute node
@@ -79,7 +80,8 @@ fn pgbench() {
     let node = compute_cplane.new_test_node(maintli);
     node.start().unwrap();
 
-    node.pg_bench(10, 100);
+    let status = node.pg_bench(10, 100);
+	assert!(status.success());
 }
 
 // Run two postgres instances on one pageserver, on different timelines

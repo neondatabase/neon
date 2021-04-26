@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -458,7 +458,7 @@ impl PostgresNode {
         }
     }
 
-    pub fn pg_regress(&self) {
+    pub fn pg_regress(&self) -> ExitStatus {
         self.safe_psql("postgres", "CREATE DATABASE regression");
         let data_dir = zenith_repo_dir();
         let regress_run_path = data_dir.join("regress");
@@ -471,7 +471,7 @@ impl PostgresNode {
         let regress_src_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/postgres/src/test/regress");
 
-        let _regress_check = Command::new(regress_build_path.join("pg_regress"))
+        let regress_check = Command::new(regress_build_path.join("pg_regress"))
             .args(&[
                 "--bindir=''",
                 "--use-existing",
@@ -492,9 +492,10 @@ impl PostgresNode {
             .env("PGHOST", self.address.ip().to_string())
             .status()
             .expect("pg_regress failed");
+		regress_check
     }
 
-    pub fn pg_bench(&self, clients: u32, seconds: u32) {
+    pub fn pg_bench(&self, clients: u32, seconds: u32) -> ExitStatus {
         let port = self.address.port().to_string();
         let clients = clients.to_string();
         let seconds = seconds.to_string();
@@ -504,7 +505,7 @@ impl PostgresNode {
             .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("pgbench -i");
-        let _pg_bench_run = Command::new(self.env.pg_bin_dir().join("pgbench"))
+        let pg_bench_run = Command::new(self.env.pg_bin_dir().join("pgbench"))
             .args(&[
                 "-p",
                 port.as_str(),
@@ -522,6 +523,7 @@ impl PostgresNode {
             .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("pgbench run");
+		pg_bench_run
     }
 }
 
