@@ -63,7 +63,7 @@ fn test_regress() {
     node.start().unwrap();
 
     let status = node.pg_regress();
-	assert!(status.success());
+    assert!(status.success());
 }
 
 // Runs pg_bench on a compute node
@@ -81,7 +81,7 @@ fn pgbench() {
     node.start().unwrap();
 
     let status = node.pg_bench(10, 100);
-	assert!(status.success());
+    assert!(status.success());
 }
 
 // Run two postgres instances on one pageserver, on different timelines

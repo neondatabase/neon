@@ -192,7 +192,10 @@ mod tests {
         assert_eq!(format!("{}", Lsn(0x12345678AAAA5555)), "12345678/AAAA5555");
         assert_eq!(format!("{}", Lsn(0x000000010000000A)), "1/A");
 
-        assert_eq!(Lsn::from_hex("12345678AAAA5555"), Ok(Lsn(0x12345678AAAA5555)));
+        assert_eq!(
+            Lsn::from_hex("12345678AAAA5555"),
+            Ok(Lsn(0x12345678AAAA5555))
+        );
         assert_eq!(Lsn::from_hex("0"), Ok(Lsn(0)));
         assert_eq!(Lsn::from_hex("F12345678AAAA5555"), Err(LsnParseError));
     }

@@ -3,10 +3,11 @@
 //
 use daemonize::Daemonize;
 use log::*;
+use parse_duration::parse;
 use std::io;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Duration;
 use std::{fs::File, fs::OpenOptions};
 
 use anyhow::Result;
@@ -14,6 +15,7 @@ use clap::{App, Arg};
 
 use slog::Drain;
 
+use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
 
@@ -42,11 +44,17 @@ fn main() -> Result<()> {
                 .help("listen for incoming connections on ip:port (default: 127.0.0.1:5454)"),
         )
         .arg(
-            Arg::with_name("pageserver")
-                .short("p")
-                .long("pageserver")
+            Arg::with_name("listen")
+                .short("l")
+                .long("listen")
                 .takes_value(true)
-                .help("address ip:port of pageserver with which wal_acceptor should establish connection"),
+                .help("listen for incoming connections on ip:port (default: 127.0.0.1:5454)"),
+        )
+        .arg(
+            Arg::with_name("ttl")
+                .long("ttl")
+                .takes_value(true)
+                .help("interval for keeping WAL as walkeeper node, after which them will be uploaded to S3 and removed locally"),
         )
         .arg(
             Arg::with_name("daemonize")
@@ -74,6 +82,7 @@ fn main() -> Result<()> {
         no_sync: false,
         pageserver_addr: None,
         listen_addr: "127.0.0.1:5454".parse()?,
+        ttl: None,
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
@@ -94,9 +103,8 @@ fn main() -> Result<()> {
     if let Some(addr) = arg_matches.value_of("listen") {
         conf.listen_addr = addr.parse().unwrap();
     }
-
-    if let Some(addr) = arg_matches.value_of("pageserver") {
-        conf.pageserver_addr = Some(addr.parse().unwrap());
+    if let Some(ttl) = arg_matches.value_of("ttl") {
+        conf.ttl = Some::<Duration>(parse(ttl)?);
     }
 
     start_wal_acceptor(conf)
@@ -138,6 +146,19 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     }
 
     let mut threads = Vec::new();
+
+    if conf.ttl.is_some() {
+        let s3_conf = conf.clone();
+        let s3_offload_thread = thread::Builder::new()
+            .name("S3 offload thread".into())
+            .spawn(|| {
+                // thread code
+                s3_offload::thread_main(s3_conf);
+            })
+            .unwrap();
+        threads.push(s3_offload_thread);
+    }
+
     let wal_acceptor_thread = thread::Builder::new()
         .name("WAL acceptor thread".into())
         .spawn(|| {

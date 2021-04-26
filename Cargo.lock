@@ -2552,10 +2552,12 @@ dependencies = [
  "lazy_static",
  "log",
  "pageserver",
+ "parse_duration",
  "postgres",
  "postgres-protocol",
  "postgres_ffi",
  "regex",
+ "rust-s3",
  "slog",
  "slog-async",
  "slog-scope",
@@ -2564,6 +2566,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "walkdir",
 ]
 
 [[package]]

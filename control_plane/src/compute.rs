@@ -492,7 +492,7 @@ impl PostgresNode {
             .env("PGHOST", self.address.ip().to_string())
             .status()
             .expect("pg_regress failed");
-		regress_check
+        regress_check
     }
 
     pub fn pg_bench(&self, clients: u32, seconds: u32) -> ExitStatus {
@@ -523,7 +523,7 @@ impl PostgresNode {
             .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("pgbench run");
-		pg_bench_run
+        pg_bench_run
     }
 }
 
