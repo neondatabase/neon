@@ -195,7 +195,6 @@ impl WalRedoManagerInternal {
     fn transaction_id_set_status_bit(
         &self,
         xl_info: u8,
-        xl_rmid: u8,
         xl_xid: u32,
         record: WALRecord,
         page: &mut BytesMut,
@@ -219,7 +218,7 @@ impl WalRedoManagerInternal {
                record.lsn,
                record.main_data_offset, record.rec.len());
 
-        let byteno: usize = ((xl_rmid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
+        let byteno: usize = ((xl_xid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
             / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
 
         let byteptr = &mut page[byteno..byteno + 1];
@@ -290,7 +289,7 @@ impl WalRedoManagerInternal {
                                record.main_data_offset, record.rec.len());
                     }
                 } else if xl_rmid == pg_constants::RM_XACT_ID {
-                    self.transaction_id_set_status_bit(xl_info, xl_rmid, xl_xid, record, &mut page);
+                    self.transaction_id_set_status_bit(xl_info, xl_xid, record, &mut page);
                 }
             }
 
