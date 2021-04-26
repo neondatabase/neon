@@ -59,23 +59,6 @@ impl TestStorageControlPlane {
         }
     }
 
-    pub fn one_page_server_no_start(local_env: &LocalEnv) -> TestStorageControlPlane {
-        let repopath = local_env.repo_path.clone();
-
-        let pserver = Arc::new(PageServerNode {
-            env: local_env.clone(),
-            kill_on_exit: true,
-            listen_address: None,
-        });
-
-        TestStorageControlPlane {
-            wal_acceptors: Vec::new(),
-            pageserver: pserver,
-            test_done: AtomicBool::new(false),
-            repopath,
-        }
-    }
-
     // postgres <-> {wal_acceptor1, wal_acceptor2, ...}
     pub fn fault_tolerant(local_env: &LocalEnv, redundancy: usize) -> TestStorageControlPlane {
         let repopath = local_env.repo_path.clone();
