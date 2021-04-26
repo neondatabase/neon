@@ -10,21 +10,16 @@
 //     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
-use byteorder::{BigEndian, ByteOrder};
+use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use regex::Regex;
 use std::io;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime;
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
-use tokio::task;
 use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
@@ -116,26 +111,41 @@ enum StartupRequestCode {
 }
 
 impl FeStartupMessage {
-    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>> {
+    pub fn read(stream: &mut dyn std::io::Read) -> Result<Option<FeMessage>> {
         const MAX_STARTUP_PACKET_LENGTH: u32 = 10000;
         const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
         const NEGOTIATE_SSL_CODE: u32 = (1234 << 16) | 5679;
         const NEGOTIATE_GSS_CODE: u32 = (1234 << 16) | 5680;
 
-        if buf.len() < 4 {
-            return Ok(None);
-        }
-        let len = BigEndian::read_u32(&buf[0..4]);
-
+        // Read length. If the connection is closed before reading anything (or before
+        // reading 4 bytes, to be precise), return None to indicate that the connection
+        // was closed. This matches the PostgreSQL server's behavior, which avoids noise
+        // in the log if the client opens connection but closes it immediately.
+        let len = match stream.read_u32::<BE>() {
+            Ok(len) => len,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                    return Ok(None);
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         if len < 4 || len as u32 > MAX_STARTUP_PACKET_LENGTH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid message length",
             ));
         }
+        let bodylen = len - 4;
 
-        let version = BigEndian::read_u32(&buf[4..8]);
+        // Read the rest of the startup packet
+        let mut body_buf: Vec<u8> = vec![0; bodylen as usize];
+        stream.read_exact(&mut body_buf)?;
+        let mut body = Bytes::from(body_buf);
 
+        // Parse the first field, which indicates what kind of a packet it is
+        let version = body.get_u32();
         let kind = match version {
             CANCEL_REQUEST_CODE => StartupRequestCode::Cancel,
             NEGOTIATE_SSL_CODE => StartupRequestCode::NegotiateSsl,
@@ -143,7 +153,8 @@ impl FeStartupMessage {
             _ => StartupRequestCode::Normal,
         };
 
-        buf.advance(len as usize);
+        // Ignore the rest of the packet
+
         Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
             version,
             kind,
@@ -328,35 +339,38 @@ impl FeCloseMessage {
 }
 
 impl FeMessage {
-    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>> {
-        if buf.len() < 5 {
-            let to_read = 5 - buf.len();
-            buf.reserve(to_read);
-            return Ok(None);
-        }
+    pub fn read(stream: &mut dyn Read) -> Result<Option<FeMessage>> {
+        // Each libpq message begins with a message type byte, followed by message length
+        // If the client closes the connection, return None. But if the client closes the
+        // connection in the middle of a message, we will return an error.
+        let tag = match stream.read_u8() {
+            Ok(b) => b,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                    return Ok(None);
+                } else {
+                    return Err(err);
+                }
+            }
+        };
+        let len = stream.read_u32::<BE>()?;
 
-        let tag = buf[0];
-        let len = BigEndian::read_u32(&buf[1..5]);
-
+        // The message length includes itself, so it better be at least 4
         if len < 4 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid message length: parsing u32",
             ));
         }
+        let bodylen = len - 4;
 
-        let total_len = len as usize + 1;
-        if buf.len() < total_len {
-            let to_read = total_len - buf.len();
-            buf.reserve(to_read);
-            return Ok(None);
-        }
+        // Read message body
+        let mut body_buf: Vec<u8> = vec![0; bodylen as usize];
+        stream.read_exact(&mut body_buf)?;
 
-        let mut body = buf.split_to(total_len);
-        body.advance(5);
+        let mut body = Bytes::from(body_buf);
 
-        let mut body = body.freeze();
-
+        // Parse it
         match tag {
             b'Q' => Ok(Some(FeMessage::Query(FeQueryMessage { body }))),
             b'P' => Ok(Some(FeParseMessage::parse(body)?)),
@@ -385,13 +399,13 @@ impl FeMessage {
                     2 => Ok(Some(FeMessage::ZenithReadRequest(zreq))),
                     _ => Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("unknown smgr message tag: {},'{:?}'", smgr_tag, buf),
+                        format!("unknown smgr message tag: {},'{:?}'", smgr_tag, body),
                     )),
                 }
             }
             tag => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unknown message tag: {},'{:?}'", tag, buf),
+                format!("unknown message tag: {},'{:?}'", tag, body),
             )),
         }
     }
@@ -399,152 +413,118 @@ impl FeMessage {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+///
+/// Main loop of the page service.
+///
+/// Listens for connections, and launches a new handler thread for each.
+///
 pub fn thread_main(conf: &PageServerConf) {
-    // Create a new thread pool
-    //
-    // FIXME: It would be nice to keep this single-threaded for debugging purposes,
-    // but that currently leads to a deadlock: if a GetPage@LSN request arrives
-    // for an LSN that hasn't been received yet, the thread gets stuck waiting for
-    // the WAL to arrive. If the WAL receiver hasn't been launched yet, i.e
-    // we haven't received a "callmemaybe" request yet to tell us where to get the
-    // WAL, we will not have a thread available to process the "callmemaybe"
-    // request when it does arrive. Using a thread pool alleviates the problem so
-    // that it doesn't happen in the tests anymore, but in principle it could still
-    // happen if we receive enough GetPage@LSN requests to consume all of the
-    // available threads.
-    //let runtime = runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let runtime = runtime::Runtime::new().unwrap();
-
     info!("Starting page server on {}", conf.listen_addr);
 
-    let runtime_ref = Arc::new(runtime);
+    let listener = TcpListener::bind(conf.listen_addr).unwrap();
 
-    runtime_ref.block_on(async {
-        let listener = TcpListener::bind(conf.listen_addr).await.unwrap();
+    loop {
+        let (socket, peer_addr) = listener.accept().unwrap();
+        debug!("accepted connection from {}", peer_addr);
+        socket.set_nodelay(true).unwrap();
+        let mut conn_handler = Connection::new(conf.clone(), socket);
 
-        loop {
-            let (socket, peer_addr) = listener.accept().await.unwrap();
-            debug!("accepted connection from {}", peer_addr);
-            socket.set_nodelay(true).unwrap();
-            let mut conn_handler = Connection::new(conf.clone(), socket, &runtime_ref);
-
-            task::spawn(async move {
-                if let Err(err) = conn_handler.run().await {
-                    error!("error: {}", err);
-                }
-            });
-        }
-    });
+        thread::spawn(move || {
+            if let Err(err) = conn_handler.run() {
+                error!("error: {}", err);
+            }
+        });
+    }
 }
 
 #[derive(Debug)]
 struct Connection {
+    stream_in: BufReader<TcpStream>,
     stream: BufWriter<TcpStream>,
     buffer: BytesMut,
     init_done: bool,
     conf: PageServerConf,
-    runtime: Arc<Runtime>,
 }
 
 impl Connection {
-    pub fn new(conf: PageServerConf, socket: TcpStream, runtime: &Arc<Runtime>) -> Connection {
+    pub fn new(conf: PageServerConf, socket: TcpStream) -> Connection {
         Connection {
+            stream_in: BufReader::new(socket.try_clone().unwrap()),
             stream: BufWriter::new(socket),
             buffer: BytesMut::with_capacity(10 * 1024),
             init_done: false,
             conf,
-            runtime: Arc::clone(runtime),
         }
     }
 
     //
     // Read full message or return None if connection is closed
     //
-    async fn read_message(&mut self) -> Result<Option<FeMessage>> {
-        loop {
-            if let Some(message) = self.parse_message()? {
-                return Ok(Some(message));
-            }
-
-            if self.stream.read_buf(&mut self.buffer).await? == 0 {
-                if self.buffer.is_empty() {
-                    return Ok(None);
-                } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "connection reset by peer",
-                    ));
-                }
-            }
-        }
-    }
-
-    fn parse_message(&mut self) -> Result<Option<FeMessage>> {
+    fn read_message(&mut self) -> Result<Option<FeMessage>> {
         if !self.init_done {
-            FeStartupMessage::parse(&mut self.buffer)
+            FeStartupMessage::read(&mut self.stream_in)
         } else {
-            FeMessage::parse(&mut self.buffer)
+            FeMessage::read(&mut self.stream_in)
         }
     }
 
-    async fn write_message_noflush(&mut self, message: &BeMessage) -> io::Result<()> {
+    fn write_message_noflush(&mut self, message: &BeMessage) -> io::Result<()> {
         match message {
             BeMessage::AuthenticationOk => {
-                self.stream.write_u8(b'R').await?;
-                self.stream.write_i32(4 + 4).await?;
-                self.stream.write_i32(0).await?;
+                self.stream.write_u8(b'R')?;
+                self.stream.write_i32::<BE>(4 + 4)?;
+                self.stream.write_i32::<BE>(0)?;
             }
 
             BeMessage::ReadyForQuery => {
-                self.stream.write_u8(b'Z').await?;
-                self.stream.write_i32(4 + 1).await?;
-                self.stream.write_u8(b'I').await?;
+                self.stream.write_u8(b'Z')?;
+                self.stream.write_i32::<BE>(4 + 1)?;
+                self.stream.write_u8(b'I')?;
             }
 
             BeMessage::ParseComplete => {
-                self.stream.write_u8(b'1').await?;
-                self.stream.write_i32(4).await?;
+                self.stream.write_u8(b'1')?;
+                self.stream.write_i32::<BE>(4)?;
             }
 
             BeMessage::BindComplete => {
-                self.stream.write_u8(b'2').await?;
-                self.stream.write_i32(4).await?;
+                self.stream.write_u8(b'2')?;
+                self.stream.write_i32::<BE>(4)?;
             }
 
             BeMessage::CloseComplete => {
-                self.stream.write_u8(b'3').await?;
-                self.stream.write_i32(4).await?;
+                self.stream.write_u8(b'3')?;
+                self.stream.write_i32::<BE>(4)?;
             }
 
             BeMessage::NoData => {
-                self.stream.write_u8(b'n').await?;
-                self.stream.write_i32(4).await?;
+                self.stream.write_u8(b'n')?;
+                self.stream.write_i32::<BE>(4)?;
             }
 
             BeMessage::ParameterDescription => {
-                self.stream.write_u8(b't').await?;
-                self.stream.write_i32(6).await?;
+                self.stream.write_u8(b't')?;
+                self.stream.write_i32::<BE>(6)?;
                 // we don't support params, so always 0
-                self.stream.write_i16(0).await?;
+                self.stream.write_i16::<BE>(0)?;
             }
 
             BeMessage::RowDescription => {
                 // XXX
                 let b = Bytes::from("data\0");
 
-                self.stream.write_u8(b'T').await?;
+                self.stream.write_u8(b'T')?;
                 self.stream
-                    .write_i32(4 + 2 + b.len() as i32 + 3 * (4 + 2))
-                    .await?;
+                    .write_i32::<BE>(4 + 2 + b.len() as i32 + 3 * (4 + 2))?;
 
-                self.stream.write_i16(1).await?;
-                self.stream.write_all(&b).await?;
-                self.stream.write_i32(0).await?; /* table oid */
-                self.stream.write_i16(0).await?; /* attnum */
-                self.stream.write_i32(25).await?; /* TEXTOID */
-                self.stream.write_i16(-1).await?; /* typlen */
-                self.stream.write_i32(0).await?; /* typmod */
-                self.stream.write_i16(0).await?; /* format code */
+                self.stream.write_i16::<BE>(1)?;
+                self.stream.write_all(&b)?;
+                self.stream.write_i32::<BE>(0)?; /* table oid */
+                self.stream.write_i16::<BE>(0)?; /* attnum */
+                self.stream.write_i32::<BE>(25)?; /* TEXTOID */
+                self.stream.write_i16::<BE>(-1)?; /* typlen */
+                self.stream.write_i32::<BE>(0)?; /* typmod */
+                self.stream.write_i16::<BE>(0)?; /* format code */
             }
 
             // XXX: accept some text data
@@ -552,74 +532,73 @@ impl Connection {
                 // XXX
                 let b = Bytes::from("hello world");
 
-                self.stream.write_u8(b'D').await?;
-                self.stream.write_i32(4 + 2 + 4 + b.len() as i32).await?;
+                self.stream.write_u8(b'D')?;
+                self.stream.write_i32::<BE>(4 + 2 + 4 + b.len() as i32)?;
 
-                self.stream.write_i16(1).await?;
-                self.stream.write_i32(b.len() as i32).await?;
-                self.stream.write_all(&b).await?;
+                self.stream.write_i16::<BE>(1)?;
+                self.stream.write_i32::<BE>(b.len() as i32)?;
+                self.stream.write_all(&b)?;
             }
 
             BeMessage::ControlFile => {
                 // TODO pass checkpoint and xid info in this message
                 let b = Bytes::from("hello pg_control");
 
-                self.stream.write_u8(b'D').await?;
-                self.stream.write_i32(4 + 2 + 4 + b.len() as i32).await?;
+                self.stream.write_u8(b'D')?;
+                self.stream.write_i32::<BE>(4 + 2 + 4 + b.len() as i32)?;
 
-                self.stream.write_i16(1).await?;
-                self.stream.write_i32(b.len() as i32).await?;
-                self.stream.write_all(&b).await?;
+                self.stream.write_i16::<BE>(1)?;
+                self.stream.write_i32::<BE>(b.len() as i32)?;
+                self.stream.write_all(&b)?;
             }
 
             BeMessage::CommandComplete => {
                 let b = Bytes::from("SELECT 1\0");
 
-                self.stream.write_u8(b'C').await?;
-                self.stream.write_i32(4 + b.len() as i32).await?;
-                self.stream.write_all(&b).await?;
+                self.stream.write_u8(b'C')?;
+                self.stream.write_i32::<BE>(4 + b.len() as i32)?;
+                self.stream.write_all(&b)?;
             }
 
             BeMessage::ZenithStatusResponse(resp) => {
-                self.stream.write_u8(b'd').await?;
-                self.stream.write_u32(4 + 1 + 1 + 4).await?;
-                self.stream.write_u8(100).await?; /* tag from pagestore_client.h */
-                self.stream.write_u8(resp.ok as u8).await?;
-                self.stream.write_u32(resp.n_blocks).await?;
+                self.stream.write_u8(b'd')?;
+                self.stream.write_u32::<BE>(4 + 1 + 1 + 4)?;
+                self.stream.write_u8(100)?; /* tag from pagestore_client.h */
+                self.stream.write_u8(resp.ok as u8)?;
+                self.stream.write_u32::<BE>(resp.n_blocks)?;
             }
 
             BeMessage::ZenithNblocksResponse(resp) => {
-                self.stream.write_u8(b'd').await?;
-                self.stream.write_u32(4 + 1 + 1 + 4).await?;
-                self.stream.write_u8(101).await?; /* tag from pagestore_client.h */
-                self.stream.write_u8(resp.ok as u8).await?;
-                self.stream.write_u32(resp.n_blocks).await?;
+                self.stream.write_u8(b'd')?;
+                self.stream.write_u32::<BE>(4 + 1 + 1 + 4)?;
+                self.stream.write_u8(101)?; /* tag from pagestore_client.h */
+                self.stream.write_u8(resp.ok as u8)?;
+                self.stream.write_u32::<BE>(resp.n_blocks)?;
             }
 
             BeMessage::ZenithReadResponse(resp) => {
-                self.stream.write_u8(b'd').await?;
+                self.stream.write_u8(b'd')?;
                 self.stream
-                    .write_u32(4 + 1 + 1 + 4 + resp.page.len() as u32)
-                    .await?;
-                self.stream.write_u8(102).await?; /* tag from pagestore_client.h */
-                self.stream.write_u8(resp.ok as u8).await?;
-                self.stream.write_u32(resp.n_blocks).await?;
-                self.stream.write_all(&resp.page.clone()).await?;
+                    .write_u32::<BE>(4 + 1 + 1 + 4 + resp.page.len() as u32)?;
+                self.stream.write_u8(102)?; /* tag from pagestore_client.h */
+                self.stream.write_u8(resp.ok as u8)?;
+                self.stream.write_u32::<BE>(resp.n_blocks)?;
+                self.stream.write_all(&resp.page.clone())?;
             }
         }
 
         Ok(())
     }
 
-    async fn write_message(&mut self, message: &BeMessage) -> io::Result<()> {
-        self.write_message_noflush(message).await?;
-        self.stream.flush().await
+    fn write_message(&mut self, message: &BeMessage) -> io::Result<()> {
+        self.write_message_noflush(message)?;
+        self.stream.flush()
     }
 
-    async fn run(&mut self) -> Result<()> {
+    fn run(&mut self) -> Result<()> {
         let mut unnamed_query_string = Bytes::new();
         loop {
-            let msg = self.read_message().await?;
+            let msg = self.read_message()?;
             trace!("got message {:?}", msg);
             match msg {
                 Some(FeMessage::StartupMessage(m)) => {
@@ -628,41 +607,39 @@ impl Connection {
                     match m.kind {
                         StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
                             let b = Bytes::from("N");
-                            self.stream.write_all(&b).await?;
-                            self.stream.flush().await?;
+                            self.stream.write_all(&b)?;
+                            self.stream.flush()?;
                         }
                         StartupRequestCode::Normal => {
-                            self.write_message_noflush(&BeMessage::AuthenticationOk)
-                                .await?;
-                            self.write_message(&BeMessage::ReadyForQuery).await?;
+                            self.write_message_noflush(&BeMessage::AuthenticationOk)?;
+                            self.write_message(&BeMessage::ReadyForQuery)?;
                             self.init_done = true;
                         }
                         StartupRequestCode::Cancel => return Ok(()),
                     }
                 }
                 Some(FeMessage::Query(m)) => {
-                    self.process_query(m.body).await?;
+                    self.process_query(m.body)?;
                 }
                 Some(FeMessage::Parse(m)) => {
                     unnamed_query_string = m.query_string;
-                    self.write_message(&BeMessage::ParseComplete).await?;
+                    self.write_message(&BeMessage::ParseComplete)?;
                 }
                 Some(FeMessage::Describe(_)) => {
-                    self.write_message_noflush(&BeMessage::ParameterDescription)
-                        .await?;
-                    self.write_message(&BeMessage::NoData).await?;
+                    self.write_message_noflush(&BeMessage::ParameterDescription)?;
+                    self.write_message(&BeMessage::NoData)?;
                 }
                 Some(FeMessage::Bind(_)) => {
-                    self.write_message(&BeMessage::BindComplete).await?;
+                    self.write_message(&BeMessage::BindComplete)?;
                 }
                 Some(FeMessage::Close(_)) => {
-                    self.write_message(&BeMessage::CloseComplete).await?;
+                    self.write_message(&BeMessage::CloseComplete)?;
                 }
                 Some(FeMessage::Execute(_)) => {
-                    self.process_query(unnamed_query_string.clone()).await?;
+                    self.process_query(unnamed_query_string.clone())?;
                 }
                 Some(FeMessage::Sync) => {
-                    self.write_message(&BeMessage::ReadyForQuery).await?;
+                    self.write_message(&BeMessage::ReadyForQuery)?;
                 }
                 Some(FeMessage::Terminate) => {
                     break;
@@ -681,7 +658,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn process_query(&mut self, query_string: Bytes) -> Result<()> {
+    fn process_query(&mut self, query_string: Bytes) -> Result<()> {
         debug!("process query {:?}", query_string);
 
         // remove null terminator, if any
@@ -691,13 +668,13 @@ impl Connection {
         }
 
         if query_string.starts_with(b"controlfile") {
-            self.handle_controlfile().await
+            self.handle_controlfile()
         } else if query_string.starts_with(b"pagestream ") {
             let (_l, r) = query_string.split_at("pagestream ".len());
             let timelineid_str = String::from_utf8(r.to_vec()).unwrap();
             let timelineid = ZTimelineId::from_str(&timelineid_str).unwrap();
 
-            self.handle_pagerequests(timelineid).await
+            self.handle_pagerequests(timelineid)
         } else if query_string.starts_with(b"basebackup ") {
             let (_l, r) = query_string.split_at("basebackup ".len());
             let r = r.to_vec();
@@ -706,10 +683,9 @@ impl Connection {
             let timelineid = ZTimelineId::from_str(&timelineid_str).unwrap();
 
             // Check that the timeline exists
-            self.handle_basebackup_request(timelineid).await?;
-            self.write_message_noflush(&BeMessage::CommandComplete)
-                .await?;
-            self.write_message(&BeMessage::ReadyForQuery).await
+            self.handle_basebackup_request(timelineid)?;
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)
         } else if query_string.starts_with(b"callmemaybe ") {
             let query_str = String::from_utf8(query_string.to_vec())
                 .unwrap()
@@ -733,36 +709,29 @@ impl Connection {
 
             walreceiver::launch_wal_receiver(&self.conf, timelineid, &connstr);
 
-            self.write_message_noflush(&BeMessage::CommandComplete)
-                .await?;
-            self.write_message(&BeMessage::ReadyForQuery).await
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)
         } else if query_string.starts_with(b"status") {
-            self.write_message_noflush(&BeMessage::RowDescription)
-                .await?;
-            self.write_message_noflush(&BeMessage::DataRow).await?;
-            self.write_message_noflush(&BeMessage::CommandComplete)
-                .await?;
-            self.write_message(&BeMessage::ReadyForQuery).await
+            self.write_message_noflush(&BeMessage::RowDescription)?;
+            self.write_message_noflush(&BeMessage::DataRow)?;
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)
         } else {
-            self.write_message_noflush(&BeMessage::RowDescription)
-                .await?;
-            self.write_message_noflush(&BeMessage::DataRow).await?;
-            self.write_message_noflush(&BeMessage::CommandComplete)
-                .await?;
-            self.write_message(&BeMessage::ReadyForQuery).await
+            self.write_message_noflush(&BeMessage::RowDescription)?;
+            self.write_message_noflush(&BeMessage::DataRow)?;
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)
         }
     }
 
-    async fn handle_controlfile(&mut self) -> Result<()> {
-        self.write_message_noflush(&BeMessage::RowDescription)
-            .await?;
-        self.write_message_noflush(&BeMessage::ControlFile).await?;
-        self.write_message_noflush(&BeMessage::CommandComplete)
-            .await?;
-        self.write_message(&BeMessage::ReadyForQuery).await
+    fn handle_controlfile(&mut self) -> Result<()> {
+        self.write_message_noflush(&BeMessage::RowDescription)?;
+        self.write_message_noflush(&BeMessage::ControlFile)?;
+        self.write_message_noflush(&BeMessage::CommandComplete)?;
+        self.write_message(&BeMessage::ReadyForQuery)
     }
 
-    async fn handle_pagerequests(&mut self, timelineid: ZTimelineId) -> Result<()> {
+    fn handle_pagerequests(&mut self, timelineid: ZTimelineId) -> Result<()> {
         // Check that the timeline exists
         let pcache = page_cache::get_or_restore_pagecache(&self.conf, timelineid);
         if pcache.is_err() {
@@ -773,14 +742,14 @@ impl Connection {
         let pcache = pcache.unwrap();
 
         /* switch client to COPYBOTH */
-        self.stream.write_u8(b'W').await?;
-        self.stream.write_i32(4 + 1 + 2).await?;
-        self.stream.write_u8(0).await?; /* copy_is_binary */
-        self.stream.write_i16(0).await?; /* numAttributes */
-        self.stream.flush().await?;
+        self.stream.write_u8(b'W')?;
+        self.stream.write_i32::<BE>(4 + 1 + 2)?;
+        self.stream.write_u8(0)?; /* copy_is_binary */
+        self.stream.write_i16::<BE>(0)?; /* numAttributes */
+        self.stream.flush()?;
 
         loop {
-            let message = self.read_message().await?;
+            let message = self.read_message()?;
 
             if let Some(m) = &message {
                 trace!("query({:?}): {:?}", timelineid, m);
@@ -800,13 +769,12 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let exist = pcache.relsize_exist(&tag, req.lsn).await.unwrap_or(false);
+                    let exist = pcache.relsize_exist(&tag, req.lsn).unwrap_or(false);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: exist,
                         n_blocks: 0,
-                    }))
-                    .await?
+                    }))?
                 }
                 Some(FeMessage::ZenithNblocksRequest(req)) => {
                     let tag = page_cache::RelTag {
@@ -816,13 +784,12 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let n_blocks = pcache.relsize_get(&tag, req.lsn).await.unwrap_or(0);
+                    let n_blocks = pcache.relsize_get(&tag, req.lsn).unwrap_or(0);
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
                         n_blocks,
-                    }))
-                    .await?
+                    }))?
                 }
                 Some(FeMessage::ZenithReadRequest(req)) => {
                     let buf_tag = page_cache::BufferTag {
@@ -835,7 +802,7 @@ impl Connection {
                         blknum: req.blkno,
                     };
 
-                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn).await {
+                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn) {
                         Ok(p) => BeMessage::ZenithReadResponse(ZenithReadResponse {
                             ok: true,
                             n_blocks: 0,
@@ -852,14 +819,14 @@ impl Connection {
                         }
                     };
 
-                    self.write_message(&msg).await?
+                    self.write_message(&msg)?
                 }
                 _ => {}
             }
         }
     }
 
-    async fn handle_basebackup_request(&mut self, timelineid: ZTimelineId) -> Result<()> {
+    fn handle_basebackup_request(&mut self, timelineid: ZTimelineId) -> Result<()> {
         // check that the timeline exists
         let pcache = page_cache::get_or_restore_pagecache(&self.conf, timelineid);
         if pcache.is_err() {
@@ -870,11 +837,11 @@ impl Connection {
 
         /* switch client to COPYOUT */
         let stream = &mut self.stream;
-        stream.write_u8(b'H').await?;
-        stream.write_i32(4 + 1 + 2).await?;
-        stream.write_u8(0).await?; /* copy_is_binary */
-        stream.write_i16(0).await?; /* numAttributes */
-        stream.flush().await?;
+        stream.write_u8(b'H')?;
+        stream.write_i32::<BE>(4 + 1 + 2)?;
+        stream.write_u8(0)?; /* copy_is_binary */
+        stream.write_i16::<BE>(0)?; /* numAttributes */
+        stream.flush()?;
         info!("sent CopyOut");
 
         /* Send a tarball of the latest snapshot on the timeline */
@@ -882,49 +849,16 @@ impl Connection {
         // find latest snapshot
         let snapshotlsn = restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
 
-        // Stream it
-        let (s, mut r) = mpsc::channel(5);
-
-        let f_tar = task::spawn_blocking(move || {
-            basebackup::send_snapshot_tarball(&mut CopyDataSink(s), timelineid, snapshotlsn)?;
-            Ok(())
-        });
-        let f_tar2 = async {
-            let joinres = f_tar.await;
-
-            if let Err(joinreserr) = joinres {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, joinreserr));
-            }
-            joinres.unwrap()
-        };
-
-        let f_pump = async move {
-            loop {
-                let buf = r.recv().await;
-                if buf.is_none() {
-                    break;
-                }
-                let buf = buf.unwrap();
-
-                // CopyData
-                stream.write_u8(b'd').await?;
-                stream.write_u32((4 + buf.len()) as u32).await?;
-                stream.write_all(&buf).await?;
-                trace!("CopyData sent for {} bytes!", buf.len());
-
-                // FIXME: flush isn't really required, but makes it easier
-                // to view in wireshark
-                stream.flush().await?;
-            }
-            Ok(())
-        };
-
-        tokio::try_join!(f_tar2, f_pump)?;
+        basebackup::send_snapshot_tarball(
+            &mut CopyDataSink { stream: stream },
+            timelineid,
+            snapshotlsn,
+        )?;
 
         // CopyDone
-        self.stream.write_u8(b'c').await?;
-        self.stream.write_u32(4).await?;
-        self.stream.flush().await?;
+        self.stream.write_u8(b'c')?;
+        self.stream.write_u32::<BE>(4)?;
+        self.stream.flush()?;
         debug!("CopyDone sent!");
 
         // FIXME: I'm getting an error from the tokio copyout driver without this.
@@ -936,15 +870,28 @@ impl Connection {
     }
 }
 
-struct CopyDataSink(mpsc::Sender<Bytes>);
+///
+/// A std::io::Write implementation that wraps all data written to it in CopyData
+/// messages.
+///
+struct CopyDataSink<'a> {
+    stream: &'a mut BufWriter<TcpStream>,
+}
 
-impl std::io::Write for CopyDataSink {
+impl<'a> std::io::Write for CopyDataSink<'a> {
     fn write(&mut self, data: &[u8]) -> std::result::Result<usize, std::io::Error> {
-        let buf = Bytes::copy_from_slice(data);
+        // CopyData
+        // FIXME: if the input is large, we should split it into multiple messages.
+        // Not sure what the threshold should be, but the ultimate hard limit is that
+        // the length cannot exceed u32.
+        self.stream.write_u8(b'd')?;
+        self.stream.write_u32::<BE>((4 + data.len()) as u32)?;
+        self.stream.write_all(&data)?;
+        trace!("CopyData sent for {} bytes!", data.len());
 
-        if let Err(e) = self.0.blocking_send(buf) {
-            return Err(io::Error::new(io::ErrorKind::Other, e));
-        }
+        // FIXME: flush isn't really required, but makes it easier
+        // to view in wireshark
+        self.stream.flush()?;
 
         Ok(data.len())
     }

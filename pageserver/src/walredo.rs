@@ -24,13 +24,13 @@ use std::io::prelude::*;
 use std::io::Error;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use zenith_utils::lsn::Lsn;
 
@@ -52,8 +52,8 @@ pub struct WalRedoManager {
     conf: PageServerConf,
     timelineid: ZTimelineId,
 
-    request_tx: mpsc::UnboundedSender<WalRedoRequest>,
-    request_rx: Mutex<Option<mpsc::UnboundedReceiver<WalRedoRequest>>>,
+    request_tx: Mutex<mpsc::Sender<WalRedoRequest>>,
+    request_rx: Mutex<Option<mpsc::Receiver<WalRedoRequest>>>,
 }
 
 struct WalRedoManagerInternal {
@@ -61,7 +61,7 @@ struct WalRedoManagerInternal {
     timelineid: ZTimelineId,
 
     pcache: Arc<PageCache>,
-    request_rx: mpsc::UnboundedReceiver<WalRedoRequest>,
+    request_rx: mpsc::Receiver<WalRedoRequest>,
 }
 
 #[derive(Debug)]
@@ -69,7 +69,7 @@ struct WalRedoRequest {
     tag: BufferTag,
     lsn: Lsn,
 
-    response_channel: oneshot::Sender<Result<Bytes, WalRedoError>>,
+    response_channel: mpsc::Sender<Result<Bytes, WalRedoError>>,
 }
 
 /// An error happened in WAL redo
@@ -89,12 +89,12 @@ impl WalRedoManager {
     /// This only initializes the struct. You need to call WalRedoManager::launch to
     /// start the thread that processes the requests.
     pub fn new(conf: &PageServerConf, timelineid: ZTimelineId) -> WalRedoManager {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel();
 
         WalRedoManager {
             conf: conf.clone(),
             timelineid,
-            request_tx: tx,
+            request_tx: Mutex::new(tx),
             request_rx: Mutex::new(Some(rx)),
         }
     }
@@ -114,22 +114,13 @@ impl WalRedoManager {
         let _walredo_thread = std::thread::Builder::new()
             .name("WAL redo thread".into())
             .spawn(move || {
-                // We block on waiting for requests on the walredo request channel, but
-                // use async I/O to communicate with the child process. Initialize the
-                // runtime for the async part.
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-
                 let mut internal = WalRedoManagerInternal {
                     _conf: conf_copy,
                     timelineid: timelineid,
                     pcache: pcache,
                     request_rx: request_rx,
                 };
-
-                runtime.block_on(internal.wal_redo_main());
+                internal.wal_redo_main();
             })
             .unwrap();
     }
@@ -138,9 +129,9 @@ impl WalRedoManager {
     /// Request the WAL redo manager to apply WAL records, to reconstruct the page image
     /// of the given page version.
     ///
-    pub async fn request_redo(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes, WalRedoError> {
+    pub fn request_redo(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes, WalRedoError> {
         // Create a channel where to receive the response
-        let (tx, rx) = oneshot::channel::<Result<Bytes, WalRedoError>>();
+        let (tx, rx) = mpsc::channel::<Result<Bytes, WalRedoError>>();
 
         let request = WalRedoRequest {
             tag,
@@ -149,10 +140,12 @@ impl WalRedoManager {
         };
 
         self.request_tx
+            .lock()
+            .unwrap()
             .send(request)
             .expect("could not send WAL redo request");
 
-        rx.await
+        rx.recv()
             .expect("could not receive response to WAL redo request")
     }
 }
@@ -164,8 +157,16 @@ impl WalRedoManagerInternal {
     //
     // Main entry point for the WAL applicator thread.
     //
-    async fn wal_redo_main(&mut self) {
+    fn wal_redo_main(&mut self) {
         info!("WAL redo thread started {}", self.timelineid);
+
+        // We block on waiting for requests on the walredo request channel, but
+        // use async I/O to communicate with the child process. Initialize the
+        // runtime for the async part.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
         // Loop forever, handling requests as they come.
         loop {
@@ -174,7 +175,7 @@ impl WalRedoManagerInternal {
 
             info!("launching WAL redo postgres process {}", self.timelineid);
 
-            process = WalRedoProcess::launch(&datadir).await.unwrap();
+            process = runtime.block_on(WalRedoProcess::launch(&datadir)).unwrap();
             info!("WAL redo postgres started");
 
             // Pretty arbitrarily, reuse the same Postgres process for 100000 requests.
@@ -182,9 +183,9 @@ impl WalRedoManagerInternal {
             // using up all shared buffers in Postgres's shared buffer cache; we don't
             // want to write any pages to disk in the WAL redo process.
             for _i in 1..100000 {
-                let request = self.request_rx.recv().await.unwrap();
+                let request = self.request_rx.recv().unwrap();
 
-                let result = self.handle_apply_request(&process, &request).await;
+                let result = runtime.block_on(self.handle_apply_request(&process, &request));
                 let result_ok = result.is_ok();
 
                 // Send the result to the requester
@@ -202,11 +203,13 @@ impl WalRedoManagerInternal {
 
             // Time to kill the 'postgres' process. A new one will be launched on next
             // iteration of the loop.
+            //
+            // TODO: SIGKILL if needed
             info!("killing WAL redo postgres process");
-            let _ = process.stdin.get_mut().shutdown().await;
+            let _ = process.stdin.get_mut().shutdown();
             let mut child = process.child;
             drop(process.stdin);
-            let _ = child.wait().await;
+            let _ = child.wait();
         }
     }
 
@@ -441,6 +444,13 @@ impl WalRedoProcess {
         let mut stdin = self.stdin.borrow_mut();
         let mut stdout = self.stdout.borrow_mut();
 
+        // We do three things simultaneously: send the old base image and WAL records to
+        // the child process's stdin, read the result from child's stdout, and forward any logging
+        // information that the child writes to its stderr to the page server's log.
+        //
+        // 'f_stdin' handles writing the base image and WAL records to the child process.
+        // 'f_stdout' below reads the result back. And 'f_stderr', which was spawned into the
+        // tokio runtime in the 'launch' function already, forwards the logging.
         let f_stdin = async {
             // Send base image, if any. (If the record initializes the page, previous page
             // version is not needed.)
@@ -486,10 +496,6 @@ impl WalRedoProcess {
             //debug!("got response for {}", tag.blknum);
             Ok::<[u8; 8192], Error>(buf)
         };
-
-        // Kill the process. This closes its stdin, which should signal the process
-        // to terminate. TODO: SIGKILL if needed
-        //child.wait();
 
         let res = futures::try_join!(f_stdout, f_stdin)?;
 

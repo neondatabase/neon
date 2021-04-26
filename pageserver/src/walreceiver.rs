@@ -26,8 +26,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
-use tokio::runtime;
-use tokio::time::{sleep, Duration};
+use std::thread::sleep;
+use std::time::Duration;
+use tokio::runtime::Runtime;
 use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
 use tokio_postgres::{NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
@@ -95,30 +96,38 @@ fn thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
         timelineid
     );
 
-    let runtime = runtime::Builder::new_current_thread()
+    // We need a tokio runtime to call the rust-postgres copy_both function.
+    // Most functions in the rust-postgres driver have a blocking wrapper,
+    // but copy_both does not (TODO: the copy_both support is still work-in-progress
+    // as of this writing. Check later if that has changed, or implement the
+    // wrapper ourselves in rust-postgres)
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
 
-    runtime.block_on(async {
-        loop {
-            // Look up the current WAL producer address
-            let wal_producer_connstr = get_wal_producer_connstr(timelineid);
+    //
+    // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
+    // and start streaming WAL from it. If the connection is lost, keep retrying.
+    //
+    loop {
+        // Look up the current WAL producer address
+        let wal_producer_connstr = get_wal_producer_connstr(timelineid);
 
-            let res = walreceiver_main(conf, timelineid, &wal_producer_connstr).await;
+        let res = walreceiver_main(&runtime, conf, timelineid, &wal_producer_connstr);
 
-            if let Err(e) = res {
-                info!(
-                    "WAL streaming connection failed ({}), retrying in 1 second",
-                    e
-                );
-                sleep(Duration::from_secs(1)).await;
-            }
+        if let Err(e) = res {
+            info!(
+                "WAL streaming connection failed ({}), retrying in 1 second",
+                e
+            );
+            sleep(Duration::from_secs(1));
         }
-    });
+    }
 }
 
-async fn walreceiver_main(
+fn walreceiver_main(
+    runtime: &Runtime,
     conf: &PageServerConf,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
@@ -126,18 +135,19 @@ async fn walreceiver_main(
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
     let connect_cfg = format!("{} replication=true", wal_producer_connstr);
-    let (rclient, connection) = tokio_postgres::connect(&connect_cfg, NoTls).await?;
+
+    let (rclient, connection) = runtime.block_on(tokio_postgres::connect(&connect_cfg, NoTls))?;
     info!("connected!");
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
-    tokio::spawn(async move {
+    runtime.spawn(async move {
         if let Err(e) = connection.await {
             error!("connection error: {}", e);
         }
     });
 
-    let identify = identify_system(&rclient).await?;
+    let identify = identify_system(runtime, &rclient)?;
     info!("{:?}", identify);
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
@@ -174,14 +184,15 @@ async fn walreceiver_main(
     );
 
     let query = format!("START_REPLICATION PHYSICAL {}", startpoint);
-    let copy_stream = rclient.copy_both_simple::<bytes::Bytes>(&query).await?;
+
+    let copy_stream = runtime.block_on(rclient.copy_both_simple::<bytes::Bytes>(&query))?;
 
     let physical_stream = ReplicationStream::new(copy_stream);
     tokio::pin!(physical_stream);
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
-    while let Some(replication_message) = physical_stream.next().await {
+    while let Some(replication_message) = runtime.block_on(physical_stream.next()) {
         match replication_message? {
             ReplicationMessage::XLogData(xlog_data) => {
                 // Pass the WAL data to the decoder, and see if we can decode
@@ -309,10 +320,11 @@ async fn walreceiver_main(
                     let ts = PgTimestamp::now()?;
                     const NO_REPLY: u8 = 0u8;
 
-                    physical_stream
-                        .as_mut()
-                        .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)
-                        .await?;
+                    runtime.block_on(
+                        physical_stream
+                            .as_mut()
+                            .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY),
+                    )?;
                 }
             }
             _ => (),
@@ -341,9 +353,12 @@ pub struct IdentifySystem {
 pub struct IdentifyError;
 
 /// Run the postgres `IDENTIFY_SYSTEM` command
-pub async fn identify_system(client: &tokio_postgres::Client) -> Result<IdentifySystem, Error> {
+pub fn identify_system(
+    runtime: &Runtime,
+    client: &tokio_postgres::Client,
+) -> Result<IdentifySystem, Error> {
     let query_str = "IDENTIFY_SYSTEM";
-    let response = client.simple_query(query_str).await?;
+    let response = runtime.block_on(client.simple_query(query_str))?;
 
     // get(N) from row, then parse it as some destination type.
     fn get_parse<T>(row: &SimpleQueryRow, idx: usize) -> Result<T, IdentifyError>

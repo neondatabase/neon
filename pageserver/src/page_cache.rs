@@ -62,7 +62,7 @@ pub struct PageCache {
     // WAL redo manager
     walredo_mgr: WalRedoManager,
 
-    // Allows .await on the arrival of a particular LSN.
+    // Allows waiting for the arrival of a particular LSN.
     seqwait_lsn: SeqWait<Lsn>,
 
     // Counters, for metrics collection.
@@ -170,12 +170,7 @@ fn gc_thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
     info!("Garbage collection thread started {}", timelineid);
     let pcache = get_pagecache(conf, timelineid).unwrap();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    runtime.block_on(pcache.do_gc(conf)).unwrap();
+    pcache.do_gc(conf).unwrap();
 }
 
 fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB {
@@ -380,10 +375,10 @@ impl PageCache {
     ///
     /// Returns an 8k page image
     ///
-    pub async fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: Lsn) -> anyhow::Result<Bytes> {
+    pub fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: Lsn) -> anyhow::Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
 
-        let lsn = self.wait_lsn(req_lsn).await?;
+        let lsn = self.wait_lsn(req_lsn)?;
 
         // Look up cache entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
@@ -409,7 +404,7 @@ impl PageCache {
                     page_img = img.clone();
                 } else if content.wal_record.is_some() {
                     // Request the WAL redo manager to apply the WAL records for us.
-                    page_img = self.walredo_mgr.request_redo(tag, lsn).await?;
+                    page_img = self.walredo_mgr.request_redo(tag, lsn)?;
                 } else {
                     // No base image, and no WAL record. Huh?
                     bail!("no page image or WAL record for requested page");
@@ -441,16 +436,16 @@ impl PageCache {
     ///
     /// Get size of relation at given LSN.
     ///
-    pub async fn relsize_get(&self, rel: &RelTag, lsn: Lsn) -> anyhow::Result<u32> {
-        self.wait_lsn(lsn).await?;
+    pub fn relsize_get(&self, rel: &RelTag, lsn: Lsn) -> anyhow::Result<u32> {
+        self.wait_lsn(lsn)?;
         return self.relsize_get_nowait(rel, lsn);
     }
 
     ///
     /// Does relation exist at given LSN?
     ///
-    pub async fn relsize_exist(&self, rel: &RelTag, req_lsn: Lsn) -> anyhow::Result<bool> {
-        let lsn = self.wait_lsn(req_lsn).await?;
+    pub fn relsize_exist(&self, rel: &RelTag, req_lsn: Lsn) -> anyhow::Result<bool> {
+        let lsn = self.wait_lsn(req_lsn)?;
 
         let key = CacheKey {
             tag: BufferTag {
@@ -815,7 +810,7 @@ impl PageCache {
         Ok(0)
     }
 
-    async fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
+    fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
         let mut buf = BytesMut::new();
         loop {
             thread::sleep(conf.gc_period);
@@ -867,7 +862,7 @@ impl PageCache {
                         if (v[0] & PAGE_IMAGE_FLAG) == 0 {
                             trace!("Reconstruct most recent page {:?}", key);
                             // force reconstruction of most recent page version
-                            self.walredo_mgr.request_redo(key.tag, key.lsn).await?;
+                            self.walredo_mgr.request_redo(key.tag, key.lsn)?;
                             reconstructed += 1;
                         }
 
@@ -887,7 +882,7 @@ impl PageCache {
                                     let v = iter.value().unwrap();
                                     if (v[0] & PAGE_IMAGE_FLAG) == 0 {
                                         trace!("Reconstruct horizon page {:?}", key);
-                                        self.walredo_mgr.request_redo(key.tag, key.lsn).await?;
+                                        self.walredo_mgr.request_redo(key.tag, key.lsn)?;
                                         truncated += 1;
                                     }
                                 }
@@ -930,7 +925,7 @@ impl PageCache {
     //
     // Wait until WAL has been received up to the given LSN.
     //
-    async fn wait_lsn(&self, mut lsn: Lsn) -> anyhow::Result<Lsn> {
+    fn wait_lsn(&self, mut lsn: Lsn) -> anyhow::Result<Lsn> {
         // When invalid LSN is requested, it means "don't wait, return latest version of the page"
         // This is necessary for bootstrap.
         if lsn == Lsn(0) {
@@ -945,7 +940,6 @@ impl PageCache {
 
         self.seqwait_lsn
             .wait_for_timeout(lsn, TIMEOUT)
-            .await
             .with_context(|| {
                 format!(
                     "Timed out while waiting for WAL record at LSN {} to arrive",
