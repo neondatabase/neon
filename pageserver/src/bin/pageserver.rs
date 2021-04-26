@@ -6,7 +6,6 @@ use log::*;
 use parse_duration::parse;
 use std::fs::{self, OpenOptions};
 use std::io;
-use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
@@ -125,7 +124,7 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     if conf.daemonize {
         info!("daemonizing...");
 
-        let repodir = PathBuf::from(zenith_repo_dir());
+        let repodir = zenith_repo_dir();
 
         // There should'n be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fprintf's or backtraces.

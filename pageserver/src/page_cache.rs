@@ -14,7 +14,6 @@ use anyhow::{bail, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
-use rocksdb;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -414,7 +413,7 @@ impl PageCache {
     ///
     pub fn relsize_get(&self, rel: &RelTag, lsn: Lsn) -> anyhow::Result<u32> {
         self.wait_lsn(lsn)?;
-        return self.relsize_get_nowait(rel, lsn);
+        self.relsize_get_nowait(rel, lsn)
     }
 
     ///

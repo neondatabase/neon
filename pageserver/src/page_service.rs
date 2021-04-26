@@ -687,9 +687,7 @@ impl Connection {
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)
         } else if query_string.starts_with(b"callmemaybe ") {
-            let query_str = String::from_utf8(query_string.to_vec())
-                .unwrap()
-                .to_string();
+            let query_str = String::from_utf8(query_string.to_vec()).unwrap();
 
             // callmemaybe <zenith timelineid as hex string> <connstr>
             let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) (.*)$").unwrap();
@@ -849,11 +847,7 @@ impl Connection {
         // find latest snapshot
         let snapshotlsn = restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
 
-        basebackup::send_snapshot_tarball(
-            &mut CopyDataSink { stream: stream },
-            timelineid,
-            snapshotlsn,
-        )?;
+        basebackup::send_snapshot_tarball(&mut CopyDataSink { stream }, timelineid, snapshotlsn)?;
 
         // CopyDone
         self.stream.write_u8(b'c')?;
