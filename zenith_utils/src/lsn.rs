@@ -244,5 +244,8 @@ mod tests {
         assert_eq!(lsn.load(), Lsn(1234));
         lsn.store(Lsn(5678));
         assert_eq!(lsn.load(), Lsn(5678));
+
+        assert_eq!(lsn.fetch_max(Lsn(6000)), Lsn(5678));
+        assert_eq!(lsn.fetch_max(Lsn(5000)), Lsn(6000));
     }
 }
