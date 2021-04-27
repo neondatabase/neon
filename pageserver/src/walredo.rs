@@ -38,6 +38,7 @@ use crate::page_cache::BufferTag;
 use crate::page_cache::WALRecord;
 use crate::ZTimelineId;
 use crate::{pg_constants, PageServerConf};
+use postgres_ffi::xlog_utils;
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -242,13 +243,7 @@ impl WalRedoManagerInternal {
 
                 // 1. Parse XLogRecord struct
                 // FIXME: refactor to avoid code duplication.
-                let _xl_tot_len = buf.get_u32_le();
-                let xl_xid = buf.get_u32_le();
-                let _xl_prev = buf.get_u64_le();
-                let xl_info = buf.get_u8();
-                let xl_rmid = buf.get_u8();
-                buf.advance(2); // 2 bytes of padding
-                let _xl_crc = buf.get_u32_le();
+                let xlogrec = xlog_utils::parse_xlog_record(&mut buf);
 
                 //move to main data
                 // TODO probably, we should store some records in our special format
@@ -258,21 +253,21 @@ impl WalRedoManagerInternal {
                     buf.advance(skip);
                 }
 
-                if xl_rmid == pg_constants::RM_CLOG_ID {
-                    let info = xl_info & !pg_constants::XLR_INFO_MASK;
+                if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
+                    let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
                     if info == pg_constants::CLOG_ZEROPAGE {
                         page.clone_from_slice(zero_page_bytes);
                     }
-                } else if xl_rmid == pg_constants::RM_XACT_ID {
-                    let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
+                } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
+                    let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
                     let mut status = 0;
                     if info == pg_constants::XLOG_XACT_COMMIT {
                         status = pg_constants::TRANSACTION_STATUS_COMMITTED;
-                        self.transaction_id_set_status_bit(xl_xid, status, &mut page);
+                        self.transaction_id_set_status_bit(xlogrec.xl_xid, status, &mut page);
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
                         let mut xinfo = 0;
-                        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+                        if xlogrec.xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
                             xinfo = buf.get_u32_le();
                             if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
                                 let _dbid = buf.get_u32_le();
@@ -294,11 +289,11 @@ impl WalRedoManagerInternal {
                         }
                     } else if info == pg_constants::XLOG_XACT_ABORT {
                         status = pg_constants::TRANSACTION_STATUS_ABORTED;
-                        self.transaction_id_set_status_bit(xl_xid, status, &mut page);
+                        self.transaction_id_set_status_bit(xlogrec.xl_xid, status, &mut page);
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
                         let mut xinfo = 0;
-                        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+                        if xlogrec.xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
                             xinfo = buf.get_u32_le();
                             if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
                                 let _dbid = buf.get_u32_le();

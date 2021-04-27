@@ -8,6 +8,7 @@
 //
 
 use byteorder::{ByteOrder, LittleEndian};
+use bytes::{Buf, Bytes};
 use crc32c::*;
 use log::*;
 use std::cmp::min;
@@ -263,4 +264,33 @@ pub fn main() {
         wal_end as u32,
         tli
     );
+}
+
+//
+// Xlog record parsing routines
+// TODO move here other related code from waldecoder.rs
+//
+#[repr(C)]
+#[derive(Debug)]
+pub struct XLogRecord {
+    pub xl_tot_len: u32,
+    pub xl_xid: u32,
+    pub xl_prev: u64,
+    pub xl_info: u8,
+    pub xl_rmid: u8,
+    pub xl_crc: u32,
+}
+
+pub fn parse_xlog_record(buf: &mut Bytes) -> XLogRecord {
+    XLogRecord {
+        xl_tot_len: buf.get_u32_le(),
+        xl_xid: buf.get_u32_le(),
+        xl_prev: buf.get_u64_le(),
+        xl_info: buf.get_u8(),
+        xl_rmid: buf.get_u8(),
+        xl_crc: {
+            buf.advance(2);
+            buf.get_u32_le()
+        },
+    }
 }
