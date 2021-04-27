@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::{App, Arg};
 use daemonize::Daemonize;
 
-use slog::Drain;
+use slog::{Drain, FnValue};
 
 use pageserver::{page_service, tui, zenith_repo_dir, PageServerConf};
 
@@ -212,7 +212,7 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
                 err
             })?;
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
-        let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = slog_term::FullFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {
             if record.level().is_at_least(slog::Level::Info) {
                 return true;
@@ -220,7 +220,20 @@ fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, 
             false
         });
         let drain = std::sync::Mutex::new(drain).fuse();
-        let logger = slog::Logger::root(drain, slog::o!());
+        let logger = slog::Logger::root(
+            drain,
+            slog::o!(
+                "location" =>
+                FnValue(move |record| {
+                    format!("{}, {}:{}",
+                            record.module(),
+                            record.file(),
+                            record.line()
+                            )
+                    }
+                )
+            ),
+        );
         Ok(slog_scope::set_global_logger(logger))
     } else {
         let decorator = slog_term::TermDecorator::new().build();
