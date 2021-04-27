@@ -107,9 +107,6 @@ pub fn get_or_restore_pagecache(
 
             let result = Arc::new(pcache);
 
-            // Launch the WAL redo thread
-            result.walredo_mgr.launch(result.clone());
-
             pcaches.insert(timelineid, result.clone());
 
             if conf.gc_horizon != 0 {
@@ -357,7 +354,10 @@ impl PageCache {
                     page_img = img.clone();
                 } else if content.wal_record.is_some() {
                     // Request the WAL redo manager to apply the WAL records for us.
-                    page_img = self.walredo_mgr.request_redo(tag, lsn)?;
+                    let (base_img, records) = self.collect_records_for_apply(tag, lsn);
+                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
+
+                    self.put_page_image(tag, lsn, page_img.clone());
                 } else {
                     // No base image, and no WAL record. Huh?
                     bail!("no page image or WAL record for requested page");
@@ -800,7 +800,11 @@ impl PageCache {
                         if (v[0] & PAGE_IMAGE_FLAG) == 0 {
                             trace!("Reconstruct most recent page {:?}", key);
                             // force reconstruction of most recent page version
-                            self.walredo_mgr.request_redo(key.tag, key.lsn)?;
+                            let (base_img, records) = self.collect_records_for_apply(key.tag, key.lsn);
+                            let new_img = self.walredo_mgr.request_redo(key.tag, key.lsn, base_img, records)?;
+
+                            self.put_page_image(key.tag, key.lsn, new_img.clone());
+
                             reconstructed += 1;
                         }
 
@@ -820,7 +824,10 @@ impl PageCache {
                                     let v = iter.value().unwrap();
                                     if (v[0] & PAGE_IMAGE_FLAG) == 0 {
                                         trace!("Reconstruct horizon page {:?}", key);
-                                        self.walredo_mgr.request_redo(key.tag, key.lsn)?;
+                                        let (base_img, records) = self.collect_records_for_apply(key.tag, key.lsn);
+                                        let new_img = self.walredo_mgr.request_redo(key.tag, key.lsn, base_img, records)?;
+                                        self.put_page_image(key.tag, key.lsn, new_img.clone());
+
                                         truncated += 1;
                                     }
                                 }

@@ -25,7 +25,7 @@ use std::io::Error;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
@@ -35,7 +35,6 @@ use tokio::time::timeout;
 use zenith_utils::lsn::Lsn;
 
 use crate::page_cache::BufferTag;
-use crate::page_cache::PageCache;
 use crate::page_cache::WALRecord;
 use crate::ZTimelineId;
 use crate::{pg_constants, PageServerConf};
@@ -49,18 +48,13 @@ static TIMEOUT: Duration = Duration::from_secs(20);
 /// WalRedoManagerInternal is used by the manager thread itself.
 ///
 pub struct WalRedoManager {
-    conf: PageServerConf,
-    timelineid: ZTimelineId,
-
     request_tx: Mutex<mpsc::Sender<WalRedoRequest>>,
-    request_rx: Mutex<Option<mpsc::Receiver<WalRedoRequest>>>,
 }
 
 struct WalRedoManagerInternal {
     _conf: PageServerConf,
     timelineid: ZTimelineId,
 
-    pcache: Arc<PageCache>,
     request_rx: mpsc::Receiver<WalRedoRequest>,
 }
 
@@ -68,6 +62,9 @@ struct WalRedoManagerInternal {
 struct WalRedoRequest {
     tag: BufferTag,
     lsn: Lsn,
+
+    base_img: Option<Bytes>,
+    records: Vec<WALRecord>,
 
     response_channel: mpsc::Sender<Result<Bytes, WalRedoError>>,
 }
@@ -91,23 +88,13 @@ impl WalRedoManager {
     pub fn new(conf: &PageServerConf, timelineid: ZTimelineId) -> WalRedoManager {
         let (tx, rx) = mpsc::channel();
 
-        WalRedoManager {
-            conf: conf.clone(),
-            timelineid,
-            request_tx: Mutex::new(tx),
-            request_rx: Mutex::new(Some(rx)),
-        }
-    }
-
-    ///
-    /// Launch the WAL redo thread
-    ///
-    pub fn launch(&self, pcache: Arc<PageCache>) {
+        //
+        // Launch the WAL redo thread
+        //
         // Get mutable references to the values that we need to pass to the
         // thread.
-        let request_rx = self.request_rx.lock().unwrap().take().unwrap();
-        let conf_copy = self.conf.clone();
-        let timelineid = self.timelineid;
+        let request_rx = rx;
+        let conf_copy = conf.clone();
 
         // Currently, the join handle is not saved anywhere and we
         // won't try restart the thread if it dies.
@@ -117,25 +104,28 @@ impl WalRedoManager {
                 let mut internal = WalRedoManagerInternal {
                     _conf: conf_copy,
                     timelineid,
-                    pcache,
                     request_rx,
                 };
                 internal.wal_redo_main();
             })
             .unwrap();
+
+        WalRedoManager { request_tx: Mutex::new(tx) }
     }
 
     ///
     /// Request the WAL redo manager to apply WAL records, to reconstruct the page image
     /// of the given page version.
     ///
-    pub fn request_redo(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes, WalRedoError> {
+    pub fn request_redo(&self, tag: BufferTag, lsn: Lsn, base_img: Option<Bytes>, records: Vec<WALRecord>) -> Result<Bytes, WalRedoError> {
         // Create a channel where to receive the response
         let (tx, rx) = mpsc::channel::<Result<Bytes, WalRedoError>>();
 
         let request = WalRedoRequest {
             tag,
             lsn,
+            base_img,
+            records,
             response_channel: tx,
         };
 
@@ -196,7 +186,7 @@ impl WalRedoManagerInternal {
         &self,
         xl_info: u8,
         xl_xid: u32,
-        record: WALRecord,
+        record: &WALRecord,
         page: &mut BytesMut,
     ) {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
@@ -251,10 +241,10 @@ impl WalRedoManagerInternal {
         process: &WalRedoProcess,
         request: &WalRedoRequest,
     ) -> Result<Bytes, WalRedoError> {
-        let pcache = &self.pcache;
         let tag = request.tag;
         let lsn = request.lsn;
-        let (base_img, records) = pcache.collect_records_for_apply(tag, lsn);
+        let base_img = request.base_img.clone();
+        let records = &request.records;
 
         let nrecords = records.len();
 
@@ -314,11 +304,6 @@ impl WalRedoManagerInternal {
             result = Err(WalRedoError::IoError(e));
         } else {
             let img = apply_result.unwrap();
-
-            // Should we put the image back to the page cache? We don't have to,
-            // but then the next GetPage@LSN call will have to do the WAL redo
-            // again
-            pcache.put_page_image(tag, lsn, img.clone());
 
             result = Ok(img);
         }
@@ -415,7 +400,7 @@ impl WalRedoProcess {
         &self,
         tag: BufferTag,
         base_img: Option<Bytes>,
-        records: Vec<WALRecord>,
+        records: &Vec<WALRecord>,
     ) -> Result<Bytes, std::io::Error> {
         let mut stdin = self.stdin.borrow_mut();
         let mut stdout = self.stdout.borrow_mut();
