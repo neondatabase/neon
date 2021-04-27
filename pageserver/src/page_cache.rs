@@ -29,28 +29,36 @@ use zenith_utils::seqwait::SeqWait;
 static TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct PageCache {
-    shared: Mutex<PageCacheShared>,
-
     // RocksDB handle
     db: rocksdb::DB,
 
     // WAL redo manager
     walredo_mgr: WalRedoManager,
 
-    // Allows waiting for the arrival of a particular LSN.
-    seqwait_lsn: SeqWait<Lsn>,
+    // What page versions do we hold in the cache? If we get GetPage with
+    // LSN < first_valid_lsn, that's an error because we (no longer) hold that
+    // page version. If we get a request > last_valid_lsn, we need to wait until
+    // we receive all the WAL up to the request. The SeqWait provides functions
+    // for that.
+    //
+    // last_record_lsn points to the end of last processed WAL record.
+    // It can lag behind last_valid_lsn, if the WAL receiver has received some WAL
+    // after the end of last record, but not the whole next record yet. In the
+    // page cache, we care about last_valid_lsn, but if the WAL receiver needs to
+    // restart the streaming, it needs to restart at the end of last record, so
+    // we track them separately. last_record_lsn should perhaps be in
+    // walreceiver.rs instead of here, but it seems convenient to keep all three
+    // values together.
+    //
+    first_valid_lsn: AtomicLsn,
+    last_valid_lsn: SeqWait<Lsn>,
+    last_record_lsn: AtomicLsn,
 
     // Counters, for metrics collection.
     pub num_entries: AtomicU64,
     pub num_page_images: AtomicU64,
     pub num_wal_records: AtomicU64,
     pub num_getpage_requests: AtomicU64,
-
-    // copies of shared.first/last_valid_lsn fields (copied here so
-    // that they can be read without acquiring the mutex).
-    first_valid_lsn: AtomicLsn,
-    last_valid_lsn: AtomicLsn,
-    last_record_lsn: AtomicLsn,
 }
 
 #[derive(Clone)]
@@ -68,29 +76,6 @@ impl AddAssign for PageCacheStats {
         self.num_wal_records += other.num_wal_records;
         self.num_getpage_requests += other.num_getpage_requests;
     }
-}
-
-//
-// Shared data structure, holding page cache and related auxiliary information
-//
-struct PageCacheShared {
-    // What page versions do we hold in the cache? If we get GetPage with
-    // LSN < first_valid_lsn, that's an error because we (no longer) hold that
-    // page version. If we get a request > last_valid_lsn, we need to wait until
-    // we receive all the WAL up to the request.
-    //
-    // last_record_lsn points to the end of last processed WAL record.
-    // It can lag behind last_valid_lsn, if the WAL receiver has received some WAL
-    // after the end of last record, but not the whole next record yet. In the
-    // page cache, we care about last_valid_lsn, but if the WAL receiver needs to
-    // restart the streaming, it needs to restart at the end of last record, so
-    // we track them separately. last_record_lsn should perhaps be in
-    // walreceiver.rs instead of here, but it seems convenient to keep all three
-    // values together.
-    //
-    first_valid_lsn: Lsn,
-    last_valid_lsn: Lsn,
-    last_record_lsn: Lsn,
 }
 
 lazy_static! {
@@ -166,26 +151,19 @@ fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB 
 
 fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache {
     PageCache {
-        shared: Mutex::new(PageCacheShared {
-            first_valid_lsn: Lsn(0),
-            last_valid_lsn: Lsn(0),
-            last_record_lsn: Lsn(0),
-        }),
-
         db: open_rocksdb(&conf, timelineid),
 
         walredo_mgr: WalRedoManager::new(conf, timelineid),
 
-        seqwait_lsn: SeqWait::new(Lsn(0)),
+        first_valid_lsn: AtomicLsn::new(0),
+        last_valid_lsn: SeqWait::new(Lsn(0)),
+        last_record_lsn: AtomicLsn::new(0),
 
         num_entries: AtomicU64::new(0),
         num_page_images: AtomicU64::new(0),
         num_wal_records: AtomicU64::new(0),
         num_getpage_requests: AtomicU64::new(0),
 
-        first_valid_lsn: AtomicLsn::new(0),
-        last_valid_lsn: AtomicLsn::new(0),
-        last_record_lsn: AtomicLsn::new(0),
     }
 }
 
@@ -643,18 +621,13 @@ impl PageCache {
 
     /// Remember that WAL has been received and added to the page cache up to the given LSN
     pub fn advance_last_valid_lsn(&self, lsn: Lsn) {
-        let mut shared = self.shared.lock().unwrap();
+        let old = self.last_valid_lsn.advance(lsn);
 
         // Can't move backwards.
-        let oldlsn = shared.last_valid_lsn;
-        if lsn >= oldlsn {
-            shared.last_valid_lsn = lsn;
-            self.last_valid_lsn.store(lsn);
-            self.seqwait_lsn.advance(lsn);
-        } else {
+        if lsn < old {
             warn!(
                 "attempted to move last valid LSN backwards (was {}, new {})",
-                oldlsn, lsn
+                old, lsn
             );
         }
     }
@@ -665,17 +638,19 @@ impl PageCache {
     /// NOTE: this updates last_valid_lsn as well.
     ///
     pub fn advance_last_record_lsn(&self, lsn: Lsn) {
-        let mut shared = self.shared.lock().unwrap();
-
         // Can't move backwards.
-        assert!(lsn >= shared.last_valid_lsn);
-        assert!(lsn >= shared.last_record_lsn);
+        let old = self.last_record_lsn.fetch_max(lsn);
+        assert!(old <= lsn);
 
-        shared.last_valid_lsn = lsn;
-        shared.last_record_lsn = lsn;
-        self.last_valid_lsn.store(lsn);
-        self.last_record_lsn.store(lsn);
-        self.seqwait_lsn.advance(lsn);
+        // Also advance last_valid_lsn
+        let old = self.last_valid_lsn.advance(lsn);
+        // Can't move backwards.
+        if lsn < old {
+            warn!(
+                "attempted to move last record LSN backwards (was {}, new {})",
+                old, lsn
+            );
+        }
     }
 
     ///
@@ -684,39 +659,27 @@ impl PageCache {
     /// TODO: This should be called by garbage collection, so that if an older
     /// page is requested, we will return an error to the requestor.
     pub fn _advance_first_valid_lsn(&self, lsn: Lsn) {
-        let mut shared = self.shared.lock().unwrap();
-
-        // Can't move backwards.
-        assert!(lsn >= shared.first_valid_lsn);
-
         // Can't overtake last_valid_lsn (except when we're
         // initializing the system and last_valid_lsn hasn't been set yet.
-        assert!(shared.last_valid_lsn == Lsn(0) || lsn < shared.last_valid_lsn);
+        let last_valid_lsn = self.last_valid_lsn.load();
+        assert!(last_valid_lsn == Lsn(0) || lsn < last_valid_lsn);
 
-        shared.first_valid_lsn = lsn;
-        self.first_valid_lsn.store(lsn);
+        let old = self.first_valid_lsn.fetch_max(lsn);
+        // Can't move backwards.
+        assert!(lsn >= old);
     }
 
     pub fn init_valid_lsn(&self, lsn: Lsn) {
-        let mut shared = self.shared.lock().unwrap();
-
-        assert!(shared.first_valid_lsn == Lsn(0));
-        assert!(shared.last_valid_lsn == Lsn(0));
-        assert!(shared.last_record_lsn == Lsn(0));
-
-        shared.first_valid_lsn = lsn;
-        shared.last_valid_lsn = lsn;
-        shared.last_record_lsn = lsn;
-
-        self.first_valid_lsn.store(lsn);
-        self.last_valid_lsn.store(lsn);
-        self.last_record_lsn.store(lsn);
+        let old = self.last_valid_lsn.advance(lsn);
+        assert!(old == Lsn(0));
+        let old = self.last_record_lsn.fetch_max(lsn);
+        assert!(old == Lsn(0));
+        let old = self.first_valid_lsn.fetch_max(lsn);
+        assert!(old == Lsn(0));
     }
 
     pub fn get_last_valid_lsn(&self) -> Lsn {
-        let shared = self.shared.lock().unwrap();
-
-        shared.last_record_lsn
+        self.last_valid_lsn.load()
     }
 
     //
@@ -913,7 +876,7 @@ impl PageCache {
             lsn = last_valid_lsn;
         }
 
-        self.seqwait_lsn
+        self.last_valid_lsn
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
                 format!(

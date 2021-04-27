@@ -173,17 +173,15 @@ where
     ///
     /// All waiters at this value or below will be woken.
     ///
-    /// `advance` will panic if you send it a lower number than
-    /// a previous call.
-    pub fn advance(&self, num: T) {
+    /// Returns the old number.
+    pub fn advance(&self, num: T) -> T {
+        let old_value;
         let wake_these = {
             let mut internal = self.internal.lock().unwrap();
 
-            if internal.current > num {
-                panic!(
-                    "tried to advance backwards, from {:?} to {:?}",
-                    internal.current, num
-                );
+            old_value = internal.current;
+            if old_value >= num {
+                return old_value;
             }
             internal.current = num;
 
@@ -204,6 +202,12 @@ where
             // We don't care; discard the error.
             let _ = tx.send(());
         }
+        old_value
+    }
+
+    /// Read the current value, without waiting.
+    pub fn load(&self) -> T {
+        self.internal.lock().unwrap().current
     }
 }
 
@@ -222,7 +226,8 @@ mod tests {
         let seq3 = Arc::clone(&seq);
         spawn(move || {
             seq2.wait_for(42).expect("wait_for 42");
-            seq2.advance(100);
+            let old = seq2.advance(100);
+            assert_eq!(old, 99);
             seq2.wait_for(999).expect_err("no 999");
         });
         spawn(move || {
@@ -230,8 +235,14 @@ mod tests {
             seq3.wait_for(0).expect("wait_for 0");
         });
         sleep(Duration::from_secs(1));
-        seq.advance(99);
+        let old = seq.advance(99);
+        assert_eq!(old, 0);
         seq.wait_for(100).expect("wait_for 100");
+
+        // Calling advance with a smaller value is a no-op
+        assert_eq!(seq.advance(98), 100);
+        assert_eq!(seq.load(), 100);
+
         seq.shutdown();
     }
 
@@ -247,6 +258,7 @@ mod tests {
         sleep(Duration::from_secs(1));
         // This will attempt to wake, but nothing will happen
         // because the waiter already dropped its Receiver.
-        seq.advance(99);
+        let old = seq.advance(99);
+        assert_eq!(old, 0)
     }
 }

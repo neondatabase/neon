@@ -171,6 +171,12 @@ impl AtomicLsn {
         }
         Lsn(prev)
     }
+
+    /// Atomically sets the Lsn to the max of old and new value, returning the old value.
+    pub fn fetch_max(&self, lsn: Lsn) -> Lsn {
+        let prev = self.inner.fetch_max(lsn.0, Ordering::AcqRel);
+        Lsn(prev)
+    }
 }
 
 #[cfg(test)]
