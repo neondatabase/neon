@@ -1,45 +1,32 @@
-name: regression check
+name: Build and Test
 
-on: [push]
+on: [push, pull_request]
 
 jobs:
   regression-check:
+    strategy:
+      matrix:
+        # If we want to duplicate this job for different
+        # Rust toolchains (e.g. nightly or 1.37.0), add them here.
+        rust_toolchain: [stable]
+        os: [ubuntu-latest]
     timeout-minutes: 30
     name: run regression test suite
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v2
         with:
           submodules: true
           fetch-depth: 2
 
-      - name: Form variables for notification message
-        id: git_info_grab
-        run: |
-          git_stat=$(git show --stat=50)
-          git_stat="${git_stat//'%'/'%25'}"
-          git_stat="${git_stat//$'\n'/'%0A'}"
-          git_stat="${git_stat//$'\r'/'%0D'}"
-          git_stat="${git_stat// / }" # space -> 'Space En', as github tends to eat ordinary spaces
-          echo "::set-output name=git_stat::$git_stat"
-          echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
-          echo "##[set-output name=git_branch;]$(echo ${GITHUB_REF#refs/heads/})"
-
-      - name: Send notification
-        uses: appleboy/telegram-action@master
+      - name: install rust toolchain ${{ matrix.rust_toolchain }}
+        uses: actions-rs/toolchain@v1
         with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          format: markdown
-          args: |
-            *@${{ github.actor }} pushed to* [${{ github.repository }}:${{steps.git_info_grab.outputs.git_branch}}](github.com/${{ github.repository }}/commit/${{steps.git_info_grab.outputs.sha_short }})
-
-            ```
-            ${{ steps.git_info_grab.outputs.git_stat }}
-            ```
+          profile: minimal
+          toolchain: ${{ matrix.rust_toolchain }}
+          override: true
 
       - name: Install postgres dependencies
         run: |
@@ -63,10 +50,6 @@ jobs:
         run: |
           make postgres
 
-      - name: Install rust
-        run: |
-          sudo apt install -y cargo
-
       - name: Cache cargo deps
         id: cache_cargo
         uses: actions/cache@v2
@@ -77,10 +60,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build
+      - name: Run cargo build
         run: |
-          cargo build
+          cargo build --workspace --bins --examples --tests
 
-      - name: Run test
+      - name: Run cargo test
         run: |
-          cargo test --test test_pageserver -- --nocapture --test-threads=1
+          cargo test -- --nocapture --test-threads=1
