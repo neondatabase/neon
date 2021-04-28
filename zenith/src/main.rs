@@ -34,10 +34,7 @@ fn main() -> Result<()> {
         .required(true);
     let matches = App::new("zenith")
         .about("Zenith CLI")
-        .subcommand(
-            SubCommand::with_name("init")
-                .about("Initialize a new Zenith repository in current directory"),
-        )
+        .subcommand(SubCommand::with_name("init").about("Initialize a new Zenith repository"))
         .subcommand(
             SubCommand::with_name("branch")
                 .about("Create a new branch")
@@ -79,7 +76,7 @@ fn main() -> Result<()> {
     let repopath = zenith_repo_dir();
     if !repopath.exists() {
         bail!(
-            "Zenith repository does not exists in {}.\n\
+            "Zenith repository does not exist in {}.\n\
                Set ZENITH_REPO_DIR or initialize a new repository with 'zenith init'",
             repopath.display()
         );

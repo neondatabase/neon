@@ -71,7 +71,7 @@ pub fn init() -> Result<()> {
     let cargo_path = env::current_dir()?;
     if !cargo_path.join("pageserver/Cargo.toml").exists() {
         anyhow::bail!(
-            "Current dirrectory does not look like a zenith repo. \
+            "Current directory does not look like a zenith repo. \
             Please, run 'init' from zenith repo root."
         );
     }
