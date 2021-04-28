@@ -38,7 +38,7 @@ use crate::page_cache::BufferTag;
 use crate::page_cache::WALRecord;
 use crate::ZTimelineId;
 use crate::{pg_constants, PageServerConf};
-use postgres_ffi::xlog_utils;
+use postgres_ffi::xlog_utils::{XLogRecord};
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -243,7 +243,7 @@ impl WalRedoManagerInternal {
 
                 // 1. Parse XLogRecord struct
                 // FIXME: refactor to avoid code duplication.
-                let xlogrec = xlog_utils::parse_xlog_record(&mut buf);
+                let xlogrec = XLogRecord::from_bytes(&mut buf);
 
                 //move to main data
                 // TODO probably, we should store some records in our special format

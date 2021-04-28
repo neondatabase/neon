@@ -281,16 +281,18 @@ pub struct XLogRecord {
     pub xl_crc: u32,
 }
 
-pub fn parse_xlog_record(buf: &mut Bytes) -> XLogRecord {
-    XLogRecord {
-        xl_tot_len: buf.get_u32_le(),
-        xl_xid: buf.get_u32_le(),
-        xl_prev: buf.get_u64_le(),
-        xl_info: buf.get_u8(),
-        xl_rmid: buf.get_u8(),
-        xl_crc: {
-            buf.advance(2);
-            buf.get_u32_le()
-        },
+impl XLogRecord {
+    pub fn from_bytes(buf: &mut Bytes) -> XLogRecord {
+        XLogRecord {
+            xl_tot_len: buf.get_u32_le(),
+            xl_xid: buf.get_u32_le(),
+            xl_prev: buf.get_u64_le(),
+            xl_info: buf.get_u8(),
+            xl_rmid: buf.get_u8(),
+            xl_crc: {
+                buf.advance(2);
+                buf.get_u32_le()
+            },
+        }
     }
 }
