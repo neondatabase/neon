@@ -1,6 +1,6 @@
-use postgres_ffi::pg_constants;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
+use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::XLogRecord;
 use std::cmp::min;
 use std::str;
@@ -312,11 +312,10 @@ pub struct DecodedWALRecord {
 // // FIXME: refactor this and decode_wal_record() below to avoid the duplication.
 // fn is_xlog_switch_record(rec: &Bytes) -> bool {
 //         let mut buf = rec.clone();
-    
+
 //         let xlogrec = XLogRecord::from_bytes(&mut buf);
 //         xlogrec.xl_info == pg_constants::XLOG_SWITCH && xlogrec.xl_rmid == pg_constants::RM_XLOG_ID
 // }
-    
 
 pub type Oid = u32;
 pub type BlockNumber = u32;
@@ -510,7 +509,9 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                      * bimg_len < BLCKSZ if the HAS_HOLE flag is set.
                      */
                     if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0
-                        && (blk.hole_offset == 0 || blk.hole_length == 0 || blk.bimg_len == pg_constants::BLCKSZ)
+                        && (blk.hole_offset == 0
+                            || blk.hole_length == 0
+                            || blk.bimg_len == pg_constants::BLCKSZ)
                     {
                         // TODO
                         /*
@@ -546,7 +547,9 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                      * cross-check that bimg_len < BLCKSZ if the IS_COMPRESSED
                      * flag is set.
                      */
-                    if (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0) && blk.bimg_len == pg_constants::BLCKSZ {
+                    if (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0)
+                        && blk.bimg_len == pg_constants::BLCKSZ
+                    {
                         // TODO
                         /*
                         report_invalid_record(state,

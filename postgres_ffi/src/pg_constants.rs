@@ -71,7 +71,6 @@ pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
 pub const SIZEOF_XLOGRECORD: u32 = 24;
 
-
 // FIXME:
 pub const BLCKSZ: u16 = 8192;
 
