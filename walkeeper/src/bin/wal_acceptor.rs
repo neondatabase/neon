@@ -44,11 +44,10 @@ fn main() -> Result<()> {
                 .help("listen for incoming connections on ip:port (default: 127.0.0.1:5454)"),
         )
         .arg(
-            Arg::with_name("listen")
-                .short("l")
-                .long("listen")
-                .takes_value(true)
-                .help("listen for incoming connections on ip:port (default: 127.0.0.1:5454)"),
+            Arg::with_name("pageserver")
+                .short("p")
+                .long("pageserver")
+                .takes_value(true),
         )
         .arg(
             Arg::with_name("ttl")
@@ -103,6 +102,11 @@ fn main() -> Result<()> {
     if let Some(addr) = arg_matches.value_of("listen") {
         conf.listen_addr = addr.parse().unwrap();
     }
+
+    if let Some(addr) = arg_matches.value_of("pageserver") {
+        conf.pageserver_addr = Some(addr.parse().unwrap());
+    }
+
     if let Some(ttl) = arg_matches.value_of("ttl") {
         conf.ttl = Some::<Duration>(parse(ttl)?);
     }
