@@ -169,10 +169,10 @@ fn test_acceptors_restarts() {
     assert_eq!(count, 500500);
 }
 
-fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize) {
+fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize, sleep_nsec: u64) {
     let cp = cplane.clone();
     thread::spawn(move || {
-        thread::sleep(time::Duration::from_secs(1));
+        thread::sleep(time::Duration::from_secs(sleep_nsec));
         cp.wal_acceptors[no].start();
     });
 }
@@ -210,7 +210,7 @@ fn test_acceptors_unavailability() {
 
     storage_cplane.wal_acceptors[0].stop().unwrap();
     let cp = Arc::new(storage_cplane);
-    start_acceptor(&cp, 0);
+    start_acceptor(&cp, 0, 2);
     let now = SystemTime::now();
     psql.execute("INSERT INTO t values (2, 'payload')", &[])
         .unwrap();
@@ -219,7 +219,7 @@ fn test_acceptors_unavailability() {
         .unwrap();
 
     cp.wal_acceptors[1].stop().unwrap();
-    start_acceptor(&cp, 1);
+    start_acceptor(&cp, 1, 2);
     psql.execute("INSERT INTO t values (4, 'payload')", &[])
         .unwrap();
     assert!(now.elapsed().unwrap().as_secs() > 2);
