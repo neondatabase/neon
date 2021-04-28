@@ -1,6 +1,8 @@
-name: regression check
+name: Send Notifications
 
-on: [push]
+on:
+  push:
+    branches: [ main ]
 
 jobs:
   send-notifications:
