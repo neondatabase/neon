@@ -38,7 +38,7 @@ use crate::page_cache::BufferTag;
 use crate::page_cache::WALRecord;
 use crate::ZTimelineId;
 use crate::{pg_constants, PageServerConf};
-use postgres_ffi::xlog_utils::{XLogRecord};
+use postgres_ffi::xlog_utils::XLogRecord;
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -111,14 +111,22 @@ impl WalRedoManager {
             })
             .unwrap();
 
-        WalRedoManager { request_tx: Mutex::new(tx) }
+        WalRedoManager {
+            request_tx: Mutex::new(tx),
+        }
     }
 
     ///
     /// Request the WAL redo manager to apply WAL records, to reconstruct the page image
     /// of the given page version.
     ///
-    pub fn request_redo(&self, tag: BufferTag, lsn: Lsn, base_img: Option<Bytes>, records: Vec<WALRecord>) -> Result<Bytes, WalRedoError> {
+    pub fn request_redo(
+        &self,
+        tag: BufferTag,
+        lsn: Lsn,
+        base_img: Option<Bytes>,
+        records: Vec<WALRecord>,
+    ) -> Result<Bytes, WalRedoError> {
         // Create a channel where to receive the response
         let (tx, rx) = mpsc::channel::<Result<Bytes, WalRedoError>>();
 

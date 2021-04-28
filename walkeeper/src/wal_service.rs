@@ -158,12 +158,12 @@ pub struct Timeline {
 #[derive(Debug)]
 struct Connection {
     timeline: Option<Arc<Timeline>>,
-    stream: TcpStream,      /* Postgres connection */
-    inbuf: BytesMut,        /* input buffer */
-    outbuf: BytesMut,       /* output buffer */
-    init_done: bool,        /* startup packet proceeded */
-	appname: Option<String>,/* assigned application name */
-    conf: WalAcceptorConf,  /* wal acceptor configuration */
+    stream: TcpStream,       /* Postgres connection */
+    inbuf: BytesMut,         /* input buffer */
+    outbuf: BytesMut,        /* output buffer */
+    init_done: bool,         /* startup packet proceeded */
+    appname: Option<String>, /* assigned application name */
+    conf: WalAcceptorConf,   /* wal acceptor configuration */
 }
 
 /*
@@ -544,7 +544,7 @@ impl Connection {
             inbuf: BytesMut::with_capacity(10 * 1024),
             outbuf: BytesMut::with_capacity(10 * 1024),
             init_done: false,
-			appname: None,
+            appname: None,
             conf: conf.clone(),
         }
     }
@@ -857,7 +857,7 @@ impl Connection {
                             self.send().await?;
                             self.init_done = true;
                             self.set_timeline(m.timelineid)?;
-							self.appname = m.appname;
+                            self.appname = m.appname;
                         }
                         StartupRequestCode::Cancel => return Ok(()),
                     }
@@ -954,9 +954,9 @@ impl Connection {
         if start_pos == 0 {
             start_pos = wal_end;
         }
-		if stop_pos == 0 && self.appname == Some("wal_proposer_recovery".to_string()) {
-			stop_pos = wal_end;
-		}
+        if stop_pos == 0 && self.appname == Some("wal_proposer_recovery".to_string()) {
+            stop_pos = wal_end;
+        }
         info!(
             "Start replication from {:X}/{:>08X} till {:X}/{:>08X}",
             (start_pos >> 32) as u32,

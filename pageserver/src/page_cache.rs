@@ -160,7 +160,6 @@ fn init_page_cache(conf: &PageServerConf, timelineid: ZTimelineId) -> PageCache 
         num_page_images: AtomicU64::new(0),
         num_wal_records: AtomicU64::new(0),
         num_getpage_requests: AtomicU64::new(0),
-
     }
 }
 
@@ -800,8 +799,11 @@ impl PageCache {
                         if (v[0] & PAGE_IMAGE_FLAG) == 0 {
                             trace!("Reconstruct most recent page {:?}", key);
                             // force reconstruction of most recent page version
-                            let (base_img, records) = self.collect_records_for_apply(key.tag, key.lsn);
-                            let new_img = self.walredo_mgr.request_redo(key.tag, key.lsn, base_img, records)?;
+                            let (base_img, records) =
+                                self.collect_records_for_apply(key.tag, key.lsn);
+                            let new_img = self
+                                .walredo_mgr
+                                .request_redo(key.tag, key.lsn, base_img, records)?;
 
                             self.put_page_image(key.tag, key.lsn, new_img.clone());
 
@@ -824,8 +826,11 @@ impl PageCache {
                                     let v = iter.value().unwrap();
                                     if (v[0] & PAGE_IMAGE_FLAG) == 0 {
                                         trace!("Reconstruct horizon page {:?}", key);
-                                        let (base_img, records) = self.collect_records_for_apply(key.tag, key.lsn);
-                                        let new_img = self.walredo_mgr.request_redo(key.tag, key.lsn, base_img, records)?;
+                                        let (base_img, records) =
+                                            self.collect_records_for_apply(key.tag, key.lsn);
+                                        let new_img = self
+                                            .walredo_mgr
+                                            .request_redo(key.tag, key.lsn, base_img, records)?;
                                         self.put_page_image(key.tag, key.lsn, new_img.clone());
 
                                         truncated += 1;

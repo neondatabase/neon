@@ -229,7 +229,7 @@ fn test_acceptors_unavailability() {
         .unwrap();
     // Here we check that the query above was hanging
     // while wal_acceptor was unavailiable
-    assert!(now.elapsed().unwrap().as_secs() >= 2*DOWNTIME);
+    assert!(now.elapsed().unwrap().as_secs() >= 2 * DOWNTIME);
 
     psql.execute("INSERT INTO t values (5, 'payload')", &[])
         .unwrap();
