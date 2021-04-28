@@ -7,6 +7,7 @@
 // have been named the same as the corresponding PostgreSQL functions instead.
 //
 
+use crate::pg_constants;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
 use crc32c::*;
@@ -294,5 +295,11 @@ impl XLogRecord {
                 buf.get_u32_le()
             },
         }
+    }
+
+    // Is this record an XLOG_SWITCH record? They need some special processing,
+    pub fn is_xlog_switch_record(&self) -> bool {
+
+    self.xl_info == pg_constants::XLOG_SWITCH && self.xl_rmid == pg_constants::RM_XLOG_ID
     }
 }

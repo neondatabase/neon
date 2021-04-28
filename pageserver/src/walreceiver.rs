@@ -8,7 +8,6 @@
 
 use crate::page_cache;
 use crate::page_cache::{BufferTag, RelTag};
-use crate::pg_constants;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -16,6 +15,7 @@ use anyhow::Error;
 use lazy_static::lazy_static;
 use log::*;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::pg_constants;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use std::collections::HashMap;
