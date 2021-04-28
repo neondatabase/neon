@@ -24,7 +24,7 @@ fn main() {
         // Path the server include dir. It is in tmp_install/include/server, if you did
         // "configure --prefix=<path to tmp_install>". But if you used "configure --prefix=/",
         // and used DESTDIR to move it into tmp_install, then it's in
-        // tmp_install/include/postgres/server (that's how the pgbuild.sh script does it).
+        // tmp_install/include/postgres/server
         // 'pg_config --includedir-server' would perhaps be the more proper way to find it,
         // but this will do for now.
         .clang_arg("-I../tmp_install/include/server")

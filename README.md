@@ -8,8 +8,7 @@ Zenith substitutes PostgreSQL storage layer and redistributes data across a clus
 ```sh
 git clone --recursive https://github.com/libzenith/zenith.git
 cd zenith
-./pgbuild.sh # builds postgres and installs it to ./tmp_install
-cargo build
+make
 ```
 
 2. Start pageserver and postggres on top of it (should be called from repo root):
@@ -54,7 +53,7 @@ postgres=# select * from t;
 
 ```sh
 git clone --recursive https://github.com/libzenith/zenith.git
-./pgbuild.sh # builds postgres and installs it to ./tmp_install
+make # builds also postgres and installs it to ./tmp_install
 cargo test -- --test-threads=1
 ```
 

@@ -61,7 +61,7 @@ jobs:
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
         run: |
-          ./pgbuild.sh
+          make postgres
 
       - name: Install rust
         run: |

@@ -84,7 +84,7 @@ pub fn init() -> Result<()> {
     if !pg_path.exists() {
         anyhow::bail!(
             "Can't find postres binary at {}. \
-                       Perhaps './pgbuild.sh' is needed to build it first.",
+                       Perhaps 'make postgres' is needed to build it first.",
             pg_path.to_str().unwrap()
         );
     }
