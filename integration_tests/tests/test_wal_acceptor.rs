@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::{thread, time};
 
+const DOWNTIME: u64 = 2;
+
 #[test]
 fn test_acceptors_normal_work() {
     let local_env = local_env::test_env("test_acceptors_normal_work");
@@ -169,10 +171,10 @@ fn test_acceptors_restarts() {
     assert_eq!(count, 500500);
 }
 
-fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize, sleep_nsec: u64) {
+fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize) {
     let cp = cplane.clone();
     thread::spawn(move || {
-        thread::sleep(time::Duration::from_secs(sleep_nsec));
+        thread::sleep(time::Duration::from_secs(DOWNTIME));
         cp.wal_acceptors[no].start();
     });
 }
@@ -214,7 +216,7 @@ fn test_acceptors_unavailability() {
     let now = SystemTime::now();
     psql.execute("INSERT INTO t values (2, 'payload')", &[])
         .unwrap();
-    assert!(now.elapsed().unwrap().as_secs() > 1);
+    assert!(now.elapsed().unwrap().as_secs() >= DOWNTIME);
     psql.execute("INSERT INTO t values (3, 'payload')", &[])
         .unwrap();
 
@@ -222,7 +224,7 @@ fn test_acceptors_unavailability() {
     start_acceptor(&cp, 1, 2);
     psql.execute("INSERT INTO t values (4, 'payload')", &[])
         .unwrap();
-    assert!(now.elapsed().unwrap().as_secs() > 2);
+    assert!(now.elapsed().unwrap().as_secs() >= 2*DOWNTIME);
 
     psql.execute("INSERT INTO t values (5, 'payload')", &[])
         .unwrap();
