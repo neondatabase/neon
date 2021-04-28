@@ -1,7 +1,7 @@
 use crate::pg_constants;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
-use postgres_ffi::xlog_utils;
+use postgres_ffi::xlog_utils::XLogRecord;
 use std::cmp::min;
 use std::str;
 use thiserror::Error;
@@ -337,7 +337,7 @@ pub struct DecodedWALRecord {
 fn is_xlog_switch_record(rec: &Bytes) -> bool {
     let mut buf = rec.clone();
 
-    let xlogrec = xlog_utils::parse_xlog_record(&mut buf);
+    let xlogrec = XLogRecord::from_bytes(&mut buf);
     xlogrec.xl_info == pg_constants::XLOG_SWITCH && xlogrec.xl_rmid == pg_constants::RM_XLOG_ID
 }
 
@@ -431,7 +431,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = xlog_utils::parse_xlog_record(&mut buf);
+    let xlogrec = XLogRecord::from_bytes(&mut buf);
 
     trace!(
         "decode_wal_record xl_rmid = {} xl_info = {}",
