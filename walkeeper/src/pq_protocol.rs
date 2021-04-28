@@ -40,6 +40,7 @@ pub struct FeStartupMessage {
     pub version: u32,
     pub kind: StartupRequestCode,
     pub timelineid: ZTimelineId,
+	pub appname: Option<String>,
 }
 
 #[derive(Debug)]
@@ -86,6 +87,7 @@ impl FeStartupMessage {
         let params = params_str.split('\0');
         let mut options = false;
         let mut timelineid: Option<ZTimelineId> = None;
+		let mut appname: Option<String> = None;
         for p in params {
             if p == "options" {
                 options = true;
@@ -94,8 +96,9 @@ impl FeStartupMessage {
                     if let Some(ztimelineid_str) = opt.strip_prefix("ztimelineid=") {
                         // FIXME: rethrow parsing error, don't unwrap
                         timelineid = Some(ZTimelineId::from_str(ztimelineid_str).unwrap());
-                        break;
-                    }
+                    } else if let Some(val) = opt.strip_prefix("application_name=") {
+						appname = Some(val.to_string());
+					}
                 }
                 break;
             }
@@ -111,6 +114,7 @@ impl FeStartupMessage {
         Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
             version,
             kind,
+			appname,
             timelineid: timelineid.unwrap(),
         })))
     }
