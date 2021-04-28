@@ -210,20 +210,25 @@ fn test_acceptors_unavailability() {
     psql.execute("INSERT INTO t values (1, 'payload')", &[])
         .unwrap();
 
+    // Shut down all wal acceptors
     storage_cplane.wal_acceptors[0].stop().unwrap();
     let cp = Arc::new(storage_cplane);
-    start_acceptor(&cp, 0, 2);
+    start_acceptor(&cp, 0);
     let now = SystemTime::now();
     psql.execute("INSERT INTO t values (2, 'payload')", &[])
         .unwrap();
+    // Here we check that the query above was hanging
+    // while wal_acceptor was unavailiable
     assert!(now.elapsed().unwrap().as_secs() >= DOWNTIME);
     psql.execute("INSERT INTO t values (3, 'payload')", &[])
         .unwrap();
 
     cp.wal_acceptors[1].stop().unwrap();
-    start_acceptor(&cp, 1, 2);
+    start_acceptor(&cp, 1);
     psql.execute("INSERT INTO t values (4, 'payload')", &[])
         .unwrap();
+    // Here we check that the query above was hanging
+    // while wal_acceptor was unavailiable
     assert!(now.elapsed().unwrap().as_secs() >= 2*DOWNTIME);
 
     psql.execute("INSERT INTO t values (5, 'payload')", &[])
@@ -235,6 +240,8 @@ fn test_acceptors_unavailability() {
         .unwrap()
         .get(0);
     println!("sum = {}", count);
+    // Ensure that all inserts succeeded.
+    // Including ones that were waiting for wal acceptor restart.
     assert_eq!(count, 15);
 }
 
