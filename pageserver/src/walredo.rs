@@ -36,10 +36,10 @@ use zenith_utils::lsn::Lsn;
 
 use crate::page_cache::BufferTag;
 use crate::page_cache::WALRecord;
-use crate::ZTimelineId;
 use crate::PageServerConf;
-use postgres_ffi::xlog_utils::{XLogRecord};
+use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
+use postgres_ffi::xlog_utils::XLogRecord;
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 

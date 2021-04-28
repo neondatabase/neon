@@ -3,8 +3,8 @@
 #![allow(non_snake_case)]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-pub mod xlog_utils;
 pub mod pg_constants;
+pub mod xlog_utils;
 
 use bytes::{Buf, Bytes, BytesMut};
 

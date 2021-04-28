@@ -299,7 +299,6 @@ impl XLogRecord {
 
     // Is this record an XLOG_SWITCH record? They need some special processing,
     pub fn is_xlog_switch_record(&self) -> bool {
-
-    self.xl_info == pg_constants::XLOG_SWITCH && self.xl_rmid == pg_constants::RM_XLOG_ID
+        self.xl_info == pg_constants::XLOG_SWITCH && self.xl_rmid == pg_constants::RM_XLOG_ID
     }
 }
