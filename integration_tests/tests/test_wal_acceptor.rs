@@ -19,12 +19,12 @@ fn test_embedded_wal_proposer() {
     const REDUNDANCY: usize = 3;
     let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
     let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
-    let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info_quoted();
+    let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
     let maintli = storage_cplane.get_branch_timeline("main");
     let node = compute_cplane.new_test_master_node(maintli);
-	node.append_conf("postgresql.conf", &format!("wal_acceptors={}\n", wal_acceptors));
+	node.append_conf("postgresql.conf", &format!("wal_acceptors='{}'\n", wal_acceptors));
     node.start().unwrap();
 
     // check basic work with table
