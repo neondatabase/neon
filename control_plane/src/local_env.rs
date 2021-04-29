@@ -129,12 +129,13 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
 
     // Run initdb
     //
-    // FIXME: we create it temporarily in "tmp" directory, and move it into
-    // the repository. Use "tempdir()" or something? Or just create it directly
-    // in the repo?
+    // We create the cluster temporarily in a "tmp" directory inside the repository,
+    // and move it to the right location from there.
+    let tmppath = repopath.join("tmp");
+
     let initdb_path = local_env.pg_bin_dir().join("initdb");
     let initdb = Command::new(initdb_path)
-        .args(&["-D", "tmp"])
+        .args(&["-D", tmppath.to_str().unwrap()])
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", local_env.pg_lib_dir().to_str().unwrap())
@@ -151,15 +152,17 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
     println!("initdb succeeded");
 
     // Read control file to extract the LSN and system id
-    let controlfile =
-        postgres_ffi::decode_pg_control(Bytes::from(fs::read("tmp/global/pg_control")?))?;
+    let controlfile_path = tmppath.join("global").join("pg_control");
+    let controlfile = postgres_ffi::decode_pg_control(Bytes::from(fs::read(controlfile_path)?))?;
     let systemid = controlfile.system_identifier;
     let lsn = controlfile.checkPoint;
     let lsnstr = format!("{:016X}", lsn);
 
     // Move the initial WAL file
     fs::rename(
-        "tmp/pg_wal/000000010000000000000001",
+        tmppath
+            .join("pg_wal")
+            .join("000000010000000000000001"),
         timelinedir
             .join("wal")
             .join("000000010000000000000001.partial"),
@@ -167,14 +170,13 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
     println!("moved initial WAL file");
 
     // Remove pg_wal
-    fs::remove_dir_all("tmp/pg_wal")?;
-    println!("removed tmp/pg_wal");
+    fs::remove_dir_all(tmppath.join("pg_wal"))?;
 
-    force_crash_recovery(&PathBuf::from("tmp"))?;
+    force_crash_recovery(&tmppath)?;
     println!("updated pg_control");
 
     let target = timelinedir.join("snapshots").join(&lsnstr);
-    fs::rename("tmp", &target)?;
+    fs::rename(tmppath, &target)?;
     println!("moved 'tmp' to {}", target.display());
 
     // Create 'main' branch to refer to the initial timeline
