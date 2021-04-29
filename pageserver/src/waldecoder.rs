@@ -306,17 +306,6 @@ pub struct DecodedWALRecord {
     pub main_data_offset: usize,
 }
 
-// // Is this record an XLOG_SWITCH record? They need some special processing,
-// // so we need to check for that before the rest of the parsing.
-// //
-// // FIXME: refactor this and decode_wal_record() below to avoid the duplication.
-// fn is_xlog_switch_record(rec: &Bytes) -> bool {
-//         let mut buf = rec.clone();
-
-//         let xlogrec = XLogRecord::from_bytes(&mut buf);
-//         xlogrec.xl_info == pg_constants::XLOG_SWITCH && xlogrec.xl_rmid == pg_constants::RM_XLOG_ID
-// }
-
 pub type Oid = u32;
 pub type BlockNumber = u32;
 
