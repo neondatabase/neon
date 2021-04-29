@@ -12,7 +12,7 @@ use std::{thread, time};
 
 const DOWNTIME: u64 = 2;
 
-#[test]
+//#[test]
 fn test_embedded_wal_proposer() {
     let local_env = local_env::test_env("test_embedded_wal_proposer");
 
