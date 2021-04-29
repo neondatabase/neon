@@ -107,6 +107,14 @@ impl TestStorageControlPlane {
             .join(",")
     }
 
+    pub fn get_wal_acceptor_conn_info_quoted(&self) -> String {
+        self.wal_acceptors
+            .iter()
+            .map(|wa| format!("\"{}\"", wa.listen))
+            .collect::<Vec<String>>()
+            .join(",")
+    }
+
     pub fn is_running(&self) -> bool {
         self.test_done.load(Ordering::Relaxed)
     }

@@ -13,6 +13,40 @@ use std::{thread, time};
 const DOWNTIME: u64 = 2;
 
 #[test]
+fn test_embedded_wal_proposer() {
+    let local_env = local_env::test_env("test_embedded_wal_proposer");
+
+    const REDUNDANCY: usize = 3;
+    let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
+    let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
+    let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info_quoted();
+
+    // start postgres
+    let maintli = storage_cplane.get_branch_timeline("main");
+    let node = compute_cplane.new_test_master_node(maintli);
+	node.append_conf("postgresql.conf", &format!("wal_acceptors={}\n", wal_acceptors));
+    node.start().unwrap();
+
+    // check basic work with table
+    node.safe_psql(
+        "postgres",
+        "CREATE TABLE t(key int primary key, value text)",
+    );
+    node.safe_psql(
+        "postgres",
+        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+    );
+    let count: i64 = node
+        .safe_psql("postgres", "SELECT sum(key) FROM t")
+        .first()
+        .unwrap()
+        .get(0);
+    println!("sum = {}", count);
+    assert_eq!(count, 5000050000);
+    // check wal files equality
+}
+
+#[test]
 fn test_acceptors_normal_work() {
     let local_env = local_env::test_env("test_acceptors_normal_work");
 
