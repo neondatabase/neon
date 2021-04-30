@@ -25,7 +25,10 @@ fn test_embedded_wal_proposer() {
     // start postgres
     let maintli = storage_cplane.get_branch_timeline("main");
     let node = compute_cplane.new_test_master_node(maintli);
-	node.append_conf("postgresql.conf", &format!("wal_acceptors='{}'\n", wal_acceptors));
+    node.append_conf(
+        "postgresql.conf",
+        &format!("wal_acceptors='{}'\n", wal_acceptors),
+    );
     node.start().unwrap();
 
     // check basic work with table

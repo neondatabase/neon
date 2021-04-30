@@ -33,6 +33,7 @@ use crate::page_cache::RelTag;
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
+use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
 use zenith_utils::lsn::Lsn;
 
@@ -170,7 +171,17 @@ fn restore_snapshot(
             }
         }
     }
-
+    for entry in fs::read_dir(snapshotpath.join("pg_xact"))? {
+        let entry = entry?;
+        restore_nonrelfile(
+            conf,
+            pcache,
+            timeline,
+            snapshot,
+            pg_constants::PG_XACT_FORKNUM,
+            &entry.path(),
+        )?;
+    }
     // TODO: Scan pg_tblspc
 
     Ok(())
@@ -210,6 +221,64 @@ fn restore_relfile(
                         spcnode: spcoid,
                         dbnode: dboid,
                         relnode,
+                        forknum: forknum as u8,
+                    },
+                    blknum,
+                };
+                pcache.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
+                /*
+                if oldest_lsn == 0 || p.lsn < oldest_lsn {
+                    oldest_lsn = p.lsn;
+                }
+                 */
+            }
+
+            // TODO: UnexpectedEof is expected
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::UnexpectedEof => {
+                    // reached EOF. That's expected.
+                    // FIXME: maybe check that we read the full length of the file?
+                    break;
+                }
+                _ => {
+                    error!("error reading file: {:?} ({})", path, e);
+                    break;
+                }
+            },
+        };
+        blknum += 1;
+    }
+
+    Ok(())
+}
+
+fn restore_nonrelfile(
+    _conf: &PageServerConf,
+    pcache: &PageCache,
+    _timeline: ZTimelineId,
+    snapshot: &str,
+    forknum: u32,
+    path: &Path,
+) -> Result<()> {
+    let lsn = Lsn::from_hex(snapshot)?;
+
+    // Does it look like a relation file?
+
+    let mut file = File::open(path)?;
+    let mut buf: [u8; 8192] = [0u8; 8192];
+    let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
+
+    // FIXME: use constants (BLCKSZ)
+    let mut blknum: u32 = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
+    loop {
+        let r = file.read_exact(&mut buf);
+        match r {
+            Ok(_) => {
+                let tag = BufferTag {
+                    rel: RelTag {
+                        spcnode: 0,
+                        dbnode: 0,
+                        relnode: 0,
                         forknum: forknum as u8,
                     },
                     blknum,
@@ -312,7 +381,6 @@ fn restore_wal(
                         },
                         blknum: blk.blkno,
                     };
-
                     let rec = page_cache::WALRecord {
                         lsn,
                         will_init: blk.will_init || blk.apply_image,

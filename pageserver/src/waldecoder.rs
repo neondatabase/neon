@@ -619,6 +619,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         let mut blk = DecodedBkpBlock::new();
         blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
         blk.blkno = buf.get_i32_le() as u32;
+        blk.will_init = true;
         trace!("RM_CLOG_ID updates block {}", blk.blkno);
         blocks.push(blk);
     } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {

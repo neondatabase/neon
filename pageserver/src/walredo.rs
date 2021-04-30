@@ -242,11 +242,13 @@ impl WalRedoManagerInternal {
 
         let apply_result: Result<Bytes, Error>;
         if tag.rel.forknum == pg_constants::PG_XACT_FORKNUM as u8 {
-            //TODO use base image if any
-            static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-            let zero_page_bytes: &[u8] = &ZERO_PAGE;
-            let mut page = BytesMut::from(zero_page_bytes);
-
+            const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+            let mut page = BytesMut::new();
+            if let Some(fpi) = base_img {
+                page.extend_from_slice(&fpi[..]);
+            } else {
+                page.extend_from_slice(&ZERO_PAGE);
+            }
             for record in records {
                 let mut buf = record.rec.clone();
 
@@ -265,7 +267,7 @@ impl WalRedoManagerInternal {
                 if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
                     let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
                     if info == pg_constants::CLOG_ZEROPAGE {
-                        page.clone_from_slice(zero_page_bytes);
+                        page.clone_from_slice(&ZERO_PAGE);
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
                     let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;

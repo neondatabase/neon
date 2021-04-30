@@ -160,9 +160,7 @@ pub fn init_repo(local_env: &mut LocalEnv) -> Result<()> {
 
     // Move the initial WAL file
     fs::rename(
-        tmppath
-            .join("pg_wal")
-            .join("000000010000000000000001"),
+        tmppath.join("pg_wal").join("000000010000000000000001"),
         timelinedir
             .join("wal")
             .join("000000010000000000000001.partial"),

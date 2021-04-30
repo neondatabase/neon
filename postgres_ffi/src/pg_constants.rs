@@ -29,6 +29,9 @@ pub const CLOG_TRUNCATE: u8 = 0x10;
 pub const XLOG_XACT_COMMIT: u8 = 0x00;
 pub const XLOG_XACT_ABORT: u8 = 0x20;
 
+// From srlu.h
+pub const SLRU_PAGES_PER_SEGMENT: u32 = 32;
+
 /* mask for filtering opcodes out of xl_info */
 pub const XLOG_XACT_OPMASK: u8 = 0x70;
 /* does this record have a 'xinfo' field or not */
