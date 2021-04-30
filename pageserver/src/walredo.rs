@@ -201,26 +201,11 @@ impl WalRedoManagerInternal {
         let byteno: usize = ((xid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
             / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
 
-        let byteptr = &mut page[byteno..byteno + 1];
         let bshift: u8 = ((xid % pg_constants::CLOG_XACTS_PER_BYTE)
             * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
 
-        let mut curval = byteptr[0];
-        curval = (curval >> bshift) & pg_constants::CLOG_XACT_BITMASK;
-
-        let mut byteval = [0];
-        byteval[0] = curval;
-        byteval[0] &= !(((1 << pg_constants::CLOG_BITS_PER_XACT as u8) - 1) << bshift);
-        byteval[0] |= status << bshift;
-
-        byteptr.copy_from_slice(&byteval);
-        trace!(
-            "xid {} byteno {} curval {} byteval {}",
-            xid,
-            byteno,
-            curval,
-            byteval[0]
-        );
+        page[byteno] =
+            (page[byteno] & !(pg_constants::CLOG_XACT_BITMASK << bshift)) | (status << bshift);
     }
 
     ///
