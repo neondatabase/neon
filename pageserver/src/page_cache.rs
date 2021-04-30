@@ -198,7 +198,6 @@ impl CacheKey {
 pub struct CacheEntryContent {
     pub page_image: Option<Bytes>,
     pub wal_record: Option<WALRecord>,
-    pub apply_pending: bool,
 }
 
 const PAGE_IMAGE_FLAG: u8 = 1u8;
@@ -222,13 +221,11 @@ impl CacheEntryContent {
             CacheEntryContent {
                 page_image: Some(Bytes::from(dst)),
                 wal_record: None,
-                apply_pending: false,
             }
         } else {
             CacheEntryContent {
                 page_image: None,
                 wal_record: Some(WALRecord::unpack(buf)),
-                apply_pending: false,
             }
         }
     }
@@ -493,7 +490,6 @@ impl PageCache {
         let content = CacheEntryContent {
             page_image: None,
             wal_record: Some(rec),
-            apply_pending: false,
         };
 
         let mut key_buf = BytesMut::new();
@@ -522,7 +518,6 @@ impl PageCache {
         let content = CacheEntryContent {
             page_image: None,
             wal_record: Some(rec),
-            apply_pending: false,
         };
         // set new relation size
         trace!("Truncate relation {:?}", tag);
@@ -551,7 +546,6 @@ impl PageCache {
         let content = CacheEntryContent {
             page_image: Some(img),
             wal_record: None,
-            apply_pending: false,
         };
 
         let mut key_buf = BytesMut::new();
