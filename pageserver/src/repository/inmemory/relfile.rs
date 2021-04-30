@@ -14,9 +14,10 @@
 //!    .zenith/timelines/<timelineid>/wal/
 //!
 //! At Page Server startup, we load all the WAL into memory, see
-//! 'InMemoryRepository::get_or_restore_timeline`. The files from the snapshot are
-//! loaded into memory the first time a page from a relfile is requested (a "request"
-//! also includes digesting any WAL records that apply to the file)
+//! 'InMemoryRepository::get_or_restore_timeline`. When a get_page_at_lsn() request
+//! comes in, we gather all the WAL that applies to the block, read the base image
+//! of the page from the latest snapshot on disk, and apply the WAL records on top
+//! of the image to reconstruct the requested page version.
 
 use crate::repository::{BufferTag, RelTag, WALRecord};
 use crate::walredo::WalRedoManager;
@@ -26,7 +27,7 @@ use bytes::Bytes;
 use log::*;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -36,6 +37,10 @@ use postgres_ffi::relfile_utils::forknumber_to_name;
 use zenith_utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+
+// FIXME: get these from PostgreSQL headers.
+const BLCKSZ: u32 = 8192;
+const RELSEG_SIZE: u32 = 131072;
 
 ///
 /// RelFileEntry is the in-memory data structure associated with a relation file.
@@ -76,36 +81,12 @@ struct PageVersion {
 
 impl RelFileEntry {
     pub fn new(timelineid: ZTimelineId, tag: RelTag) -> RelFileEntry {
-        let relfile = RelFileEntry {
+        RelFileEntry {
             timelineid,
             tag,
             page_versions: Mutex::new(BTreeMap::new()),
             relsizes: Mutex::new(BTreeMap::new()),
-        };
-
-        // Try to restore the file from latest snapshot.
-        //
-        // We don't propagate the error to the caller. In a better implementation, we
-        // wouldn't try to immediately load a snapshot anyway, we would load
-        // pages on demand. If restoring a page fails, that should result in an error
-        // in get_page_at_lsn(), not here.
-        //
-        // FIXME: skip this for the special relfile that actually means the CLOG.
-        if tag.forknum != pg_constants::PG_XACT_FORKNUM as u8 {
-            match crate::restore_local_repo::find_latest_snapshot(timelineid) {
-                Ok(snapshotlsn) => {
-                    let res = relfile.restore_relfile(snapshotlsn);
-                    if res.is_err() {
-                        error!("could not restore {:?} on timeline {} from snapshot {}", tag, timelineid, snapshotlsn);
-                    }
-                }
-                Err(e) => {
-                    error!("could not find snapshot for timeline {}: {}", timelineid, e);
-                }
-            }
         }
-
-        relfile
     }
 
     /// Look up given page in the cache.
@@ -113,26 +94,30 @@ impl RelFileEntry {
         &self,
         walredo_mgr: &WalRedoManager,
         blknum: u32,
-        lsn: Lsn
+        lsn: Lsn,
     ) -> Result<Bytes> {
         // Scan the BTreeMap backwards, starting from the given entry.
         let mut records: Vec<WALRecord> = Vec::new();
         let mut page_img: Option<Bytes> = None;
+        let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
         {
             let page_versions = self.page_versions.lock().unwrap();
             let minkey = (blknum, Lsn(0));
             let maxkey = (blknum, lsn);
             let mut iter = page_versions.range((Included(&minkey), Included(&maxkey)));
-
-            while let Some(((_blknum, _entry_lsn), entry)) = iter.next_back() {
+            while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
                 if let Some(img) = &entry.page_image {
                     page_img = Some(img.clone());
+                    need_base_image_lsn = None;
                     break;
                 } else if let Some(rec) = &entry.record {
                     records.push(rec.clone());
                     if rec.will_init {
                         // This WAL record initializes the page, so no need to go further back
+                        need_base_image_lsn = None;
                         break;
+                    } else {
+                        need_base_image_lsn = Some(*entry_lsn);
                     }
                 } else {
                     // No base image, and no WAL record. Huh?
@@ -143,6 +128,23 @@ impl RelFileEntry {
             // release lock on 'page_versions'
         }
         records.reverse();
+
+        // Unless we found a base image in memory or in the WAL, we need to read it
+        // from the latest snapshot
+        if let Some(lsn) = need_base_image_lsn {
+            trace!("No base image found in memory, reading from snapshot");
+
+            // FIXME: We should probably propagate this error to the client.
+            page_img = match self.read_page_from_snapshot(blknum, lsn) {
+                Ok(snapshot_img) => Some(snapshot_img),
+                Err(e) => {
+                    error!("could not read block from snapshot: {}", e);
+                    Some(ZERO_PAGE.clone())
+                }
+            };
+
+            // TODO: should we keep the image in memory?
+        }
 
         // If we have a page image, and no WAL, we're all set
         if records.is_empty() {
@@ -195,7 +197,14 @@ impl RelFileEntry {
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             Ok(*entry)
         } else {
-            bail!("No size found for relfile {:?} at {}", self.tag, lsn);
+            // TODO: I think this will return 0 if the relfile doesn't exist at all.
+            // Is that reasonable?
+            trace!(
+                "No size found for relfile {:?} at {} in memory, reading from snapshot",
+                self.tag,
+                lsn
+            );
+            self.read_relsize_from_snapshot(lsn)
         }
     }
 
@@ -208,7 +217,12 @@ impl RelFileEntry {
         if let Some((_entry_lsn, _entry)) = iter.next_back() {
             Ok(true)
         } else {
-            bail!("No size found for relfile {:?} at {}", self.tag, lsn);
+            trace!(
+                "No size found for relfile {:?} at {} in memory, checking snapshot",
+                self.tag,
+                lsn
+            );
+            self.exists_in_snapshot(lsn)
         }
     }
 
@@ -262,12 +276,16 @@ impl RelFileEntry {
             let oldsize;
             if let Some((_entry_lsn, entry)) = iter.next_back() {
                 oldsize = *entry;
-                if blknum >= oldsize {
-                    debug!("enlarging relation {:?} from {} to {} blocks", self.tag, oldsize, blknum + 1);
-                    relsizes.insert(lsn, blknum + 1);
-                }
             } else {
-                debug!("creating relation {:?} with {} blocks", self.tag, blknum + 1);
+                oldsize = self.read_relsize_from_snapshot(lsn).unwrap();
+            }
+            if blknum >= oldsize {
+                debug!(
+                    "enlarging relation {:?} from {} to {} blocks",
+                    self.tag,
+                    oldsize,
+                    blknum + 1
+                );
                 relsizes.insert(lsn, blknum + 1);
             }
         }
@@ -286,15 +304,12 @@ impl RelFileEntry {
         Ok(())
     }
 
+    /// Read a page version from the last on-disk snapshot before given LSN
+    fn read_page_from_snapshot(&self, blknum: u32, lsn: Lsn) -> Result<Bytes> {
+        let snapshotlsn = crate::restore_local_repo::find_latest_snapshot(self.timelineid, lsn)?;
 
-    ///
-    /// Scan one file from a snapshot, loading all pages into memory.
-    ///
-    /// The relfile is just a flat file in the same format used by PostgreSQL. There
-    /// is no version information in it.
-    ///
-    fn restore_relfile(&self, snapshotlsn: Lsn) -> Result<()> {
-        debug!("restoring relfile {:?} from snapshot at {}", self.tag, snapshotlsn);
+        let segno = blknum / RELSEG_SIZE;
+        let offset = (blknum % RELSEG_SIZE) * BLCKSZ;
 
         //
         // timelines/<timelineid>/snapshots/<snapshot LSN>/base/<dbid>/<relid>
@@ -302,45 +317,74 @@ impl RelFileEntry {
             .join(self.timelineid.to_string())
             .join("snapshots")
             .join(format!("{:016X}", snapshotlsn.0))
-            .join(get_pg_relation_path(self.tag));
-
-        // FIXME: segments are not handled correctly. Assume there's only one
-        let segno = 0;
+            .join(get_pg_relation_path_segno(self.tag, segno));
 
         let mut file = File::open(&path)?;
+
+        file.seek(SeekFrom::Start(offset.into()))?;
+
         let mut buf: [u8; 8192] = [0u8; 8192];
+        file.read_exact(&mut buf)?;
+        Ok(Bytes::copy_from_slice(&buf))
+    }
 
-        // FIXME: use constants (BLCKSZ)
-        let mut blknum: u32 = segno * (1024 * 1024 * 1024 / 8192);
+    /// Get size of a relation from the last on-disk snapshot before given LSN
+    fn read_relsize_from_snapshot(&self, lsn: Lsn) -> Result<u32> {
+        let snapshotlsn = crate::restore_local_repo::find_latest_snapshot(self.timelineid, lsn)?;
+
+        //
+        // timelines/<timelineid>/snapshots/<snapshot LSN>/base/<dbid>/<relid>
+        //
+        // The relfiles are segmented into 1 GB segments. Add them up to get the total
+        // size
+        let mut segno = 0;
+        let mut totalsize = 0;
         loop {
-            let r = file.read_exact(&mut buf);
-            match r {
-                Ok(_) => {
-                    self.put_page_image(blknum, snapshotlsn, Bytes::copy_from_slice(&buf));
-                    /*
-                    if oldest_lsn == 0 || p.lsn < oldest_lsn {
-                    oldest_lsn = p.lsn;
-                }
-                     */
-                }
+            let path = PathBuf::from("timelines")
+                .join(self.timelineid.to_string())
+                .join("snapshots")
+                .join(format!("{:016X}", snapshotlsn.0))
+                .join(get_pg_relation_path_segno(self.tag, segno));
 
-                // TODO: UnexpectedEof is expected
-                Err(e) => match e.kind() {
-                    std::io::ErrorKind::UnexpectedEof => {
-                        // reached EOF. That's expected.
-                        // FIXME: maybe check that we read the full length of the file?
-                        break;
-                    }
-                    _ => {
-                        error!("error reading file: {:?} ({})", path, e);
-                        break;
-                    }
-                },
-            };
-            blknum += 1;
+            if !path.exists() {
+                break;
+            }
+
+            let filesize = path.metadata()?.len();
+            totalsize += filesize;
+
+            if filesize > (RELSEG_SIZE * BLCKSZ).into() {
+                // Unexpectedly large file
+                bail!(
+                    "relfile segment {} has unexpectedly large size: {}",
+                    path.display(),
+                    filesize
+                );
+            }
+            if filesize < (RELSEG_SIZE * BLCKSZ).into() {
+                break;
+            }
+
+            segno += 1;
         }
 
-        Ok(())
+        let nblocks = totalsize / (BLCKSZ as u64);
+
+        Ok(nblocks as u32)
+    }
+
+    /// Does relation exist in the last on-disk snapshot before given LSN?
+    fn exists_in_snapshot(&self, lsn: Lsn) -> Result<bool> {
+        let snapshotlsn = crate::restore_local_repo::find_latest_snapshot(self.timelineid, lsn)?;
+
+        // timelines/<timelineid>/snapshots/<snapshot LSN>/base/<dbid>/<relid>
+        let path = PathBuf::from("timelines")
+            .join(self.timelineid.to_string())
+            .join("snapshots")
+            .join(format!("{:016X}", snapshotlsn.0))
+            .join(get_pg_relation_path(self.tag));
+
+        Ok(path.exists())
     }
 }
 
@@ -389,4 +433,15 @@ fn get_pg_relation_path(tag: RelTag) -> String {
             format!("pg_tblspc/{}/{}/{}", tag.spcnode, tag.dbnode, tag.relnode)
         }
     }
+}
+
+///
+/// Get filename of a 1GB relation file segment.
+///
+fn get_pg_relation_path_segno(tag: RelTag, segno: u32) -> PathBuf {
+    let mut pathstr = get_pg_relation_path(tag);
+    if segno > 0 {
+        pathstr = format!("{}_{}", pathstr, segno);
+    }
+    PathBuf::from(&pathstr)
 }

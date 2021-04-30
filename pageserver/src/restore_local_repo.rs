@@ -88,9 +88,10 @@ pub fn restore_timeline(
 }
 
 ///
-/// Find latest snapshot in a timeline's 'snapshots' directory
+/// Scan the 'snapshots' directory of the given timeline, and return the
+/// LSN of the latest snapshot that's earlier or equal to 'maxlsn'
 ///
-pub fn find_latest_snapshot(timeline: ZTimelineId) -> Result<Lsn> {
+pub fn find_latest_snapshot(timeline: ZTimelineId, maxlsn: Lsn) -> Result<Lsn> {
     let snapshotspath = format!("timelines/{}/snapshots", timeline);
 
     let mut last_snapshot_lsn = Lsn(0);
@@ -98,7 +99,9 @@ pub fn find_latest_snapshot(timeline: ZTimelineId) -> Result<Lsn> {
         let filename = direntry.unwrap().file_name();
 
         if let Ok(lsn) = Lsn::from_filename(&filename) {
-            last_snapshot_lsn = max(lsn, last_snapshot_lsn);
+            if lsn <= maxlsn || maxlsn == Lsn(0) {
+                last_snapshot_lsn = max(lsn, last_snapshot_lsn);
+            }
         } else {
             error!("unrecognized file in snapshots directory: {:?}", filename);
         }

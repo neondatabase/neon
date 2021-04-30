@@ -139,7 +139,13 @@ impl Timeline for InMemoryTimeline {
     }
 
     fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
-        debug!("put_wal_record: {:?} at {:?}", tag, rec);
+        if tag.rel.forknum == postgres_ffi::pg_constants::PG_XACT_FORKNUM as u8 {
+            // TODO
+            debug!("got WAL record for CLOG, ignoring");
+            return;
+        }
+
+        debug!("put_wal_record: {:?} at {}", tag, rec.lsn);
         self.get_relfile(tag.rel).put_wal_record(tag.blknum, rec);
     }
 
