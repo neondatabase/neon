@@ -1,4 +1,4 @@
-use std::fs;
+use std::{collections::HashMap, fs};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::str::FromStr;
@@ -158,13 +158,13 @@ pub fn get_branch_timeline(repopath: &Path, branchname: &str) -> ZTimelineId {
 fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
+    // FIXME: cheat and resolve the timeline by peeking into the
+    // repository. In reality, when you're launching a compute node
+    // against a possibly-remote page server, we wouldn't know what
+    // branches exist in the remote repository. Or would we require
+    // that you "zenith fetch" them into a local repoitory first?
     match pg_match.subcommand() {
         ("create", Some(sub_m)) => {
-            // FIXME: cheat and resolve the timeline by peeking into the
-            // repository. In reality, when you're launching a compute node
-            // against a possibly-remote page server, we wouldn't know what
-            // branches exist in the remote repository. Or would we require
-            // that you "zenith fetch" them into a local repoitory first?
             let timeline_arg = sub_m.value_of("timeline").unwrap_or("main");
             let timeline = get_branch_timeline(&env.repo_path, timeline_arg);
 
@@ -173,9 +173,18 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             cplane.new_node(timeline)?;
         }
         ("list", Some(_sub_m)) => {
-            println!("NODE\tADDRESS\tSTATUS");
+            let mut tl2branch = HashMap::<ZTimelineId, String>::new();
+            let branches_dir = zenith_repo_dir().join("refs").join("branches");
+            for path in fs::read_dir(branches_dir.clone())? {
+                let branch_name = path?.file_name().to_str().unwrap().to_string();
+                let branch_file = branches_dir.join(branch_name.clone());
+                let timelineid = fs::read_to_string(branch_file)?.parse::<ZTimelineId>()?;
+                tl2branch.insert(timelineid, branch_name);
+            }
+
+            println!("NODE\tADDRESS\t\tSTATUS\tBRANCH");
             for (node_name, node) in cplane.nodes.iter() {
-                println!("{}\t{}\t{}", node_name, node.address, node.status());
+                println!("{}\t{}\t{}\t{}", node_name, node.address, node.status(), tl2branch[&node.timelineid]);
             }
         }
         ("start", Some(sub_m)) => {

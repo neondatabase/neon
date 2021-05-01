@@ -151,7 +151,7 @@ pub struct PostgresNode {
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
     is_test: bool,
-    timelineid: ZTimelineId,
+    pub timelineid: ZTimelineId,
 }
 
 impl PostgresNode {
@@ -169,6 +169,7 @@ impl PostgresNode {
 
         lazy_static! {
             static ref CONF_PORT_RE: Regex = Regex::new(r"(?m)^\s*port\s*=\s*(\d+)\s*$").unwrap();
+            static ref CONF_TIMELINE_RE: Regex = Regex::new(r"(?m)^\s*zenith_timeline\s*=\s*'(\w+)'\s*$").unwrap();
         }
 
         // parse data directory name
@@ -184,6 +185,7 @@ impl PostgresNode {
             )
         })?;
 
+        // parse port
         let err_msg = format!(
             "failed to find port definition in config file {}",
             cfg_path.to_str().unwrap()
@@ -199,11 +201,21 @@ impl PostgresNode {
             .parse()
             .with_context(|| err_msg)?;
 
-        // FIXME: What timeline is this server on? Would have to parse the postgresql.conf
-        // file for that, too. It's currently not needed for anything, but it would be
-        // nice to list the timeline in "zenith pg list"
-        let timelineid_buf = [0u8; 16];
-        let timelineid = ZTimelineId::from(timelineid_buf);
+        // parse timeline
+        let err_msg = format!(
+            "failed to find timeline definition in config file {}",
+            cfg_path.to_str().unwrap()
+        );
+        let timelineid: ZTimelineId = CONF_TIMELINE_RE
+            .captures(config.as_str())
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 1"))?
+            .iter()
+            .last()
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 2"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 3"))?
+            .as_str()
+            .parse()
+            .with_context(|| err_msg)?;
 
         // ok now
         Ok(PostgresNode {
