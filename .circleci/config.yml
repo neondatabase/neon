@@ -45,7 +45,8 @@ jobs:
           name: build postgres
           command: |
             if [ ! -e tmp_install/bin/postgres ]; then
-              git submodule update --init --recursive
+              # "depth 1" saves some time by not cloning the whole repo
+              git submodule update --init --depth 1
               make postgres
             fi
 
@@ -131,7 +132,7 @@ jobs:
       - when:
           condition: << parameters.needs_postgres_source >>
           steps:
-            - run: git submodule update --init --recursive
+            - run: git submodule update --init --depth 1
       - run: pip install pytest psycopg2
       - run:
           name: Run pytest
