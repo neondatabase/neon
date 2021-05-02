@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fs};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::str::FromStr;
+use std::{collections::HashMap, fs};
 
 use anyhow::Result;
 use anyhow::{anyhow, bail};
@@ -184,7 +184,13 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
             println!("NODE\tADDRESS\t\tSTATUS\tBRANCH");
             for (node_name, node) in cplane.nodes.iter() {
-                println!("{}\t{}\t{}\t{}", node_name, node.address, node.status(), tl2branch[&node.timelineid]);
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    node_name,
+                    node.address,
+                    node.status(),
+                    tl2branch[&node.timelineid]
+                );
             }
         }
         ("start", Some(sub_m)) => {

@@ -168,7 +168,8 @@ impl PostgresNode {
 
         lazy_static! {
             static ref CONF_PORT_RE: Regex = Regex::new(r"(?m)^\s*port\s*=\s*(\d+)\s*$").unwrap();
-            static ref CONF_TIMELINE_RE: Regex = Regex::new(r"(?m)^\s*zenith_timeline\s*=\s*'(\w+)'\s*$").unwrap();
+            static ref CONF_TIMELINE_RE: Regex =
+                Regex::new(r"(?m)^\s*zenith_timeline\s*=\s*'(\w+)'\s*$").unwrap();
         }
 
         // parse data directory name
