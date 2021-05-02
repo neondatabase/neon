@@ -1,0 +1,188 @@
+version: 2.1
+
+orbs:
+  python: circleci/python@1.4.0
+
+executors:
+  zenith-build-executor:
+    docker:
+      - image: cimg/rust:1.51.0
+
+jobs:
+
+  # A job to build postgres and zenith
+  build-zenith:
+    executor: zenith-build-executor
+    steps:
+        # FIXME cache the previous result? persist_to_workspace? create a new docker container?
+        # Alternatively, we might only install the postgres deps at the last minute before we build postgres.
+      - run:
+          name: apt install dependencies
+          command: |
+            sudo apt update
+            sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl4-openssl-dev libssl-dev clang
+
+        # Checkout the git repo (circleci doesn't have a flag to enable submodules here)
+      - checkout
+
+        # Grab the postgres git revision to build a cache key.
+        # Note this works even though the submodule hasn't been checkout out yet.
+      - run:
+          name: Get postgres cache key
+          command: |
+            git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+
+      - restore_cache:
+          name: Restore postgres cache
+          keys:
+            # Restore ONLY if the rev key matches exactly
+            - postgres-cache-v98-{{ checksum "/tmp/cache-key-postgres" }}
+
+        # Build postgres if the restore_cache didn't find a build.
+        # `make` can't figure out whether the cache is valid, since
+        # it only compares file timestamps.
+      - run:
+          name: build postgres
+          command: |
+            if [ ! -e tmp_install/bin/postgres ]; then
+              git submodule update --init --recursive
+              make postgres
+            fi
+
+      - save_cache:
+          name: Save postgres cache
+          key: postgres-cache-v98-{{ checksum "/tmp/cache-key-postgres" }}
+          paths:
+            - tmp_install
+
+      - restore_cache:
+          name: Restore rust cache
+          keys:
+            # Choose an exact match first, if it exists.
+            - rust-cache-deps-v98-{{ checksum "Cargo.lock" }}
+            # Fall back to an out of date cache. Cargo can figure out what needs rebuilding.
+            - rust-cache-deps-v98-
+
+        # Build the rust code, including test binaries
+      - run: cargo build --bins --tests
+
+      - save_cache:
+          name: Save rust cache
+          key: rust-cache-deps-v98-{{ checksum "Cargo.lock" }}
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+            - target
+
+        # Run rust unit tests
+        # FIXME: remove -p zenith_utils once integration tests are moved to python
+      - run: cargo test -p zenith_utils
+
+        # Install the rust binaries, for use by test jobs
+        # `--locked` is required; otherwise, `cargo install` will ignore Cargo.lock.
+        # FIXME: this is a really silly way to install; maybe we should just output
+        # a tarball as an artifact? Or a .deb package?
+      - run:
+          name: cargo install
+          command: |
+            cargo install --debug --locked --root /tmp/zenith --path pageserver
+            cargo install --debug --locked --root /tmp/zenith --path walkeeper
+            cargo install --debug --locked --root /tmp/zenith --path zenith
+
+        # Install the postgres binaries, for use by test jobs
+        # FIXME: this is a silly way to do "install"; maybe just output a standard
+        # postgres package, whatever the favored form is (tarball? .deb package?)
+        # Note that pg_regress needs some build artifacts that probably aren't
+        # in the usual package...?
+      - run:
+          name: postgres install
+          command: |
+            cp -a tmp_install /tmp/zenith/pg_install
+
+        # Save the rust output binaries for other jobs in this workflow.
+      - persist_to_workspace:
+          root: /tmp/zenith
+          paths:
+            - "*"
+
+  run-pytest:
+    #description: "Run pytest"
+    executor: python/default
+    parameters:
+      # Use test_filter to name a test or a group of tests with the same prefix.
+      test_filter:
+        type: string
+        default: ""
+      # Use test_filter to name a python file containing tests to run.
+      # This parameter is required, to prevent the mistake of running all tests in one job.
+      test_file:
+        type: string
+      # Arbitrary parameters to pytest. For example "-s" to prevent capturing stdout/stderr
+      extra_params:
+        type: string
+        default: ""
+      needs_postgres_source:
+        type: boolean
+        default: false
+    steps:
+      - attach_workspace:
+          at: /tmp/zenith
+      - checkout
+      - when:
+          condition: << parameters.needs_postgres_source >>
+          steps:
+            - run: git submodule update --init --recursive
+      - run: pip install pytest psycopg2
+      - run:
+          name: Run pytest
+          working_directory: test_runner
+          environment:
+            - ZENITH_BIN: /tmp/zenith/bin
+            - POSTGRES_BIN: /tmp/zenith/pg_install
+            - TEST_OUTPUT: /tmp/test_output
+          command: |
+            TEST_FILE="<< parameters.test_file >>"
+            TEST_FILTER="<< parameters.test_filter >>"
+            EXTRA_PARAMS="<< parameters.extra_params >>"
+            if [ -z "$TEST_FILE$TEST_FILTER" ]; then
+              echo "test_file or test_filter must be set"
+              exit 1
+            fi
+            if [ -n "$TEST_FILTER" ]; then
+              TEST_FILTER="-k $TEST_FILTER"
+            fi
+            pytest $TEST_FILE $TEST_FILTER $EXTRA_PARAMS
+      - run:
+          # CircleCI artifacts are preserved one file at a time, so skipping
+          # this step isn't a good idea. If you want to extract the
+          # pageserver state, perhaps a tarball would be a better idea.
+          name: Delete pageserver data
+          when: always
+          command: |
+            du -sh /tmp/test_output/*
+            for DIR in /tmp/test_output/*; do
+              mv $DIR/repo/pageserver.log $DIR/ || true # ignore errors
+              echo "rm $DIR/repo"
+              rm -rf $DIR/repo
+            done
+            du -sh /tmp/test_output/*
+      - store_artifacts:
+          path: /tmp/test_output
+
+
+workflows:
+  build_and_test:
+    jobs:
+      - build-zenith
+      - run-pytest:
+          name: pgbench test
+          test_file: test_pgbench.py
+          requires:
+            - build-zenith
+      - run-pytest:
+          name: pg_regress test
+          test_file: test_pg_regress.py
+          extra_params: -s
+          needs_postgres_source: true
+          requires:
+            - build-zenith
