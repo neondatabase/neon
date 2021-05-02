@@ -99,7 +99,6 @@ impl ComputeControlPlane {
 
     pub fn new_test_node(&mut self, timelineid: ZTimelineId) -> Arc<PostgresNode> {
         let node = self.new_from_page_server(true, timelineid);
-        assert!(node.is_ok());
         let node = node.unwrap();
 
         // Configure the node to stream WAL directly to the pageserver
