@@ -26,9 +26,9 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::runtime::Runtime;
-use tokio_postgres::replication::{PgTimestamp, ReplicationStream};
+use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::{NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
 use zenith_utils::lsn::Lsn;
@@ -244,7 +244,7 @@ fn walreceiver_main(
                 let reply_requested: bool = keepalive.reply() != 0;
 
                 trace!(
-                    "received PrimaryKeepAlive(wal_end: {}, timestamp: {} reply: {})",
+                    "received PrimaryKeepAlive(wal_end: {}, timestamp: {:?} reply: {})",
                     wal_end,
                     timestamp,
                     reply_requested,
@@ -254,8 +254,8 @@ fn walreceiver_main(
                     let last_lsn = PgLsn::from(u64::from(timeline.get_last_valid_lsn()));
                     let write_lsn = last_lsn;
                     let flush_lsn = last_lsn;
-                    let apply_lsn = PgLsn::INVALID;
-                    let ts = PgTimestamp::now()?;
+                    let apply_lsn = PgLsn::from(0);
+                    let ts = SystemTime::now();
                     const NO_REPLY: u8 = 0u8;
 
                     runtime.block_on(

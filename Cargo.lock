@@ -1292,12 +1292,13 @@ checksum = "3831453b3449ceb48b6d9c7ad7c96d5ea673e9b470a1dc578c2ce6521230884c"
 [[package]]
 name = "postgres"
 version = "0.19.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
 dependencies = [
  "bytes",
  "fallible-iterator",
  "futures",
  "log",
+ "postgres-protocol",
  "tokio",
  "tokio-postgres",
 ]
@@ -1305,13 +1306,14 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
 dependencies = [
  "base64",
  "byteorder",
  "bytes",
  "fallible-iterator",
  "hmac",
+ "lazy_static",
  "md-5",
  "memchr",
  "rand",
@@ -1322,7 +1324,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -2031,7 +2033,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=a0d067b66447951d1276a53fb09886539c3fa094#a0d067b66447951d1276a53fb09886539c3fa094"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
 dependencies = [
  "async-trait",
  "byteorder",
