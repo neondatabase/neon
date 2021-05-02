@@ -66,37 +66,25 @@ pub fn init() -> Result<()> {
         );
     }
 
-    // Now we can run init only from crate directory, so check that current dir is our crate.
-    // Use 'pageserver/Cargo.toml' existence as evidendce.
-    let cargo_path = env::current_dir()?;
-    if !cargo_path.join("pageserver/Cargo.toml").exists() {
-        anyhow::bail!(
-            "Current directory does not look like a zenith repo. \
-            Please, run 'init' from zenith repo root."
-        );
-    }
-
     // ok, now check that expected binaries are present
 
-    // check postgres
-    let pg_distrib_dir = cargo_path.join("tmp_install");
-    let pg_path = pg_distrib_dir.join("bin/postgres");
-    if !pg_path.exists() {
-        anyhow::bail!(
-            "Can't find postres binary at {}. \
-                       Perhaps 'make postgres' is needed to build it first.",
-            pg_path.to_str().unwrap()
-        );
+    // Find postgres binaries. Follow POSTGRES_BIN if set, otherwise look in "tmp_install".
+    let pg_distrib_dir: PathBuf = {
+        if let Some(postgres_bin) = env::var_os("POSTGRES_BIN") {
+            postgres_bin.into()
+        } else {
+            let cwd = env::current_dir()?;
+            cwd.join("tmp_install").to_owned()
+        }
+    };
+    if !pg_distrib_dir.join("bin/postgres").exists() {
+        anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
     }
 
-    // check pageserver
-    let zenith_distrib_dir = cargo_path.join("target/debug/");
-    let pageserver_path = zenith_distrib_dir.join("pageserver");
-    if !pageserver_path.exists() {
-        anyhow::bail!(
-            "Can't find pageserver binary at {}. Please build it.",
-            pageserver_path.to_str().unwrap()
-        );
+    // Find zenith binaries.
+    let zenith_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
+    if !zenith_distrib_dir.join("pageserver").exists() {
+        anyhow::bail!("Can't find pageserver binary.",);
     }
 
     // ok, we are good to go
