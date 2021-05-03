@@ -5,4 +5,4 @@
 __pycache__/
 test_output/
 .vscode
-.zenith
+/.zenith
