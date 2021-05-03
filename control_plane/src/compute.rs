@@ -419,7 +419,7 @@ impl PostgresNode {
         }
     }
 
-    pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<tokio_postgres::Row> {
+    pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<postgres::Row> {
         let connstring = format!(
             "host={} port={} dbname={} user={}",
             self.address.ip(),
