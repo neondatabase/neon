@@ -5,6 +5,7 @@ orbs:
 
 executors:
   zenith-build-executor:
+    resource_class: xlarge
     docker:
       - image: cimg/rust:1.51.0
 
