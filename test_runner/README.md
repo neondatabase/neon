@@ -3,13 +3,20 @@
 This directory contains integration tests.
 
 Prerequisites:
-- pytest, psycopg2
-    Install using something like this:
-    - `pip3 install pytest psycopg2` (Debian or Ubuntu)
-
-- an already compiled zenith + postgres tree
-    - See the root README.md for details
-
+- Python 3.6 or later
+- Python packages: pytest, psycopg2
+    - pytest 6.0 is required.
+    - __NOTE: `apt install` on Debian/Ubuntu won't work.__
+      They ship a much older version of pytest (and sometimes rename it to
+      `pytest-3`.)
+    - Install using something like this:
+        - `pip3 install pytest psycopg2` (Debian or Ubuntu)
+- Zenith and Postgres binaries
+    - See the root README.md for build directions
+    - Tests can be run from the git tree; or see the environment variables
+      below to run from other directories.
+- The zenith git repo, including the postgres submodule
+  (for some tests, e.g. pg_regress)
 
 ### Running the tests
 
