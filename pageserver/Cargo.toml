@@ -38,7 +38,7 @@ walkdir = "2"
 thiserror = "1.0"
 hex = "0.4.3"
 tar = "0.4.33"
-parse_duration = "*"
+parse_duration = "2.1.1"
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_utils = { path = "../zenith_utils" }
