@@ -266,7 +266,6 @@ dependencies = [
  "serde",
  "tar",
  "thiserror",
- "tokio-postgres",
  "toml",
  "walkeeper",
  "workspace_hack",
@@ -778,7 +777,6 @@ dependencies = [
  "pageserver",
  "postgres",
  "rand",
- "tokio-postgres",
  "walkeeper",
 ]
 
@@ -1177,7 +1175,6 @@ dependencies = [
  "termion",
  "thiserror",
  "tokio",
- "tokio-postgres",
  "tokio-stream",
  "tui",
  "walkdir",
@@ -2240,7 +2237,6 @@ dependencies = [
  "slog-stdlog",
  "slog-term",
  "tokio",
- "tokio-postgres",
  "tokio-stream",
  "walkdir",
  "workspace_hack",
