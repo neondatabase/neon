@@ -140,7 +140,9 @@ fn run_pageserver_cmd(local_env: &LocalEnv, args: ArgMatches) -> Result<()> {
             println!("Page server started");
         }
         ("stop", Some(_sub_m)) => {
-            todo!();
+            let psnode = PageServerNode::from_env(local_env);
+            psnode.stop()?;
+            println!("Page server stopped");
         }
         _ => unreachable!(),
     };
