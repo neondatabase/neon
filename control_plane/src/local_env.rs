@@ -74,7 +74,7 @@ pub fn init() -> Result<()> {
             postgres_bin.into()
         } else {
             let cwd = env::current_dir()?;
-            cwd.join("tmp_install").to_owned()
+            cwd.join("tmp_install")
         }
     };
     if !pg_distrib_dir.join("bin/postgres").exists() {
