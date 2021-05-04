@@ -37,7 +37,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - postgres-cache-v98-{{ checksum "/tmp/cache-key-postgres" }}
+            - postgres-cache-v01-{{ checksum "/tmp/cache-key-postgres" }}
 
         # Build postgres if the restore_cache didn't find a build.
         # `make` can't figure out whether the cache is valid, since
@@ -53,7 +53,7 @@ jobs:
 
       - save_cache:
           name: Save postgres cache
-          key: postgres-cache-v98-{{ checksum "/tmp/cache-key-postgres" }}
+          key: postgres-cache-v01-{{ checksum "/tmp/cache-key-postgres" }}
           paths:
             - tmp_install
 
@@ -61,16 +61,16 @@ jobs:
           name: Restore rust cache
           keys:
             # Choose an exact match first, if it exists.
-            - rust-cache-deps-v98-{{ checksum "Cargo.lock" }}
+            - rust-cache-deps-v01-{{ checksum "Cargo.lock" }}
             # Fall back to an out of date cache. Cargo can figure out what needs rebuilding.
-            - rust-cache-deps-v98-
+            - rust-cache-deps-v01-
 
         # Build the rust code, including test binaries
       - run: cargo build --bins --tests
 
       - save_cache:
           name: Save rust cache
-          key: rust-cache-deps-v98-{{ checksum "Cargo.lock" }}
+          key: rust-cache-deps-v01-{{ checksum "Cargo.lock" }}
           paths:
             - ~/.cargo/registry
             - ~/.cargo/git
