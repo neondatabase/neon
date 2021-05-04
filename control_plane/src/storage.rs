@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{anyhow, bail, Context, Result};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use std::convert::TryInto;
 use std::fs;
-use std::io;
-use std::net::SocketAddr;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -171,7 +172,7 @@ impl PageServerNode {
             .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
 
         if !cmd.status()?.success() {
-            anyhow::bail!(
+            bail!(
                 "Pageserver failed to start. See '{}' for details.",
                 self.repo_path().join("pageserver.log").display()
             );
@@ -192,20 +193,13 @@ impl PageServerNode {
     }
 
     pub fn stop(&self) -> Result<()> {
-        let pidfile = self.pid_file();
-        let pid = read_pidfile(&pidfile)?;
-
-        let status = Command::new("kill")
-            .arg(&pid)
-            .env_clear()
-            .status()
-            .expect("failed to execute kill");
-
-        if !status.success() {
-            anyhow::bail!("Failed to kill pageserver with pid {}", pid);
+        let pid = read_pidfile(&self.pid_file())?;
+        let pid = Pid::from_raw(pid);
+        if kill(pid, Signal::SIGTERM).is_err() {
+            bail!("Failed to kill pageserver with pid {}", pid);
         }
 
-        // await for pageserver stop
+        // wait for pageserver stop
         for _ in 0..5 {
             let stream = TcpStream::connect(self.address());
             if let Err(_e) = stream {
@@ -215,12 +209,7 @@ impl PageServerNode {
             thread::sleep(Duration::from_secs(1));
         }
 
-        // ok, we failed to stop pageserver, let's panic
-        if !status.success() {
-            anyhow::bail!("Failed to stop pageserver with pid {}", pid);
-        } else {
-            Ok(())
-        }
+        bail!("Failed to stop pageserver with pid {}", pid);
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
@@ -304,24 +293,22 @@ impl WalAcceptorNode {
         }
     }
 
-    pub fn stop(&self) -> std::result::Result<(), io::Error> {
+    pub fn stop(&self) -> Result<()> {
         println!("Stopping wal acceptor on {}", self.listen);
         let pidfile = self.data_dir.join("wal_acceptor.pid");
         let pid = read_pidfile(&pidfile)?;
-        // Ignores any failures when running this command
-        let _status = Command::new("kill")
-            .arg(pid)
-            .env_clear()
-            .status()
-            .expect("failed to execute kill");
-
+        let pid = Pid::from_raw(pid);
+        if kill(pid, Signal::SIGTERM).is_err() {
+            bail!("Failed to kill wal_acceptor with pid {}", pid);
+        }
         Ok(())
     }
 }
 
 impl Drop for WalAcceptorNode {
     fn drop(&mut self) {
-        self.stop().unwrap();
+        // Ignore errors.
+        let _ = self.stop();
     }
 }
 
@@ -333,15 +320,10 @@ pub struct WalProposerNode {
 
 impl WalProposerNode {
     pub fn stop(&self) {
-        let status = Command::new("kill")
-            .arg(self.pid.to_string())
-            .env_clear()
-            .status()
-            .expect("failed to execute kill");
-
-        if !status.success() {
-            panic!("kill start failed");
-        }
+        // std::process::Child::id() returns u32, we need i32.
+        let pid: i32 = self.pid.try_into().unwrap();
+        let pid = Pid::from_raw(pid);
+        kill(pid, Signal::SIGTERM).expect("failed to execute kill");
     }
 }
 
@@ -353,11 +335,16 @@ impl Drop for WalProposerNode {
 
 /// Read a PID file
 ///
-/// This should contain an unsigned integer, but we return it as a String
-/// because our callers only want to pass it back into a subcommand.
-fn read_pidfile(pidfile: &Path) -> std::result::Result<String, io::Error> {
-    fs::read_to_string(pidfile).map_err(|err| {
-        eprintln!("failed to read pidfile {:?}: {:?}", pidfile, err);
-        err
-    })
+/// We expect a file that contains a single integer.
+/// We return an i32 for compatibility with libc and nix.
+fn read_pidfile(pidfile: &Path) -> Result<i32> {
+    let pid_str = fs::read_to_string(pidfile)
+        .with_context(|| format!("failed to read pidfile {:?}", pidfile))?;
+    let pid: i32 = pid_str
+        .parse()
+        .map_err(|_| anyhow!("failed to parse pidfile {:?}", pidfile))?;
+    if pid < 1 {
+        bail!("pidfile {:?} contained bad value '{}'", pidfile, pid);
+    }
+    Ok(pid)
 }

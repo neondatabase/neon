@@ -11,7 +11,6 @@ rand = "0.8.3"
 tar = "0.4.33"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="a0d067b66447951d1276a53fb09886539c3fa094" }
-
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.5"
 lazy_static = "1.4"
@@ -20,6 +19,8 @@ anyhow = "1.0"
 hex = "0.4.3"
 bytes = "1.0.1"
 fs_extra = "1.2.0"
+nix = "0.20"
+thiserror = "1"
 
 pageserver = { path = "../pageserver" }
 walkeeper = { path = "../walkeeper" }
