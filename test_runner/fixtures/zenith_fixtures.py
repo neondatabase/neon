@@ -53,7 +53,7 @@ def zenfixture(func):
 @pytest.fixture(autouse=True, scope='session')
 def safety_check():
     """ Ensure that no unwanted daemons are running before we start testing. """
-    cmd = ['pgrep', '-c', 'pageserver|postgres']
+    cmd = ['pgrep', '-c', 'pageserver|postgres|wal_acceptor']
     result = subprocess.run(cmd)
     if result.returncode == 0:
         # returncode of 0 means it found something.
@@ -128,7 +128,7 @@ def pageserver(zenith_cli):
 
 
 class Postgres:
-    """ An object representing a running pageserver. """
+    """ An object representing a running postgres daemon. """
 
     def __init__(self, zenith_cli):
         self.zenith_cli = zenith_cli
