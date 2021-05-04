@@ -109,13 +109,8 @@ class ZenithPageserver:
         self.running = True
 
     def stop(self):
-        # FIXME: this is a todo!() in the zenith cli code
-        if self.running:
-            try:
-                subprocess.run(['killall', 'pageserver'])
-            except FileNotFoundError:
-                print(
-                    'WARNING: Failed to terminate pageserver, "killall" not found', file=sys.stderr)
+        self.zenith_cli.run(['pageserver', 'stop'])
+        self.running = True
 
 
 @zenfixture
