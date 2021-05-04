@@ -63,7 +63,8 @@ jobs:
             # Choose an exact match first, if it exists.
             - rust-cache-deps-v01-{{ checksum "Cargo.lock" }}
             # Fall back to an out of date cache. Cargo can figure out what needs rebuilding.
-            - rust-cache-deps-v01-
+            # FIXME: imperfect match disabled due to issue #90.
+            #- rust-cache-deps-v01-
 
         # Build the rust code, including test binaries
       - run: cargo build --bins --tests
