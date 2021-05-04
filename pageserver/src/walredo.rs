@@ -493,7 +493,7 @@ impl WalRedoProcess {
             Ok::<[u8; 8192], Error>(buf)
         };
 
-        let res = futures::try_join!(f_stdout, f_stdin)?;
+        let res = tokio::try_join!(f_stdout, f_stdin)?;
 
         let buf = res.0;
 
