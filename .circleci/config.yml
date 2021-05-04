@@ -154,7 +154,7 @@ jobs:
             if [ -n "$TEST_FILTER" ]; then
               TEST_FILTER="-k $TEST_FILTER"
             fi
-            pytest $TEST_FILE $TEST_FILTER $EXTRA_PARAMS
+            pytest --tb=short $TEST_FILE $TEST_FILTER $EXTRA_PARAMS
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
