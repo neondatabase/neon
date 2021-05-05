@@ -178,7 +178,7 @@ impl WalRedoManagerInternal {
 
         // Loop forever, handling requests as they come.
         loop {
-            let request = self.request_rx.recv().unwrap();
+            let request = self.request_rx.recv().expect("WAL redo request channel was closed");
 
             let result = runtime.block_on(self.handle_apply_request(&process, &request));
             let result_ok = result.is_ok();
