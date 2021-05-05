@@ -80,7 +80,7 @@ fn pgbench() {
     let node = compute_cplane.new_test_node(maintli);
     node.start().unwrap();
 
-    let status = node.pg_bench(10, 100);
+    let status = node.pg_bench(10, 5);
     assert!(status.success());
 }
 
