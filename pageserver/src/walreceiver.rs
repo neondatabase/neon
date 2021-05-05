@@ -234,7 +234,6 @@ fn walreceiver_main(
                             let rec = WALRecord {
                                 lsn,
                                 will_init: blk.will_init || blk.apply_image,
-                                truncate: false,
                                 rec: recdata.clone(),
                                 main_data_offset: decoded.main_data_offset as u32,
                             };
@@ -248,23 +247,13 @@ fn walreceiver_main(
                         {
                             let truncate = XlSmgrTruncate::decode(&decoded);
                             if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
-                                let tag = BufferTag {
-                                    rel: RelTag {
-                                        spcnode: truncate.rnode.spcnode,
-                                        dbnode: truncate.rnode.dbnode,
-                                        relnode: truncate.rnode.relnode,
-                                        forknum: MAIN_FORKNUM,
-                                    },
-                                    blknum: truncate.blkno,
+                                let rel = RelTag {
+                                    spcnode: truncate.rnode.spcnode,
+                                    dbnode: truncate.rnode.dbnode,
+                                    relnode: truncate.rnode.relnode,
+                                    forknum: MAIN_FORKNUM,
                                 };
-                                let rec = WALRecord {
-                                    lsn,
-                                    will_init: false,
-                                    truncate: true,
-                                    rec: recdata.clone(),
-                                    main_data_offset: decoded.main_data_offset as u32,
-                                };
-                                timeline.put_rel_wal_record(tag, rec)?;
+                                timeline.put_truncation(rel, lsn, truncate.blkno)?;
                             }
                         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
                             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)

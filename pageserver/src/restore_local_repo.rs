@@ -370,7 +370,6 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
                     let rec = WALRecord {
                         lsn,
                         will_init: blk.will_init || blk.apply_image,
-                        truncate: false,
                         rec: recdata.clone(),
                         main_data_offset: decoded.main_data_offset as u32,
                     };

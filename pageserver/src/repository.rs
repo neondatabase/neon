@@ -36,7 +36,7 @@ pub trait Timeline {
     // Functions used by WAL receiver
 
     fn put_wal_record(&self, tag: BufferTag, rec: WALRecord);
-    fn put_rel_wal_record(&self, tag: BufferTag, rec: WALRecord) -> anyhow::Result<()>;
+    fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> anyhow::Result<()>;
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes);
     fn create_database(
         &self,
@@ -109,7 +109,6 @@ impl BufferTag {
 pub struct WALRecord {
     pub lsn: Lsn, // LSN at the *end* of the record
     pub will_init: bool,
-    pub truncate: bool,
     pub rec: Bytes,
     // Remember the offset of main_data in rec,
     // so that we don't have to parse the record again.
@@ -121,7 +120,6 @@ impl WALRecord {
     pub fn pack(&self, buf: &mut BytesMut) {
         buf.put_u64(self.lsn.0);
         buf.put_u8(self.will_init as u8);
-        buf.put_u8(self.truncate as u8);
         buf.put_u32(self.main_data_offset);
         buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
@@ -129,14 +127,12 @@ impl WALRecord {
     pub fn unpack(buf: &mut BytesMut) -> WALRecord {
         let lsn = Lsn::from(buf.get_u64());
         let will_init = buf.get_u8() != 0;
-        let truncate = buf.get_u8() != 0;
         let main_data_offset = buf.get_u32();
         let mut dst = vec![0u8; buf.get_u32() as usize];
         buf.copy_to_slice(&mut dst);
         WALRecord {
             lsn,
             will_init,
-            truncate,
             rec: Bytes::from(dst),
             main_data_offset,
         }
