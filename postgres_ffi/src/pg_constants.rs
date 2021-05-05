@@ -98,3 +98,7 @@ pub const BKPBLOCK_SAME_REL: u8 = 0x80; /* RelFileNode omitted, same as previous
 pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
 pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
+
+
+pub const MAIN_FORKNUM: u8 = 0;
+pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;

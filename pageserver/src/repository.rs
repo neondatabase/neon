@@ -1,6 +1,6 @@
 pub mod rocksdb;
 
-use crate::waldecoder::Oid;
+use crate::waldecoder::{Oid, DecodedWALRecord};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -46,6 +46,13 @@ pub trait Timeline {
         src_db_id: Oid,
         src_tablespace_id: Oid,
     ) -> Result<()>;
+
+    fn save_decoded_record(
+        &self,
+        decoded: DecodedWALRecord,
+        recdata: Bytes,
+        lsn: Lsn
+    ) -> anyhow::Result<()>;
 
     fn advance_last_valid_lsn(&self, lsn: Lsn);
     fn get_last_valid_lsn(&self) -> Lsn;

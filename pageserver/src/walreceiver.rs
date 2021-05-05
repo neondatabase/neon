@@ -7,14 +7,13 @@
 //!
 
 use crate::page_cache;
-use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
+use crate::repository::{Repository, Timeline};
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use anyhow::Error;
 use lazy_static::lazy_static;
 use log::*;
-use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
@@ -219,61 +218,7 @@ fn walreceiver_main(
                 loop {
                     if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         let decoded = decode_wal_record(recdata.clone());
-                        // Put the WAL record to the page cache. We make a separate copy of
-                        // it for every block it modifies. (The actual WAL record is kept in
-                        // a Bytes, which uses a reference counter for the underlying buffer,
-                        // so having multiple copies of it doesn't cost that much)
-                        for blk in decoded.blocks.iter() {
-                            let tag = BufferTag {
-                                rel: RelTag {
-                                    spcnode: blk.rnode_spcnode,
-                                    dbnode: blk.rnode_dbnode,
-                                    relnode: blk.rnode_relnode,
-                                    forknum: blk.forknum as u8,
-                                },
-                                blknum: blk.blkno,
-                            };
-
-                            let rec = WALRecord {
-                                lsn,
-                                will_init: blk.will_init || blk.apply_image,
-                                rec: recdata.clone(),
-                                main_data_offset: decoded.main_data_offset as u32,
-                            };
-
-                            timeline.put_wal_record(tag, rec);
-                        }
-                        // include truncate wal record in all pages
-                        if decoded.xl_rmid == pg_constants::RM_SMGR_ID
-                            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                                == pg_constants::XLOG_SMGR_TRUNCATE
-                        {
-                            let truncate = XlSmgrTruncate::decode(&decoded);
-                            if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
-                                let rel = RelTag {
-                                    spcnode: truncate.rnode.spcnode,
-                                    dbnode: truncate.rnode.dbnode,
-                                    relnode: truncate.rnode.relnode,
-                                    forknum: MAIN_FORKNUM,
-                                };
-                                timeline.put_truncation(rel, lsn, truncate.blkno)?;
-                            }
-                        } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
-                            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                                == pg_constants::XLOG_DBASE_CREATE
-                        {
-                            let createdb = XlCreateDatabase::decode(&decoded);
-                            timeline.create_database(
-                                lsn,
-                                createdb.db_id,
-                                createdb.tablespace_id,
-                                createdb.src_db_id,
-                                createdb.src_tablespace_id,
-                            )?;
-                        }
-                        // Now that this record has been handled, let the page cache know that
-                        // it is up-to-date to this LSN
-                        timeline.advance_last_record_lsn(lsn);
+                        timeline.save_decoded_record(decoded, recdata, lsn)?;
                     } else {
                         break;
                     }
