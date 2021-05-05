@@ -439,17 +439,6 @@ fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
     }
 }
 
-#[derive(Debug)]
-struct ParsedBaseImageFileName {
-    pub spcnode: u32,
-    pub dbnode: u32,
-    pub relnode: u32,
-    pub forknum: u32,
-    pub segno: u32,
-
-    pub lsn: u64,
-}
-
 // formats:
 // <oid>
 // <oid>_<fork name>
