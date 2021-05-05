@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Lsn(pub u64);
 
 /// We tried to parse an LSN from a string, but failed
@@ -117,6 +117,12 @@ impl FromStr for Lsn {
 }
 
 impl fmt::Display for Lsn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:X}/{:X}", self.0 >> 32, self.0 & 0xffffffff)
+    }
+}
+
+impl fmt::Debug for Lsn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:X}/{:X}", self.0 >> 32, self.0 & 0xffffffff)
     }
