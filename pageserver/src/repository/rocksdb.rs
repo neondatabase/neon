@@ -396,10 +396,13 @@ impl RocksTimeline {
 
                         // reconstruct most recent page version
                         if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
-                            trace!("Reconstruct most recent page {:?}", key);
                             // force reconstruction of most recent page version
                             let (base_img, records) =
                                 self.collect_records_for_apply(key.tag, key.lsn);
+
+                            trace!("Reconstruct most recent page {}/{}/{}_{} blk {} at {} from {} records",
+                                   key.tag.rel.spcnode, key.tag.rel.dbnode, key.tag.rel.relnode, key.tag.rel.forknum, key.tag.blknum, key.lsn, records.len());
+
                             let new_img = self
                                 .walredo_mgr
                                 .request_redo(key.tag, key.lsn, base_img, records)?;
@@ -424,17 +427,39 @@ impl RocksTimeline {
                                 if key.tag == maxkey.tag {
                                     let v = iter.value().unwrap();
                                     if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
-                                        trace!("Reconstruct horizon page {:?}", key);
                                         let (base_img, records) =
                                             self.collect_records_for_apply(key.tag, key.lsn);
+                                        trace!("Reconstruct horizon page {}/{}/{}_{} blk {} at {} from {} records",
+                                              key.tag.rel.spcnode, key.tag.rel.dbnode, key.tag.rel.relnode, key.tag.rel.forknum, key.tag.blknum, key.lsn, records.len());
                                         let new_img = self
                                             .walredo_mgr
                                             .request_redo(key.tag, key.lsn, base_img, records)?;
                                         self.put_page_image(key.tag, key.lsn, new_img.clone());
 
                                         truncated += 1;
+                                    } else {
+                                        trace!(
+                                            "Keeping horizon page {}/{}/{}_{} blk {} at {}",
+                                            key.tag.rel.spcnode,
+                                            key.tag.rel.dbnode,
+                                            key.tag.rel.relnode,
+                                            key.tag.rel.forknum,
+                                            key.tag.blknum,
+                                            key.lsn
+                                        );
                                     }
                                 }
+                            } else {
+                                trace!(
+                                    "Last page {}/{}/{}_{} blk {} at {}, horizon {}",
+                                    key.tag.rel.spcnode,
+                                    key.tag.rel.dbnode,
+                                    key.tag.rel.relnode,
+                                    key.tag.rel.forknum,
+                                    key.tag.blknum,
+                                    key.lsn,
+                                    horizon
+                                );
                             }
                             // remove records prior to horizon
                             loop {
@@ -455,6 +480,15 @@ impl RocksTimeline {
                                     v[0] |= UNUSED_VERSION_FLAG;
                                     self.db.put(k, &v[..])?;
                                     deleted += 1;
+                                    trace!(
+                                        "deleted: {}/{}/{}_{} blk {} at {}",
+                                        key.tag.rel.spcnode,
+                                        key.tag.rel.dbnode,
+                                        key.tag.rel.relnode,
+                                        key.tag.rel.forknum,
+                                        key.tag.blknum,
+                                        key.lsn
+                                    );
                                 } else {
                                     break;
                                 }
@@ -626,7 +660,15 @@ impl Timeline for RocksTimeline {
         content.pack(&mut val_buf);
 
         let _res = self.db.put(&key_buf[..], &val_buf[..]);
-        //trace!("put_wal_record lsn: {}", lsn);
+        trace!(
+            "put_wal_record {} {}/{}/{}_{} blk at {}",
+            tag.rel.spcnode,
+            tag.rel.dbnode,
+            tag.rel.relnode,
+            tag.rel.forknum,
+            tag.blknum,
+            lsn
+        );
 
         self.num_entries.fetch_add(1, Ordering::Relaxed);
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
@@ -643,7 +685,15 @@ impl Timeline for RocksTimeline {
 
         let content = CacheEntryContent::Truncation;
         // set new relation size
-        trace!("Truncate relation {:?} to {} blocks", rel, nblocks);
+        trace!(
+            "Truncate relation {}/{}/{}_{} to {} blocks at {}",
+            rel.spcnode,
+            rel.dbnode,
+            rel.relnode,
+            rel.forknum,
+            nblocks,
+            lsn
+        );
 
         let mut key_buf = BytesMut::new();
         let mut val_buf = BytesMut::new();
@@ -683,8 +733,15 @@ impl Timeline for RocksTimeline {
         trace!("put_wal_record lsn: {}", key.lsn);
         let _res = self.db.put(&key_buf[..], &val_buf[..]);
 
-        //debug!("inserted page image for {}/{}/{}_{} blk {} at {}",
-        //        tag.spcnode, tag.dbnode, tag.relnode, tag.forknum, tag.blknum, lsn);
+        trace!(
+            "put_page_image {} {}/{}/{}_{} blk at {}",
+            tag.rel.spcnode,
+            tag.rel.dbnode,
+            tag.rel.relnode,
+            tag.rel.forknum,
+            tag.blknum,
+            lsn
+        );
         self.num_page_images.fetch_add(1, Ordering::Relaxed);
     }
 
