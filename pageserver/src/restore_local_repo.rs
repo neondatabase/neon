@@ -33,13 +33,19 @@ use postgres_ffi::xlog_utils::*;
 use zenith_utils::lsn::Lsn;
 
 ///
-/// Load all WAL and all relation data pages from local disk into the repository.
+/// Load all WAL and optionally all relation data pages from local disk into the repository.
+///
+/// If 'restore_snapshot' is true, loads all snapshots from the <timeline>/snapshots/
+/// directory, too. If it's false, only loads the WAL and initializes the valid LSN.
 ///
 pub fn restore_timeline(
     conf: &PageServerConf,
     timeline: &dyn Timeline,
     timelineid: ZTimelineId,
+    restore_snapshot_arg: bool,
 ) -> Result<()> {
+    debug!("restoring timeline {}", timelineid);
+
     let timelinepath = PathBuf::from("timelines").join(timelineid.to_string());
 
     if !timelinepath.exists() {
@@ -59,10 +65,12 @@ pub fn restore_timeline(
         let lsn = Lsn::from_filename(&filename)?;
         last_snapshot_lsn = max(lsn, last_snapshot_lsn);
 
-        // FIXME: pass filename as Path instead of str?
         let filename_str = filename.into_string().unwrap();
-        restore_snapshot(conf, timeline, timelineid, &filename_str)?;
-        info!("restored snapshot at {:?}", filename_str);
+        if restore_snapshot_arg {
+            // FIXME: pass filename as Path instead of str?
+            restore_snapshot(conf, timeline, timelineid, &filename_str)?;
+        }
+        info!("found snapshot at {:?}", filename_str);
     }
 
     if last_snapshot_lsn == Lsn(0) {
@@ -82,7 +90,7 @@ pub fn restore_timeline(
 ///
 /// Find latest snapshot in a timeline's 'snapshots' directory
 ///
-pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<Lsn> {
+pub fn find_latest_snapshot(timeline: ZTimelineId) -> Result<Lsn> {
     let snapshotspath = format!("timelines/{}/snapshots", timeline);
 
     let mut last_snapshot_lsn = Lsn(0);
@@ -178,7 +186,13 @@ fn restore_snapshot(
     Ok(())
 }
 
-fn restore_relfile(
+///
+/// Scan one relfile from a snapshot, loading all pages into the given Timeline
+///
+/// The relfile is just a flat file in the same format used by PostgreSQL. There
+/// is no version information in it.
+///
+pub fn restore_relfile(
     timeline: &dyn Timeline,
     snapshot: &str,
     spcoid: u32,

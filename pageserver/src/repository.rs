@@ -1,4 +1,4 @@
-pub mod rocksdb;
+pub mod inmemory;
 
 use crate::waldecoder::{Oid, DecodedWALRecord};
 use crate::ZTimelineId;
@@ -17,7 +17,7 @@ pub trait Repository {
     ///
     /// The Timeline is expected to be already "open", i.e. `get_or_restore_timeline`
     /// should've been called on it earlier already.
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<rocksdb::RocksTimeline>>;
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<inmemory::InMemoryTimeline>>;
 
     /// Get Timeline handle for given zenith timeline ID.
     ///
@@ -25,7 +25,7 @@ pub trait Repository {
     fn get_or_restore_timeline(
         &self,
         timelineid: ZTimelineId,
-    ) -> Result<Arc<rocksdb::RocksTimeline>>;
+    ) -> Result<Arc<inmemory::InMemoryTimeline>>;
 
     //fn get_stats(&self) -> RepositoryStats;
 }

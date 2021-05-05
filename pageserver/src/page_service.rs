@@ -849,7 +849,7 @@ impl Connection {
         /* Send a tarball of the latest snapshot on the timeline */
 
         // find latest snapshot
-        let snapshotlsn = restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
+        let snapshotlsn = restore_local_repo::find_latest_snapshot(timelineid).unwrap();
 
         basebackup::send_snapshot_tarball(&mut CopyDataSink { stream }, timelineid, snapshotlsn)?;
 

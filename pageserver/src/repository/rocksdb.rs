@@ -180,7 +180,7 @@ impl Repository for RocksRepository {
             None => {
                 let timeline = RocksTimeline::new(&self.conf, timelineid);
 
-                restore_timeline(&self.conf, &timeline, timelineid)?;
+                restore_timeline(&self.conf, &timeline, timelineid, true)?;
 
                 let timeline_rc = Arc::new(timeline);
 
