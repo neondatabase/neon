@@ -202,6 +202,7 @@ pub struct CacheEntryContent {
 
 const PAGE_IMAGE_FLAG: u8 = 1u8;
 const UNUSED_VERSION_FLAG: u8 = 2u8;
+const TRUNCATED_FLAG: u8 = 4u8;
 
 impl CacheEntryContent {
     pub fn pack(&self, buf: &mut BytesMut) {
@@ -210,7 +211,11 @@ impl CacheEntryContent {
             buf.put_u16(image.len() as u16);
             buf.put_slice(&image[..]);
         } else if let Some(rec) = &self.wal_record {
-            buf.put_u8(0);
+            if rec.truncated {
+                buf.put_u8(TRUNCATED_FLAG);
+            } else {
+                buf.put_u8(0);
+            }
             rec.pack(buf);
         }
     }
@@ -790,7 +795,7 @@ impl PageCache {
                         minkey.lsn = Lsn(0); // first version
 
                         // reconstruct most recent page version
-                        if (v[0] & PAGE_IMAGE_FLAG) == 0 {
+                        if (v[0] & (TRUNCATED_FLAG | PAGE_IMAGE_FLAG)) == 0 {
                             trace!("Reconstruct most recent page {:?}", key);
                             // force reconstruction of most recent page version
                             let (base_img, records) =
@@ -818,7 +823,7 @@ impl PageCache {
                                 let key = CacheKey::unpack(&mut buf);
                                 if key.tag == maxkey.tag {
                                     let v = iter.value().unwrap();
-                                    if (v[0] & PAGE_IMAGE_FLAG) == 0 {
+                                    if (v[0] & (TRUNCATED_FLAG | PAGE_IMAGE_FLAG)) == 0 {
                                         trace!("Reconstruct horizon page {:?}", key);
                                         let (base_img, records) =
                                             self.collect_records_for_apply(key.tag, key.lsn);
