@@ -40,11 +40,11 @@ pub struct RocksTimeline {
     // WAL redo manager
     walredo_mgr: WalRedoManager,
 
-    // What page versions do we hold in the cache? If we get GetPage with
-    // LSN < first_valid_lsn, that's an error because we (no longer) hold that
-    // page version. If we get a request > last_valid_lsn, we need to wait until
-    // we receive all the WAL up to the request. The SeqWait provides functions
-    // for that.
+    // What page versions do we hold in the cache? If we get a request > last_valid_lsn,
+    // we need to wait until we receive all the WAL up to the request. The SeqWait
+    // provides functions for that. TODO: If we get a request for an old LSN, such that
+    // the versions have already been garbage collected away, we should throw an error,
+    // but we don't track that currently.
     //
     // last_record_lsn points to the end of last processed WAL record.
     // It can lag behind last_valid_lsn, if the WAL receiver has received some WAL
@@ -55,7 +55,6 @@ pub struct RocksTimeline {
     // walreceiver.rs instead of here, but it seems convenient to keep all three
     // values together.
     //
-    first_valid_lsn: AtomicLsn,
     last_valid_lsn: SeqWait<Lsn>,
     last_record_lsn: AtomicLsn,
 
@@ -225,7 +224,6 @@ impl RocksTimeline {
 
             walredo_mgr: WalRedoManager::new(conf, timelineid),
 
-            first_valid_lsn: AtomicLsn::new(0),
             last_valid_lsn: SeqWait::new(Lsn(0)),
             last_record_lsn: AtomicLsn::new(0),
 
@@ -830,30 +828,10 @@ impl Timeline for RocksTimeline {
         }
     }
 
-    ///
-    /// Remember the beginning of valid WAL.
-    ///
-    /// TODO: This should be called by garbage collection, so that if an older
-    /// page is requested, we will return an error to the requestor.
-    /*
-    fn _advance_first_valid_lsn(&self, lsn: Lsn) {
-        // Can't overtake last_valid_lsn (except when we're
-        // initializing the system and last_valid_lsn hasn't been set yet.
-        let last_valid_lsn = self.last_valid_lsn.load();
-        assert!(last_valid_lsn == Lsn(0) || lsn < last_valid_lsn);
-
-        let old = self.first_valid_lsn.fetch_max(lsn);
-        // Can't move backwards.
-        assert!(lsn >= old);
-    }
-     */
-
     fn init_valid_lsn(&self, lsn: Lsn) {
         let old = self.last_valid_lsn.advance(lsn);
         assert!(old == Lsn(0));
         let old = self.last_record_lsn.fetch_max(lsn);
-        assert!(old == Lsn(0));
-        let old = self.first_valid_lsn.fetch_max(lsn);
         assert!(old == Lsn(0));
     }
 
