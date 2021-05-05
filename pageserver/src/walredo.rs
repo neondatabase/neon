@@ -34,8 +34,8 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 use zenith_utils::lsn::Lsn;
 
-use crate::page_cache::BufferTag;
-use crate::page_cache::WALRecord;
+use crate::repository::BufferTag;
+use crate::repository::WALRecord;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::pg_constants;

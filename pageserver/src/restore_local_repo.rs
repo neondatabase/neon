@@ -26,10 +26,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use bytes::Bytes;
 
-use crate::page_cache;
-use crate::page_cache::BufferTag;
-use crate::page_cache::PageCache;
-use crate::page_cache::RelTag;
+use crate::repository::{BufferTag, RelTag, Timeline, WALRecord};
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -48,10 +45,10 @@ const GLOBALTABLESPACE_OID: u32 = 1664;
 //
 pub fn restore_timeline(
     conf: &PageServerConf,
-    pcache: &PageCache,
-    timeline: ZTimelineId,
+    timeline: &dyn Timeline,
+    timelineid: ZTimelineId,
 ) -> Result<()> {
-    let timelinepath = PathBuf::from("timelines").join(timeline.to_string());
+    let timelinepath = PathBuf::from("timelines").join(timelineid.to_string());
 
     if !timelinepath.exists() {
         anyhow::bail!("timeline {} does not exist in the page server's repository");
@@ -59,7 +56,7 @@ pub fn restore_timeline(
 
     // Scan .zenith/timelines/<timeline>/snapshots
     let snapshotspath = PathBuf::from("timelines")
-        .join(timeline.to_string())
+        .join(timelineid.to_string())
         .join("snapshots");
 
     let mut last_snapshot_lsn: Lsn = Lsn(0);
@@ -72,7 +69,7 @@ pub fn restore_timeline(
 
         // FIXME: pass filename as Path instead of str?
         let filename_str = filename.into_string().unwrap();
-        restore_snapshot(conf, pcache, timeline, &filename_str)?;
+        restore_snapshot(conf, timeline, timelineid, &filename_str)?;
         info!("restored snapshot at {:?}", filename_str);
     }
 
@@ -83,9 +80,9 @@ pub fn restore_timeline(
         );
         // TODO return error?
     }
-    pcache.init_valid_lsn(last_snapshot_lsn);
+    timeline.init_valid_lsn(last_snapshot_lsn);
 
-    restore_wal(conf, pcache, timeline, last_snapshot_lsn)?;
+    restore_wal(timeline, timelineid, last_snapshot_lsn)?;
 
     Ok(())
 }
@@ -110,12 +107,12 @@ pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Re
 
 fn restore_snapshot(
     conf: &PageServerConf,
-    pcache: &PageCache,
-    timeline: ZTimelineId,
+    timeline: &dyn Timeline,
+    timelineid: ZTimelineId,
     snapshot: &str,
 ) -> Result<()> {
     let snapshotpath = PathBuf::from("timelines")
-        .join(timeline.to_string())
+        .join(timelineid.to_string())
         .join("snapshots")
         .join(snapshot);
 
@@ -131,8 +128,6 @@ fn restore_snapshot(
 
             // Load any relation files into the page server
             _ => restore_relfile(
-                conf,
-                pcache,
                 timeline,
                 snapshot,
                 GLOBALTABLESPACE_OID,
@@ -160,8 +155,6 @@ fn restore_snapshot(
 
                 // Load any relation files into the page server
                 _ => restore_relfile(
-                    conf,
-                    pcache,
                     timeline,
                     snapshot,
                     DEFAULTTABLESPACE_OID,
@@ -175,8 +168,8 @@ fn restore_snapshot(
         let entry = entry?;
         restore_nonrelfile(
             conf,
-            pcache,
             timeline,
+            timelineid,
             snapshot,
             pg_constants::PG_XACT_FORKNUM,
             &entry.path(),
@@ -188,9 +181,7 @@ fn restore_snapshot(
 }
 
 fn restore_relfile(
-    _conf: &PageServerConf,
-    pcache: &PageCache,
-    _timeline: ZTimelineId,
+    timeline: &dyn Timeline,
     snapshot: &str,
     spcoid: u32,
     dboid: u32,
@@ -225,7 +216,7 @@ fn restore_relfile(
                     },
                     blknum,
                 };
-                pcache.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
                     oldest_lsn = p.lsn;
@@ -254,8 +245,8 @@ fn restore_relfile(
 
 fn restore_nonrelfile(
     _conf: &PageServerConf,
-    pcache: &PageCache,
-    _timeline: ZTimelineId,
+    timeline: &dyn Timeline,
+    _timelineid: ZTimelineId,
     snapshot: &str,
     forknum: u32,
     path: &Path,
@@ -283,7 +274,7 @@ fn restore_nonrelfile(
                     },
                     blknum,
                 };
-                pcache.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
                     oldest_lsn = p.lsn;
@@ -312,13 +303,8 @@ fn restore_nonrelfile(
 
 // Scan WAL on a timeline, starting from gien LSN, and load all the records
 // into the page cache.
-fn restore_wal(
-    _conf: &PageServerConf,
-    pcache: &PageCache,
-    timeline: ZTimelineId,
-    startpoint: Lsn,
-) -> Result<()> {
-    let walpath = format!("timelines/{}/wal", timeline);
+fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn) -> Result<()> {
+    let walpath = format!("timelines/{}/wal", timelineid);
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
@@ -381,7 +367,7 @@ fn restore_wal(
                         },
                         blknum: blk.blkno,
                     };
-                    let rec = page_cache::WALRecord {
+                    let rec = WALRecord {
                         lsn,
                         will_init: blk.will_init || blk.apply_image,
                         truncate: false,
@@ -389,11 +375,11 @@ fn restore_wal(
                         main_data_offset: decoded.main_data_offset as u32,
                     };
 
-                    pcache.put_wal_record(tag, rec);
+                    timeline.put_wal_record(tag, rec);
                 }
                 // Now that this record has been handled, let the page cache know that
                 // it is up-to-date to this LSN
-                pcache.advance_last_valid_lsn(lsn);
+                timeline.advance_last_valid_lsn(lsn);
                 last_lsn = lsn;
             } else {
                 break;

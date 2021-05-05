@@ -7,6 +7,7 @@ use std::time::Duration;
 pub mod basebackup;
 pub mod page_cache;
 pub mod page_service;
+pub mod repository;
 pub mod restore_local_repo;
 pub mod tui;
 pub mod tui_event;

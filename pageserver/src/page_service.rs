@@ -24,6 +24,7 @@ use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
 use crate::page_cache;
+use crate::repository::{BufferTag, RelTag, Repository, Timeline};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
@@ -698,8 +699,9 @@ impl Connection {
             let connstr: String = String::from(caps.get(2).unwrap().as_str());
 
             // Check that the timeline exists
-            let pcache = page_cache::get_or_restore_pagecache(&self.conf, timelineid);
-            if pcache.is_err() {
+            let repository = page_cache::get_repository();
+            let timeline = repository.get_or_restore_timeline(timelineid);
+            if timeline.is_err() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("client requested callmemaybe on timeline {} which does not exist in page server", timelineid)));
@@ -731,13 +733,14 @@ impl Connection {
 
     fn handle_pagerequests(&mut self, timelineid: ZTimelineId) -> Result<()> {
         // Check that the timeline exists
-        let pcache = page_cache::get_or_restore_pagecache(&self.conf, timelineid);
-        if pcache.is_err() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("client requested pagestream on timeline {} which does not exist in page server", timelineid)));
-        }
-        let pcache = pcache.unwrap();
+        let repository = page_cache::get_repository();
+        let timeline = repository
+            .get_timeline(timelineid)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("client requested pagestream on timeline {} which does not exist in page server", timelineid))
+            })?;
 
         /* switch client to COPYBOTH */
         self.stream.write_u8(b'W')?;
@@ -760,14 +763,14 @@ impl Connection {
 
             match message {
                 Some(FeMessage::ZenithExistsRequest(req)) => {
-                    let tag = page_cache::RelTag {
+                    let tag = RelTag {
                         spcnode: req.spcnode,
                         dbnode: req.dbnode,
                         relnode: req.relnode,
                         forknum: req.forknum,
                     };
 
-                    let exist = pcache.relsize_exist(&tag, req.lsn).unwrap_or(false);
+                    let exist = timeline.get_relsize_exists(tag, req.lsn).unwrap_or(false);
 
                     self.write_message(&BeMessage::ZenithStatusResponse(ZenithStatusResponse {
                         ok: exist,
@@ -775,14 +778,14 @@ impl Connection {
                     }))?
                 }
                 Some(FeMessage::ZenithNblocksRequest(req)) => {
-                    let tag = page_cache::RelTag {
+                    let tag = RelTag {
                         spcnode: req.spcnode,
                         dbnode: req.dbnode,
                         relnode: req.relnode,
                         forknum: req.forknum,
                     };
 
-                    let n_blocks = pcache.relsize_get(&tag, req.lsn).unwrap_or(0);
+                    let n_blocks = timeline.get_relsize(tag, req.lsn).unwrap_or(0);
 
                     self.write_message(&BeMessage::ZenithNblocksResponse(ZenithStatusResponse {
                         ok: true,
@@ -790,8 +793,8 @@ impl Connection {
                     }))?
                 }
                 Some(FeMessage::ZenithReadRequest(req)) => {
-                    let buf_tag = page_cache::BufferTag {
-                        rel: page_cache::RelTag {
+                    let buf_tag = BufferTag {
+                        rel: RelTag {
                             spcnode: req.spcnode,
                             dbnode: req.dbnode,
                             relnode: req.relnode,
@@ -800,7 +803,7 @@ impl Connection {
                         blknum: req.blkno,
                     };
 
-                    let msg = match pcache.get_page_at_lsn(buf_tag, req.lsn) {
+                    let msg = match timeline.get_page_at_lsn(buf_tag, req.lsn) {
                         Ok(p) => BeMessage::ZenithReadResponse(ZenithReadResponse {
                             ok: true,
                             n_blocks: 0,
@@ -826,8 +829,9 @@ impl Connection {
 
     fn handle_basebackup_request(&mut self, timelineid: ZTimelineId) -> Result<()> {
         // check that the timeline exists
-        let pcache = page_cache::get_or_restore_pagecache(&self.conf, timelineid);
-        if pcache.is_err() {
+        let repository = page_cache::get_repository();
+        let timeline = repository.get_or_restore_timeline(timelineid);
+        if timeline.is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("client requested basebackup on timeline {} which does not exist in page server", timelineid)));

@@ -7,7 +7,7 @@
 //!
 
 use crate::page_cache;
-use crate::page_cache::{BufferTag, RelTag};
+use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -128,7 +128,7 @@ fn thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
 
 fn walreceiver_main(
     runtime: &Runtime,
-    conf: &PageServerConf,
+    _conf: &PageServerConf,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
 ) -> Result<(), Error> {
@@ -152,13 +152,14 @@ fn walreceiver_main(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
-    let pcache = page_cache::get_pagecache(&conf, timelineid).unwrap();
+    let repository = page_cache::get_repository();
+    let timeline = repository.get_timeline(timelineid).unwrap();
 
     //
     // Start streaming the WAL, from where we left off previously.
     //
-    let mut startpoint = pcache.get_last_valid_lsn();
-    let last_valid_lsn = pcache.get_last_valid_lsn();
+    let mut startpoint = timeline.get_last_valid_lsn();
+    let last_valid_lsn = timeline.get_last_valid_lsn();
     if startpoint == Lsn(0) {
         // If we start here with identify.xlogpos we will have race condition with
         // postgres start: insert into postgres may request page that was modified with lsn
@@ -168,7 +169,7 @@ fn walreceiver_main(
         // different like having 'initdb' method on a pageserver (or importing some shared
         // empty database snapshot), so for now I just put start of first segment which
         // seems to be a valid record.
-        pcache.init_valid_lsn(Lsn(0x0100_0000));
+        timeline.init_valid_lsn(Lsn(0x0100_0000));
         startpoint = Lsn(0x0100_0000);
     } else {
         // There might be some padding after the last full record, skip it.
@@ -230,7 +231,7 @@ fn walreceiver_main(
                                 blknum: blk.blkno,
                             };
 
-                            let rec = page_cache::WALRecord {
+                            let rec = WALRecord {
                                 lsn,
                                 will_init: blk.will_init || blk.apply_image,
                                 truncate: false,
@@ -238,7 +239,7 @@ fn walreceiver_main(
                                 main_data_offset: decoded.main_data_offset as u32,
                             };
 
-                            pcache.put_wal_record(tag, rec);
+                            timeline.put_wal_record(tag, rec);
                         }
                         // include truncate wal record in all pages
                         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
@@ -256,21 +257,21 @@ fn walreceiver_main(
                                     },
                                     blknum: truncate.blkno,
                                 };
-                                let rec = page_cache::WALRecord {
+                                let rec = WALRecord {
                                     lsn,
                                     will_init: false,
                                     truncate: true,
                                     rec: recdata.clone(),
                                     main_data_offset: decoded.main_data_offset as u32,
                                 };
-                                pcache.put_rel_wal_record(tag, rec)?;
+                                timeline.put_rel_wal_record(tag, rec)?;
                             }
                         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
                             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                                 == pg_constants::XLOG_DBASE_CREATE
                         {
                             let createdb = XlCreateDatabase::decode(&decoded);
-                            pcache.create_database(
+                            timeline.create_database(
                                 lsn,
                                 createdb.db_id,
                                 createdb.tablespace_id,
@@ -280,7 +281,7 @@ fn walreceiver_main(
                         }
                         // Now that this record has been handled, let the page cache know that
                         // it is up-to-date to this LSN
-                        pcache.advance_last_record_lsn(lsn);
+                        timeline.advance_last_record_lsn(lsn);
                     } else {
                         break;
                     }
@@ -292,7 +293,7 @@ fn walreceiver_main(
                 // better reflect that, because GetPage@LSN requests might also point in the
                 // middle of a record, if the request LSN was taken from the server's current
                 // flush ptr.
-                pcache.advance_last_valid_lsn(endlsn);
+                timeline.advance_last_valid_lsn(endlsn);
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!("caught up at LSN {}", endlsn);
@@ -313,7 +314,7 @@ fn walreceiver_main(
                 );
                 if reply_requested {
                     // TODO: More thought should go into what values are sent here.
-                    let last_lsn = PgLsn::from(u64::from(pcache.get_last_valid_lsn()));
+                    let last_lsn = PgLsn::from(u64::from(timeline.get_last_valid_lsn()));
                     let write_lsn = last_lsn;
                     let flush_lsn = last_lsn;
                     let apply_lsn = PgLsn::INVALID;

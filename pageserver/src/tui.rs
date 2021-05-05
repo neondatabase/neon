@@ -229,7 +229,7 @@ impl<'a> Widget for LogWidget<'a> {
 // Render a widget to show some metrics
 struct MetricsWidget {}
 
-fn get_metric_u64(title: &str, value: u64) -> Spans {
+fn _get_metric_u64(title: &str, value: u64) -> Spans {
     Spans::from(vec![
         Span::styled(format!("{:<20}", title), Style::default()),
         Span::raw(": "),
@@ -260,9 +260,11 @@ impl tui::widgets::Widget for MetricsWidget {
 
         block.render(area, buf);
 
+        #[allow(unused_mut)]
         let mut lines: Vec<Spans> = Vec::new();
 
-        let page_cache_stats = crate::page_cache::get_stats();
+        // FIXME
+        //let page_cache_stats = crate::page_cache::get_stats();
 
         // This is not used since LSNs were removed from page cache stats.
         // Maybe it will be used in the future?
@@ -275,7 +277,7 @@ impl tui::widgets::Widget for MetricsWidget {
         lines.push(get_metric_str("Valid LSN range", &lsnrange));
         lines.push(get_metric_str("Last record LSN", &last_valid_recordlsn_str));
         */
-
+/*
         lines.push(get_metric_u64(
             "# of cache entries",
             page_cache_stats.num_entries,
@@ -292,7 +294,7 @@ impl tui::widgets::Widget for MetricsWidget {
             "# of GetPage@LSN calls",
             page_cache_stats.num_getpage_requests,
         ));
-
+*/
         let text = Text::from(lines);
 
         Paragraph::new(text).render(inner_area, buf);

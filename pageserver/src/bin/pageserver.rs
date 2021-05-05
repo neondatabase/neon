@@ -16,7 +16,7 @@ use daemonize::Daemonize;
 
 use slog::{Drain, FnValue};
 
-use pageserver::{page_service, tui, zenith_repo_dir, PageServerConf};
+use pageserver::{page_cache, page_service, tui, zenith_repo_dir, PageServerConf};
 
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 const DEFAULT_GC_PERIOD_SEC: u64 = 10;
@@ -172,6 +172,8 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
             }
         },
     }
+
+    page_cache::init(conf);
 
     // GetPage@LSN requests are served by another thread. (It uses async I/O,
     // but the code in page_service sets up it own thread pool for that)
