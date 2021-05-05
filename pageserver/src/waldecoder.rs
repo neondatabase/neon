@@ -309,8 +309,6 @@ pub struct DecodedWALRecord {
 pub type Oid = u32;
 pub type BlockNumber = u32;
 
-pub const MAIN_FORKNUM: u8 = 0;
-pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

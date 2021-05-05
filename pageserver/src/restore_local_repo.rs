@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use bytes::Bytes;
 
-use crate::repository::{BufferTag, RelTag, Timeline, WALRecord};
+use crate::repository::{BufferTag, RelTag, Timeline};
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -353,32 +353,7 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
                 let decoded = decode_wal_record(recdata.clone());
-                // Put the WAL record to the page cache. We make a separate copy of
-                // it for every block it modifies. (The actual WAL record is kept in
-                // a Bytes, which uses a reference counter for the underlying buffer,
-                // so having multiple copies of it doesn't cost that much)
-                for blk in decoded.blocks.iter() {
-                    let tag = BufferTag {
-                        rel: RelTag {
-                            spcnode: blk.rnode_spcnode,
-                            dbnode: blk.rnode_dbnode,
-                            relnode: blk.rnode_relnode,
-                            forknum: blk.forknum as u8,
-                        },
-                        blknum: blk.blkno,
-                    };
-                    let rec = WALRecord {
-                        lsn,
-                        will_init: blk.will_init || blk.apply_image,
-                        rec: recdata.clone(),
-                        main_data_offset: decoded.main_data_offset as u32,
-                    };
-
-                    timeline.put_wal_record(tag, rec);
-                }
-                // Now that this record has been handled, let the page cache know that
-                // it is up-to-date to this LSN
-                timeline.advance_last_valid_lsn(lsn);
+                timeline.save_decoded_record(decoded, recdata, lsn)?;
                 last_lsn = lsn;
             } else {
                 break;
