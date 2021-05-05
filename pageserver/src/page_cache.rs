@@ -211,7 +211,7 @@ impl CacheEntryContent {
             buf.put_u16(image.len() as u16);
             buf.put_slice(&image[..]);
         } else if let Some(rec) = &self.wal_record {
-            if rec.truncated {
+            if rec.truncate {
                 buf.put_u8(TRUNCATED_FLAG);
             } else {
                 buf.put_u8(0);
