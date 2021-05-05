@@ -7,6 +7,7 @@
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use log::*;
+use walkdir::WalkDir;
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -22,6 +23,7 @@ use crate::ZTimelineId;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::parse_relfilename;
 
 mod relfile;
 
@@ -160,10 +162,61 @@ impl Timeline for InMemoryTimeline {
             .put_page_image(tag.blknum, lsn, img)
     }
 
-    fn put_create_database(&self, _lsn: Lsn, _db_id: Oid, _tablespace_id: Oid, _src_db_id: Oid, _src_tablespace_id: Oid) -> Result<()> {
+    fn put_create_database(
+        &self,
+        lsn: Lsn,
+        db_id: Oid,
+        _tablespace_id: Oid,
+        src_db_id: Oid,
+        _src_tablespace_id: Oid,
+    ) -> Result<()> {
+        // Make a copy of everything in the old DB under new DB id
+        //
+        // FIXME: This will only copy relations that exist in the last snapshot. If a relation
+        // was created in the source database after that, it won't be copied.
 
-        // TODO: Make a copy of everything in the old DB under new DB id
-        bail!("CREATE DATABASE not implemented");
+        let snapshotlsn = crate::restore_local_repo::find_latest_snapshot(self.timelineid, lsn)?;
+        let dbpath = format!(
+            "timelines/{}/snapshots/{:016X}/base/{}",
+            self.timelineid, snapshotlsn.0, src_db_id
+        );
+        for entry in WalkDir::new(&dbpath) {
+            let entry = entry?;
+            let fullpath = entry.path();
+
+            if entry.file_type().is_dir() {
+                error!("ignoring subdir in snapshot dir");
+            } else if entry.file_type().is_symlink() {
+                error!("ignoring symlink in snapshot dir");
+            } else if entry.file_type().is_file() {
+                if let Ok((relnode, forknum, _segno)) =
+                    parse_relfilename(entry.file_name().to_str().unwrap())
+                {
+                    let srcrel = self.get_relfile(RelTag {
+                        spcnode: pg_constants::DEFAULTTABLESPACE_OID,
+                        dbnode: src_db_id,
+                        relnode,
+                        forknum,
+                    });
+                    let rel = self.get_relfile(RelTag {
+                        spcnode: pg_constants::DEFAULTTABLESPACE_OID,
+                        dbnode: db_id,
+                        relnode,
+                        forknum,
+                    });
+                    rel.copy_from(&self.walredo_mgr, &srcrel, lsn)?;
+                } else {
+                    // FIXME: What else can we find in the database dir?
+                    // pg_filenode.map and PG_VERSION
+                }
+            } else {
+                error!("unknown file type: {}", fullpath.display());
+            }
+        }
+
+        // TODO: non-default tablespaces not implemented yet
+
+        Ok(())
     }
 
     // Process a WAL record. We make a separate copy of it for every block it modifies.

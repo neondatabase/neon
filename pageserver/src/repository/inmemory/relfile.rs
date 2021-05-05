@@ -89,6 +89,22 @@ impl RelFileEntry {
         }
     }
 
+    /// Copy a relation from another at given LSN. The new relation will appear with the same LSN.
+    /// This is a subroutine of handling CREATE DATABASE, which makes a copy of the template database.
+    pub fn copy_from(
+        &self,
+        walredo_mgr: &WalRedoManager,
+        src: &RelFileEntry,
+        lsn: Lsn,
+    ) -> Result<()> {
+        let src_size = src.get_relsize(lsn)?;
+        for blknum in 0..src_size {
+            let img = src.get_page_at_lsn(walredo_mgr, blknum, lsn)?;
+            self.put_page_image(blknum, lsn, img);
+        }
+        Ok(())
+    }
+
     /// Look up given page in the cache.
     pub fn get_page_at_lsn(
         &self,
