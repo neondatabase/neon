@@ -828,6 +828,10 @@ impl Timeline for RocksTimeline {
         }
     }
 
+    fn get_last_record_lsn(&self) -> Lsn {
+        self.last_record_lsn.load()
+    }
+
     fn init_valid_lsn(&self, lsn: Lsn) {
         let old = self.last_valid_lsn.advance(lsn);
         assert!(old == Lsn(0));

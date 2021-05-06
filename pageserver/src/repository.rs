@@ -47,10 +47,12 @@ pub trait Timeline {
         src_tablespace_id: Oid,
     ) -> Result<()>;
 
-    fn advance_last_record_lsn(&self, lsn: Lsn);
     fn advance_last_valid_lsn(&self, lsn: Lsn);
-    fn init_valid_lsn(&self, lsn: Lsn);
     fn get_last_valid_lsn(&self) -> Lsn;
+    fn init_valid_lsn(&self, lsn: Lsn);
+
+    fn advance_last_record_lsn(&self, lsn: Lsn);
+    fn get_last_record_lsn(&self) -> Lsn;
 }
 
 #[derive(Clone)]

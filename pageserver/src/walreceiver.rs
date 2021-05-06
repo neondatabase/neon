@@ -158,8 +158,11 @@ fn walreceiver_main(
     //
     // Start streaming the WAL, from where we left off previously.
     //
-    let mut startpoint = timeline.get_last_valid_lsn();
-    let last_valid_lsn = timeline.get_last_valid_lsn();
+    // If we had previously received WAL up to some point in the middle of a WAL record, we
+    // better start from the end of last full WAL record, not in the middle of one. Hence,
+    // use 'last_record_lsn' rather than 'last_valid_lsn' here.
+    let last_rec_lsn = timeline.get_last_record_lsn();
+    let mut startpoint = last_rec_lsn;
     if startpoint == Lsn(0) {
         // If we start here with identify.xlogpos we will have race condition with
         // postgres start: insert into postgres may request page that was modified with lsn
@@ -180,8 +183,8 @@ fn walreceiver_main(
         startpoint += startpoint.calc_padding(8u32);
     }
     debug!(
-        "last_valid_lsn {} starting replication from {}  for timeline {}, server is at {}...",
-        last_valid_lsn, startpoint, timelineid, end_of_wal
+        "last_record_lsn {} starting replication from {} for timeline {}, server is at {}...",
+        last_rec_lsn, startpoint, timelineid, end_of_wal
     );
 
     let query = format!("START_REPLICATION PHYSICAL {}", startpoint);
