@@ -745,7 +745,7 @@ impl Timeline for RocksTimeline {
         self.num_page_images.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn create_database(
+    fn put_create_database(
         &self,
         lsn: Lsn,
         db_id: Oid,
@@ -844,7 +844,7 @@ impl Timeline for RocksTimeline {
                 == pg_constants::XLOG_DBASE_CREATE
         {
             let createdb = XlCreateDatabase::decode(&decoded);
-            self.create_database(
+            self.put_create_database(
                 lsn,
                 createdb.db_id,
                 createdb.tablespace_id,
