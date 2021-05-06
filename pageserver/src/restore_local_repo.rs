@@ -34,9 +34,9 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
 use zenith_utils::lsn::Lsn;
 
-//
-// Load it all into the page cache.
-//
+///
+/// Load all WAL and all relation data pages from local disk into the repository.
+///
 pub fn restore_timeline(
     conf: &PageServerConf,
     timeline: &dyn Timeline,
@@ -81,6 +81,9 @@ pub fn restore_timeline(
     Ok(())
 }
 
+///
+/// Find latest snapshot in a timeline's 'snapshots' directory
+///
 pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<u64> {
     let snapshotspath = format!("timelines/{}/snapshots", timeline);
 

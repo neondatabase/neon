@@ -7,6 +7,13 @@ use walkdir::WalkDir;
 
 use crate::ZTimelineId;
 
+///
+/// Send a tarball containing a snapshot of all non-relation files in the
+/// PostgreSQL data directory, at given LSN
+///
+/// There must be a snapshot at the given LSN in the snapshots directory, we cannot
+/// reconstruct the state at an arbitrary LSN at the moment.
+///
 pub fn send_snapshot_tarball(
     write: &mut dyn Write,
     timelineid: ZTimelineId,
@@ -48,7 +55,14 @@ pub fn send_snapshot_tarball(
                 ar.append_path_with_name(fullpath, relpath)?;
             } else {
                 trace!("not sending {}", relpath.display());
-                // FIXME: send all files for now
+
+                // FIXME: For now, also send all the relation files.
+                // This really shouldn't be necessary, and kind of
+                // defeats the point of having a page server in the
+                // first place. But it is useful at least when
+                // debugging with the DEBUG_COMPARE_LOCAL option (see
+                // vendor/postgres/src/backend/storage/smgr/pagestore_smgr.c)
+
                 ar.append_path_with_name(fullpath, relpath)?;
             }
         } else {
@@ -56,7 +70,11 @@ pub fn send_snapshot_tarball(
         }
     }
 
-    // FIXME: also send all the WAL
+    // FIXME: Also send all the WAL. The compute node would only need
+    // the WAL that applies to non-relation files, because the page
+    // server handles all the relation files. But we don't have a
+    // mechanism for separating relation and non-relation WAL at the
+    // moment.
     for entry in std::fs::read_dir(&walpath)? {
         let entry = entry?;
         let fullpath = &entry.path();
@@ -146,6 +164,10 @@ fn parse_filename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
     Ok((relnode, forknum, segno))
 }
 
+///
+/// Parse a path, relative to the root of PostgreSQL data directory, as
+/// a PostgreSQL relation data file.
+///
 fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
     /*
      * Relation data files can be in one of the following directories:
