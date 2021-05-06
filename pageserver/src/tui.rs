@@ -171,6 +171,11 @@ pub fn ui_main() -> Result<(), Box<dyn Error>> {
         })?;
 
         // If ther user presses 'q', quit.
+
+        // silence clippy's suggestion to rewrite this as an if-statement. Match
+        // makes more sense as soon as we get another command than 'q'.
+        #[allow(clippy::single_match)]
+        #[allow(clippy::collapsible_match)]
         if let Event::Input(key) = events.next()? {
             match key {
                 Key::Char('q') => {

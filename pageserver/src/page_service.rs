@@ -663,7 +663,7 @@ impl Connection {
         debug!("process query {:?}", query_string);
 
         // remove null terminator, if any
-        let mut query_string = query_string.clone();
+        let mut query_string = query_string;
         if query_string.last() == Some(&0) {
             query_string.truncate(query_string.len() - 1);
         }

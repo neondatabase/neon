@@ -215,13 +215,13 @@ fn walreceiver_main(
 
                 waldecoder.feed_bytes(data);
 
-                loop {
-                    if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                        let decoded = decode_wal_record(recdata.clone());
-                        timeline.save_decoded_record(decoded, recdata, lsn)?;
-                    } else {
-                        break;
-                    }
+                while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                    let decoded = decode_wal_record(recdata.clone());
+                    timeline.save_decoded_record(decoded, recdata, lsn)?;
+
+                    // Now that this record has been handled, let the page cache know that
+                    // it is up-to-date to this LSN
+                    timeline.advance_last_record_lsn(lsn);
                 }
 
                 // Update the last_valid LSN value in the page cache one more time. We updated
@@ -317,7 +317,7 @@ pub fn identify_system(
             dbname: get_parse(first_row, 3).ok(),
         })
     } else {
-        Err(IdentifyError)?
+        Err(IdentifyError.into())
     }
 }
 

@@ -435,7 +435,7 @@ impl WalRedoProcess {
         &self,
         tag: BufferTag,
         base_img: Option<Bytes>,
-        records: &Vec<WALRecord>,
+        records: &[WALRecord],
     ) -> Result<Bytes, std::io::Error> {
         let mut stdin = self.stdin.borrow_mut();
         let mut stdout = self.stdout.borrow_mut();
