@@ -1340,6 +1340,7 @@ dependencies = [
  "hex",
  "log",
  "rand",
+ "regex",
 ]
 
 [[package]]

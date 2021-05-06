@@ -4,6 +4,7 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 pub mod pg_constants;
+pub mod relfile_utils;
 pub mod xlog_utils;
 
 use bytes::{Buf, Bytes, BytesMut};

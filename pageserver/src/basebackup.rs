@@ -1,12 +1,11 @@
 use log::*;
-use regex::Regex;
-use std::fmt;
 use std::io::Write;
 use tar::Builder;
 use walkdir::WalkDir;
 
 use crate::ZTimelineId;
 
+use postgres_ffi::relfile_utils::*;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -99,73 +98,6 @@ pub fn send_snapshot_tarball(
     Ok(())
 }
 
-// formats:
-// <oid>
-// <oid>_<fork name>
-// <oid>.<segment number>
-// <oid>_<fork name>.<segment number>
-
-#[derive(Debug)]
-struct FilePathError {
-    msg: String,
-}
-
-impl FilePathError {
-    fn new(msg: &str) -> FilePathError {
-        FilePathError {
-            msg: msg.to_string(),
-        }
-    }
-}
-
-impl From<core::num::ParseIntError> for FilePathError {
-    fn from(e: core::num::ParseIntError) -> Self {
-        return FilePathError {
-            msg: format!("invalid filename: {}", e),
-        };
-    }
-}
-
-impl fmt::Display for FilePathError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "invalid filename")
-    }
-}
-
-fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
-    match forkname {
-        // "main" is not in filenames, it's implicit if the fork name is not present
-        None => Ok(0),
-        Some("fsm") => Ok(1),
-        Some("vm") => Ok(2),
-        Some("init") => Ok(3),
-        Some(_) => Err(FilePathError::new("invalid forkname")),
-    }
-}
-
-fn parse_filename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
-    let re = Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();
-
-    let caps = re
-        .captures(fname)
-        .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
-
-    let relnode_str = caps.name("relnode").unwrap().as_str();
-    let relnode = u32::from_str_radix(relnode_str, 10)?;
-
-    let forkname = caps.name("forkname").map(|f| f.as_str());
-    let forknum = forkname_to_forknum(forkname)?;
-
-    let segno_match = caps.name("segno");
-    let segno = if segno_match.is_none() {
-        0
-    } else {
-        u32::from_str_radix(segno_match.unwrap().as_str(), 10)?
-    };
-
-    Ok((relnode, forknum, segno))
-}
-
 ///
 /// Parse a path, relative to the root of PostgreSQL data directory, as
 /// a PostgreSQL relation data file.
@@ -189,7 +121,7 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
      * <oid>.<segment number>
      */
     if let Some(fname) = path.strip_prefix("global/") {
-        let (_relnode, _forknum, _segno) = parse_filename(fname)?;
+        let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
 
         Ok(())
     } else if let Some(dbpath) = path.strip_prefix("base/") {
@@ -205,7 +137,7 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
             return Err(FilePathError::new("invalid relation data file name"));
         };
 
-        let (_relnode, _forknum, _segno) = parse_filename(fname)?;
+        let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
 
         Ok(())
     } else if let Some(_) = path.strip_prefix("pg_tblspc/") {

@@ -24,6 +24,7 @@ use futures::future;
 
 use crate::{page_cache, PageServerConf};
 use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::*;
 
 struct Storage {
     region: Region,
@@ -126,44 +127,6 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
     info!("restored!");
 
     Ok(())
-}
-
-#[derive(Debug)]
-struct FilePathError {
-    msg: String,
-}
-
-impl FilePathError {
-    fn new(msg: &str) -> FilePathError {
-        FilePathError {
-            msg: msg.to_string(),
-        }
-    }
-}
-
-impl From<core::num::ParseIntError> for FilePathError {
-    fn from(e: core::num::ParseIntError) -> Self {
-        return FilePathError {
-            msg: format!("invalid filename: {}", e),
-        };
-    }
-}
-
-impl fmt::Display for FilePathError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "invalid filename")
-    }
-}
-
-fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
-    match forkname {
-        // "main" is not in filenames, it's implicit if the fork name is not present
-        None => Ok(0),
-        Some("fsm") => Ok(1),
-        Some("vm") => Ok(2),
-        Some("init") => Ok(3),
-        Some(_) => Err(FilePathError::new("invalid forkname")),
-    }
 }
 
 #[derive(Debug)]

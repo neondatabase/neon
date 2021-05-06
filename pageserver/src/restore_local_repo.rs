@@ -11,11 +11,8 @@
 //
 
 use log::*;
-use regex::Regex;
-use std::fmt;
 
 use std::cmp::max;
-use std::error::Error;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -31,6 +28,7 @@ use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use zenith_utils::lsn::Lsn;
 
@@ -369,76 +367,4 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
     info!("reached end of WAL at {}", last_lsn);
 
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct FilePathError {
-    msg: String,
-}
-
-impl Error for FilePathError {
-    fn description(&self) -> &str {
-        &self.msg
-    }
-}
-impl FilePathError {
-    fn new(msg: &str) -> FilePathError {
-        FilePathError {
-            msg: msg.to_string(),
-        }
-    }
-}
-
-impl From<core::num::ParseIntError> for FilePathError {
-    fn from(e: core::num::ParseIntError) -> Self {
-        return FilePathError {
-            msg: format!("invalid filename: {}", e),
-        };
-    }
-}
-
-impl fmt::Display for FilePathError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "invalid filename")
-    }
-}
-
-fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
-    match forkname {
-        // "main" is not in filenames, it's implicit if the fork name is not present
-        None => Ok(0),
-        Some("fsm") => Ok(1),
-        Some("vm") => Ok(2),
-        Some("init") => Ok(3),
-        Some(_) => Err(FilePathError::new("invalid forkname")),
-    }
-}
-
-// formats:
-// <oid>
-// <oid>_<fork name>
-// <oid>.<segment number>
-// <oid>_<fork name>.<segment number>
-
-fn parse_relfilename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
-    let re = Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();
-
-    let caps = re
-        .captures(fname)
-        .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
-
-    let relnode_str = caps.name("relnode").unwrap().as_str();
-    let relnode = u32::from_str_radix(relnode_str, 10)?;
-
-    let forkname = caps.name("forkname").map(|f| f.as_str());
-    let forknum = forkname_to_forknum(forkname)?;
-
-    let segno_match = caps.name("segno");
-    let segno = if segno_match.is_none() {
-        0
-    } else {
-        u32::from_str_radix(segno_match.unwrap().as_str(), 10)?
-    };
-
-    Ok((relnode, forknum, segno))
 }
