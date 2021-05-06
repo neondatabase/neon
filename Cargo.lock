@@ -269,6 +269,7 @@ dependencies = [
  "tokio-postgres",
  "toml",
  "walkeeper",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -1180,6 +1181,7 @@ dependencies = [
  "tokio-stream",
  "tui",
  "walkdir",
+ "workspace_hack",
  "zenith_utils",
 ]
 
@@ -1342,6 +1344,7 @@ dependencies = [
  "rand",
  "regex",
  "thiserror",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -2238,6 +2241,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "walkdir",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -2390,6 +2394,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "workspace_hack"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "memchr",
+ "num-integer",
+ "num-traits",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "regex-syntax",
+ "serde",
+ "syn",
+]
+
+[[package]]
 name = "xattr"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2413,6 +2433,7 @@ dependencies = [
  "control_plane",
  "pageserver",
  "postgres_ffi",
+ "workspace_hack",
 ]
 
 [[package]]
