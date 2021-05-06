@@ -7,6 +7,8 @@ use walkdir::WalkDir;
 
 use crate::ZTimelineId;
 
+use zenith_utils::lsn::Lsn;
+
 ///
 /// Send a tarball containing a snapshot of all non-relation files in the
 /// PostgreSQL data directory, at given LSN
@@ -17,11 +19,11 @@ use crate::ZTimelineId;
 pub fn send_snapshot_tarball(
     write: &mut dyn Write,
     timelineid: ZTimelineId,
-    snapshotlsn: u64,
+    snapshotlsn: Lsn,
 ) -> Result<(), std::io::Error> {
     let mut ar = Builder::new(write);
 
-    let snappath = format!("timelines/{}/snapshots/{:016X}", timelineid, snapshotlsn);
+    let snappath = format!("timelines/{}/snapshots/{:016X}", timelineid, snapshotlsn.0);
     let walpath = format!("timelines/{}/wal", timelineid);
 
     debug!("sending tarball of snapshot in {}", snappath);

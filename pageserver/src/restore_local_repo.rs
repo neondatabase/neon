@@ -84,18 +84,21 @@ pub fn restore_timeline(
 ///
 /// Find latest snapshot in a timeline's 'snapshots' directory
 ///
-pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<u64> {
+pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<Lsn> {
     let snapshotspath = format!("timelines/{}/snapshots", timeline);
 
-    let mut last_snapshot_lsn = 0;
+    let mut last_snapshot_lsn = Lsn(0);
     for direntry in fs::read_dir(&snapshotspath).unwrap() {
-        let filename = direntry.unwrap().file_name().to_str().unwrap().to_owned();
+        let filename = direntry.unwrap().file_name();
 
-        let lsn = u64::from_str_radix(&filename, 16)?;
-        last_snapshot_lsn = max(lsn, last_snapshot_lsn);
+        if let Ok(lsn) = Lsn::from_filename(&filename) {
+            last_snapshot_lsn = max(lsn, last_snapshot_lsn);
+        } else {
+            error!("unrecognized file in snapshots directory: {:?}", filename);
+        }
     }
 
-    if last_snapshot_lsn == 0 {
+    if last_snapshot_lsn == Lsn(0) {
         error!("could not find valid snapshot in {}", &snapshotspath);
         // TODO return error?
     }
