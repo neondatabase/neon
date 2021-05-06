@@ -1,14 +1,30 @@
+//!
+//! Misc constants, copied from PostgreSQL headers.
+//!
+
+//
 // From pg_tablespace_d.h
 //
 pub const DEFAULTTABLESPACE_OID: u32 = 1663;
 pub const GLOBALTABLESPACE_OID: u32 = 1664;
-//Special values for non-rel files' tags
-//TODO maybe use enum?
+
+//
+// Fork numbers, from relpath.h
+//
+pub const MAIN_FORKNUM: u8 = 0;
+pub const FSM_FORKNUM: u8 = 1;
+pub const VISIBILITYMAP_FORKNUM: u8 = 2;
+pub const INIT_FORKNUM: u8 = 3;
+
+// Special values for non-rel files' tags (Zenith-specific)
 pub const PG_CONTROLFILE_FORKNUM: u32 = 42;
 pub const PG_FILENODEMAP_FORKNUM: u32 = 43;
 pub const PG_XACT_FORKNUM: u32 = 44;
 pub const PG_MXACT_OFFSETS_FORKNUM: u32 = 45;
 pub const PG_MXACT_MEMBERS_FORKNUM: u32 = 46;
+
+// From storage_xlog.h
+pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 
 //
 // constants from clog.h
@@ -98,7 +114,3 @@ pub const BKPBLOCK_SAME_REL: u8 = 0x80; /* RelFileNode omitted, same as previous
 pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
 pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
-
-
-pub const MAIN_FORKNUM: u8 = 0;
-pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;

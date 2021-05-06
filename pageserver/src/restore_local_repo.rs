@@ -34,12 +34,6 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
 use zenith_utils::lsn::Lsn;
 
-// From pg_tablespace_d.h
-//
-// FIXME: we'll probably need these elsewhere too, move to some common location
-const DEFAULTTABLESPACE_OID: u32 = 1663;
-const GLOBALTABLESPACE_OID: u32 = 1664;
-
 //
 // Load it all into the page cache.
 //
@@ -130,7 +124,7 @@ fn restore_snapshot(
             _ => restore_relfile(
                 timeline,
                 snapshot,
-                GLOBALTABLESPACE_OID,
+                pg_constants::GLOBALTABLESPACE_OID,
                 0,
                 &direntry.path(),
             )?,
@@ -157,7 +151,7 @@ fn restore_snapshot(
                 _ => restore_relfile(
                     timeline,
                     snapshot,
-                    DEFAULTTABLESPACE_OID,
+                    pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
                     &direntry.path(),
                 )?,

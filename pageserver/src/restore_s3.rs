@@ -23,6 +23,7 @@ use tokio::runtime;
 use futures::future;
 
 use crate::{page_cache, PageServerConf};
+use postgres_ffi::pg_constants;
 
 struct Storage {
     region: Region,
@@ -126,12 +127,6 @@ async fn restore_chunk(conf: &PageServerConf) -> Result<(), S3Error> {
 
     Ok(())
 }
-
-// From pg_tablespace_d.h
-//
-// FIXME: we'll probably need these elsewhere too, move to some common location
-const DEFAULTTABLESPACE_OID: u32 = 1663;
-const GLOBALTABLESPACE_OID: u32 = 1664;
 
 #[derive(Debug)]
 struct FilePathError {
@@ -237,7 +232,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
         Ok(ParsedBaseImageFileName {
-            spcnode: GLOBALTABLESPACE_OID,
+            spcnode: pg_constants::GLOBALTABLESPACE_OID,
             dbnode: 0,
             relnode,
             forknum,
@@ -260,7 +255,7 @@ fn parse_rel_file_path(path: &str) -> Result<ParsedBaseImageFileName, FilePathEr
         let (relnode, forknum, segno, lsn) = parse_filename(fname)?;
 
         Ok(ParsedBaseImageFileName {
-            spcnode: DEFAULTTABLESPACE_OID,
+            spcnode: pg_constants::DEFAULTTABLESPACE_OID,
             dbnode,
             relnode,
             forknum,
