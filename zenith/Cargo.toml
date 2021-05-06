@@ -14,3 +14,4 @@ anyhow = "1.0"
 pageserver = { path = "../pageserver" }
 control_plane = { path = "../control_plane" }
 postgres_ffi = { path = "../postgres_ffi" }
+workspace_hack = { path = "../workspace_hack" }

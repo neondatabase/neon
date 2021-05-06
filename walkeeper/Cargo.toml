@@ -34,3 +34,4 @@ walkdir = "2"
 # FIXME: 'pageserver' is needed for ZTimelineId. Refactor
 pageserver = { path = "../pageserver" }
 postgres_ffi = { path = "../postgres_ffi" }
+workspace_hack = { path = "../workspace_hack" }

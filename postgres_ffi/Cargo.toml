@@ -17,6 +17,7 @@ crc32c = "0.6.0"
 hex = "0.4.3"
 log = "0.4.14"
 thiserror = "1.0"
+workspace_hack = { path = "../workspace_hack" }
 
 [build-dependencies]
 bindgen = "0.57"
