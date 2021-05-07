@@ -7,7 +7,6 @@ use std::str::FromStr;
 
 pub type Oid = u32;
 pub type SystemId = u64;
-pub type Result<T> = std::result::Result<T, io::Error>;
 
 #[derive(Debug)]
 pub enum FeMessage {
@@ -52,7 +51,7 @@ pub enum StartupRequestCode {
 }
 
 impl FeStartupMessage {
-    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>> {
+    pub fn parse(buf: &mut BytesMut) -> io::Result<Option<FeMessage>> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
         const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
         const NEGOTIATE_SSL_CODE: u32 = (1234 << 16) | 5679;
@@ -202,7 +201,7 @@ impl<'a> BeMessage<'a> {
 }
 
 impl FeMessage {
-    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>> {
+    pub fn parse(buf: &mut BytesMut) -> io::Result<Option<FeMessage>> {
         if buf.len() < 5 {
             let to_read = 5 - buf.len();
             buf.reserve(to_read);
