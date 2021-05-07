@@ -29,8 +29,10 @@ anyhow = "1.0"
 crc32c = "0.6.0"
 parse_duration = "2.1.1"
 walkdir = "2"
+serde = { version = "1.0", features = ["derive"] }
 
 # FIXME: 'pageserver' is needed for ZTimelineId. Refactor
 pageserver = { path = "../pageserver" }
 postgres_ffi = { path = "../postgres_ffi" }
 workspace_hack = { path = "../workspace_hack" }
+zenith_utils = { path = "../zenith_utils" }

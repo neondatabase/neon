@@ -1181,6 +1181,7 @@ dependencies = [
  "regex",
  "rocksdb",
  "rust-s3",
+ "serde",
  "slog",
  "slog-async",
  "slog-scope",
@@ -2246,6 +2247,7 @@ dependencies = [
  "postgres_ffi",
  "regex",
  "rust-s3",
+ "serde",
  "slog",
  "slog-async",
  "slog-scope",
@@ -2255,6 +2257,7 @@ dependencies = [
  "tokio-stream",
  "walkdir",
  "workspace_hack",
+ "zenith_utils",
 ]
 
 [[package]]

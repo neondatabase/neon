@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -49,7 +50,7 @@ pub struct PageServerConf {
 /// is separate from PostgreSQL timelines, and doesn't have those
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ZTimelineId([u8; 16]);
 
 impl FromStr for ZTimelineId {
