@@ -75,14 +75,12 @@ fn read_into(r: &mut impl Read, buf: &mut BytesMut) -> io::Result<usize> {
 }
 
 /// Unique node identifier used by Paxos
-#[repr(C)]
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 struct NodeId {
     uuid: u128,
     term: [u8; 8],
 }
 
-#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 struct ServerInfo {
     /// proxy-safekeeper protocol version
@@ -99,7 +97,6 @@ struct ServerInfo {
 }
 
 /// Vote request sent from proxy to safekeepers
-#[repr(C)]
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct RequestVote {
     node_id: NodeId,
@@ -110,7 +107,6 @@ struct RequestVote {
 }
 
 /// Information of about storage node
-#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 struct SafeKeeperInfo {
     /// magic for verifying content the control file
@@ -130,7 +126,6 @@ struct SafeKeeperInfo {
 }
 
 /// Hot standby feedback received from replica
-#[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 struct HotStandbyFeedback {
     ts: TimestampTz,
@@ -139,7 +134,6 @@ struct HotStandbyFeedback {
 }
 
 /// Request with WAL message sent from proxy to safekeeper.
-#[repr(C)]
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct SafeKeeperRequest {
     /// Sender's node identifier (looks like we do not need it for TCP streaming connection)
@@ -155,7 +149,6 @@ struct SafeKeeperRequest {
 }
 
 /// Report safekeeper state to proxy
-#[repr(C)]
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct SafeKeeperResponse {
     epoch: u64,
