@@ -140,7 +140,7 @@ fn restore_snapshot(
     for direntry in fs::read_dir(snapshotpath.join("base"))? {
         let direntry = direntry?;
 
-        let dboid = u32::from_str_radix(direntry.file_name().to_str().unwrap(), 10)?;
+        let dboid = direntry.file_name().to_str().unwrap().parse::<u32>()?;
 
         for direntry in fs::read_dir(direntry.path())? {
             let direntry = direntry?;

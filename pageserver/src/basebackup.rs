@@ -126,15 +126,11 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
         Ok(())
     } else if let Some(dbpath) = path.strip_prefix("base/") {
         let mut s = dbpath.split('/');
-        let dbnode_str = s
-            .next()
-            .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
-        let _dbnode = u32::from_str_radix(dbnode_str, 10)?;
-        let fname = s
-            .next()
-            .ok_or_else(|| FilePathError::new("invalid relation data file name"))?;
+        let dbnode_str = s.next().ok_or(FilePathError::InvalidFileName)?;
+        let _dbnode = dbnode_str.parse::<u32>()?;
+        let fname = s.next().ok_or(FilePathError::InvalidFileName)?;
         if s.next().is_some() {
-            return Err(FilePathError::new("invalid relation data file name"));
+            return Err(FilePathError::InvalidFileName);
         };
 
         let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
@@ -142,9 +138,10 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
         Ok(())
     } else if let Some(_) = path.strip_prefix("pg_tblspc/") {
         // TODO
-        Err(FilePathError::new("tablespaces not supported"))
+        error!("tablespaces not implemented yet");
+        Err(FilePathError::InvalidFileName)
     } else {
-        Err(FilePathError::new("invalid relation data file name"))
+        Err(FilePathError::InvalidFileName)
     }
 }
 
