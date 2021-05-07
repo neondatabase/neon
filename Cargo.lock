@@ -2238,6 +2238,7 @@ dependencies = [
  "crc32c",
  "daemonize",
  "fs2",
+ "hex",
  "lazy_static",
  "log",
  "pageserver",

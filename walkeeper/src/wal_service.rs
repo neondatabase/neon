@@ -78,9 +78,7 @@ fn read_into(r: &mut impl Read, buf: &mut BytesMut) -> io::Result<usize> {
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 struct NodeId {
     uuid: u128,
-    #[serde(serialize_with = "serialize_u64_flip_endian")]
-    #[serde(deserialize_with = "deserialize_u64_flip_endian")]
-    term: u64,
+    term: [u8; 8],
 }
 
 #[repr(C)]
@@ -236,23 +234,6 @@ fn parse_hex_str(s: &str) -> Result<u64> {
     }
 }
 
-// For use with serde's `serialize_with` attribute
-fn serialize_u64_flip_endian<S>(x: &u64, s: S) -> std::result::Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    s.serialize_u64(u64::from_be(*x))
-}
-
-// For use with serde's `deserialize_with` attribute
-fn deserialize_u64_flip_endian<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let x: u64 = serde::de::Deserialize::deserialize(deserializer)?;
-    Ok(u64::from_be(x))
-}
-
 impl SafeKeeperInfo {
     fn new() -> SafeKeeperInfo {
         SafeKeeperInfo {
@@ -262,7 +243,10 @@ impl SafeKeeperInfo {
             server: ServerInfo {
                 protocol_version: SK_PROTOCOL_VERSION, /* proxy-safekeeper protocol version */
                 pg_version: UNKNOWN_SERVER_VERSION,    /* Postgres server version */
-                node_id: NodeId { term: 0, uuid: 0 },
+                node_id: NodeId {
+                    term: [0; 8],
+                    uuid: 0,
+                },
                 system_id: 0, /* Postgres system identifier */
                 timeline_id: ZTimelineId::from([0u8; 16]),
                 wal_end: 0,
@@ -588,8 +572,8 @@ impl Connection {
             self.send()?;
             io_error!(
                 "Reject connection attempt with term {} because my term is {}",
-                prop.node_id.term,
-                my_info.server.node_id.term
+                hex::encode(prop.node_id.term),
+                hex::encode(my_info.server.node_id.term)
             );
         }
         my_info.server.node_id = prop.node_id;
