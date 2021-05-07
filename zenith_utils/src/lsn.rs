@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::path::Path;
@@ -10,7 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Lsn(pub u64);
 
 /// We tried to parse an LSN from a string, but failed
