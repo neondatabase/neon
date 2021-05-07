@@ -1,7 +1,7 @@
-///
-///   WAL service listens for client connections and
-///   receive WAL from wal_proposer and send it to WAL receivers
-///
+//!
+//!   WAL service listens for client connections and
+//!   receive WAL from wal_proposer and send it to WAL receivers
+//!
 use anyhow::{anyhow, bail, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -666,9 +666,9 @@ impl Connection {
         Ok(())
     }
 
-    //
-    // Read full message or return None if connection is closed
-    //
+    ///
+    /// Read full message or return None if connection is closed
+    ///
     fn read_message(&mut self) -> Result<Option<FeMessage>> {
         loop {
             if let Some(message) = self.parse_message()? {
@@ -685,9 +685,9 @@ impl Connection {
         }
     }
 
-    //
-    // Parse libpq message
-    //
+    ///
+    /// Parse libpq message
+    ///
     fn parse_message(&mut self) -> Result<Option<FeMessage>> {
         let msg = if !self.init_done {
             FeStartupMessage::parse(&mut self.inbuf)?
@@ -697,23 +697,23 @@ impl Connection {
         Ok(msg)
     }
 
-    //
-    // Reset output buffer to start accumulating data of new message
-    //
+    ///
+    /// Reset output buffer to start accumulating data of new message
+    ///
     fn start_sending(&mut self) {
         self.outbuf.clear();
     }
 
-    //
-    // Send buffered messages
-    //
+    ///
+    /// Send buffered messages
+    ///
     fn send(&mut self) -> Result<()> {
         Ok(self.stream.write_all(&self.outbuf)?)
     }
 
-    //
-    // Send WAL to replica or WAL receiver using standard libpq replication protocol
-    //
+    ///
+    /// Send WAL to replica or WAL receiver using standard libpq replication protocol
+    ///
     fn send_wal(&mut self) -> Result<()> {
         info!("WAL sender to {:?} is started", self.stream.peer_addr()?);
         loop {
@@ -760,9 +760,9 @@ impl Connection {
         Ok(())
     }
 
-    //
-    // Handle IDENTIFY_SYSTEM replication command
-    //
+    ///
+    /// Handle IDENTIFY_SYSTEM replication command
+    ///
     fn handle_identify_system(&mut self) -> Result<bool> {
         let (start_pos, timeline) = self.find_end_of_wal(false);
         let lsn = start_pos.to_string();
@@ -810,9 +810,9 @@ impl Connection {
         Ok(true)
     }
 
-    //
-    // Handle START_REPLICATION replication command
-    //
+    ///
+    /// Handle START_REPLICATION replication command
+    ///
     fn handle_start_replication(&mut self, cmd: &Bytes) -> Result<bool> {
         // helper function to encapsulate the regex -> Lsn magic
         fn get_start_stop(cmd: &[u8]) -> Result<(Lsn, Lsn)> {
