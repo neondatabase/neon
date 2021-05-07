@@ -8,3 +8,5 @@ pub mod seqwait;
 
 // Async version of SeqWait. Currently unused.
 // pub mod seqwait_async;
+
+pub mod bin_ser;
