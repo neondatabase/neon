@@ -1,6 +1,6 @@
 pub mod rocksdb;
 
-use crate::waldecoder::{Oid, DecodedWALRecord};
+use crate::waldecoder::{DecodedWALRecord, Oid};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -31,7 +31,6 @@ pub trait Repository {
 }
 
 pub trait Timeline {
-
     //------------------------------------------------------------------------------
     // Public GET functions
     //------------------------------------------------------------------------------
@@ -85,7 +84,7 @@ pub trait Timeline {
         &self,
         decoded: DecodedWALRecord,
         recdata: Bytes,
-        lsn: Lsn
+        lsn: Lsn,
     ) -> anyhow::Result<()>;
 
     /// Remember the all WAL before the given LSN has been processed.

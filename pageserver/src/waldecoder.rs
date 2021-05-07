@@ -309,7 +309,6 @@ pub struct DecodedWALRecord {
 pub type Oid = u32;
 pub type BlockNumber = u32;
 
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RelFileNode {

@@ -7,13 +7,14 @@
 
 use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::restore_timeline;
-use crate::waldecoder::{Oid, DecodedWALRecord, XlSmgrTruncate, XlCreateDatabase};
+use crate::waldecoder::{DecodedWALRecord, Oid, XlCreateDatabase, XlSmgrTruncate};
 use crate::walredo::WalRedoManager;
 use crate::ZTimelineId;
 use crate::{zenith_repo_dir, PageServerConf};
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
+use postgres_ffi::pg_constants;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -24,8 +25,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
-use postgres_ffi::pg_constants;
-
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -702,10 +701,7 @@ impl Timeline for RocksTimeline {
         for blknum in nblocks..old_rel_size {
             key_buf.clear();
             let key = CacheKey {
-                tag: BufferTag {
-                    rel,
-                    blknum,
-                },
+                tag: BufferTag { rel, blknum },
                 lsn,
             };
             key.pack(&mut key_buf);
@@ -802,8 +798,8 @@ impl Timeline for RocksTimeline {
         &self,
         decoded: DecodedWALRecord,
         recdata: Bytes,
-        lsn: Lsn) -> anyhow::Result<()>
-    {
+        lsn: Lsn,
+    ) -> anyhow::Result<()> {
         for blk in decoded.blocks.iter() {
             let tag = BufferTag {
                 rel: RelTag {

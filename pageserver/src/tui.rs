@@ -282,7 +282,7 @@ impl tui::widgets::Widget for MetricsWidget {
         lines.push(get_metric_str("Valid LSN range", &lsnrange));
         lines.push(get_metric_str("Last record LSN", &last_valid_recordlsn_str));
         */
-/*
+        /*
         lines.push(get_metric_u64(
             "# of cache entries",
             page_cache_stats.num_entries,
@@ -299,7 +299,7 @@ impl tui::widgets::Widget for MetricsWidget {
             "# of GetPage@LSN calls",
             page_cache_stats.num_getpage_requests,
         ));
-*/
+        */
         let text = Text::from(lines);
 
         Paragraph::new(text).render(inner_area, buf);
