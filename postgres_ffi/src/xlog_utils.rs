@@ -33,18 +33,8 @@ pub type TimestampTz = u64;
 pub type XLogSegNo = u64;
 
 #[allow(non_snake_case)]
-pub fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> u32 {
-    (xlogptr as u32) & (wal_segsz_bytes as u32 - 1)
-}
-
-#[allow(non_snake_case)]
 pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
     (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo
-}
-
-#[allow(non_snake_case)]
-pub fn XLByteToSeg(xlogptr: XLogRecPtr, wal_segsz_bytes: usize) -> XLogSegNo {
-    xlogptr / wal_segsz_bytes as u64
 }
 
 #[allow(non_snake_case)]
