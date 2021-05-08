@@ -194,14 +194,14 @@ fn parse_hex_str(s: &str) -> Result<u64> {
 
 impl Serializer for NodeId {
     fn pack(&self, buf: &mut BytesMut) {
-        buf.put_u128_le(self.uuid);
-        buf.put_u64(self.term); // use big endian to provide compatibility with memcmp
+        buf.put_u64_le(self.term);
+        buf.put_u128(self.uuid); // use big endian to provide compatibility with memcmp
     }
 
     fn unpack(buf: &mut BytesMut) -> NodeId {
         NodeId {
-            uuid: buf.get_u128_le(),
-            term: buf.get_u64(), // use big endian to provide compatibility with memcmp
+            term: buf.get_u64_le(),
+            uuid: buf.get_u128(), // use big endian to provide compatibility with memcmp
         }
     }
 }
