@@ -1,6 +1,6 @@
 pub mod inmemory;
 
-use crate::waldecoder::{Oid, DecodedWALRecord};
+use crate::waldecoder::{DecodedWALRecord, Oid};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -10,28 +10,22 @@ use zenith_utils::lsn::Lsn;
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
-///
-/// FIXME: I wish these would return an abstract `&dyn Timeline`.
 pub trait Repository {
     /// Get Timeline handle for given zenith timeline ID.
     ///
     /// The Timeline is expected to be already "open", i.e. `get_or_restore_timeline`
     /// should've been called on it earlier already.
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<inmemory::InMemoryTimeline>>;
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
     /// Get Timeline handle for given zenith timeline ID.
     ///
     /// Creates a new Timeline object if it's not "open" already.
-    fn get_or_restore_timeline(
-        &self,
-        timelineid: ZTimelineId,
-    ) -> Result<Arc<inmemory::InMemoryTimeline>>;
+    fn get_or_restore_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
     //fn get_stats(&self) -> RepositoryStats;
 }
 
 pub trait Timeline {
-
     //------------------------------------------------------------------------------
     // Public GET functions
     //------------------------------------------------------------------------------
@@ -85,7 +79,7 @@ pub trait Timeline {
         &self,
         decoded: DecodedWALRecord,
         recdata: Bytes,
-        lsn: Lsn
+        lsn: Lsn,
     ) -> anyhow::Result<()>;
 
     /// Remember the all WAL before the given LSN has been processed.

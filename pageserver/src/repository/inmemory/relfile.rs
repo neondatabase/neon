@@ -251,7 +251,7 @@ impl RelFileEntry {
                 dirty: true,
                 page_image: None,
                 record: Some(rec),
-            }
+            },
         );
     }
 
@@ -264,7 +264,7 @@ impl RelFileEntry {
                 dirty: true,
                 page_image: Some(img),
                 record: None,
-            }
+            },
         );
     }
 
@@ -277,8 +277,10 @@ impl RelFileEntry {
 
             if old.is_some() {
                 // We already had an entry for this LSN. That's odd..
-                warn!("Page version of rel {:?} blk {} at {} already exists",
-                      self.tag, blknum, lsn);
+                warn!(
+                    "Page version of rel {:?} blk {} at {} already exists",
+                    self.tag, blknum, lsn
+                );
             }
 
             // release lock on 'page_versions'
@@ -420,12 +422,7 @@ fn get_pg_relation_path(tag: RelTag) -> String {
     } else if tag.spcnode == pg_constants::DEFAULTTABLESPACE_OID {
         /* The default tablespace is {datadir}/base */
         if let Some(forkname) = forknumber_to_name(tag.forknum) {
-            format!(
-                "base/{}/{}_{}",
-                tag.dbnode,
-                tag.relnode,
-                forkname
-            )
+            format!("base/{}/{}_{}", tag.dbnode, tag.relnode, forkname)
         } else {
             format!("base/{}/{}", tag.dbnode, tag.relnode)
         }
@@ -440,10 +437,7 @@ fn get_pg_relation_path(tag: RelTag) -> String {
         if let Some(forkname) = forknumber_to_name(tag.forknum) {
             format!(
                 "pg_tblspc/{}/{}/{}_{}",
-                tag.spcnode,
-                tag.dbnode,
-                tag.relnode,
-                forkname,
+                tag.spcnode, tag.dbnode, tag.relnode, forkname,
             )
         } else {
             format!("pg_tblspc/{}/{}/{}", tag.spcnode, tag.dbnode, tag.relnode)

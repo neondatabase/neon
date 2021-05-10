@@ -20,10 +20,10 @@ use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 
-use zenith_utils::lsn::{AtomicLsn, Lsn};
-use zenith_utils::seqwait::SeqWait;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::parse_relfilename;
+use zenith_utils::lsn::{AtomicLsn, Lsn};
+use zenith_utils::seqwait::SeqWait;
 
 mod relfile;
 
@@ -42,16 +42,16 @@ pub struct InMemoryRepository {
 
 /// Public interface
 impl Repository for InMemoryRepository {
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<InMemoryTimeline>> {
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let timelines = self.timelines.lock().unwrap();
 
         match timelines.get(&timelineid) {
-            Some(timeline) => Ok(Arc::clone(&timeline)),
+            Some(timeline) => Ok(timeline.clone()),
             None => bail!("timeline not found"),
         }
     }
 
-    fn get_or_restore_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<InMemoryTimeline>> {
+    fn get_or_restore_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
         match timelines.get(&timelineid) {
@@ -224,8 +224,8 @@ impl Timeline for InMemoryTimeline {
         &self,
         decoded: DecodedWALRecord,
         recdata: Bytes,
-        lsn: Lsn) -> anyhow::Result<()>
-    {
+        lsn: Lsn,
+    ) -> anyhow::Result<()> {
         for blk in decoded.blocks.iter() {
             let tag = BufferTag {
                 rel: RelTag {
