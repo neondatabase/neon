@@ -80,8 +80,8 @@ fn read_into(r: &mut impl Read, buf: &mut BytesMut) -> io::Result<usize> {
 /// Unique node identifier used by Paxos
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 struct NodeId {
-    uuid: u128,
-    term: [u8; 8],
+    term: u64,
+    uuid: [u8; 16],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -227,8 +227,8 @@ impl SafeKeeperInfo {
                 protocol_version: SK_PROTOCOL_VERSION, /* proxy-safekeeper protocol version */
                 pg_version: UNKNOWN_SERVER_VERSION,    /* Postgres server version */
                 node_id: NodeId {
-                    term: [0; 8],
-                    uuid: 0,
+                    term: 0,
+                    uuid: [0; 16],
                 },
                 system_id: 0, /* Postgres system identifier */
                 timeline_id: ZTimelineId::from([0u8; 16]),
@@ -555,8 +555,8 @@ impl Connection {
             self.send()?;
             bail!(
                 "Reject connection attempt with term {} because my term is {}",
-                hex::encode(prop.node_id.term),
-                hex::encode(my_info.server.node_id.term)
+                prop.node_id.term,
+                my_info.server.node_id.term,
             );
         }
         my_info.server.node_id = prop.node_id;
