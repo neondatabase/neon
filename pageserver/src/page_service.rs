@@ -54,6 +54,7 @@ enum FeMessage {
 #[derive(Debug)]
 enum BeMessage {
     AuthenticationOk,
+    ParameterStatus,
     ReadyForQuery,
     RowDescription,
     ParseComplete,
@@ -439,6 +440,16 @@ impl Connection {
                 self.stream.write_i32::<BE>(0)?;
             }
 
+            BeMessage::ParameterStatus => {
+                self.stream.write_u8(b'S')?;
+                // parameter names and values are specified by null terminated strings
+                const PARAM_NAME_VALUE: &[u8] = b"client_encoding\0UTF8\0";
+                // length of this i32 + rest of data in message
+                self.stream
+                    .write_i32::<BE>(4 + PARAM_NAME_VALUE.len() as i32)?;
+                self.stream.write(PARAM_NAME_VALUE)?;
+            }
+
             BeMessage::ReadyForQuery => {
                 self.stream.write_u8(b'Z')?;
                 self.stream.write_i32::<BE>(4 + 1)?;
@@ -575,6 +586,9 @@ impl Connection {
                         }
                         StartupRequestCode::Normal => {
                             self.write_message_noflush(&BeMessage::AuthenticationOk)?;
+                            // psycopg2 will not connect if client_encoding is not
+                            // specified by the server
+                            self.write_message_noflush(&BeMessage::ParameterStatus)?;
                             self.write_message(&BeMessage::ReadyForQuery)?;
                             self.init_done = true;
                         }
@@ -674,6 +688,11 @@ impl Connection {
         } else if query_string.starts_with(b"status") {
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&BeMessage::DataRow)?;
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)?;
+        } else if query_string.to_ascii_lowercase().starts_with(b"set ") {
+            // important because psycopg2 executes "SET datestyle TO 'ISO'"
+            // on connect
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
         } else {
