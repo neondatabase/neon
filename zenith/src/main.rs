@@ -11,7 +11,7 @@ use control_plane::local_env::LocalEnv;
 use control_plane::storage::PageServerNode;
 use control_plane::{compute::ComputeControlPlane, local_env, storage};
 
-use pageserver::ZTimelineId;
+use pageserver::{branches::BranchInfo, ZTimelineId};
 
 fn zenith_repo_dir() -> PathBuf {
     // Find repository path
@@ -175,23 +175,43 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             cplane.new_node(timeline)?;
         }
         ("list", Some(_sub_m)) => {
-            let mut tl2branch = HashMap::<ZTimelineId, String>::new();
-            let branches_dir = zenith_repo_dir().join("refs").join("branches");
-            for path in fs::read_dir(branches_dir.clone())? {
-                let branch_name = path?.file_name().to_str().unwrap().to_string();
-                let branch_file = branches_dir.join(branch_name.clone());
-                let timelineid = fs::read_to_string(branch_file)?.parse::<ZTimelineId>()?;
-                tl2branch.insert(timelineid, branch_name);
-            }
+            let page_server = storage::PageServerNode::from_env(env);
+            let mut client = page_server.page_server_psql_client()?;
+            let branches_msgs = client.simple_query("pg_list")?;
 
-            println!("NODE\tADDRESS\t\tSTATUS\tBRANCH");
+            let branches_json = branches_msgs
+                .first()
+                .map(|msg| match msg {
+                    postgres::SimpleQueryMessage::Row(row) => row.get(0),
+                    _ => None,
+                })
+                .flatten()
+                .ok_or_else(|| anyhow!("missing branches"))?;
+
+            let branch_infos: Vec<BranchInfo> = serde_json::from_str(branches_json)?;
+            let branch_infos: Result<HashMap<ZTimelineId, String>> = branch_infos
+                .into_iter()
+                .map(|branch_info| {
+                    let timeline_id = ZTimelineId::from_str(&branch_info.timeline_id)?;
+                    let lsn_string_opt = branch_info.latest_valid_lsn.map(|lsn| lsn.to_string());
+                    let lsn_str = lsn_string_opt.as_deref().unwrap_or("?");
+                    let branch_lsn_string = format!("{}@{}", branch_info.name, lsn_str);
+                    Ok((timeline_id, branch_lsn_string))
+                })
+                .collect();
+            let branch_infos = branch_infos?;
+
+            println!("NODE\tADDRESS\t\tSTATUS\tBRANCH@LSN");
             for (node_name, node) in cplane.nodes.iter() {
                 println!(
                     "{}\t{}\t{}\t{}",
                     node_name,
                     node.address,
                     node.status(),
-                    tl2branch[&node.timelineid]
+                    branch_infos
+                        .get(&node.timelineid)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?")
                 );
             }
         }

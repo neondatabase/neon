@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -6,6 +7,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 pub mod basebackup;
+pub mod branches;
 pub mod page_cache;
 pub mod page_service;
 pub mod repository;
