@@ -24,7 +24,7 @@ use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
 use crate::page_cache;
-use crate::repository::{BufferTag, RelTag, Repository, Timeline};
+use crate::repository::{BufferTag, RelTag, Repository};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;

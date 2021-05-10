@@ -162,7 +162,7 @@ impl RocksRepository {
 
 // Get handle to a given timeline. It is assumed to already exist.
 impl Repository for RocksRepository {
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<RocksTimeline>> {
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let timelines = self.timelines.lock().unwrap();
 
         match timelines.get(&timelineid) {
@@ -171,7 +171,7 @@ impl Repository for RocksRepository {
         }
     }
 
-    fn get_or_restore_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<RocksTimeline>> {
+    fn get_or_restore_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
         match timelines.get(&timelineid) {
