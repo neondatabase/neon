@@ -62,7 +62,7 @@ enum BeMessage {
     NoData,
     BindComplete,
     CloseComplete,
-    DataRow,
+    DataRow(Bytes),
     CommandComplete,
     ControlFile,
 
@@ -73,6 +73,8 @@ enum BeMessage {
     ZenithNblocksResponse(ZenithStatusResponse),
     ZenithReadResponse(ZenithReadResponse),
 }
+
+const HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(Bytes::from_static(b"hello world"));
 
 #[derive(Debug)]
 struct ZenithRequest {
@@ -502,10 +504,7 @@ impl Connection {
             }
 
             // XXX: accept some text data
-            BeMessage::DataRow => {
-                // XXX
-                let b = Bytes::from("hello world");
-
+            BeMessage::DataRow(b) => {
                 self.stream.write_u8(b'D')?;
                 self.stream.write_i32::<BE>(4 + 2 + 4 + b.len() as i32)?;
 
@@ -685,9 +684,17 @@ impl Connection {
 
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
+        } else if query_string.starts_with(b"pg_list") {
+            let branches = crate::branches::get_branches(&*page_cache::get_repository())?;
+            let branches_buf = serde_json::to_vec(&branches)?;
+
+            self.write_message_noflush(&BeMessage::RowDescription)?;
+            self.write_message_noflush(&BeMessage::DataRow(Bytes::from(branches_buf)))?;
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.starts_with(b"status") {
             self.write_message_noflush(&BeMessage::RowDescription)?;
-            self.write_message_noflush(&BeMessage::DataRow)?;
+            self.write_message_noflush(&HELLO_WORLD_ROW)?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.to_ascii_lowercase().starts_with(b"set ") {
@@ -697,7 +704,7 @@ impl Connection {
             self.write_message(&BeMessage::ReadyForQuery)?;
         } else {
             self.write_message_noflush(&BeMessage::RowDescription)?;
-            self.write_message_noflush(&BeMessage::DataRow)?;
+            self.write_message_noflush(&HELLO_WORLD_ROW)?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
         }

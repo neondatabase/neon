@@ -1182,6 +1182,7 @@ dependencies = [
  "rocksdb",
  "rust-s3",
  "serde",
+ "serde_json",
  "slog",
  "slog-async",
  "slog-scope",
@@ -2449,7 +2450,9 @@ dependencies = [
  "clap",
  "control_plane",
  "pageserver",
+ "postgres",
  "postgres_ffi",
+ "serde_json",
  "workspace_hack",
 ]
 
