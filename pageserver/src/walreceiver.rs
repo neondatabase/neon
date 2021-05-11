@@ -142,25 +142,18 @@ fn walreceiver_main(
     // use 'last_record_lsn' rather than 'last_valid_lsn' here.
     let last_rec_lsn = timeline.get_last_record_lsn();
     let mut startpoint = last_rec_lsn;
+
     if startpoint == Lsn(0) {
-        // If we start here with identify.xlogpos we will have race condition with
-        // postgres start: insert into postgres may request page that was modified with lsn
-        // smaller than identify.xlogpos.
-        //
-        // Current procedure for starting postgres will anyway be changed to something
-        // different like having 'initdb' method on a pageserver (or importing some shared
-        // empty database snapshot), so for now I just put start of first segment which
-        // seems to be a valid record.
-        timeline.init_valid_lsn(Lsn(0x0100_0000));
-        startpoint = Lsn(0x0100_0000);
-    } else {
-        // There might be some padding after the last full record, skip it.
-        //
-        // FIXME: It probably would be better to always start streaming from the beginning
-        // of the page, or the segment, so that we could check the page/segment headers
-        // too. Just for the sake of paranoia.
-        startpoint += startpoint.calc_padding(8u32);
+        error!("No previous WAL position");
     }
+
+    // There might be some padding after the last full record, skip it.
+    //
+    // FIXME: It probably would be better to always start streaming from the beginning
+    // of the page, or the segment, so that we could check the page/segment headers
+    // too. Just for the sake of paranoia.
+    startpoint += startpoint.calc_padding(8u32);
+
     debug!(
         "last_record_lsn {} starting replication from {} for timeline {}, server is at {}...",
         last_rec_lsn, startpoint, timelineid, end_of_wal
