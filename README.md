@@ -73,11 +73,6 @@ Depends on the modified 'postgres' binary for WAL redo.
 
 Tests with different combinations of a Postgres compute node, WAL safekeeper and Page Server.
 
-/mgmt-console:
-
-Web UI to launch (modified) Postgres servers, using S3 as the backing store. Written in Python.
-This is somewhat outdated, as it doesn't use the WAL safekeeper or Page Servers.
-
 /vendor/postgres:
 
 PostgreSQL source tree, with the modifications needed for Zenith.
