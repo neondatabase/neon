@@ -4,7 +4,9 @@ use crate::waldecoder::{DecodedWALRecord, Oid};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::fmt;
 use std::sync::Arc;
+use postgres_ffi::relfile_utils::forknumber_to_name;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -134,6 +136,20 @@ impl RelTag {
             dbnode: buf.get_u32(),
             relnode: buf.get_u32(),
             forknum: buf.get_u32() as u8,
+        }
+    }
+}
+
+/// Display RelTag in the same format that's used in most PostgreSQL debug messages:
+///
+/// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]
+///
+impl fmt::Display for RelTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(forkname) = forknumber_to_name(self.forknum) {
+            write!(f, "{}/{}/{}_{}", self.spcnode, self.dbnode, self.relnode, forkname)
+        } else {
+            write!(f, "{}/{}/{}", self.spcnode, self.dbnode, self.relnode)
         }
     }
 }

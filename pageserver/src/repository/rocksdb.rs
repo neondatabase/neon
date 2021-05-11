@@ -335,13 +335,13 @@ impl RocksTimeline {
                         break;
                     }
                     let relsize = tag.blknum + 1;
-                    debug!("Size of relation {:?} at {} is {}", rel, lsn, relsize);
+                    debug!("Size of relation {} at {} is {}", rel, lsn, relsize);
                     return Ok(relsize);
                 }
             }
             break;
         }
-        debug!("Size of relation {:?} at {} is zero", rel, lsn);
+        debug!("Size of relation {} at {} is zero", rel, lsn);
         Ok(0)
     }
 
@@ -399,8 +399,8 @@ impl RocksTimeline {
                             let (base_img, records) =
                                 self.collect_records_for_apply(key.tag, key.lsn);
 
-                            trace!("Reconstruct most recent page {}/{}/{}_{} blk {} at {} from {} records",
-                                   key.tag.rel.spcnode, key.tag.rel.dbnode, key.tag.rel.relnode, key.tag.rel.forknum, key.tag.blknum, key.lsn, records.len());
+                            trace!("Reconstruct most recent page {} blk {} at {} from {} records",
+                                   key.tag.rel, key.tag.blknum, key.lsn, records.len());
 
                             let new_img = self
                                 .walredo_mgr
@@ -428,8 +428,8 @@ impl RocksTimeline {
                                     if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
                                         let (base_img, records) =
                                             self.collect_records_for_apply(key.tag, key.lsn);
-                                        trace!("Reconstruct horizon page {}/{}/{}_{} blk {} at {} from {} records",
-                                              key.tag.rel.spcnode, key.tag.rel.dbnode, key.tag.rel.relnode, key.tag.rel.forknum, key.tag.blknum, key.lsn, records.len());
+                                        trace!("Reconstruct horizon page {} blk {} at {} from {} records",
+                                              key.tag.rel, key.tag.blknum, key.lsn, records.len());
                                         let new_img = self
                                             .walredo_mgr
                                             .request_redo(key.tag, key.lsn, base_img, records)?;
@@ -437,28 +437,11 @@ impl RocksTimeline {
 
                                         truncated += 1;
                                     } else {
-                                        trace!(
-                                            "Keeping horizon page {}/{}/{}_{} blk {} at {}",
-                                            key.tag.rel.spcnode,
-                                            key.tag.rel.dbnode,
-                                            key.tag.rel.relnode,
-                                            key.tag.rel.forknum,
-                                            key.tag.blknum,
-                                            key.lsn
-                                        );
+                                        trace!("Keeping horizon page {} blk {} at {}", key.tag.rel, key.tag.blknum, key.lsn);
                                     }
                                 }
                             } else {
-                                trace!(
-                                    "Last page {}/{}/{}_{} blk {} at {}, horizon {}",
-                                    key.tag.rel.spcnode,
-                                    key.tag.rel.dbnode,
-                                    key.tag.rel.relnode,
-                                    key.tag.rel.forknum,
-                                    key.tag.blknum,
-                                    key.lsn,
-                                    horizon
-                                );
+                                trace!("Last page {} blk {} at {}, horizon {}", key.tag.rel, key.tag.blknum, key.lsn, horizon);
                             }
                             // remove records prior to horizon
                             loop {
@@ -479,15 +462,7 @@ impl RocksTimeline {
                                     v[0] |= UNUSED_VERSION_FLAG;
                                     self.db.put(k, &v[..])?;
                                     deleted += 1;
-                                    trace!(
-                                        "deleted: {}/{}/{}_{} blk {} at {}",
-                                        key.tag.rel.spcnode,
-                                        key.tag.rel.dbnode,
-                                        key.tag.rel.relnode,
-                                        key.tag.rel.forknum,
-                                        key.tag.blknum,
-                                        key.lsn
-                                    );
+                                    trace!("deleted: {} blk {} at {}", key.tag.rel, key.tag.blknum, key.lsn);
                                 } else {
                                     break;
                                 }
@@ -583,21 +558,17 @@ impl Timeline for RocksTimeline {
                     u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
                 let page_lsn_lo =
                     u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
-                debug!(
-                    "Returning page with LSN {:X}/{:X} for {}/{}/{}.{} blk {}",
+                debug!("Returning page with LSN {:X}/{:X} for {} blk {}",
                     page_lsn_hi,
                     page_lsn_lo,
-                    tag.rel.spcnode,
-                    tag.rel.dbnode,
-                    tag.rel.relnode,
-                    tag.rel.forknum,
+                    tag.rel,
                     tag.blknum
                 );
                 return Ok(page_img);
             }
         }
         static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-        debug!("Page {:?} at {}({}) not found", tag, req_lsn, lsn);
+        debug!("Page {} blk {} at {}({}) not found", tag.rel, tag.blknum, req_lsn, lsn);
         Ok(Bytes::from_static(&ZERO_PAGE))
         /* return Err("could not find page image")?; */
     }
@@ -633,11 +604,11 @@ impl Timeline for RocksTimeline {
             buf.extend_from_slice(&k);
             let tag = BufferTag::unpack(&mut buf);
             if tag.rel == rel {
-                debug!("Relation {:?} exists at {}", rel, lsn);
+                debug!("Relation {} exists at {}", rel, lsn);
                 return Ok(true);
             }
         }
-        debug!("Relation {:?} doesn't exist at {}", rel, lsn);
+        debug!("Relation {} doesn't exist at {}", rel, lsn);
         Ok(false)
     }
 
@@ -659,15 +630,7 @@ impl Timeline for RocksTimeline {
         content.pack(&mut val_buf);
 
         let _res = self.db.put(&key_buf[..], &val_buf[..]);
-        trace!(
-            "put_wal_record {} {}/{}/{}_{} blk at {}",
-            tag.rel.spcnode,
-            tag.rel.dbnode,
-            tag.rel.relnode,
-            tag.rel.forknum,
-            tag.blknum,
-            lsn
-        );
+        trace!("put_wal_record rel {} blk {} at {}", tag.rel, tag.blknum, lsn);
 
         self.num_entries.fetch_add(1, Ordering::Relaxed);
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
@@ -684,15 +647,7 @@ impl Timeline for RocksTimeline {
 
         let content = CacheEntryContent::Truncation;
         // set new relation size
-        trace!(
-            "Truncate relation {}/{}/{}_{} to {} blocks at {}",
-            rel.spcnode,
-            rel.dbnode,
-            rel.relnode,
-            rel.forknum,
-            nblocks,
-            lsn
-        );
+        trace!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
 
         let mut key_buf = BytesMut::new();
         let mut val_buf = BytesMut::new();
@@ -729,15 +684,7 @@ impl Timeline for RocksTimeline {
         trace!("put_wal_record lsn: {}", key.lsn);
         let _res = self.db.put(&key_buf[..], &val_buf[..]);
 
-        trace!(
-            "put_page_image {} {}/{}/{}_{} blk at {}",
-            tag.rel.spcnode,
-            tag.rel.dbnode,
-            tag.rel.relnode,
-            tag.rel.forknum,
-            tag.blknum,
-            lsn
-        );
+        trace!("put_page_image rel {} blk {} at {}", tag.rel, tag.blknum, lsn);
         self.num_page_images.fetch_add(1, Ordering::Relaxed);
     }
 
