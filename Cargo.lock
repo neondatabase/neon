@@ -2462,4 +2462,5 @@ dependencies = [
  "hex-literal",
  "serde",
  "thiserror",
+ "workspace_hack",
 ]
