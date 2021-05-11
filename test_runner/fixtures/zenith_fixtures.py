@@ -3,8 +3,8 @@ import pytest
 import shutil
 import subprocess
 import sys
-from fixtures.utils import (get_self_dir, mkdir_if_needed,
-                            subprocess_capture, global_counter)
+from .utils import (get_self_dir, mkdir_if_needed,
+                    subprocess_capture, global_counter)
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
