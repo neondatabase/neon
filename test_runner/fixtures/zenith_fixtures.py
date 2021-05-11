@@ -53,8 +53,9 @@ def zenfixture(func):
 @pytest.fixture(autouse=True, scope='session')
 def safety_check():
     """ Ensure that no unwanted daemons are running before we start testing. """
-    cmd = ['pgrep', '-c', 'pageserver|postgres|wal_acceptor']
-    result = subprocess.run(cmd)
+    # does not use -c as it is not supported on macOS
+    cmd = ['pgrep', 'pageserver|postgres|wal_acceptor']
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
     if result.returncode == 0:
         # returncode of 0 means it found something.
         # This is bad; we don't want any of those processes polluting the
