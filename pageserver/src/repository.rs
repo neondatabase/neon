@@ -4,9 +4,9 @@ use crate::waldecoder::{DecodedWALRecord, Oid};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use postgres_ffi::relfile_utils::forknumber_to_name;
 use std::fmt;
 use std::sync::Arc;
-use postgres_ffi::relfile_utils::forknumber_to_name;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -142,7 +142,11 @@ impl RelTag {
 impl fmt::Display for RelTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(forkname) = forknumber_to_name(self.forknum) {
-            write!(f, "{}/{}/{}_{}", self.spcnode, self.dbnode, self.relnode, forkname)
+            write!(
+                f,
+                "{}/{}/{}_{}",
+                self.spcnode, self.dbnode, self.relnode, forkname
+            )
         } else {
             write!(f, "{}/{}/{}", self.spcnode, self.dbnode, self.relnode)
         }

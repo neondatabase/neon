@@ -399,8 +399,13 @@ impl RocksTimeline {
                             let (base_img, records) =
                                 self.collect_records_for_apply(key.tag, key.lsn);
 
-                            trace!("Reconstruct most recent page {} blk {} at {} from {} records",
-                                   key.tag.rel, key.tag.blknum, key.lsn, records.len());
+                            trace!(
+                                "Reconstruct most recent page {} blk {} at {} from {} records",
+                                key.tag.rel,
+                                key.tag.blknum,
+                                key.lsn,
+                                records.len()
+                            );
 
                             let new_img = self
                                 .walredo_mgr
@@ -437,11 +442,22 @@ impl RocksTimeline {
 
                                         truncated += 1;
                                     } else {
-                                        trace!("Keeping horizon page {} blk {} at {}", key.tag.rel, key.tag.blknum, key.lsn);
+                                        trace!(
+                                            "Keeping horizon page {} blk {} at {}",
+                                            key.tag.rel,
+                                            key.tag.blknum,
+                                            key.lsn
+                                        );
                                     }
                                 }
                             } else {
-                                trace!("Last page {} blk {} at {}, horizon {}", key.tag.rel, key.tag.blknum, key.lsn, horizon);
+                                trace!(
+                                    "Last page {} blk {} at {}, horizon {}",
+                                    key.tag.rel,
+                                    key.tag.blknum,
+                                    key.lsn,
+                                    horizon
+                                );
                             }
                             // remove records prior to horizon
                             loop {
@@ -462,7 +478,12 @@ impl RocksTimeline {
                                     v[0] |= UNUSED_VERSION_FLAG;
                                     self.db.put(k, &v[..])?;
                                     deleted += 1;
-                                    trace!("deleted: {} blk {} at {}", key.tag.rel, key.tag.blknum, key.lsn);
+                                    trace!(
+                                        "deleted: {} blk {} at {}",
+                                        key.tag.rel,
+                                        key.tag.blknum,
+                                        key.lsn
+                                    );
                                 } else {
                                     break;
                                 }
@@ -558,17 +579,18 @@ impl Timeline for RocksTimeline {
                     u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
                 let page_lsn_lo =
                     u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
-                debug!("Returning page with LSN {:X}/{:X} for {} blk {}",
-                    page_lsn_hi,
-                    page_lsn_lo,
-                    tag.rel,
-                    tag.blknum
+                debug!(
+                    "Returning page with LSN {:X}/{:X} for {} blk {}",
+                    page_lsn_hi, page_lsn_lo, tag.rel, tag.blknum
                 );
                 return Ok(page_img);
             }
         }
         static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-        debug!("Page {} blk {} at {}({}) not found", tag.rel, tag.blknum, req_lsn, lsn);
+        debug!(
+            "Page {} blk {} at {}({}) not found",
+            tag.rel, tag.blknum, req_lsn, lsn
+        );
         Ok(Bytes::from_static(&ZERO_PAGE))
         /* return Err("could not find page image")?; */
     }
@@ -630,7 +652,12 @@ impl Timeline for RocksTimeline {
         content.pack(&mut val_buf);
 
         let _res = self.db.put(&key_buf[..], &val_buf[..]);
-        trace!("put_wal_record rel {} blk {} at {}", tag.rel, tag.blknum, lsn);
+        trace!(
+            "put_wal_record rel {} blk {} at {}",
+            tag.rel,
+            tag.blknum,
+            lsn
+        );
 
         self.num_entries.fetch_add(1, Ordering::Relaxed);
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
@@ -684,7 +711,12 @@ impl Timeline for RocksTimeline {
         trace!("put_wal_record lsn: {}", key.lsn);
         let _res = self.db.put(&key_buf[..], &val_buf[..]);
 
-        trace!("put_page_image rel {} blk {} at {}", tag.rel, tag.blknum, lsn);
+        trace!(
+            "put_page_image rel {} blk {} at {}",
+            tag.rel,
+            tag.blknum,
+            lsn
+        );
         self.num_page_images.fetch_add(1, Ordering::Relaxed);
     }
 
