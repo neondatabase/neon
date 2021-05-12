@@ -159,6 +159,37 @@ pub fn get_branch_timeline(repopath: &Path, branchname: &str) -> ZTimelineId {
     ZTimelineId::from_str(&(fs::read_to_string(&branchpath).unwrap())).unwrap()
 }
 
+/// Returns a map of timeline IDs to branch_name@lsn strings.
+/// Connects to the pageserver to query this information.
+fn get_branch_infos(env: &LocalEnv) -> Result<HashMap<ZTimelineId, String>> {
+    let page_server = storage::PageServerNode::from_env(env);
+    let mut client = page_server.page_server_psql_client()?;
+    let branches_msgs = client.simple_query("pg_list")?;
+
+    let branches_json = branches_msgs
+        .first()
+        .map(|msg| match msg {
+            postgres::SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .flatten()
+        .ok_or_else(|| anyhow!("missing branches"))?;
+
+    let branch_infos: Vec<BranchInfo> = serde_json::from_str(branches_json)?;
+    let branch_infos: Result<HashMap<ZTimelineId, String>> = branch_infos
+        .into_iter()
+        .map(|branch_info| {
+            let timeline_id = ZTimelineId::from_str(&branch_info.timeline_id)?;
+            let lsn_string_opt = branch_info.latest_valid_lsn.map(|lsn| lsn.to_string());
+            let lsn_str = lsn_string_opt.as_deref().unwrap_or("?");
+            let branch_lsn_string = format!("{}@{}", branch_info.name, lsn_str);
+            Ok((timeline_id, branch_lsn_string))
+        })
+        .collect();
+
+    branch_infos
+}
+
 fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
@@ -177,31 +208,10 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             cplane.new_node(timeline)?;
         }
         ("list", Some(_sub_m)) => {
-            let page_server = storage::PageServerNode::from_env(env);
-            let mut client = page_server.page_server_psql_client()?;
-            let branches_msgs = client.simple_query("pg_list")?;
-
-            let branches_json = branches_msgs
-                .first()
-                .map(|msg| match msg {
-                    postgres::SimpleQueryMessage::Row(row) => row.get(0),
-                    _ => None,
-                })
-                .flatten()
-                .ok_or_else(|| anyhow!("missing branches"))?;
-
-            let branch_infos: Vec<BranchInfo> = serde_json::from_str(branches_json)?;
-            let branch_infos: Result<HashMap<ZTimelineId, String>> = branch_infos
-                .into_iter()
-                .map(|branch_info| {
-                    let timeline_id = ZTimelineId::from_str(&branch_info.timeline_id)?;
-                    let lsn_string_opt = branch_info.latest_valid_lsn.map(|lsn| lsn.to_string());
-                    let lsn_str = lsn_string_opt.as_deref().unwrap_or("?");
-                    let branch_lsn_string = format!("{}@{}", branch_info.name, lsn_str);
-                    Ok((timeline_id, branch_lsn_string))
-                })
-                .collect();
-            let branch_infos = branch_infos?;
+            let branch_infos = get_branch_infos(env).unwrap_or_else(|e| {
+                eprintln!("Failed to load branch info: {}", e);
+                HashMap::new()
+            });
 
             println!("NODE\tADDRESS\t\tSTATUS\tBRANCH@LSN");
             for (node_name, node) in cplane.nodes.iter() {
