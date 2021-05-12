@@ -1,11 +1,8 @@
 use crate::ZTimelineId;
 use log::*;
-use postgres_ffi::FilePathError;
 use std::io::Write;
 use tar::Builder;
 use walkdir::WalkDir;
-
-use crate::ZTimelineId;
 
 use postgres_ffi::relfile_utils::*;
 use zenith_utils::lsn::Lsn;

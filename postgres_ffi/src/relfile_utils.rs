@@ -2,6 +2,7 @@
 /// Common utilities for dealing with PostgreSQL relation files.
 ///
 use regex::Regex;
+use crate::pg_constants;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum FilePathError {
@@ -21,10 +22,10 @@ impl From<core::num::ParseIntError> for FilePathError {
 pub fn forkname_to_number(forkname: Option<&str>) -> Result<u8, FilePathError> {
     match forkname {
         // "main" is not in filenames, it's implicit if the fork name is not present
-        None => Ok(0),
-        Some("fsm") => Ok(1),
-        Some("vm") => Ok(2),
-        Some("init") => Ok(3),
+        None => Ok(pg_constants::MAIN_FORKNUM),
+        Some("fsm") => Ok(pg_constants::FSM_FORKNUM),
+        Some("vm") => Ok(pg_constants::VISIBILITYMAP_FORKNUM),
+        Some("init") => Ok(pg_constants::INIT_FORKNUM),
         Some(_) => Err(FilePathError::InvalidForkName),
     }
 }
@@ -32,10 +33,10 @@ pub fn forkname_to_number(forkname: Option<&str>) -> Result<u8, FilePathError> {
 /// Convert Postgres fork number to the right suffix of the relation data file.
 pub fn forknumber_to_name(forknum: u8) -> Option<&'static str> {
     match forknum {
-        0 => None,
-        1 => Some("fsm"),
-        2 => Some("vm"),
-        3 => Some("init"),
+        pg_constants::MAIN_FORKNUM => None,
+        pg_constants::FSM_FORKNUM => Some("fsm"),
+        pg_constants::VISIBILITYMAP_FORKNUM => Some("vm"),
+        pg_constants::INIT_FORKNUM => Some("init"),
         _ => panic!("unrecognized fork number"),
     }
 }

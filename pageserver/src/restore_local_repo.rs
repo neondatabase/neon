@@ -29,7 +29,6 @@ use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
-use postgres_ffi::FilePathError;
 use zenith_utils::lsn::Lsn;
 
 ///

@@ -76,7 +76,6 @@ pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 // From pg_control.h and rmgrlist.h
 pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
-pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 
 // From heapam_xlog.h
 pub const XLOG_HEAP_INSERT: u8 = 0x00;
