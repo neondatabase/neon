@@ -15,13 +15,13 @@ pub const MAIN_FORKNUM: u8 = 0;
 pub const FSM_FORKNUM: u8 = 1;
 pub const VISIBILITYMAP_FORKNUM: u8 = 2;
 pub const INIT_FORKNUM: u8 = 3;
-
 // Special values for non-rel files' tags (Zenith-specific)
-pub const PG_CONTROLFILE_FORKNUM: u32 = 42;
-pub const PG_FILENODEMAP_FORKNUM: u32 = 43;
-pub const PG_XACT_FORKNUM: u32 = 44;
-pub const PG_MXACT_OFFSETS_FORKNUM: u32 = 45;
-pub const PG_MXACT_MEMBERS_FORKNUM: u32 = 46;
+//Special values for non-rel files' tags
+pub const PG_CONTROLFILE_FORKNUM: u8 = 42;
+pub const PG_FILENODEMAP_FORKNUM: u8 = 43;
+pub const PG_XACT_FORKNUM: u8 = 44;
+pub const PG_MXACT_OFFSETS_FORKNUM: u8 = 45;
+pub const PG_MXACT_MEMBERS_FORKNUM: u8 = 46;
 
 // From storage_xlog.h
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
@@ -33,6 +33,13 @@ pub const CLOG_XACTS_PER_BYTE: u32 = 4;
 pub const CLOG_XACTS_PER_PAGE: u32 = 8192 * CLOG_XACTS_PER_BYTE;
 pub const CLOG_BITS_PER_XACT: u8 = 2;
 pub const CLOG_XACT_BITMASK: u8 = (1 << CLOG_BITS_PER_XACT) - 1;
+
+//
+// Constants from visbilitymap.h
+//
+pub const SIZE_OF_PAGE_HEADER: u16 = 24;
+pub const BITS_PER_HEAPBLOCK: u16 = 2;
+pub const HEAPBLOCKS_PER_PAGE: u16 = (BLCKSZ - SIZE_OF_PAGE_HEADER) * 8 / BITS_PER_HEAPBLOCK;
 
 pub const TRANSACTION_STATUS_COMMITTED: u8 = 0x01;
 pub const TRANSACTION_STATUS_ABORTED: u8 = 0x02;
@@ -69,13 +76,32 @@ pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 // From pg_control.h and rmgrlist.h
 pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
+pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
+
+// From heapam_xlog.h
+pub const XLOG_HEAP_INSERT: u8 = 0x00;
+pub const XLOG_HEAP_DELETE: u8 = 0x10;
+pub const XLOG_HEAP_UPDATE: u8 = 0x20;
+pub const XLOG_HEAP_HOT_UPDATE: u8 = 0x40;
+pub const XLOG_HEAP2_VISIBLE: u8 = 0x40;
+pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
+pub const XLH_INSERT_ALL_FROZEN_SET: u8 = (1 << 5) as u8;
+pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
+pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
+pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = (1 << 1) as u8;
+pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
+
 pub const RM_XLOG_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;
 pub const RM_SMGR_ID: u8 = 2;
 pub const RM_CLOG_ID: u8 = 3;
 pub const RM_DBASE_ID: u8 = 4;
 pub const RM_TBLSPC_ID: u8 = 5;
-// pub const RM_MULTIXACT_ID:u8 = 6;
+pub const RM_MULTIXACT_ID: u8 = 6;
+pub const RM_RELMAP_ID: u8 = 7;
+pub const RM_STANDBY_ID: u8 = 8;
+pub const RM_HEAP2_ID: u8 = 9;
+pub const RM_HEAP_ID: u8 = 10;
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;

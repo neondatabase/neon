@@ -11,7 +11,6 @@
 //
 
 use log::*;
-
 use std::cmp::max;
 use std::fs;
 use std::fs::File;
@@ -30,6 +29,7 @@ use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::FilePathError;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -199,8 +199,7 @@ fn restore_relfile(
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
 
-    // FIXME: use constants (BLCKSZ)
-    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / 8192);
+    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
     loop {
         let r = file.read_exact(&mut buf);
         match r {
@@ -210,7 +209,7 @@ fn restore_relfile(
                         spcnode: spcoid,
                         dbnode: dboid,
                         relnode,
-                        forknum: forknum as u8,
+                        forknum,
                     },
                     blknum,
                 };
@@ -246,7 +245,7 @@ fn restore_nonrelfile(
     timeline: &dyn Timeline,
     _timelineid: ZTimelineId,
     snapshot: &str,
-    forknum: u32,
+    forknum: u8,
     path: &Path,
 ) -> Result<()> {
     let lsn = Lsn::from_hex(snapshot)?;
@@ -257,7 +256,6 @@ fn restore_nonrelfile(
     let mut buf: [u8; 8192] = [0u8; 8192];
     let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
 
-    // FIXME: use constants (BLCKSZ)
     let mut blknum: u32 = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
     loop {
         let r = file.read_exact(&mut buf);
@@ -268,7 +266,7 @@ fn restore_nonrelfile(
                         spcnode: 0,
                         dbnode: 0,
                         relnode: 0,
-                        forknum: forknum as u8,
+                        forknum,
                     },
                     blknum,
                 };

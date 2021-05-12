@@ -134,7 +134,7 @@ struct ParsedBaseImageFileName {
     pub spcnode: u32,
     pub dbnode: u32,
     pub relnode: u32,
-    pub forknum: u32,
+    pub forknum: u8,
     pub segno: u32,
 
     pub lsn: u64,
@@ -146,7 +146,7 @@ struct ParsedBaseImageFileName {
 // <oid>.<segment number>
 // <oid>_<fork name>.<segment number>
 
-fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
+fn parse_filename(fname: &str) -> Result<(u32, u8, u32, u64), FilePathError> {
     let re = Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?_(?P<lsnhi>[[:xdigit:]]{8})(?P<lsnlo>[[:xdigit:]]{8})$").unwrap();
 
     let caps = re
@@ -252,8 +252,7 @@ async fn slurp_base_file(
 
     let mut bytes = BytesMut::from(data.as_slice()).freeze();
 
-    // FIXME: use constants (BLCKSZ)
-    let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / 8192);
+    let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
 
     let pcache = page_cache::get_pagecache(conf, sys_id);
 
@@ -263,7 +262,7 @@ async fn slurp_base_file(
                 spcnode: parsed.spcnode,
                 dbnode: parsed.dbnode,
                 relnode: parsed.relnode,
-                forknum: parsed.forknum as u8,
+                forknum: parsed.forknum,
             },
             blknum,
         };
