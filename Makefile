@@ -32,10 +32,14 @@ postgres-headers: postgres-configure
 	+@echo "Installing PostgreSQL headers"
 	$(MAKE) -C tmp_install/build/src/include MAKELEVEL=0 install
 
-# Compile and install PostgreSQL
+
+# Compile and install PostgreSQL and contrib/zenith
 postgres: postgres-configure
 	+@echo "Compiling PostgreSQL"
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 install
+	+@echo "Compiling contrib/zenith"
+	(cd vendor/postgres/contrib/zenith && \
+	$(MAKE) PG_CONFIG=$(abspath tmp_install)/bin/pg_config install USE_PGXS=1)
 
 postgres-clean:
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 clean
