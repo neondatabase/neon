@@ -1,12 +1,13 @@
+use std::{collections::btree_map::Entry, str::FromStr};
 use anyhow::Result;
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context, bail};
 use clap::{App, Arg, ArgMatches, SubCommand};
 use std::collections::HashMap;
 use std::process::exit;
-
-use control_plane::compute::ComputeControlPlane;
-use control_plane::local_env;
 use control_plane::storage::PageServerNode;
+use control_plane::{compute::ComputeControlPlane, local_env};
+use control_plane::{local_env::LocalEnv, remotes};
+
 use pageserver::{branches::BranchInfo, ZTimelineId};
 use zenith_utils::lsn::Lsn;
 
@@ -60,6 +61,20 @@ fn main() -> Result<()> {
                 .subcommand(SubCommand::with_name("start").arg(name_arg.clone()))
                 .subcommand(SubCommand::with_name("stop").arg(name_arg.clone()))
                 .subcommand(SubCommand::with_name("destroy").arg(name_arg.clone())),
+        )
+        .subcommand(
+            SubCommand::with_name("remote")
+                .about("Manage remote pagerservers")
+                .subcommand(
+                    SubCommand::with_name("add")
+                        .about("Add a new remote pageserver")
+                        .arg(Arg::with_name("name").required(true))
+                        .arg(
+                            Arg::with_name("url")
+                                .help("PostgreSQL connection URI")
+                                .required(true),
+                        ),
+                ),
         )
         .get_matches();
 
@@ -146,6 +161,13 @@ fn main() -> Result<()> {
                 exit(1);
             }
         }
+
+        ("remote", Some(remote_match)) => {
+            if let Err(e) = handle_remote(remote_match, &env) {
+                eprintln!("remote operation failed: {}", e);
+                exit(1);
+            }
+        }
         _ => {}
     };
 
@@ -229,6 +251,31 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
         }
 
         _ => {}
+    }
+
+    Ok(())
+}
+
+fn handle_remote(remote_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> {
+    let mut remotes = remotes::load_remotes(local_env)?;
+    match remote_match.subcommand() {
+        ("add", Some(args)) => {
+            let name = args.value_of("name").unwrap();
+            let url = args.value_of("url").unwrap();
+
+            // validate the URL
+            postgres::Config::from_str(url)?;
+
+            match remotes.entry(name.to_string()) {
+                Entry::Vacant(vacant) => {
+                    vacant.insert(url.to_string());
+                }
+                Entry::Occupied(_) => bail!("origin '{}' already exists", name),
+            }
+
+            remotes::save_remotes(local_env, &remotes)?;
+        }
+        _ => bail!("unknown command"),
     }
 
     Ok(())

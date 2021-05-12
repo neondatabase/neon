@@ -6,10 +6,12 @@
 //
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::env;
+use std::{collections::BTreeMap, env};
 use std::fs;
 use std::path::PathBuf;
 use url::Url;
+
+use crate::remotes;
 
 //
 // This data structures represent deserialized zenith CLI config
@@ -128,6 +130,8 @@ pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
 
     let toml = toml::to_string(&conf)?;
     fs::write(conf.base_data_dir.join("config"), toml)?;
+    // initialize remotes file
+    remotes::save_remotes(&conf, &BTreeMap::default())?;
 
     Ok(())
 }
