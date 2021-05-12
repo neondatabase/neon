@@ -386,6 +386,8 @@ impl WalRedoProcess {
                 .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
             config.write_all(b"shared_buffers=128kB\n")?;
             config.write_all(b"fsync=off\n")?;
+            config.write_all(b"shared_preload_libraries=zenith\n")?;
+            config.write_all(b"zenith.wal_redo=on\n")?;
         }
         // Start postgres itself
         let mut child = Command::new("postgres")

@@ -105,7 +105,8 @@ impl ComputeControlPlane {
         node.append_conf(
             "postgresql.conf",
             format!(
-                "callmemaybe_connstring = '{}'\n", // FIXME escaping
+                "shared_preload_libraries = zenith\n\
+                zenith.callmemaybe_connstring = '{}'\n", // FIXME escaping
                 node.connstr()
             )
             .as_str(),
@@ -132,7 +133,8 @@ impl ComputeControlPlane {
         node.append_conf(
             "postgresql.conf",
             format!(
-                "callmemaybe_connstring = '{}'\n", // FIXME escaping
+                "shared_preload_libraries = zenith\n\
+                zenith.callmemaybe_connstring = '{}'\n", // FIXME escaping
                 node.connstr()
             )
             .as_str(),
@@ -169,7 +171,7 @@ impl PostgresNode {
         lazy_static! {
             static ref CONF_PORT_RE: Regex = Regex::new(r"(?m)^\s*port\s*=\s*(\d+)\s*$").unwrap();
             static ref CONF_TIMELINE_RE: Regex =
-                Regex::new(r"(?m)^\s*zenith_timeline\s*=\s*'(\w+)'\s*$").unwrap();
+                Regex::new(r"(?m)^\s*zenith.zenith_timeline\s*=\s*'(\w+)'\s*$").unwrap();
         }
 
         // parse data directory name
@@ -312,8 +314,9 @@ impl PostgresNode {
         self.append_conf(
             "postgresql.conf",
             &format!(
-                "page_server_connstring = 'host={} port={}'\n\
-                      zenith_timeline='{}'\n",
+                "shared_preload_libraries = zenith \n\
+                 zenith.page_server_connstring = 'host={} port={}'\n\
+                 zenith.zenith_timeline='{}'\n",
                 self.pageserver.address().ip(),
                 self.pageserver.address().port(),
                 self.timelineid
