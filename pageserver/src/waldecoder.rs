@@ -307,10 +307,9 @@ pub struct DecodedWALRecord {
 }
 
 pub type Oid = u32;
+pub type TransactionId = u32;
 pub type BlockNumber = u32;
-
-pub const MAIN_FORKNUM: u8 = 0;
-pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
+pub type OffsetNumber = u16;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -362,6 +361,82 @@ impl XlCreateDatabase {
             tablespace_id: buf.get_u32_le(),
             src_db_id: buf.get_u32_le(),
             src_tablespace_id: buf.get_u32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlHeapInsert {
+    pub offnum: OffsetNumber,
+    pub flags: u8,
+}
+
+impl XlHeapInsert {
+    pub fn decode(buf: &mut Bytes) -> XlHeapInsert {
+        XlHeapInsert {
+            offnum: buf.get_u16_le(),
+            flags: buf.get_u8(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlHeapMultiInsert {
+    pub flags: u8,
+    pub ntuples: u16,
+}
+
+impl XlHeapMultiInsert {
+    pub fn decode(buf: &mut Bytes) -> XlHeapMultiInsert {
+        XlHeapMultiInsert {
+            flags: buf.get_u8(),
+            ntuples: buf.get_u16_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlHeapDelete {
+    pub xmax: TransactionId,
+    pub offnum: OffsetNumber,
+    pub infobits_set: u8,
+    pub flags: u8,
+}
+
+impl XlHeapDelete {
+    pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
+        XlHeapDelete {
+            xmax: buf.get_u32_le(),
+            offnum: buf.get_u16_le(),
+            infobits_set: buf.get_u8(),
+            flags: buf.get_u8(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlHeapUpdate {
+    pub old_xmax: TransactionId,
+    pub old_offnum: OffsetNumber,
+    pub old_infobits_set: u8,
+    pub flags: u8,
+    pub new_xmax: TransactionId,
+    pub new_offnum: OffsetNumber,
+}
+
+impl XlHeapUpdate {
+    pub fn decode(buf: &mut Bytes) -> XlHeapUpdate {
+        XlHeapUpdate {
+            old_xmax: buf.get_u32_le(),
+            old_offnum: buf.get_u16_le(),
+            old_infobits_set: buf.get_u8(),
+            flags: buf.get_u8(),
+            new_xmax: buf.get_u32_le(),
+            new_offnum: buf.get_u16_le(),
         }
     }
 }
@@ -617,7 +692,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     //5. Handle special CLOG and XACT records
     if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
         let mut blk = DecodedBkpBlock::new();
-        blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+        blk.forknum = pg_constants::PG_XACT_FORKNUM;
         blk.blkno = buf.get_i32_le() as u32;
         blk.will_init = true;
         trace!("RM_CLOG_ID updates block {}", blk.blkno);
@@ -626,7 +701,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
         if info == pg_constants::XLOG_XACT_COMMIT {
             let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+            blk.forknum = pg_constants::PG_XACT_FORKNUM;
             blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
             trace!(
                 "XLOG_XACT_COMMIT xl_info {} xl_prev {:X}/{:X}  xid {} updates block {} main_data_len {}",
@@ -659,7 +734,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     if prev_blkno != blkno {
                         prev_blkno = blkno;
                         let mut blk = DecodedBkpBlock::new();
-                        blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+                        blk.forknum = pg_constants::PG_XACT_FORKNUM;
                         blk.blkno = blkno;
                         blocks.push(blk);
                     }
@@ -694,7 +769,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             }
         } else if info == pg_constants::XLOG_XACT_ABORT {
             let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+            blk.forknum = pg_constants::PG_XACT_FORKNUM;
             blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
             trace!(
                 "XLOG_XACT_ABORT xl_info {} xl_prev {:X}/{:X} xid {} updates block {} main_data_len {}",
@@ -726,7 +801,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     if prev_blkno != blkno {
                         prev_blkno = blkno;
                         let mut blk = DecodedBkpBlock::new();
-                        blk.forknum = pg_constants::PG_XACT_FORKNUM as u8;
+                        blk.forknum = pg_constants::PG_XACT_FORKNUM;
                         blk.blkno = blkno;
                         blocks.push(blk);
                     }
@@ -781,6 +856,79 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             trace!("XLOG_TBLSPC_CREATE ts_id {} ts_path {}", ts_id, ts_path);
         } else {
             trace!("XLOG_TBLSPC_DROP is not handled yet");
+        }
+    } else if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
+        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
+        if info == pg_constants::XLOG_HEAP_INSERT {
+            let xlrec = XlHeapInsert::decode(&mut buf);
+            if (xlrec.flags
+                & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
+                    | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
+                != 0
+            {
+                let mut blk = DecodedBkpBlock::new();
+                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
+                blk.blkno = blkno;
+                blk.rnode_spcnode = blocks[0].rnode_spcnode;
+                blk.rnode_dbnode = blocks[0].rnode_dbnode;
+                blk.rnode_relnode = blocks[0].rnode_relnode;
+                blocks.push(blk);
+            }
+        } else if info == pg_constants::XLOG_HEAP_DELETE {
+            let xlrec = XlHeapDelete::decode(&mut buf);
+            if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                let mut blk = DecodedBkpBlock::new();
+                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
+                blk.blkno = blkno;
+                blk.rnode_spcnode = blocks[0].rnode_spcnode;
+                blk.rnode_dbnode = blocks[0].rnode_dbnode;
+                blk.rnode_relnode = blocks[0].rnode_relnode;
+                blocks.push(blk);
+            }
+        } else if info == pg_constants::XLOG_HEAP_UPDATE
+            || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+        {
+            let xlrec = XlHeapUpdate::decode(&mut buf);
+            if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                let mut blk = DecodedBkpBlock::new();
+                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
+                blk.blkno = blkno;
+                blk.rnode_spcnode = blocks[0].rnode_spcnode;
+                blk.rnode_dbnode = blocks[0].rnode_dbnode;
+                blk.rnode_relnode = blocks[0].rnode_relnode;
+                blocks.push(blk);
+            }
+            if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0
+                && blocks.len() > 1
+            {
+                let mut blk = DecodedBkpBlock::new();
+                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
+                blk.blkno = blocks[1].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
+                blk.rnode_spcnode = blocks[1].rnode_spcnode;
+                blk.rnode_dbnode = blocks[1].rnode_dbnode;
+                blk.rnode_relnode = blocks[1].rnode_relnode;
+                blocks.push(blk);
+            }
+        }
+    } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
+        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+            let xlrec = XlHeapMultiInsert::decode(&mut buf);
+            if (xlrec.flags
+                & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
+                    | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
+                != 0
+            {
+                let mut blk = DecodedBkpBlock::new();
+                let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
+                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
+                blk.blkno = blkno;
+                blk.rnode_spcnode = blocks[0].rnode_spcnode;
+                blk.rnode_dbnode = blocks[0].rnode_dbnode;
+                blk.rnode_relnode = blocks[0].rnode_relnode;
+                blocks.push(blk);
+            }
         }
     }
 

@@ -246,13 +246,13 @@ fn walreceiver_main(
                                 == pg_constants::XLOG_SMGR_TRUNCATE
                         {
                             let truncate = XlSmgrTruncate::decode(&decoded);
-                            if (truncate.flags & SMGR_TRUNCATE_HEAP) != 0 {
+                            if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
                                 let tag = BufferTag {
                                     rel: RelTag {
                                         spcnode: truncate.rnode.spcnode,
                                         dbnode: truncate.rnode.dbnode,
                                         relnode: truncate.rnode.relnode,
-                                        forknum: MAIN_FORKNUM,
+                                        forknum: pg_constants::MAIN_FORKNUM,
                                     },
                                     blknum: truncate.blkno,
                                 };

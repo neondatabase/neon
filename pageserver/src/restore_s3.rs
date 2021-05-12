@@ -134,49 +134,11 @@ const DEFAULTTABLESPACE_OID: u32 = 1663;
 const GLOBALTABLESPACE_OID: u32 = 1664;
 
 #[derive(Debug)]
-struct FilePathError {
-    msg: String,
-}
-
-impl FilePathError {
-    fn new(msg: &str) -> FilePathError {
-        FilePathError {
-            msg: msg.to_string(),
-        }
-    }
-}
-
-impl From<core::num::ParseIntError> for FilePathError {
-    fn from(e: core::num::ParseIntError) -> Self {
-        return FilePathError {
-            msg: format!("invalid filename: {}", e),
-        };
-    }
-}
-
-impl fmt::Display for FilePathError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "invalid filename")
-    }
-}
-
-fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
-    match forkname {
-        // "main" is not in filenames, it's implicit if the fork name is not present
-        None => Ok(0),
-        Some("fsm") => Ok(1),
-        Some("vm") => Ok(2),
-        Some("init") => Ok(3),
-        Some(_) => Err(FilePathError::new("invalid forkname")),
-    }
-}
-
-#[derive(Debug)]
 struct ParsedBaseImageFileName {
     pub spcnode: u32,
     pub dbnode: u32,
     pub relnode: u32,
-    pub forknum: u32,
+    pub forknum: u8,
     pub segno: u32,
 
     pub lsn: u64,
@@ -188,7 +150,7 @@ struct ParsedBaseImageFileName {
 // <oid>.<segment number>
 // <oid>_<fork name>.<segment number>
 
-fn parse_filename(fname: &str) -> Result<(u32, u32, u32, u64), FilePathError> {
+fn parse_filename(fname: &str) -> Result<(u32, u8, u32, u64), FilePathError> {
     let re = Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?_(?P<lsnhi>[[:xdigit:]]{8})(?P<lsnlo>[[:xdigit:]]{8})$").unwrap();
 
     let caps = re
@@ -294,8 +256,7 @@ async fn slurp_base_file(
 
     let mut bytes = BytesMut::from(data.as_slice()).freeze();
 
-    // FIXME: use constants (BLCKSZ)
-    let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / 8192);
+    let mut blknum: u32 = parsed.segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
 
     let pcache = page_cache::get_pagecache(conf, sys_id);
 
@@ -305,7 +266,7 @@ async fn slurp_base_file(
                 spcnode: parsed.spcnode,
                 dbnode: parsed.dbnode,
                 relnode: parsed.relnode,
-                forknum: parsed.forknum as u8,
+                forknum: parsed.forknum,
             },
             blknum,
         };

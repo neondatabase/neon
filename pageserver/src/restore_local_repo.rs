@@ -12,10 +12,8 @@
 
 use log::*;
 use regex::Regex;
-use std::fmt;
 
 use std::cmp::max;
-use std::error::Error;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -35,6 +33,7 @@ use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::FilePathError;
 use zenith_utils::lsn::Lsn;
 
 // From pg_tablespace_d.h
@@ -210,8 +209,7 @@ fn restore_relfile(
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
 
-    // FIXME: use constants (BLCKSZ)
-    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / 8192);
+    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
     loop {
         let r = file.read_exact(&mut buf);
         match r {
@@ -221,7 +219,7 @@ fn restore_relfile(
                         spcnode: spcoid,
                         dbnode: dboid,
                         relnode,
-                        forknum: forknum as u8,
+                        forknum,
                     },
                     blknum,
                 };
@@ -257,7 +255,7 @@ fn restore_nonrelfile(
     pcache: &PageCache,
     _timeline: ZTimelineId,
     snapshot: &str,
-    forknum: u32,
+    forknum: u8,
     path: &Path,
 ) -> Result<()> {
     let lsn = Lsn::from_hex(snapshot)?;
@@ -268,7 +266,6 @@ fn restore_nonrelfile(
     let mut buf: [u8; 8192] = [0u8; 8192];
     let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
 
-    // FIXME: use constants (BLCKSZ)
     let mut blknum: u32 = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
     loop {
         let r = file.read_exact(&mut buf);
@@ -279,7 +276,7 @@ fn restore_nonrelfile(
                         spcnode: 0,
                         dbnode: 0,
                         relnode: 0,
-                        forknum: forknum as u8,
+                        forknum,
                     },
                     blknum,
                 };
@@ -411,55 +408,12 @@ fn restore_wal(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct FilePathError {
-    msg: String,
-}
-
-impl Error for FilePathError {
-    fn description(&self) -> &str {
-        &self.msg
-    }
-}
-impl FilePathError {
-    fn new(msg: &str) -> FilePathError {
-        FilePathError {
-            msg: msg.to_string(),
-        }
-    }
-}
-
-impl From<core::num::ParseIntError> for FilePathError {
-    fn from(e: core::num::ParseIntError) -> Self {
-        return FilePathError {
-            msg: format!("invalid filename: {}", e),
-        };
-    }
-}
-
-impl fmt::Display for FilePathError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "invalid filename")
-    }
-}
-
-fn forkname_to_forknum(forkname: Option<&str>) -> Result<u32, FilePathError> {
-    match forkname {
-        // "main" is not in filenames, it's implicit if the fork name is not present
-        None => Ok(0),
-        Some("fsm") => Ok(1),
-        Some("vm") => Ok(2),
-        Some("init") => Ok(3),
-        Some(_) => Err(FilePathError::new("invalid forkname")),
-    }
-}
-
 #[derive(Debug)]
 struct ParsedBaseImageFileName {
     pub spcnode: u32,
     pub dbnode: u32,
     pub relnode: u32,
-    pub forknum: u32,
+    pub forknum: u8,
     pub segno: u32,
 
     pub lsn: u64,
@@ -471,7 +425,7 @@ struct ParsedBaseImageFileName {
 // <oid>.<segment number>
 // <oid>_<fork name>.<segment number>
 
-fn parse_relfilename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
+fn parse_relfilename(fname: &str) -> Result<(u32, u8, u32), FilePathError> {
     let re = Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();
 
     let caps = re
@@ -482,7 +436,7 @@ fn parse_relfilename(fname: &str) -> Result<(u32, u32, u32), FilePathError> {
     let relnode = u32::from_str_radix(relnode_str, 10)?;
 
     let forkname = caps.name("forkname").map(|f| f.as_str());
-    let forknum = forkname_to_forknum(forkname)?;
+    let forknum = postgres_ffi::forkname_to_forknum(forkname)?;
 
     let segno_match = caps.name("segno");
     let segno = if segno_match.is_none() {

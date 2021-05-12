@@ -7,6 +7,8 @@ pub mod pg_constants;
 pub mod xlog_utils;
 
 use bytes::{Buf, Bytes, BytesMut};
+use std::error::Error;
+use std::fmt;
 
 // sizeof(ControlFileData)
 const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
@@ -47,6 +49,50 @@ pub fn decode_pg_control(mut buf: Bytes) -> Result<ControlFileData, anyhow::Erro
     }
 
     Ok(controlfile)
+}
+
+#[derive(Debug, Clone)]
+pub struct FilePathError {
+    msg: String,
+}
+
+impl Error for FilePathError {
+    fn description(&self) -> &str {
+        &self.msg
+    }
+}
+
+impl FilePathError {
+    pub fn new(msg: &str) -> FilePathError {
+        FilePathError {
+            msg: msg.to_string(),
+        }
+    }
+}
+
+impl From<core::num::ParseIntError> for FilePathError {
+    fn from(e: core::num::ParseIntError) -> Self {
+        return FilePathError {
+            msg: format!("invalid filename: {}", e),
+        };
+    }
+}
+
+impl fmt::Display for FilePathError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "invalid filename")
+    }
+}
+
+pub fn forkname_to_forknum(forkname: Option<&str>) -> Result<u8, FilePathError> {
+    match forkname {
+        // "main" is not in filenames, it's implicit if the fork name is not present
+        None => Ok(pg_constants::MAIN_FORKNUM),
+        Some("fsm") => Ok(pg_constants::FSM_FORKNUM),
+        Some("vm") => Ok(pg_constants::VISIBILITYMAP_FORKNUM),
+        Some("init") => Ok(pg_constants::INIT_FORKNUM),
+        Some(_) => Err(FilePathError::new("invalid forkname")),
+    }
 }
 
 pub fn encode_pg_control(controlfile: ControlFileData) -> Bytes {
