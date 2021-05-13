@@ -7,6 +7,7 @@ pub mod pq_protocol;
 pub mod replication;
 pub mod s3_offload;
 pub mod send_wal;
+pub mod timeline;
 pub mod wal_service;
 
 use crate::pq_protocol::SystemId;

@@ -2,10 +2,9 @@
 //! "START REPLICATION" message.
 
 use crate::pq_protocol::{BeMessage, FeMessage};
-use crate::send_wal::SendWal;
-use crate::wal_service::{
-    HotStandbyFeedback, Timeline, TimelineTools, END_REPLICATION_MARKER, MAX_SEND_SIZE,
-};
+use crate::send_wal::SendWalConn;
+use crate::timeline::{Timeline, TimelineTools};
+use crate::wal_service::{HotStandbyFeedback, END_REPLICATION_MARKER, MAX_SEND_SIZE};
 use crate::WalAcceptorConf;
 use anyhow::{anyhow, bail, Result};
 use byteorder::{BigEndian, ByteOrder};
@@ -40,7 +39,8 @@ impl HotStandbyFeedback {
     }
 }
 
-pub struct ReplicationHandler {
+/// A network connection that's speaking the replication protocol.
+pub struct ReplicationConn {
     timeline: Option<Arc<Timeline>>,
     /// Postgres connection, buffered input
     ///
@@ -55,9 +55,9 @@ pub struct ReplicationHandler {
     appname: Option<String>,
 }
 
-impl ReplicationHandler {
+impl ReplicationConn {
     /// Create a new `SendWal`, consuming the `Connection`.
-    pub fn new(conn: SendWal) -> Self {
+    pub fn new(conn: SendWalConn) -> Self {
         Self {
             timeline: conn.timeline,
             stream_in: Some(conn.stream_in),
