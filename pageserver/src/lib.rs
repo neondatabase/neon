@@ -40,6 +40,13 @@ pub struct PageServerConf {
     pub workdir: PathBuf,
 
     pub pg_distrib_dir: PathBuf,
+
+    pub repository_format: RepositoryFormat,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepositoryFormat {
+    RocksDb,
 }
 
 impl PageServerConf {

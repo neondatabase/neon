@@ -260,7 +260,7 @@ mod tests {
     use crate::object_repository::ObjectRepository;
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
-    use crate::PageServerConf;
+    use crate::{PageServerConf, RepositoryFormat};
     use postgres_ffi::pg_constants;
     use std::fs;
     use std::path::PathBuf;
@@ -295,7 +295,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
+    fn get_test_repo(test_name: &str, repository_format: RepositoryFormat) -> Result<Box<dyn Repository>> {
         let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
         let _ = fs::remove_dir_all(&repo_dir);
         fs::create_dir_all(&repo_dir)?;
@@ -308,28 +308,37 @@ mod tests {
             listen_addr: "127.0.0.1:5430".parse().unwrap(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),
+            repository_format,
         };
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-        let obj_store = RocksObjectStore::create(conf)?;
+        let repo = match conf.repository_format {
+            RepositoryFormat::RocksDb => {
+                let obj_store = RocksObjectStore::create(conf)?;
 
-        let walredo_mgr = TestRedoManager {};
+                let walredo_mgr = TestRedoManager {};
 
-        let repo = ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr));
+                ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr))
+            }
+        };
 
         Ok(Box::new(repo))
     }
 
     /// Test get_relsize() and truncation.
     #[test]
-    fn test_relsize() -> Result<()> {
+    fn test_relsize_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_relsize_rocksdb", RepositoryFormat::RocksDb)?;
+        test_relsize(&*repo)
+    }
+
+    fn test_relsize(repo: &dyn Repository) -> Result<()> {
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
         // Create timeline to work on
-        let repo = get_test_repo("test_relsize")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
@@ -414,8 +423,12 @@ mod tests {
     /// This isn't very interesting with the RocksDb implementation, as we don't pay
     /// any attention to Postgres segment boundaries there.
     #[test]
-    fn test_large_rel() -> Result<()> {
-        let repo = get_test_repo("test_large_rel")?;
+    fn test_large_rel_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_large_rel", RepositoryFormat::RocksDb)?;
+        test_large_rel(&*repo)
+    }
+
+    fn test_large_rel(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
@@ -456,9 +469,11 @@ mod tests {
     }
 
     #[test]
-    fn test_history() -> Result<()> {
-        let repo = get_test_repo("test_snapshot")?;
-
+    fn test_history_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_history", RepositoryFormat::RocksDb)?;
+        test_history(&*repo)
+    }
+    fn test_history(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 

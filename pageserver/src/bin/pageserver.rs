@@ -21,7 +21,8 @@ use daemonize::Daemonize;
 
 use slog::{Drain, FnValue};
 
-use pageserver::{branches, page_cache, page_service, tui, PageServerConf};
+use pageserver::{branches, page_cache, page_service, tui};
+use pageserver::{PageServerConf, RepositoryFormat};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 
@@ -35,6 +36,7 @@ struct CfgFileParams {
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     pg_distrib_dir: Option<String>,
+    repository_format: Option<String>
 }
 
 impl CfgFileParams {
@@ -49,6 +51,7 @@ impl CfgFileParams {
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
             pg_distrib_dir: get_arg("postgres-distrib"),
+            repository_format: get_arg("repository-format"),
         }
     }
 
@@ -60,6 +63,7 @@ impl CfgFileParams {
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
+            repository_format: self.repository_format.or(other.repository_format),
         }
     }
 
@@ -90,6 +94,18 @@ impl CfgFileParams {
             anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
         }
 
+        // FIXME
+        let repository_format = match self.repository_format.as_ref() {
+            Some(repository_format_str) => {
+                if repository_format_str == "rocksdb" {
+                    RepositoryFormat::RocksDb
+                } else {
+                    anyhow::bail!("invalid --repository-format '{}', must be 'rocksdb'", repository_format_str);
+                }
+            },
+            None => RepositoryFormat::RocksDb,
+        };
+
         Ok(PageServerConf {
             daemonize: false,
             interactive: false,
@@ -101,6 +117,7 @@ impl CfgFileParams {
             workdir: PathBuf::from("."),
 
             pg_distrib_dir,
+            repository_format,
         })
     }
 }
@@ -159,6 +176,12 @@ fn main() -> Result<()> {
                 .long("postgres-distrib")
                 .takes_value(true)
                 .help("Postgres distribution directory"),
+        )
+        .arg(
+            Arg::with_name("repository-format")
+                .long("repository-format")
+                .takes_value(true)
+                .help("Which repository implementation to use (only 'rocksdb' is supported at the moment)"),
         )
         .get_matches();
 

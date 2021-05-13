@@ -7,7 +7,7 @@ use crate::object_repository::ObjectRepository;
 use crate::repository::Repository;
 use crate::rocksdb_storage::RocksObjectStore;
 use crate::walredo::PostgresRedoManager;
-use crate::PageServerConf;
+use crate::{PageServerConf, RepositoryFormat};
 use lazy_static::lazy_static;
 use std::sync::{Arc, Mutex};
 
@@ -18,15 +18,19 @@ lazy_static! {
 pub fn init(conf: &'static PageServerConf) {
     let mut m = REPOSITORY.lock().unwrap();
 
-    let obj_store = RocksObjectStore::open(conf).unwrap();
-
     // Set up a WAL redo manager, for applying WAL records.
     let walredo_mgr = PostgresRedoManager::new(conf);
 
     // we have already changed current dir to the repository.
-    let repo = ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr));
+    let repo = match conf.repository_format {
+        RepositoryFormat::RocksDb => {
+            let obj_store = RocksObjectStore::open(conf).unwrap();
 
-    *m = Some(Arc::new(repo));
+            Arc::new(ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr)))
+        }
+    };
+
+    *m = Some(repo);
 }
 
 pub fn get_repository() -> Arc<dyn Repository> {
