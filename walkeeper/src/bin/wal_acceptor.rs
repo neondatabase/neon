@@ -1,19 +1,17 @@
 //
 // Main entry point for the wal_acceptor executable
 //
+use anyhow::{Context, Result};
+use clap::{App, Arg};
 use daemonize::Daemonize;
 use log::*;
 use parse_duration::parse;
+use slog::Drain;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use std::{fs::File, fs::OpenOptions};
-
-use anyhow::Result;
-use clap::{App, Arg};
-
-use slog::Drain;
 
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
@@ -115,8 +113,18 @@ fn main() -> Result<()> {
 }
 
 fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
+    let log_filename = conf.data_dir.join("wal_acceptor.log");
+    // Don't open the same file for output multiple times;
+    // the different fds could overwrite each other's output.
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_filename)
+        .with_context(|| format!("failed to open {:?}", &log_filename))?;
+
     // Initialize logger
-    let _scope_guard = init_logging(&conf)?;
+    let logger_file = log_file.try_clone().unwrap();
+    let _scope_guard = init_logging(&conf, logger_file)?;
     let _log_guard = slog_stdlog::init().unwrap();
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
@@ -126,16 +134,8 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
 
         // There should'n be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fprintf's or backtraces.
-        let stdout = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("wal_acceptor.log")
-            .unwrap();
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("wal_acceptor.log")
-            .unwrap();
+        let stdout = log_file.try_clone().unwrap();
+        let stderr = log_file;
 
         let daemonize = Daemonize::new()
             .pid_file("wal_acceptor.pid")
@@ -178,14 +178,11 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     Ok(())
 }
 
-fn init_logging(conf: &WalAcceptorConf) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
+fn init_logging(
+    conf: &WalAcceptorConf,
+    log_file: File,
+) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
     if conf.daemonize {
-        let log = conf.data_dir.join("wal_acceptor.log");
-        let log_file = File::create(&log).map_err(|err| {
-            // We failed to initialize logging, so we can't log this message with error!
-            eprintln!("Could not create log file {:?}: {}", log, err);
-            err
-        })?;
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
         let drain = std::sync::Mutex::new(drain).fuse();

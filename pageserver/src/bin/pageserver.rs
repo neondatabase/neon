@@ -4,7 +4,7 @@
 
 use log::*;
 use parse_duration::parse;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::process::exit;
 use std::thread;
@@ -98,8 +98,19 @@ fn main() -> Result<()> {
 }
 
 fn start_pageserver(conf: &PageServerConf) -> Result<()> {
+    let repodir = zenith_repo_dir();
+    let log_filename = repodir.join("pageserver.log");
+    // Don't open the same file for output multiple times;
+    // the different fds could overwrite each other's output.
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_filename)
+        .with_context(|| format!("failed to open {:?}", &log_filename))?;
+
     // Initialize logger
-    let _scope_guard = init_logging(&conf)?;
+    let logger_file = log_file.try_clone().unwrap();
+    let _scope_guard = init_logging(&conf, logger_file)?;
     let _log_guard = slog_stdlog::init()?;
 
     // Note: this `info!(...)` macro comes from `log` crate
@@ -124,21 +135,10 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     if conf.daemonize {
         info!("daemonizing...");
 
-        let repodir = zenith_repo_dir();
-
         // There should'n be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fprintf's or backtraces.
-        let log_filename = repodir.join("pageserver.log");
-        let stdout = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_filename)
-            .with_context(|| format!("failed to open {:?}", &log_filename))?;
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_filename)
-            .with_context(|| format!("failed to open {:?}", &log_filename))?;
+        let stdout = log_file.try_clone().unwrap();
+        let stderr = log_file;
 
         let daemonize = Daemonize::new()
             .pid_file(repodir.join("pageserver.pid"))
@@ -199,20 +199,13 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     Ok(())
 }
 
-fn init_logging(conf: &PageServerConf) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
+fn init_logging(
+    conf: &PageServerConf,
+    log_file: File,
+) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
     if conf.interactive {
         Ok(tui::init_logging())
     } else if conf.daemonize {
-        let log = zenith_repo_dir().join("pageserver.log");
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
-            .map_err(|err| {
-                // We failed to initialize logging, so we can't log this message with error!
-                eprintln!("Could not create log file {:?}: {}", log, err);
-                err
-            })?;
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::FullFormat::new(decorator).build();
         let drain = slog::Filter::new(drain, |record: &slog::Record| {
