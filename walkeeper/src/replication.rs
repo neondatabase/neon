@@ -7,7 +7,6 @@ use crate::timeline::{Timeline, TimelineTools};
 use crate::wal_service::{HotStandbyFeedback, END_REPLICATION_MARKER, MAX_SEND_SIZE};
 use crate::WalAcceptorConf;
 use anyhow::{anyhow, bail, Result};
-use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, Bytes, BytesMut};
 use log::*;
 use postgres_ffi::xlog_utils::{get_current_timestamp, XLogFileName};
@@ -19,25 +18,12 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::{str, thread};
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
 const XLOG_HDR_SIZE: usize = 1 + 8 * 3; /* 'w' + startPos + walEnd + timestamp */
 const LIBPQ_HDR_SIZE: usize = 5; /* 1 byte with message type + 4 bytes length */
 const LIBPQ_MSG_SIZE_OFFS: usize = 1;
-
-// FIXME: we don't use consistent endian on this data structure.
-// In wal_service it's little-endian, but here it's big-endian.
-// FIXME: This function should go away and be replaced by
-// derived serde::Deserialize
-impl HotStandbyFeedback {
-    fn parse(body: &Bytes) -> HotStandbyFeedback {
-        HotStandbyFeedback {
-            ts: BigEndian::read_u64(&body[0..8]),
-            xmin: BigEndian::read_u64(&body[8..16]),
-            catalog_xmin: BigEndian::read_u64(&body[16..24]),
-        }
-    }
-}
 
 /// A network connection that's speaking the replication protocol.
 pub struct ReplicationConn {
@@ -77,7 +63,8 @@ impl ReplicationConn {
         loop {
             match FeMessage::read_from(&mut stream_in)? {
                 FeMessage::CopyData(m) => {
-                    timeline.add_hs_feedback(HotStandbyFeedback::parse(&m.body))
+                    let feedback = HotStandbyFeedback::des(&m.body)?;
+                    timeline.add_hs_feedback(feedback)
                 }
                 msg => {
                     info!("unexpected message {:?}", msg);
