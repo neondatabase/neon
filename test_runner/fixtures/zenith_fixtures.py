@@ -126,17 +126,34 @@ def pageserver(zenith_cli):
 class Postgres:
     """ An object representing a running postgres daemon. """
 
-    def __init__(self, zenith_cli):
+    def __init__(self, zenith_cli, repo_dir):
         self.zenith_cli = zenith_cli
         self.running = False
+        self.host = 'localhost'
+        self.port = 55432
+        self.repo_dir = repo_dir
         # path to conf is <repo_dir>/pgdatadirs/pg1/postgresql.conf
 
-    def create_start(self):
+    def create_start(self, config_lines=None):
         """ create the pg data directory, and start the server """
         self.zenith_cli.run(['pg', 'create'])
+        if config_lines is None:
+            config_lines = []
+        self.config(config_lines)
         # FIXME: where did the name pg1 come from?
         self.zenith_cli.run(['pg', 'start', 'pg1'])
         self.running = True
+
+
+    #lines should be an array of valid postgresql.conf rows
+    def config(self, lines):
+        #TODO use real node name, not just guessed pg1
+        filename = 'pgdatadirs/pg1/postgresql.conf'
+        config_name = os.path.join(self.repo_dir, filename)
+        with open(config_name, 'a') as conf:
+            for line in lines:
+                conf.write(line)
+                conf.write('\n')
 
     def stop(self):
         if self.running:
@@ -144,8 +161,8 @@ class Postgres:
 
 
 @zenfixture
-def postgres(zenith_cli):
-    pg = Postgres(zenith_cli)
+def postgres(zenith_cli, repo_dir):
+    pg = Postgres(zenith_cli, repo_dir)
     yield pg
     # After the yield comes any cleanup code we need.
     print('Starting postgres cleanup')
