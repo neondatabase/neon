@@ -449,7 +449,7 @@ impl Connection {
                 // length of this i32 + rest of data in message
                 self.stream
                     .write_i32::<BE>(4 + PARAM_NAME_VALUE.len() as i32)?;
-                self.stream.write(PARAM_NAME_VALUE)?;
+                self.stream.write_all(PARAM_NAME_VALUE)?;
             }
 
             BeMessage::ReadyForQuery => {
