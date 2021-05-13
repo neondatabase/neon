@@ -93,9 +93,7 @@ pub trait BeSer: Serialize + DeserializeOwned {
     }
 
     /// Deserialize from a reader
-    ///
-    /// tip: `&[u8]` implements `Read`
-    fn des_from<R: Read>(r: R) -> Result<Self, DeserializeError> {
+    fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
         be_coder().deserialize_from(r).or(Err(DeserializeError))
     }
 }
@@ -129,16 +127,63 @@ pub trait LeSer: Serialize + DeserializeOwned {
     }
 
     /// Deserialize from a reader
+    fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
+        le_coder().deserialize_from(r).or(Err(DeserializeError))
+    }
+}
+
+/// Binary serialize/deserialize helper functions (Big Endian)
+///
+/// This version panics on every serialization/deserialization error.
+/// That can be useful if you want to see a backtrace to find where the
+/// error occurred.
+pub trait LeSerPanic: Serialize + DeserializeOwned {
+    /// Serialize into a byte slice
+    fn ser_into_slice<W: Write>(&self, b: &mut [u8]) -> Result<(), SerializeError> {
+        // This is slightly awkward; we need a mutable reference to a mutable reference.
+        let mut w = b;
+        self.ser_into(&mut w)
+    }
+
+    /// Serialize into a borrowed writer
+    ///
+    /// This is useful for most `Write` types except `&mut [u8]`, which
+    /// can more easily use [`ser_into_slice`](Self::ser_into_slice).
+    fn ser_into<W: Write>(&self, w: &mut W) -> Result<(), SerializeError> {
+        le_coder()
+            .serialize_into(w, &self)
+            .or_else(|e| panic!("ser_into failed: {}", e))
+    }
+
+    /// Serialize into a new heap-allocated buffer
+    fn ser(&self) -> Result<Vec<u8>, SerializeError> {
+        le_coder()
+            .serialize(&self)
+            .or_else(|e| panic!("ser failed: {}", e))
+    }
+
+    /// Deserialize from a byte slice
+    fn des(buf: &[u8]) -> Result<Self, DeserializeError> {
+        le_coder()
+            .deserialize(buf)
+            .or_else(|e| panic!("des failed: {}", e))
+    }
+
+    /// Deserialize from a reader
     ///
     /// tip: `&[u8]` implements `Read`
-    fn des_from<R: Read>(r: R) -> Result<Self, DeserializeError> {
-        le_coder().deserialize_from(r).or(Err(DeserializeError))
+    fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
+        le_coder()
+            .deserialize_from(r)
+            .or_else(|e| panic!("des_from failed: {}", e))
     }
 }
 
 impl<T> BeSer for T where T: Serialize + DeserializeOwned {}
 
 impl<T> LeSer for T where T: Serialize + DeserializeOwned {}
+
+impl<T> LeSerPanic for T where T: Serialize + DeserializeOwned {}
 
 #[cfg(test)]
 mod tests {
@@ -205,13 +250,13 @@ mod tests {
         assert_eq!(buf.into_inner(), SHORT1_ENC_BE_TRAILING);
 
         // deserialize from a `Write` sink.
-        let buf = Cursor::new(SHORT2_ENC_BE);
-        let decoded = ShortStruct::des_from(buf).unwrap();
+        let mut buf = Cursor::new(SHORT2_ENC_BE);
+        let decoded = ShortStruct::des_from(&mut buf).unwrap();
         assert_eq!(decoded, SHORT2);
 
         // deserialize from a `Write` sink that terminates early.
-        let buf = Cursor::new([0u8; 4]);
-        ShortStruct::des_from(buf).unwrap_err();
+        let mut buf = Cursor::new([0u8; 4]);
+        ShortStruct::des_from(&mut buf).unwrap_err();
     }
 
     #[test]
@@ -234,13 +279,13 @@ mod tests {
         assert_eq!(buf.into_inner(), SHORT1_ENC_LE_TRAILING);
 
         // deserialize from a `Write` sink.
-        let buf = Cursor::new(SHORT2_ENC_LE);
-        let decoded = ShortStruct::des_from(buf).unwrap();
+        let mut buf = Cursor::new(SHORT2_ENC_LE);
+        let decoded = ShortStruct::des_from(&mut buf).unwrap();
         assert_eq!(decoded, SHORT2);
 
         // deserialize from a `Write` sink that terminates early.
-        let buf = Cursor::new([0u8; 4]);
-        ShortStruct::des_from(buf).unwrap_err();
+        let mut buf = Cursor::new([0u8; 4]);
+        ShortStruct::des_from(&mut buf).unwrap_err();
     }
 
     #[test]

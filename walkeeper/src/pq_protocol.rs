@@ -1,7 +1,7 @@
-use byteorder::{BigEndian, ByteOrder};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use byteorder::{BigEndian, ReadBytesExt};
+use bytes::{BufMut, Bytes, BytesMut};
 use pageserver::ZTimelineId;
-use std::io;
+use std::io::{self, Read};
 use std::str;
 use std::str::FromStr;
 
@@ -10,7 +10,6 @@ pub type SystemId = u64;
 
 #[derive(Debug)]
 pub enum FeMessage {
-    StartupMessage(FeStartupMessage),
     Query(FeQueryMessage),
     Terminate,
     CopyData(FeCopyData),
@@ -51,28 +50,22 @@ pub enum StartupRequestCode {
 }
 
 impl FeStartupMessage {
-    pub fn parse(buf: &mut BytesMut) -> io::Result<Option<FeMessage>> {
+    pub fn read_from(reader: &mut impl Read) -> io::Result<Self> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
         const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
         const NEGOTIATE_SSL_CODE: u32 = (1234 << 16) | 5679;
         const NEGOTIATE_GSS_CODE: u32 = (1234 << 16) | 5680;
 
-        if buf.len() < 4 {
-            return Ok(None);
-        }
-        let len = BigEndian::read_u32(&buf[0..4]) as usize;
+        let len = reader.read_u32::<BigEndian>()? as usize;
 
         if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "invalid message length",
+                "FeStartupMessage: invalid message length",
             ));
         }
-        if buf.len() < len {
-            return Ok(None);
-        }
 
-        let version = BigEndian::read_u32(&buf[4..8]);
+        let version = reader.read_u32::<BigEndian>()?;
 
         let kind = match version {
             CANCEL_REQUEST_CODE => StartupRequestCode::Cancel,
@@ -81,7 +74,11 @@ impl FeStartupMessage {
             _ => StartupRequestCode::Normal,
         };
 
-        let params_bytes = &buf[8..len];
+        // FIXME: A buffer pool would be nice, to avoid zeroing the buffer.
+        let params_len = len - 8;
+        let mut params_bytes = vec![0u8; params_len];
+        reader.read_exact(params_bytes.as_mut())?;
+
         let params_str = str::from_utf8(&params_bytes).unwrap();
         let params = params_str.split('\0');
         let mut options = false;
@@ -109,13 +106,12 @@ impl FeStartupMessage {
             ));
         }
 
-        buf.advance(len as usize);
-        Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
+        Ok(FeStartupMessage {
             version,
             kind,
             appname,
             timelineid: timelineid.unwrap(),
-        })))
+        })
     }
 }
 
@@ -201,44 +197,28 @@ impl<'a> BeMessage<'a> {
 }
 
 impl FeMessage {
-    pub fn parse(buf: &mut BytesMut) -> io::Result<Option<FeMessage>> {
-        if buf.len() < 5 {
-            let to_read = 5 - buf.len();
-            buf.reserve(to_read);
-            return Ok(None);
-        }
-
-        let tag = buf[0];
-        let len = BigEndian::read_u32(&buf[1..5]);
+    pub fn read_from(reader: &mut impl Read) -> io::Result<FeMessage> {
+        let tag = reader.read_u8()?;
+        let len = reader.read_u32::<BigEndian>()?;
 
         if len < 4 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid message length: parsing u32",
+                "FeMessage: invalid message length",
             ));
         }
 
-        let total_len = len as usize + 1;
-        if buf.len() < total_len {
-            let to_read = total_len - buf.len();
-            buf.reserve(to_read);
-            return Ok(None);
-        }
-
-        let mut body = buf.split_to(total_len);
-        body.advance(5);
+        let body_len = (len - 4) as usize;
+        let mut body = vec![0u8; body_len];
+        reader.read_exact(&mut body)?;
 
         match tag {
-            b'Q' => Ok(Some(FeMessage::Query(FeQueryMessage {
-                body: body.freeze(),
-            }))),
-            b'd' => Ok(Some(FeMessage::CopyData(FeCopyData {
-                body: body.freeze(),
-            }))),
-            b'X' => Ok(Some(FeMessage::Terminate)),
+            b'Q' => Ok(FeMessage::Query(FeQueryMessage { body: body.into() })),
+            b'd' => Ok(FeMessage::CopyData(FeCopyData { body: body.into() })),
+            b'X' => Ok(FeMessage::Terminate),
             tag => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unknown message tag: {},'{:?}'", tag, buf),
+                format!("unknown message tag: {},'{:?}'", tag, body),
             )),
         }
     }
