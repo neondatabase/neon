@@ -6,30 +6,26 @@ use anyhow::{bail, Result};
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 use bytes::{Buf, BufMut, BytesMut};
 use fs2::FileExt;
-use lazy_static::lazy_static;
 use log::*;
 use postgres::{Client, NoTls};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cmp::{max, min};
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
 use std::str;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::thread;
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 
 use crate::pq_protocol::*;
-use crate::send_wal::SendWal;
+use crate::send_wal::SendWalConn;
+use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
 use pageserver::ZTimelineId;
-use postgres_ffi::xlog_utils::{
-    find_end_of_wal, TimeLineID, TimestampTz, XLogFileName, XLOG_BLCKSZ,
-};
+use postgres_ffi::xlog_utils::{TimeLineID, TimestampTz, XLogFileName, XLOG_BLCKSZ};
 
 type FullTransactionId = u64;
 
@@ -39,8 +35,8 @@ const SK_PROTOCOL_VERSION: u32 = 1;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
-const CONTROL_FILE_NAME: &str = "safekeeper.control";
 const END_OF_STREAM: Lsn = Lsn(0);
+const CONTROL_FILE_NAME: &str = "safekeeper.control";
 
 /// Unique node identifier used by Paxos
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +71,7 @@ struct RequestVote {
 }
 
 /// Information of about storage node
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SafeKeeperInfo {
     /// magic for verifying content the control file
     pub magic: u32,
@@ -94,7 +90,7 @@ pub struct SafeKeeperInfo {
 }
 
 /// Hot standby feedback received from replica
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HotStandbyFeedback {
     pub ts: TimestampTz,
     pub xmin: FullTransactionId,
@@ -126,51 +122,121 @@ struct SafeKeeperResponse {
 
 /// Shared state associated with database instance (tenant)
 #[derive(Debug)]
-struct SharedState {
+pub struct SharedState {
     /// quorum commit LSN
-    commit_lsn: Lsn,
+    pub commit_lsn: Lsn,
     /// information about this safekeeper
-    info: SafeKeeperInfo,
+    pub info: SafeKeeperInfo,
     /// opened file control file handle (needed to hold exlusive file lock
-    control_file: Option<File>,
+    pub control_file: Option<File>,
     /// combined hot standby feedback from all replicas
-    hs_feedback: HotStandbyFeedback,
+    pub hs_feedback: HotStandbyFeedback,
 }
 
-/// Database instance (tenant)
-#[derive(Debug)]
-pub struct Timeline {
-    pub timelineid: ZTimelineId,
-    mutex: Mutex<SharedState>,
-    /// conditional variable used to notify wal senders
-    cond: Condvar,
-}
+impl SharedState {
+    pub fn new() -> Self {
+        Self {
+            commit_lsn: Lsn(0),
+            info: SafeKeeperInfo::new(),
+            control_file: None,
+            hs_feedback: HotStandbyFeedback {
+                ts: 0,
+                xmin: u64::MAX,
+                catalog_xmin: u64::MAX,
+            },
+        }
+    }
 
-// Useful utilities needed by various Connection-like objects
-pub trait TimelineTools {
-    fn set(&mut self, timeline_id: ZTimelineId) -> Result<()>;
-    fn get(&self) -> &Arc<Timeline>;
-    fn find_end_of_wal(&self, data_dir: &Path, precise: bool) -> (Lsn, TimeLineID);
-}
+    /// Accumulate hot standby feedbacks from replicas
+    pub fn add_hs_feedback(&mut self, feedback: HotStandbyFeedback) {
+        self.hs_feedback.xmin = min(self.hs_feedback.xmin, feedback.xmin);
+        self.hs_feedback.catalog_xmin = min(self.hs_feedback.catalog_xmin, feedback.catalog_xmin);
+        self.hs_feedback.ts = max(self.hs_feedback.ts, feedback.ts);
+    }
 
-impl TimelineTools for Option<Arc<Timeline>> {
-    fn set(&mut self, timeline_id: ZTimelineId) -> Result<()> {
-        // We will only set the timeline once. If it were to ever change,
-        // anyone who cloned the Arc would be out of date.
-        assert!(self.is_none());
-        *self = Some(GlobalTimelines::store(timeline_id)?);
+    /// Load and lock control file (prevent running more than one instance of safekeeper)
+    pub fn load_control_file(
+        &mut self,
+        conf: &WalAcceptorConf,
+        timelineid: ZTimelineId,
+    ) -> Result<()> {
+        if self.control_file.is_some() {
+            info!("control file for timeline {} is already open", timelineid);
+            return Ok(());
+        }
+
+        let control_file_path = conf
+            .data_dir
+            .join(timelineid.to_string())
+            .join(CONTROL_FILE_NAME);
+        info!("loading control file {}", control_file_path.display());
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&control_file_path)
+        {
+            Ok(file) => {
+                // Lock file to prevent two or more active wal_acceptors
+                match file.try_lock_exclusive() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        bail!(
+                            "Control file {:?} is locked by some other process: {}",
+                            &control_file_path,
+                            e
+                        );
+                    }
+                }
+                self.control_file = Some(file);
+
+                const SIZE: usize = mem::size_of::<SafeKeeperInfo>();
+                let mut buf = [0u8; SIZE];
+                if self
+                    .control_file
+                    .as_mut()
+                    .unwrap()
+                    .read_exact(&mut buf)
+                    .is_ok()
+                {
+                    let mut input = BytesMut::new();
+                    input.extend_from_slice(&buf);
+                    let my_info = SafeKeeperInfo::unpack(&mut input);
+
+                    if my_info.magic != SK_MAGIC {
+                        bail!("Invalid control file magic: {}", my_info.magic);
+                    }
+                    if my_info.format_version != SK_FORMAT_VERSION {
+                        bail!(
+                            "Incompatible format version: {} vs. {}",
+                            my_info.format_version,
+                            SK_FORMAT_VERSION
+                        );
+                    }
+                    self.info = my_info;
+                }
+            }
+            Err(e) => {
+                panic!(
+                    "Failed to open control file {:?}: {}",
+                    &control_file_path, e
+                );
+            }
+        }
         Ok(())
     }
 
-    fn get(&self) -> &Arc<Timeline> {
-        self.as_ref().unwrap()
-    }
+    pub fn save_control_file(&mut self, sync: bool) -> Result<()> {
+        let mut buf = BytesMut::new();
+        self.info.pack(&mut buf);
 
-    /// Find last WAL record. If "precise" is false then just locate last partial segment
-    fn find_end_of_wal(&self, data_dir: &Path, precise: bool) -> (Lsn, TimeLineID) {
-        let seg_size = self.get().get_info().server.wal_seg_size as usize;
-        let (lsn, timeline) = find_end_of_wal(data_dir, seg_size, precise);
-        (Lsn(lsn), timeline)
+        let file = self.control_file.as_mut().unwrap();
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&buf[..])?;
+        if sync {
+            file.sync_all()?;
+        }
+        Ok(())
     }
 }
 
@@ -233,32 +299,6 @@ impl SafeKeeperInfo {
     }
 }
 
-lazy_static! {
-    pub static ref TIMELINES: Mutex<HashMap<ZTimelineId, Arc<Timeline>>> =
-        Mutex::new(HashMap::new());
-}
-
-/// A zero-sized struct used to manage access to the global timelines map.
-struct GlobalTimelines;
-
-impl GlobalTimelines {
-    /// Store a new timeline into the global TIMELINES map.
-    fn store(timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
-        let mut timelines = TIMELINES.lock().unwrap();
-
-        match timelines.get(&timeline_id) {
-            Some(result) => Ok(Arc::clone(result)),
-            None => {
-                info!("creating timeline dir {}", timeline_id);
-                fs::create_dir_all(timeline_id.to_string())?;
-                let new_tid = Arc::new(Timeline::new(timeline_id));
-                timelines.insert(timeline_id, Arc::clone(&new_tid));
-                Ok(new_tid)
-            }
-        }
-    }
-}
-
 /// Accept incoming TCP connections and spawn them into a background thread.
 pub fn thread_main(conf: WalAcceptorConf) -> Result<()> {
     info!("Starting wal acceptor on {}", conf.listen_addr);
@@ -294,165 +334,6 @@ fn handle_socket(socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
     Ok(())
 }
 
-impl Timeline {
-    pub fn new(timelineid: ZTimelineId) -> Timeline {
-        let shared_state = SharedState {
-            commit_lsn: Lsn(0),
-            info: SafeKeeperInfo::new(),
-            control_file: None,
-            hs_feedback: HotStandbyFeedback {
-                ts: 0,
-                xmin: u64::MAX,
-                catalog_xmin: u64::MAX,
-            },
-        };
-        Timeline {
-            timelineid,
-            mutex: Mutex::new(shared_state),
-            cond: Condvar::new(),
-        }
-    }
-
-    /// Wait for an LSN to be committed.
-    ///
-    /// Returns the last committed LSN, which will be at least
-    /// as high as the LSN waited for.
-    ///
-    pub fn wait_for_lsn(&self, lsn: Lsn) -> Lsn {
-        let mut shared_state = self.mutex.lock().unwrap();
-        loop {
-            let commit_lsn = shared_state.commit_lsn;
-            // This must be `>`, not `>=`.
-            if commit_lsn > lsn {
-                return commit_lsn;
-            }
-            shared_state = self.cond.wait(shared_state).unwrap();
-        }
-    }
-
-    // Notify caught-up WAL senders about new WAL data received
-    fn notify_wal_senders(&self, commit_lsn: Lsn) {
-        let mut shared_state = self.mutex.lock().unwrap();
-        if shared_state.commit_lsn < commit_lsn {
-            shared_state.commit_lsn = commit_lsn;
-            self.cond.notify_all();
-        }
-    }
-
-    fn _stop_wal_senders(&self) {
-        self.notify_wal_senders(END_REPLICATION_MARKER);
-    }
-
-    pub fn get_info(&self) -> SafeKeeperInfo {
-        return self.mutex.lock().unwrap().info;
-    }
-
-    fn set_info(&self, info: &SafeKeeperInfo) {
-        self.mutex.lock().unwrap().info = *info;
-    }
-
-    // Accumulate hot standby feedbacks from replicas
-    pub fn add_hs_feedback(&self, feedback: HotStandbyFeedback) {
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.hs_feedback.xmin = min(shared_state.hs_feedback.xmin, feedback.xmin);
-        shared_state.hs_feedback.catalog_xmin =
-            min(shared_state.hs_feedback.catalog_xmin, feedback.catalog_xmin);
-        shared_state.hs_feedback.ts = max(shared_state.hs_feedback.ts, feedback.ts);
-    }
-
-    fn get_hs_feedback(&self) -> HotStandbyFeedback {
-        let shared_state = self.mutex.lock().unwrap();
-        shared_state.hs_feedback
-    }
-
-    // Load and lock control file (prevent running more than one instance of safekeeper)
-    fn load_control_file(&self, conf: &WalAcceptorConf) -> Result<()> {
-        let mut shared_state = self.mutex.lock().unwrap();
-
-        if shared_state.control_file.is_some() {
-            info!(
-                "control file for timeline {} is already open",
-                self.timelineid
-            );
-            return Ok(());
-        }
-
-        let control_file_path = conf
-            .data_dir
-            .join(self.timelineid.to_string())
-            .join(CONTROL_FILE_NAME);
-        info!("loading control file {}", control_file_path.display());
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&control_file_path)
-        {
-            Ok(file) => {
-                // Lock file to prevent two or more active wal_acceptors
-                match file.try_lock_exclusive() {
-                    Ok(()) => {}
-                    Err(e) => {
-                        bail!(
-                            "Control file {:?} is locked by some other process: {}",
-                            &control_file_path,
-                            e
-                        );
-                    }
-                }
-                shared_state.control_file = Some(file);
-
-                const SIZE: usize = mem::size_of::<SafeKeeperInfo>();
-                let mut buf = [0u8; SIZE];
-                if shared_state
-                    .control_file
-                    .as_mut()
-                    .unwrap()
-                    .read_exact(&mut buf)
-                    .is_ok()
-                {
-                    let mut input = BytesMut::new();
-                    input.extend_from_slice(&buf);
-                    let my_info = SafeKeeperInfo::unpack(&mut input);
-
-                    if my_info.magic != SK_MAGIC {
-                        bail!("Invalid control file magic: {}", my_info.magic);
-                    }
-                    if my_info.format_version != SK_FORMAT_VERSION {
-                        bail!(
-                            "Incompatible format version: {} vs. {}",
-                            my_info.format_version,
-                            SK_FORMAT_VERSION
-                        );
-                    }
-                    shared_state.info = my_info;
-                }
-            }
-            Err(e) => {
-                panic!(
-                    "Failed to open control file {:?}: {}",
-                    &control_file_path, e
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn save_control_file(&self, sync: bool) -> Result<()> {
-        let mut buf = BytesMut::new();
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.info.pack(&mut buf);
-
-        let file = shared_state.control_file.as_mut().unwrap();
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&buf[..])?;
-        if sync {
-            file.sync_all()?;
-        }
-        Ok(())
-    }
-}
-
 impl Connection {
     pub fn new(socket: TcpStream, conf: WalAcceptorConf) -> Result<Connection> {
         let peer_addr = socket.peer_addr()?;
@@ -485,7 +366,7 @@ impl Connection {
             self.stream_in.read_u32::<BigEndian>()?;
             self.receive_wal()?; // internal protocol between wal_proposer and wal_acceptor
         } else {
-            SendWal::new(self).run()?; // libpq replication protocol between wal_acceptor and replicas/pagers
+            SendWalConn::new(self).run()?; // libpq replication protocol between wal_acceptor and replicas/pagers
         }
         Ok(())
     }

@@ -1,11 +1,13 @@
-//! This implements the libpq replication protocol between wal_acceptor and replicas/pagers
+//! This implements the libpq replication protocol between wal_acceptor
+//! and replicas/pagers
 //!
 
 use crate::pq_protocol::{
     BeMessage, FeMessage, FeStartupMessage, RowDescriptor, StartupRequestCode,
 };
-use crate::replication::ReplicationHandler;
-use crate::wal_service::{Connection, Timeline, TimelineTools};
+use crate::replication::ReplicationConn;
+use crate::timeline::{Timeline, TimelineTools};
+use crate::wal_service::Connection;
 use crate::WalAcceptorConf;
 use anyhow::{bail, Result};
 use bytes::BytesMut;
@@ -14,7 +16,8 @@ use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 
-pub struct SendWal {
+/// A network connection that's speaking the libpq replication protocol.
+pub struct SendWalConn {
     pub timeline: Option<Arc<Timeline>>,
     /// Postgres connection, buffered input
     pub stream_in: BufReader<TcpStream>,
@@ -28,7 +31,7 @@ pub struct SendWal {
     appname: Option<String>,
 }
 
-impl SendWal {
+impl SendWalConn {
     /// Create a new `SendWal`, consuming the `Connection`.
     pub fn new(conn: Connection) -> Self {
         Self {
@@ -80,7 +83,7 @@ impl SendWal {
                         self.handle_identify_system()?;
                     } else if q.body.starts_with(b"START_REPLICATION") {
                         // Create a new replication object, consuming `self`.
-                        ReplicationHandler::new(self).run(&q.body)?;
+                        ReplicationConn::new(self).run(&q.body)?;
                         break;
                     } else {
                         bail!("Unexpected command {:?}", q.body);
