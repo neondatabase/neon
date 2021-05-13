@@ -167,7 +167,10 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         .name("WAL acceptor thread".into())
         .spawn(|| {
             // thread code
-            wal_service::thread_main(conf);
+            let thread_result = wal_service::thread_main(conf);
+            if let Err(e) = thread_result {
+                info!("wal_service thread terminated: {}", e);
+            }
         })
         .unwrap();
     threads.push(wal_acceptor_thread);
