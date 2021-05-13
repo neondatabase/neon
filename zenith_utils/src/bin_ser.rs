@@ -79,7 +79,7 @@ pub trait BeSer: Serialize + DeserializeOwned {
     /// This is useful for most `Write` types except `&mut [u8]`, which
     /// can more easily use [`ser_into_slice`](Self::ser_into_slice).
     fn ser_into<W: Write>(&self, w: &mut W) -> Result<(), SerializeError> {
-        le_coder().serialize_into(w, &self).or(Err(SerializeError))
+        be_coder().serialize_into(w, &self).or(Err(SerializeError))
     }
 
     /// Serialize into a new heap-allocated buffer
@@ -96,7 +96,7 @@ pub trait BeSer: Serialize + DeserializeOwned {
     ///
     /// tip: `&[u8]` implements `Read`
     fn des_from<R: Read>(r: R) -> Result<Self, DeserializeError> {
-        le_coder().deserialize_from(r).or(Err(DeserializeError))
+        be_coder().deserialize_from(r).or(Err(DeserializeError))
     }
 }
 
@@ -143,6 +143,7 @@ impl<T> LeSer for T where T: Serialize + DeserializeOwned {}
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
+    use std::io::Cursor;
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     pub struct ShortStruct {
@@ -150,62 +151,127 @@ mod tests {
         b: u32,
     }
 
+    const SHORT1: ShortStruct = ShortStruct { a: 7, b: 65536 };
+    const SHORT1_ENC_BE: &[u8] = &[7, 0, 1, 0, 0];
+    const SHORT1_ENC_BE_TRAILING: &[u8] = &[7, 0, 1, 0, 0, 255, 255, 255];
+    const SHORT1_ENC_LE: &[u8] = &[7, 0, 0, 1, 0];
+    const SHORT1_ENC_LE_TRAILING: &[u8] = &[7, 0, 0, 1, 0, 255, 255, 255];
+
+    const SHORT2: ShortStruct = ShortStruct {
+        a: 8,
+        b: 0x07030000,
+    };
+    const SHORT2_ENC_BE: &[u8] = &[8, 7, 3, 0, 0];
+    const SHORT2_ENC_BE_TRAILING: &[u8] = &[8, 7, 3, 0, 0, 0xff, 0xff, 0xff];
+    const SHORT2_ENC_LE: &[u8] = &[8, 0, 0, 3, 7];
+    const SHORT2_ENC_LE_TRAILING: &[u8] = &[8, 0, 0, 3, 7, 0xff, 0xff, 0xff];
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    pub struct LongMsg {
+        pub tag: u8,
+        pub blockpos: u32,
+        pub last_flush_position: u64,
+        pub apply: u64,
+        pub timestamp: i64,
+        pub reply_requested: u8,
+    }
+
+    const LONG1: LongMsg = LongMsg {
+        tag: 42,
+        blockpos: 0x1000_2000,
+        last_flush_position: 0x1234_2345_3456_4567,
+        apply: 0x9876_5432_10FE_DCBA,
+        timestamp: 0x7788_99AA_BBCC_DDFF,
+        reply_requested: 1,
+    };
+
     #[test]
     fn be_short() {
         use super::BeSer;
 
-        let x = ShortStruct { a: 7, b: 65536 };
+        let encoded = SHORT1.ser().unwrap();
+        assert_eq!(encoded, SHORT1_ENC_BE);
 
-        let encoded = x.ser().unwrap();
+        let decoded = ShortStruct::des(SHORT2_ENC_BE).unwrap();
+        assert_eq!(decoded, SHORT2);
 
-        assert_eq!(encoded, vec![7, 0, 1, 0, 0]);
+        // with trailing data
+        let decoded = ShortStruct::des(SHORT2_ENC_BE_TRAILING).unwrap();
+        assert_eq!(decoded, SHORT2);
 
-        let raw = [8u8, 7, 3, 0, 0];
-        let decoded = ShortStruct::des(&raw).unwrap();
+        // serialize into a `Write` sink.
+        let mut buf = Cursor::new(vec![0xFF; 8]);
+        SHORT1.ser_into(&mut buf).unwrap();
+        assert_eq!(buf.into_inner(), SHORT1_ENC_BE_TRAILING);
 
-        assert_eq!(
-            decoded,
-            ShortStruct {
-                a: 8,
-                b: 0x07030000
-            }
-        );
+        // deserialize from a `Write` sink.
+        let buf = Cursor::new(SHORT2_ENC_BE);
+        let decoded = ShortStruct::des_from(buf).unwrap();
+        assert_eq!(decoded, SHORT2);
 
-        // has trailing data
-        let raw = [8u8, 7, 3, 0, 0, 0xFF, 0xFF, 0xFF];
-        let _ = ShortStruct::des(&raw).unwrap();
-    }
-
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    pub struct BigMsg {
-        pub tag: u8,
-        pub blockpos: u64,
-        pub last_flush_position: u64,
-        pub apply: u64,
-        pub timestamp: u64,
-        pub reply_requested: u8,
+        // deserialize from a `Write` sink that terminates early.
+        let buf = Cursor::new([0u8; 4]);
+        ShortStruct::des_from(buf).unwrap_err();
     }
 
     #[test]
-    fn be_big() {
+    fn le_short() {
+        use super::LeSer;
+
+        let encoded = SHORT1.ser().unwrap();
+        assert_eq!(encoded, SHORT1_ENC_LE);
+
+        let decoded = ShortStruct::des(SHORT2_ENC_LE).unwrap();
+        assert_eq!(decoded, SHORT2);
+
+        // with trailing data
+        let decoded = ShortStruct::des(SHORT2_ENC_LE_TRAILING).unwrap();
+        assert_eq!(decoded, SHORT2);
+
+        // serialize into a `Write` sink.
+        let mut buf = Cursor::new(vec![0xFF; 8]);
+        SHORT1.ser_into(&mut buf).unwrap();
+        assert_eq!(buf.into_inner(), SHORT1_ENC_LE_TRAILING);
+
+        // deserialize from a `Write` sink.
+        let buf = Cursor::new(SHORT2_ENC_LE);
+        let decoded = ShortStruct::des_from(buf).unwrap();
+        assert_eq!(decoded, SHORT2);
+
+        // deserialize from a `Write` sink that terminates early.
+        let buf = Cursor::new([0u8; 4]);
+        ShortStruct::des_from(buf).unwrap_err();
+    }
+
+    #[test]
+    fn be_long() {
         use super::BeSer;
 
-        let msg = BigMsg {
-            tag: 42,
-            blockpos: 0x1000_2000_3000_4000,
-            last_flush_position: 0x1234_2345_3456_4567,
-            apply: 0x9876_5432_10FE_DCBA,
-            timestamp: 0xABBA_CDDC_EFFE_0110,
-            reply_requested: 1,
-        };
+        let msg = LONG1;
 
         let encoded = msg.ser().unwrap();
         let expected = hex_literal::hex!(
-            "2A 1000 2000 3000 4000 1234 2345 3456 4567 9876 5432 10FE DCBA ABBA CDDC EFFE 0110 01"
+            "2A 1000 2000 1234 2345 3456 4567 9876 5432 10FE DCBA 7788 99AA BBCC DDFF 01"
         );
         assert_eq!(encoded, expected);
 
-        let msg2 = BigMsg::des(&encoded).unwrap();
+        let msg2 = LongMsg::des(&encoded).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn le_long() {
+        use super::LeSer;
+
+        let msg = LONG1;
+
+        let encoded = msg.ser().unwrap();
+        let expected = hex_literal::hex!(
+            "2A 0020 0010 6745 5634 4523 3412 BADC FE10 3254 7698 FFDD CCBB AA99 8877 01"
+        );
+        assert_eq!(encoded, expected);
+
+        let msg2 = LongMsg::des(&encoded).unwrap();
         assert_eq!(msg, msg2);
     }
 }
