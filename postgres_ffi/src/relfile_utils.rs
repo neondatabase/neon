@@ -1,8 +1,8 @@
-///
-/// Common utilities for dealing with PostgreSQL relation files.
-///
-use regex::Regex;
+//!
+//! Common utilities for dealing with PostgreSQL relation files.
+//!
 use crate::pg_constants;
+use regex::Regex;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum FilePathError {
