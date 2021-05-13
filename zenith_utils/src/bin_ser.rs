@@ -15,7 +15,7 @@
 
 use bincode::Options;
 use serde::{de::DeserializeOwned, Serialize};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use thiserror::Error;
 
 /// An error that occurred during a deserialize operation
@@ -23,8 +23,23 @@ use thiserror::Error;
 /// This could happen because the input data was too short,
 /// or because an invalid value was encountered.
 #[derive(Debug, Error)]
-#[error("deserialize error")]
-pub struct DeserializeError;
+pub enum DeserializeError {
+    /// The deserializer isn't able to deserialize the supplied data.
+    #[error("deserialize error")]
+    BadInput,
+    /// While deserializing from a `Read` source, an `io::Error` occurred.
+    #[error("deserialize error: {0}")]
+    Io(io::Error),
+}
+
+impl From<bincode::Error> for DeserializeError {
+    fn from(e: bincode::Error) -> Self {
+        match *e {
+            bincode::ErrorKind::Io(io_err) => DeserializeError::Io(io_err),
+            _ => DeserializeError::BadInput,
+        }
+    }
+}
 
 /// An error that occurred during a serialize operation
 ///
@@ -89,12 +104,14 @@ pub trait BeSer: Serialize + DeserializeOwned {
 
     /// Deserialize from a byte slice
     fn des(buf: &[u8]) -> Result<Self, DeserializeError> {
-        be_coder().deserialize(buf).or(Err(DeserializeError))
+        be_coder()
+            .deserialize(buf)
+            .or(Err(DeserializeError::BadInput))
     }
 
     /// Deserialize from a reader
     fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
-        be_coder().deserialize_from(r).or(Err(DeserializeError))
+        be_coder().deserialize_from(r).map_err(|e| e.into())
     }
 }
 
@@ -123,59 +140,14 @@ pub trait LeSer: Serialize + DeserializeOwned {
 
     /// Deserialize from a byte slice
     fn des(buf: &[u8]) -> Result<Self, DeserializeError> {
-        le_coder().deserialize(buf).or(Err(DeserializeError))
-    }
-
-    /// Deserialize from a reader
-    fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
-        le_coder().deserialize_from(r).or(Err(DeserializeError))
-    }
-}
-
-/// Binary serialize/deserialize helper functions (Big Endian)
-///
-/// This version panics on every serialization/deserialization error.
-/// That can be useful if you want to see a backtrace to find where the
-/// error occurred.
-pub trait LeSerPanic: Serialize + DeserializeOwned {
-    /// Serialize into a byte slice
-    fn ser_into_slice<W: Write>(&self, b: &mut [u8]) -> Result<(), SerializeError> {
-        // This is slightly awkward; we need a mutable reference to a mutable reference.
-        let mut w = b;
-        self.ser_into(&mut w)
-    }
-
-    /// Serialize into a borrowed writer
-    ///
-    /// This is useful for most `Write` types except `&mut [u8]`, which
-    /// can more easily use [`ser_into_slice`](Self::ser_into_slice).
-    fn ser_into<W: Write>(&self, w: &mut W) -> Result<(), SerializeError> {
-        le_coder()
-            .serialize_into(w, &self)
-            .or_else(|e| panic!("ser_into failed: {}", e))
-    }
-
-    /// Serialize into a new heap-allocated buffer
-    fn ser(&self) -> Result<Vec<u8>, SerializeError> {
-        le_coder()
-            .serialize(&self)
-            .or_else(|e| panic!("ser failed: {}", e))
-    }
-
-    /// Deserialize from a byte slice
-    fn des(buf: &[u8]) -> Result<Self, DeserializeError> {
         le_coder()
             .deserialize(buf)
-            .or_else(|e| panic!("des failed: {}", e))
+            .or(Err(DeserializeError::BadInput))
     }
 
     /// Deserialize from a reader
-    ///
-    /// tip: `&[u8]` implements `Read`
     fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
-        le_coder()
-            .deserialize_from(r)
-            .or_else(|e| panic!("des_from failed: {}", e))
+        le_coder().deserialize_from(r).map_err(|e| e.into())
     }
 }
 
@@ -183,10 +155,9 @@ impl<T> BeSer for T where T: Serialize + DeserializeOwned {}
 
 impl<T> LeSer for T where T: Serialize + DeserializeOwned {}
 
-impl<T> LeSerPanic for T where T: Serialize + DeserializeOwned {}
-
 #[cfg(test)]
 mod tests {
+    use super::DeserializeError;
     use serde::{Deserialize, Serialize};
     use std::io::Cursor;
 
@@ -256,7 +227,8 @@ mod tests {
 
         // deserialize from a `Write` sink that terminates early.
         let mut buf = Cursor::new([0u8; 4]);
-        ShortStruct::des_from(&mut buf).unwrap_err();
+        let err = ShortStruct::des_from(&mut buf).unwrap_err();
+        assert!(matches!(err, DeserializeError::Io(_)));
     }
 
     #[test]
@@ -285,7 +257,8 @@ mod tests {
 
         // deserialize from a `Write` sink that terminates early.
         let mut buf = Cursor::new([0u8; 4]);
-        ShortStruct::des_from(&mut buf).unwrap_err();
+        let err = ShortStruct::des_from(&mut buf).unwrap_err();
+        assert!(matches!(err, DeserializeError::Io(_)));
     }
 
     #[test]
