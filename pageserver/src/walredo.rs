@@ -14,6 +14,7 @@
 //! TODO: Even though the postgres code runs in a separate process,
 //! it's not a secure sandbox.
 //!
+use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::assert;
@@ -36,6 +37,7 @@ use zenith_utils::lsn::Lsn;
 
 use crate::repository::BufferTag;
 use crate::repository::WALRecord;
+use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::XLogRecord;
@@ -170,6 +172,25 @@ impl WalRedoManager for PostgresRedoManager {
     }
 }
 
+fn mx_offset_to_flags_offset(xid: MultiXactId) -> usize {
+    return ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32) as u16
+        % pg_constants::MULTIXACT_MEMBERGROUPS_PER_PAGE
+        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE) as usize;
+}
+
+fn mx_offset_to_flags_bitshift(xid: MultiXactId) -> u16 {
+    return (xid as u16) % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP
+        * pg_constants::MXACT_MEMBER_BITS_PER_XACT;
+}
+
+/* Location (byte offset within page) of TransactionId of given member */
+fn mx_offset_to_member_offset(xid: MultiXactId) -> usize {
+    return mx_offset_to_flags_offset(xid)
+        + (pg_constants::MULTIXACT_FLAGBYTES_PER_GROUP
+            + (xid as u16 % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP) * 4)
+            as usize;
+}
+
 ///
 /// WAL redo thread
 ///
@@ -255,7 +276,7 @@ impl PostgresRedoManagerInternal {
         let start = Instant::now();
 
         let apply_result: Result<Bytes, Error>;
-        if tag.rel.forknum == pg_constants::PG_XACT_FORKNUM {
+        if tag.rel.forknum >= pg_constants::PG_XACT_FORKNUM {
             const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
             let mut page = BytesMut::new();
             if let Some(fpi) = base_img {
@@ -344,6 +365,55 @@ impl PostgresRedoManagerInternal {
                                record.lsn,
                                record.main_data_offset, record.rec.len());
                     }
+                } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
+                    let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+                    if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
+                        page.fill(0);
+                    } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
+                        page.fill(0);
+                    } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
+                        let xlrec = XlMultiXactCreate::decode(&mut buf);
+                        if tag.rel.forknum == pg_constants::PG_MXACT_OFFSETS_FORKNUM {
+                            let offs = (xlrec.mid % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32
+                                * 4) as usize;
+                            LittleEndian::write_u32(&mut page[offs..offs + 4], xlrec.moff);
+                        } else {
+                            assert!(tag.rel.forknum == pg_constants::PG_MXACT_MEMBERS_FORKNUM);
+                            for i in 0..xlrec.nmembers {
+                                let blkno = i / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+                                if blkno == tag.blknum {
+                                    // update only target block
+                                    let offset = xlrec.moff + i;
+                                    let memberoff = mx_offset_to_member_offset(offset);
+                                    let flagsoff = mx_offset_to_flags_offset(offset);
+                                    let bshift = mx_offset_to_flags_bitshift(offset);
+                                    let mut flagsval =
+                                        LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
+                                    flagsval &=
+                                        !(((1 << pg_constants::MXACT_MEMBER_BITS_PER_XACT) - 1)
+                                            << bshift);
+                                    flagsval |= xlrec.members[i as usize].status << bshift;
+                                    LittleEndian::write_u32(
+                                        &mut page[flagsoff..flagsoff + 4],
+                                        flagsval,
+                                    );
+                                    LittleEndian::write_u32(
+                                        &mut page[memberoff..memberoff + 4],
+                                        xlrec.members[i as usize].xid,
+                                    );
+                                }
+                            }
+                        }
+                    } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
+                        // empty page image indicates that this SLRU page is truncated and can be removed by GC
+                        page.clear();
+                    } else {
+                        assert!(false);
+                    }
+                } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
+                    page.clear();
+                    page.extend_from_slice(&buf[..]);
+                    assert!(page.len() == 512); // size of pg_filenode.map
                 }
             }
 
@@ -537,7 +607,7 @@ impl PostgresRedoProcess {
 // explanation of the protocol.
 
 fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
-    let len = 4 + 5 * 4;
+    let len = 4 + 1 + 4 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'B');
@@ -552,7 +622,7 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
 fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
     assert!(base_img.len() == 8192);
 
-    let len = 4 + 5 * 4 + base_img.len();
+    let len = 4 + 1 + 4 * 4 + base_img.len();
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'P');
@@ -580,7 +650,7 @@ fn build_apply_record_msg(endlsn: Lsn, rec: Bytes) -> Bytes {
 }
 
 fn build_get_page_msg(tag: BufferTag) -> Bytes {
-    let len = 4 + 5 * 4;
+    let len = 4 + 1 + 4 * 4;
     let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'G');

@@ -23,7 +23,7 @@ use anyhow::Result;
 use bytes::Bytes;
 
 use crate::repository::{BufferTag, RelTag, Timeline};
-use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
+use crate::waldecoder::{Oid, decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
@@ -120,8 +120,26 @@ fn restore_snapshot(
             None => continue,
 
             // These special files appear in the snapshot, but are not needed by the page server
-            Some("pg_control") => continue,
-            Some("pg_filenode.map") => continue,
+            Some("pg_control") => restore_nonrel_file(
+					conf,
+					timeline,
+					timelineid,
+					snapshot,
+                    pg_constants::GLOBALTABLESPACE_OID,
+                    0,
+					pg_constants::PG_CONTROLFILE_FORKNUM,
+					&direntry.path(),
+				)?,
+            Some("pg_filenode.map") => restore_nonrel_file(
+					conf,
+					timeline,
+					timelineid,
+					snapshot,
+                    pg_constants::GLOBALTABLESPACE_OID,
+                    0,
+					pg_constants::PG_FILENODEMAP_FORKNUM,
+					&direntry.path(),
+				)?,
 
             // Load any relation files into the page server
             _ => restore_relfile(
@@ -148,7 +166,16 @@ fn restore_snapshot(
 
                 // These special files appear in the snapshot, but are not needed by the page server
                 Some("PG_VERSION") => continue,
-                Some("pg_filenode.map") => continue,
+                Some("pg_filenode.map") => restore_nonrel_file(
+					conf,
+					timeline,
+					timelineid,
+					snapshot,
+                    pg_constants::DEFAULTTABLESPACE_OID,
+                    dboid,
+					pg_constants::PG_FILENODEMAP_FORKNUM,
+					&direntry.path(),
+				)?,
 
                 // Load any relation files into the page server
                 _ => restore_relfile(
@@ -163,12 +190,34 @@ fn restore_snapshot(
     }
     for entry in fs::read_dir(snapshotpath.join("pg_xact"))? {
         let entry = entry?;
-        restore_nonrelfile(
+        restore_slru_file(
             conf,
             timeline,
             timelineid,
             snapshot,
             pg_constants::PG_XACT_FORKNUM,
+            &entry.path(),
+        )?;
+    }
+    for entry in fs::read_dir(snapshotpath.join("pg_multixact").join("members"))? {
+        let entry = entry?;
+        restore_slru_file(
+            conf,
+            timeline,
+            timelineid,
+            snapshot,
+            pg_constants::PG_MXACT_MEMBERS_FORKNUM,
+            &entry.path(),
+        )?;
+    }
+    for entry in fs::read_dir(snapshotpath.join("pg_multixact").join("offsets"))? {
+        let entry = entry?;
+        restore_slru_file(
+            conf,
+            timeline,
+            timelineid,
+            snapshot,
+            pg_constants::PG_MXACT_OFFSETS_FORKNUM,
             &entry.path(),
         )?;
     }
@@ -180,8 +229,8 @@ fn restore_snapshot(
 fn restore_relfile(
     timeline: &dyn Timeline,
     snapshot: &str,
-    spcoid: u32,
-    dboid: u32,
+    spcoid: Oid,
+    dboid: Oid,
     path: &Path,
 ) -> Result<()> {
     let lsn = Lsn::from_hex(snapshot)?;
@@ -239,7 +288,39 @@ fn restore_relfile(
     Ok(())
 }
 
-fn restore_nonrelfile(
+fn restore_nonrel_file(
+    _conf: &PageServerConf,
+    timeline: &dyn Timeline,
+    _timelineid: ZTimelineId,
+    snapshot: &str,
+    spcoid: Oid,
+    dboid: Oid,
+    forknum: u8,
+    path: &Path,
+) -> Result<()> {
+    let lsn = Lsn::from_hex(snapshot)?;
+
+    // Does it look like a relation file?
+
+    let mut file = File::open(path)?;
+    let mut buffer = Vec::new();
+    // read the whole file
+    file.read_to_end(&mut buffer)?;
+
+    let tag = BufferTag {
+        rel: RelTag {
+            spcnode: spcoid,
+            dbnode: dboid,
+            relnode: 0,
+            forknum,
+        },
+        blknum: 0,
+    };
+    timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]));
+    Ok(())
+}
+
+fn restore_slru_file(
     _conf: &PageServerConf,
     timeline: &dyn Timeline,
     _timelineid: ZTimelineId,
@@ -263,7 +344,7 @@ fn restore_nonrelfile(
                 let tag = BufferTag {
                     rel: RelTag {
                         spcnode: 0,
-                        dbnode: 0,
+                        dbnode:  0,
                         relnode: 0,
                         forknum,
                     },
@@ -296,7 +377,7 @@ fn restore_nonrelfile(
     Ok(())
 }
 
-// Scan WAL on a timeline, starting from gien LSN, and load all the records
+// Scan WAL on a timeline, starting from given LSN, and load all the records
 // into the page cache.
 fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn) -> Result<()> {
     let walpath = format!("timelines/{}/wal", timelineid);

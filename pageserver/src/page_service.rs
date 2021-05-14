@@ -653,12 +653,18 @@ impl Connection {
         } else if query_string.starts_with(b"basebackup ") {
             let (_l, r) = query_string.split_at("basebackup ".len());
             let r = r.to_vec();
-            let timelineid_str = String::from(String::from_utf8(r)?.trim_end());
+            let basebackup_args = String::from(String::from_utf8(r)?.trim_end());
+            let args: Vec<&str> = basebackup_args.rsplit(' ').collect();
+            let timelineid_str = args[0];
             info!("got basebackup command: \"{}\"", timelineid_str);
             let timelineid = ZTimelineId::from_str(&timelineid_str)?;
-
+            let lsn = if args.len() > 1 {
+                Some(Lsn::from_str(args[1])?)
+            } else {
+                None
+            };
             // Check that the timeline exists
-            self.handle_basebackup_request(timelineid)?;
+            self.handle_basebackup_request(timelineid, lsn)?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.starts_with(b"callmemaybe ") {
@@ -814,16 +820,19 @@ impl Connection {
         }
     }
 
-    fn handle_basebackup_request(&mut self, timelineid: ZTimelineId) -> anyhow::Result<()> {
+    fn handle_basebackup_request(
+        &mut self,
+        timelineid: ZTimelineId,
+        lsn: Option<Lsn>,
+    ) -> anyhow::Result<()> {
         // check that the timeline exists
         let repository = page_cache::get_repository();
-        if repository.get_or_restore_timeline(timelineid).is_err() {
-            bail!(
+        let timeline = repository.get_or_restore_timeline(timelineid).map_err(|_| {
+            anyhow!(
                 "client requested basebackup on timeline {} which does not exist in page server",
                 timelineid
-            );
-        }
-
+            )
+        })?;
         /* switch client to COPYOUT */
         let stream = &mut self.stream;
         stream.write_u8(b'H')?;
@@ -836,10 +845,16 @@ impl Connection {
         /* Send a tarball of the latest snapshot on the timeline */
 
         // find latest snapshot
-        let snapshotlsn = restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
-
-        basebackup::send_snapshot_tarball(&mut CopyDataSink { stream }, timelineid, snapshotlsn)?;
-
+        let snapshot_lsn =
+            restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
+        let req_lsn = lsn.unwrap_or(snapshot_lsn);
+        basebackup::send_tarball_at_lsn(
+            &mut CopyDataSink { stream },
+            timelineid,
+            &timeline,
+            req_lsn,
+            snapshot_lsn,
+        )?;
         // CopyDone
         self.stream.write_u8(b'c')?;
         self.stream.write_u32::<BE>(4)?;

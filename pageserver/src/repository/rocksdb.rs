@@ -440,7 +440,6 @@ impl RocksTimeline {
                             let new_img = self
                                 .walredo_mgr
                                 .request_redo(key.tag, key.lsn, base_img, records)?;
-
                             self.put_page_image(key.tag, key.lsn, new_img.clone());
 
                             reconstructed += 1;
@@ -629,8 +628,86 @@ impl Timeline for RocksTimeline {
     /// Get size of relation at given LSN.
     ///
     fn get_relsize(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
-        self.wait_lsn(lsn)?;
+        let lsn = self.wait_lsn(lsn)?;
         self.relsize_get_nowait(rel, lsn)
+    }
+
+    /// Get databases. This function is used to local pg_filenode.map files
+    fn get_databases(&self) -> Result<Vec<RelTag>> {
+        let key = CacheKey {
+            // minimal key
+            tag: BufferTag {
+                rel: RelTag {
+                    forknum: pg_constants::PG_FILENODEMAP_FORKNUM,
+                    spcnode: 0,
+                    dbnode: 0,
+                    relnode: 0,
+                },
+                blknum: 0,
+            },
+            lsn: Lsn(0),
+        };
+        let mut buf = BytesMut::new();
+        key.pack(&mut buf);
+        let mut dbs = Vec::new();
+
+        let mut iter = self.db.raw_iterator();
+        iter.seek(&buf[..]);
+        let mut prev_tag = key.tag.rel;
+        while iter.valid() {
+            let k = iter.key().unwrap();
+            buf.clear();
+            buf.extend_from_slice(&k);
+            let tag = RelTag::unpack(&mut buf);
+            if tag.forknum != pg_constants::PG_FILENODEMAP_FORKNUM {
+                break; // we are done with this fork
+            }
+            if tag != prev_tag {
+                dbs.push(tag); // collect unique tags
+                prev_tag = tag;
+            }
+            iter.next();
+        }
+        return Ok(dbs);
+    }
+
+    /// Get range [begin,end) of stored blocks. Used mostly for SMGR pseudorelations
+    /// but can be also applied to normal relations.
+    fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)> {
+        let lsn = self.wait_lsn(lsn)?;
+        let mut key = CacheKey {
+            // minimal key to start with
+            tag: BufferTag { rel, blknum: 0 },
+            lsn,
+        };
+        let mut buf = BytesMut::new();
+        key.pack(&mut buf);
+        let mut iter = self.db.raw_iterator();
+        iter.seek(&buf[..]); // locate first entry
+        if iter.valid() {
+            let k = iter.key().unwrap();
+            buf.clear();
+            buf.extend_from_slice(&k);
+            let tag = BufferTag::unpack(&mut buf);
+            if tag.rel == rel {
+                // still trversing this relation
+                let first_blknum = tag.blknum;
+                key.tag.blknum = u32::MAX; // maximal key
+                buf.clear();
+                key.pack(&mut buf);
+                let mut iter = self.db.raw_iterator();
+                iter.seek_for_prev(&buf[..]); // localte last entry
+                if iter.valid() {
+                    let k = iter.key().unwrap();
+                    buf.clear();
+                    buf.extend_from_slice(&k);
+                    let tag = BufferTag::unpack(&mut buf);
+                    let last_blknum = tag.blknum;
+                    return Ok((first_blknum, last_blknum + 1)); // upper boundary is exclusive
+                }
+            }
+        }
+        Ok((0, 0)) // empty range
     }
 
     ///
@@ -731,13 +808,24 @@ impl Timeline for RocksTimeline {
     /// Memorize a full image of a page version
     ///
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) {
+        let img_len = img.len();
         let key = CacheKey { tag, lsn };
         let content = CacheEntryContent::PageImage(img);
-
         let mut key_buf = BytesMut::new();
         key.pack(&mut key_buf);
         let mut val_buf = BytesMut::new();
         content.pack(&mut val_buf);
+
+        // Zero size of page image indicates that SLRU page was truncated
+        if img_len == 0 && key.tag.rel.forknum > pg_constants::PG_XACT_FORKNUM {
+            if (val_buf[0] & UNUSED_VERSION_FLAG) != 0 {
+                // records already marked for deletion
+                return;
+            } else {
+                // delete truncated multixact page
+                val_buf[0] |= UNUSED_VERSION_FLAG;
+            }
+        }
 
         trace!("put_wal_record lsn: {}", key.lsn);
         let _res = self.db.put(&key_buf[..], &val_buf[..]);

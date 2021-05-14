@@ -310,6 +310,9 @@ pub type Oid = u32;
 pub type TransactionId = u32;
 pub type BlockNumber = u32;
 pub type OffsetNumber = u16;
+pub type MultiXactId = TransactionId;
+pub type MultiXactOffset = u32;
+pub type MultiXactStatus = u32;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -317,6 +320,24 @@ pub struct RelFileNode {
     pub spcnode: Oid, /* tablespace */
     pub dbnode: Oid,  /* database */
     pub relnode: Oid, /* relation */
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlRelmapUpdate {
+    pub dbid: Oid,   /* database ID, or 0 for shared map */
+    pub tsid: Oid,   /* database's tablespace, or pg_global */
+    pub nbytes: i32, /* size of relmap data */
+}
+
+impl XlRelmapUpdate {
+    pub fn decode(buf: &mut Bytes) -> XlRelmapUpdate {
+        XlRelmapUpdate {
+            dbid: buf.get_u32_le(),
+            tsid: buf.get_u32_le(),
+            nbytes: buf.get_i32_le(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -437,6 +458,74 @@ impl XlHeapUpdate {
             flags: buf.get_u8(),
             new_xmax: buf.get_u32_le(),
             new_offnum: buf.get_u16_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct MultiXactMember {
+    pub xid: TransactionId,
+    pub status: MultiXactStatus,
+}
+
+impl MultiXactMember {
+    pub fn decode(buf: &mut Bytes) -> MultiXactMember {
+        MultiXactMember {
+            xid: buf.get_u32_le(),
+            status: buf.get_u32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlMultiXactCreate {
+    pub mid: MultiXactId,      /* new MultiXact's ID */
+    pub moff: MultiXactOffset, /* its starting offset in members file */
+    pub nmembers: u32,         /* number of member XIDs */
+    pub members: Vec<MultiXactMember>,
+}
+
+impl XlMultiXactCreate {
+    pub fn decode(buf: &mut Bytes) -> XlMultiXactCreate {
+        let mid = buf.get_u32_le();
+        let moff = buf.get_u32_le();
+        let nmembers = buf.get_u32_le();
+        let mut members = Vec::new();
+        for _ in 0..nmembers {
+            members.push(MultiXactMember::decode(buf));
+        }
+        XlMultiXactCreate {
+            mid,
+            moff,
+            nmembers,
+            members,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlMultiXactTruncate {
+    oldest_multi_db: Oid,
+    /* to-be-truncated range of multixact offsets */
+    start_trunc_off: MultiXactId, /* just for completeness' sake */
+    end_trunc_off: MultiXactId,
+
+    /* to-be-truncated range of multixact members */
+    start_trunc_memb: MultiXactOffset,
+    end_trunc_memb: MultiXactOffset,
+}
+
+impl XlMultiXactTruncate {
+    pub fn decode(buf: &mut Bytes) -> XlMultiXactTruncate {
+        XlMultiXactTruncate {
+            oldest_multi_db: buf.get_u32_le(),
+            start_trunc_off: buf.get_u32_le(),
+            end_trunc_off: buf.get_u32_le(),
+            start_trunc_memb: buf.get_u32_le(),
+            end_trunc_memb: buf.get_u32_le(),
         }
     }
 }
@@ -930,6 +1019,73 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 blocks.push(blk);
             }
         }
+    } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
+        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
+            let mut blk = DecodedBkpBlock::new();
+            blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
+            blk.blkno = buf.get_u32_le();
+            blk.will_init = true;
+            blocks.push(blk);
+        } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
+            let mut blk = DecodedBkpBlock::new();
+            blk.forknum = pg_constants::PG_MXACT_MEMBERS_FORKNUM;
+            blk.blkno = buf.get_u32_le();
+            blk.will_init = true;
+            blocks.push(blk);
+        } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
+            let xlrec = XlMultiXactCreate::decode(&mut buf);
+            // Update offset page
+            let mut blk = DecodedBkpBlock::new();
+            blk.blkno = xlrec.mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
+            blocks.push(blk);
+            let first_mbr_blkno = xlrec.moff / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            let last_mbr_blkno =
+                (xlrec.moff + xlrec.nmembers - 1) / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            for blkno in first_mbr_blkno..=last_mbr_blkno {
+                // Update members page
+                let mut blk = DecodedBkpBlock::new();
+                blk.forknum = pg_constants::PG_MXACT_MEMBERS_FORKNUM;
+                blk.blkno = blkno;
+                blocks.push(blk);
+            }
+        } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
+            let xlrec = XlMultiXactTruncate::decode(&mut buf);
+            let first_off_blkno =
+                xlrec.start_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            let last_off_blkno =
+                xlrec.end_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            for blkno in first_off_blkno..last_off_blkno {
+                let mut blk = DecodedBkpBlock::new();
+                blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
+                blk.blkno = blkno;
+                blk.will_init = true;
+                blocks.push(blk);
+            }
+            let first_mbr_blkno =
+                xlrec.start_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            let last_mbr_blkno =
+                xlrec.end_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            for blkno in first_mbr_blkno..last_mbr_blkno {
+                let mut blk = DecodedBkpBlock::new();
+                blk.forknum = pg_constants::PG_MXACT_MEMBERS_FORKNUM;
+                blk.blkno = blkno;
+                blk.will_init = true;
+                blocks.push(blk);
+            }
+        } else {
+            assert!(false);
+        }
+    } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
+        let xlrec = XlRelmapUpdate::decode(&mut buf);
+        let mut blk = DecodedBkpBlock::new();
+        blk.forknum = pg_constants::PG_FILENODEMAP_FORKNUM;
+        blk.rnode_spcnode = xlrec.tsid;
+        blk.rnode_dbnode = xlrec.dbid;
+        blk.rnode_relnode = 0;
+        blk.will_init = true;
+        blocks.push(blk);
     }
 
     DecodedWALRecord {

@@ -106,6 +106,13 @@ pub trait Timeline {
     /// valid LSN, so that the WAL receiver knows where to restart streaming.
     fn advance_last_record_lsn(&self, lsn: Lsn);
     fn get_last_record_lsn(&self) -> Lsn;
+
+    /// Get range [begin,end) of stored blocks. Used mostly for SMGR pseudorelations
+    /// but can be also applied to normal relations.
+    fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)>;
+
+    /// Get vector of databases (represented using RelTag only dbnode and spcnode fields are used)
+    fn get_databases(&self) -> Result<Vec<RelTag>>;
 }
 
 #[derive(Clone)]
@@ -118,25 +125,25 @@ pub struct RepositoryStats {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy)]
 pub struct RelTag {
+    pub forknum: u8,
     pub spcnode: u32,
     pub dbnode: u32,
     pub relnode: u32,
-    pub forknum: u8,
 }
 
 impl RelTag {
     pub fn pack(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.forknum);
         buf.put_u32(self.spcnode);
         buf.put_u32(self.dbnode);
         buf.put_u32(self.relnode);
-        buf.put_u32(self.forknum as u32); // encode forknum as u32 to provide compatibility with wal_redo_postgres
     }
     pub fn unpack(buf: &mut BytesMut) -> RelTag {
         RelTag {
+            forknum: buf.get_u8(),
             spcnode: buf.get_u32(),
             dbnode: buf.get_u32(),
             relnode: buf.get_u32(),
-            forknum: buf.get_u32() as u8,
         }
     }
 }
