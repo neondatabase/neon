@@ -302,7 +302,7 @@ impl PostgresRedoManagerInternal {
                 if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
                     let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
                     if info == pg_constants::CLOG_ZEROPAGE {
-                        page.clone_from_slice(&ZERO_PAGE);
+                        page.copy_from_slice(&ZERO_PAGE);
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
                     let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
@@ -368,9 +368,9 @@ impl PostgresRedoManagerInternal {
                 } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
                     let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
                     if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
-                        page.fill(0);
+                        page.copy_from_slice(&ZERO_PAGE);
                     } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
-                        page.fill(0);
+                        page.copy_from_slice(&ZERO_PAGE);
                     } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                         let xlrec = XlMultiXactCreate::decode(&mut buf);
                         if tag.rel.forknum == pg_constants::PG_MXACT_OFFSETS_FORKNUM {

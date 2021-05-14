@@ -54,7 +54,7 @@ fn add_slru_segments(
                 let segname = format!("{}/{:>04X}", path, curr_segno.unwrap());
 				let header = new_tar_header(&segname, SEG_SIZE as u64)?;
                 ar.append(&header, &seg_buf[..])?;
-                seg_buf.fill(0);
+                seg_buf = [0u8; SEG_SIZE];
             }
             curr_segno = Some(segno);
             let offs_start = (page % pg_constants::SLRU_PAGES_PER_SEGMENT) as usize
