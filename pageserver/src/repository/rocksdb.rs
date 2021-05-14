@@ -211,6 +211,21 @@ impl Repository for RocksRepository {
             }
         }
     }
+
+    #[cfg(test)]
+    fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
+        let mut timelines = self.timelines.lock().unwrap();
+
+        let timeline = RocksTimeline::new(&self.repo_dir, timelineid, self.walredo_mgr.clone());
+
+        let timeline_rc = Arc::new(timeline);
+        let r = timelines.insert(timelineid, timeline_rc.clone());
+        assert!(r.is_none());
+
+        // don't start the garbage collector for unit tests, either.
+
+        Ok(timeline_rc)
+    }
 }
 
 impl RocksTimeline {
@@ -621,6 +636,7 @@ impl Timeline for RocksTimeline {
     ///
     /// Does relation exist at given LSN?
     ///
+    /// FIXME: this actually returns true, if the relation exists at *any* LSN
     fn get_relsize_exists(&self, rel: RelTag, req_lsn: Lsn) -> Result<bool> {
         let lsn = self.wait_lsn(req_lsn)?;
 
