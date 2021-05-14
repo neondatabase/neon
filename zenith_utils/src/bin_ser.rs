@@ -83,10 +83,11 @@ pub fn le_coder() -> impl Options {
 ///
 pub trait BeSer: Serialize + DeserializeOwned {
     /// Serialize into a byte slice
-    fn ser_into_slice<W: Write>(&self, b: &mut [u8]) -> Result<(), SerializeError> {
-        // This is slightly awkward; we need a mutable reference to a mutable reference.
-        let mut w = b;
-        self.ser_into(&mut w)
+    fn ser_into_slice(&self, mut b: &mut [u8]) -> Result<(), SerializeError> {
+        // &mut [u8] implements Write, but `ser_into` needs a mutable
+        // reference to that. So we need the slightly awkward "mutable
+        // reference to a mutable reference.
+        self.ser_into(&mut b)
     }
 
     /// Serialize into a borrowed writer
@@ -119,10 +120,11 @@ pub trait BeSer: Serialize + DeserializeOwned {
 ///
 pub trait LeSer: Serialize + DeserializeOwned {
     /// Serialize into a byte slice
-    fn ser_into_slice<W: Write>(&self, b: &mut [u8]) -> Result<(), SerializeError> {
-        // This is slightly awkward; we need a mutable reference to a mutable reference.
-        let mut w = b;
-        self.ser_into(&mut w)
+    fn ser_into_slice(&self, mut b: &mut [u8]) -> Result<(), SerializeError> {
+        // &mut [u8] implements Write, but `ser_into` needs a mutable
+        // reference to that. So we need the slightly awkward "mutable
+        // reference to a mutable reference.
+        self.ser_into(&mut b)
     }
 
     /// Serialize into a borrowed writer
