@@ -7,6 +7,7 @@ use crate::PageServerConf;
 //use crate::repository::Repository;
 use crate::repository::rocksdb::RocksRepository;
 use lazy_static::lazy_static;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 lazy_static! {
@@ -16,7 +17,10 @@ lazy_static! {
 pub fn init(conf: &PageServerConf) {
     let mut m = REPOSITORY.lock().unwrap();
 
-    *m = Some(Arc::new(RocksRepository::new(conf)));
+    // we have already changed current dir to the repository.
+    let repo = RocksRepository::new(conf, Path::new("."));
+
+    *m = Some(Arc::new(repo));
 }
 
 pub fn get_repository() -> Arc<RocksRepository> {

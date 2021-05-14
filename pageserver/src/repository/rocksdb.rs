@@ -9,8 +9,8 @@ use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::restore_timeline;
 use crate::waldecoder::{DecodedWALRecord, Oid, XlCreateDatabase, XlSmgrTruncate};
 use crate::walredo::WalRedoManager;
+use crate::PageServerConf;
 use crate::ZTimelineId;
-use crate::{zenith_repo_dir, PageServerConf};
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
@@ -18,6 +18,7 @@ use postgres_ffi::pg_constants;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,7 @@ use zenith_utils::seqwait::SeqWait;
 static TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct RocksRepository {
+    repo_dir: PathBuf,
     conf: PageServerConf,
     timelines: Mutex<HashMap<ZTimelineId, Arc<RocksTimeline>>>,
 }
@@ -152,8 +154,9 @@ impl CacheEntryContent {
 }
 
 impl RocksRepository {
-    pub fn new(conf: &PageServerConf) -> RocksRepository {
+    pub fn new(conf: &PageServerConf, repo_dir: &Path) -> RocksRepository {
         RocksRepository {
+            repo_dir: PathBuf::from(repo_dir),
             conf: conf.clone(),
             timelines: Mutex::new(HashMap::new()),
         }
@@ -177,7 +180,7 @@ impl Repository for RocksRepository {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let timeline = RocksTimeline::new(&self.conf, timelineid);
+                let timeline = RocksTimeline::new(&self.conf, &self.repo_dir, timelineid);
 
                 restore_timeline(&self.conf, &timeline, timelineid)?;
 
@@ -203,8 +206,8 @@ impl Repository for RocksRepository {
 }
 
 impl RocksTimeline {
-    fn open_rocksdb(_conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB {
-        let path = zenith_repo_dir().join(timelineid.to_string());
+    fn open_rocksdb(repo_dir: &Path, timelineid: ZTimelineId) -> rocksdb::DB {
+        let path = repo_dir.join("timelines").join(timelineid.to_string());
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         opts.set_use_fsync(true);
@@ -219,9 +222,9 @@ impl RocksTimeline {
         rocksdb::DB::open(&opts, &path).unwrap()
     }
 
-    fn new(conf: &PageServerConf, timelineid: ZTimelineId) -> RocksTimeline {
+    fn new(conf: &PageServerConf, repo_dir: &Path, timelineid: ZTimelineId) -> RocksTimeline {
         RocksTimeline {
-            db: RocksTimeline::open_rocksdb(&conf, timelineid),
+            db: RocksTimeline::open_rocksdb(repo_dir, timelineid),
 
             walredo_mgr: WalRedoManager::new(conf, timelineid),
 
