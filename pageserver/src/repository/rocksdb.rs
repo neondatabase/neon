@@ -34,6 +34,8 @@ pub struct RocksRepository {
     repo_dir: PathBuf,
     conf: PageServerConf,
     timelines: Mutex<HashMap<ZTimelineId, Arc<RocksTimeline>>>,
+
+    walredo_mgr: Arc<dyn WalRedoManager>,
 }
 
 pub struct RocksTimeline {
@@ -41,7 +43,7 @@ pub struct RocksTimeline {
     db: rocksdb::DB,
 
     // WAL redo manager
-    walredo_mgr: WalRedoManager,
+    walredo_mgr: Arc<dyn WalRedoManager>,
 
     // What page versions do we hold in the cache? If we get a request > last_valid_lsn,
     // we need to wait until we receive all the WAL up to the request. The SeqWait
@@ -154,11 +156,16 @@ impl CacheEntryContent {
 }
 
 impl RocksRepository {
-    pub fn new(conf: &PageServerConf, repo_dir: &Path) -> RocksRepository {
+    pub fn new(
+        conf: &PageServerConf,
+        repo_dir: &Path,
+        walredo_mgr: Arc<dyn WalRedoManager>,
+    ) -> RocksRepository {
         RocksRepository {
             repo_dir: PathBuf::from(repo_dir),
             conf: conf.clone(),
             timelines: Mutex::new(HashMap::new()),
+            walredo_mgr,
         }
     }
 }
@@ -180,7 +187,8 @@ impl Repository for RocksRepository {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let timeline = RocksTimeline::new(&self.conf, &self.repo_dir, timelineid);
+                let timeline =
+                    RocksTimeline::new(&self.repo_dir, timelineid, self.walredo_mgr.clone());
 
                 restore_timeline(&self.conf, &timeline, timelineid)?;
 
@@ -222,11 +230,15 @@ impl RocksTimeline {
         rocksdb::DB::open(&opts, &path).unwrap()
     }
 
-    fn new(conf: &PageServerConf, repo_dir: &Path, timelineid: ZTimelineId) -> RocksTimeline {
+    fn new(
+        repo_dir: &Path,
+        timelineid: ZTimelineId,
+        walredo_mgr: Arc<dyn WalRedoManager>,
+    ) -> RocksTimeline {
         RocksTimeline {
             db: RocksTimeline::open_rocksdb(repo_dir, timelineid),
 
-            walredo_mgr: WalRedoManager::new(conf, timelineid),
+            walredo_mgr,
 
             last_valid_lsn: SeqWait::new(Lsn(0)),
             last_record_lsn: AtomicLsn::new(0),

@@ -7,7 +7,6 @@
 //!
 
 use crate::page_cache;
-use crate::repository::Repository;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;

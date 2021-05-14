@@ -1,19 +1,19 @@
-//
-// WAL redo
-//
-// We rely on Postgres to perform WAL redo for us. We launch a
-// postgres process in special "wal redo" mode that's similar to
-// single-user mode. We then pass the the previous page image, if any,
-// and all the WAL records we want to apply, to the postgress
-// process. Then we get the page image back. Communication with the
-// postgres process happens via stdin/stdout
-//
-// See src/backend/tcop/zenith_wal_redo.c for the other side of
-// this communication.
-//
-// TODO: Even though the postgres code runs in a separate process,
-// it's not a secure sandbox.
-//
+//!
+//! WAL redo
+//!
+//! We rely on Postgres to perform WAL redo for us. We launch a
+//! postgres process in special "wal redo" mode that's similar to
+//! single-user mode. We then pass the the previous page image, if any,
+//! and all the WAL records we want to apply, to the postgres
+//! process. Then we get the page image back. Communication with the
+//! postgres process happens via stdin/stdout
+//!
+//! See src/backend/tcop/zenith_wal_redo.c for the other side of
+//! this communication.
+//!
+//! TODO: Even though the postgres code runs in a separate process,
+//! it's not a secure sandbox.
+//!
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::assert;
@@ -37,25 +37,43 @@ use zenith_utils::lsn::Lsn;
 use crate::repository::BufferTag;
 use crate::repository::WALRecord;
 use crate::PageServerConf;
-use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::XLogRecord;
+
+///
+/// WAL Redo Manager is responsible for replaying WAL records.
+///
+/// Callers use the WAL redo manager through this abstract interface,
+/// which makes it easy to mock it in tests.
+pub trait WalRedoManager: Send + Sync {
+    /// Apply some WAL records.
+    ///
+    /// The caller passes an old page image, and WAL records that should be
+    /// applied over it. The return value is a new page image, after applying
+    /// the reords.
+    fn request_redo(
+        &self,
+        tag: BufferTag,
+        lsn: Lsn,
+        base_img: Option<Bytes>,
+        records: Vec<WALRecord>,
+    ) -> Result<Bytes, WalRedoError>;
+}
 
 static TIMEOUT: Duration = Duration::from_secs(20);
 
 ///
-/// A WAL redo manager consists of two parts: WalRedoManager, and
-/// WalRedoManagerInternal. WalRedoManager is the public struct
+/// The implementation consists of two parts: PostgresRedoManager, and
+/// PostgresRedoManagerInternal. PostgresRedoManager is the public struct
 /// that can be used to send redo requests to the manager.
-/// WalRedoManagerInternal is used by the manager thread itself.
+/// PostgresRedoManagerInternal is used by the manager thread itself.
 ///
-pub struct WalRedoManager {
+pub struct PostgresRedoManager {
     request_tx: Mutex<mpsc::Sender<WalRedoRequest>>,
 }
 
-struct WalRedoManagerInternal {
+struct PostgresRedoManagerInternal {
     _conf: PageServerConf,
-    timelineid: ZTimelineId,
 
     request_rx: mpsc::Receiver<WalRedoRequest>,
 }
@@ -81,13 +99,12 @@ pub enum WalRedoError {
 ///
 /// Public interface of WAL redo manager
 ///
-impl WalRedoManager {
+impl PostgresRedoManager {
     ///
-    /// Create a new WalRedoManager.
+    /// Create a new PostgresRedoManager.
     ///
-    /// This only initializes the struct. You need to call WalRedoManager::launch to
-    /// start the thread that processes the requests.
-    pub fn new(conf: &PageServerConf, timelineid: ZTimelineId) -> WalRedoManager {
+    /// This launches a new thread to handle the requests.
+    pub fn new(conf: &PageServerConf) -> PostgresRedoManager {
         let (tx, rx) = mpsc::channel();
 
         //
@@ -103,25 +120,28 @@ impl WalRedoManager {
         let _walredo_thread = std::thread::Builder::new()
             .name("WAL redo thread".into())
             .spawn(move || {
-                let mut internal = WalRedoManagerInternal {
+                let mut internal = PostgresRedoManagerInternal {
                     _conf: conf_copy,
-                    timelineid,
                     request_rx,
                 };
                 internal.wal_redo_main();
             })
             .unwrap();
 
-        WalRedoManager {
+        PostgresRedoManager {
             request_tx: Mutex::new(tx),
         }
     }
+}
 
+impl WalRedoManager for PostgresRedoManager {
     ///
-    /// Request the WAL redo manager to apply WAL records, to reconstruct the page image
-    /// of the given page version.
+    /// Request the WAL redo manager to apply some WAL records
     ///
-    pub fn request_redo(
+    /// The WAL redo is handled by a separate thread, so this just sends a request
+    /// to the thread and waits for response.
+    ///
+    fn request_redo(
         &self,
         tag: BufferTag,
         lsn: Lsn,
@@ -153,12 +173,12 @@ impl WalRedoManager {
 ///
 /// WAL redo thread
 ///
-impl WalRedoManagerInternal {
+impl PostgresRedoManagerInternal {
     //
     // Main entry point for the WAL applicator thread.
     //
     fn wal_redo_main(&mut self) {
-        info!("WAL redo thread started {}", self.timelineid);
+        info!("WAL redo thread started");
 
         // We block on waiting for requests on the walredo request channel, but
         // use async I/O to communicate with the child process. Initialize the
@@ -168,12 +188,18 @@ impl WalRedoManagerInternal {
             .build()
             .unwrap();
 
-        let process: WalRedoProcess;
-        let datadir = format!("wal-redo/{}", self.timelineid);
+        let process: PostgresRedoProcess;
 
-        info!("launching WAL redo postgres process {}", self.timelineid);
+        // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
+        // just create one with constant name. That fails if you try to launch more than
+        // one WAL redo manager concurrently.
+        let datadir = format!("wal-redo-datadir");
 
-        process = runtime.block_on(WalRedoProcess::launch(&datadir)).unwrap();
+        info!("launching WAL redo postgres process");
+
+        process = runtime
+            .block_on(PostgresRedoProcess::launch(&datadir))
+            .unwrap();
         info!("WAL redo postgres started");
 
         // Loop forever, handling requests as they come.
@@ -216,7 +242,7 @@ impl WalRedoManagerInternal {
     ///
     async fn handle_apply_request(
         &self,
-        process: &WalRedoProcess,
+        process: &PostgresRedoProcess,
         request: &WalRedoRequest,
     ) -> Result<Bytes, WalRedoError> {
         let tag = request.tag;
@@ -351,19 +377,19 @@ impl WalRedoManagerInternal {
     }
 }
 
-struct WalRedoProcess {
+struct PostgresRedoProcess {
     stdin: RefCell<ChildStdin>,
     stdout: RefCell<ChildStdout>,
 }
 
-impl WalRedoProcess {
+impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
     // Tests who run pageserver binary are setting proper PG_BIN_DIR
     // and PG_LIB_DIR so that WalRedo would start right postgres. We may later
     // switch to setting same things in pageserver config file.
-    async fn launch(datadir: &str) -> Result<WalRedoProcess, Error> {
+    async fn launch(datadir: &str) -> Result<PostgresRedoProcess, Error> {
         // Create empty data directory for wal-redo postgres deleting old one.
         fs::remove_dir_all(datadir).ok();
         let initdb = Command::new("initdb")
@@ -426,7 +452,7 @@ impl WalRedoProcess {
         };
         tokio::spawn(f_stderr);
 
-        Ok(WalRedoProcess {
+        Ok(PostgresRedoProcess {
             stdin: RefCell::new(stdin),
             stdout: RefCell::new(stdout),
         })
