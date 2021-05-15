@@ -46,8 +46,23 @@ impl From<bincode::Error> for DeserializeError {
 /// This probably means our [`Write`] failed, e.g. we tried
 /// to write beyond the end of a buffer.
 #[derive(Debug, Error)]
-#[error("serialize error")]
-pub struct SerializeError;
+pub enum SerializeError {
+    /// The serializer isn't able to serialize the supplied data.
+    #[error("serialize error")]
+    BadInput,
+    /// While serializing into a `Write` sink, an `io::Error` occurred.
+    #[error("serialize error: {0}")]
+    Io(io::Error),
+}
+
+impl From<bincode::Error> for SerializeError {
+    fn from(e: bincode::Error) -> Self {
+        match *e {
+            bincode::ErrorKind::Io(io_err) => SerializeError::Io(io_err),
+            _ => SerializeError::BadInput,
+        }
+    }
+}
 
 /// A shortcut that configures big-endian binary serialization
 ///
@@ -95,12 +110,12 @@ pub trait BeSer: Serialize + DeserializeOwned {
     /// This is useful for most `Write` types except `&mut [u8]`, which
     /// can more easily use [`ser_into_slice`](Self::ser_into_slice).
     fn ser_into<W: Write>(&self, w: &mut W) -> Result<(), SerializeError> {
-        be_coder().serialize_into(w, &self).or(Err(SerializeError))
+        be_coder().serialize_into(w, &self).map_err(|e| e.into())
     }
 
     /// Serialize into a new heap-allocated buffer
     fn ser(&self) -> Result<Vec<u8>, SerializeError> {
-        be_coder().serialize(&self).or(Err(SerializeError))
+        be_coder().serialize(&self).map_err(|e| e.into())
     }
 
     /// Deserialize from a byte slice
@@ -113,6 +128,14 @@ pub trait BeSer: Serialize + DeserializeOwned {
     /// Deserialize from a reader
     fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
         be_coder().deserialize_from(r).map_err(|e| e.into())
+    }
+
+    /// Compute the serialized size of a data structure
+    ///
+    /// Note: it may be faster to serialize to a buffer and then measure the
+    /// buffer length, than to call `serialized_size` and then `ser_into`.
+    fn serialized_size(&self) -> Result<u64, SerializeError> {
+        be_coder().serialized_size(self).map_err(|e| e.into())
     }
 }
 
@@ -132,12 +155,12 @@ pub trait LeSer: Serialize + DeserializeOwned {
     /// This is useful for most `Write` types except `&mut [u8]`, which
     /// can more easily use [`ser_into_slice`](Self::ser_into_slice).
     fn ser_into<W: Write>(&self, w: &mut W) -> Result<(), SerializeError> {
-        le_coder().serialize_into(w, &self).or(Err(SerializeError))
+        le_coder().serialize_into(w, &self).map_err(|e| e.into())
     }
 
     /// Serialize into a new heap-allocated buffer
     fn ser(&self) -> Result<Vec<u8>, SerializeError> {
-        le_coder().serialize(&self).or(Err(SerializeError))
+        le_coder().serialize(&self).map_err(|e| e.into())
     }
 
     /// Deserialize from a byte slice
@@ -150,6 +173,14 @@ pub trait LeSer: Serialize + DeserializeOwned {
     /// Deserialize from a reader
     fn des_from<R: Read>(r: &mut R) -> Result<Self, DeserializeError> {
         le_coder().deserialize_from(r).map_err(|e| e.into())
+    }
+
+    /// Compute the serialized size of a data structure
+    ///
+    /// Note: it may be faster to serialize to a buffer and then measure the
+    /// buffer length, than to call `serialized_size` and then `ser_into`.
+    fn serialized_size(&self) -> Result<u64, SerializeError> {
+        le_coder().serialized_size(self).map_err(|e| e.into())
     }
 }
 
@@ -207,6 +238,8 @@ mod tests {
     fn be_short() {
         use super::BeSer;
 
+        assert_eq!(SHORT1.serialized_size().unwrap(), 5);
+
         let encoded = SHORT1.ser().unwrap();
         assert_eq!(encoded, SHORT1_ENC_BE);
 
@@ -236,6 +269,8 @@ mod tests {
     #[test]
     fn le_short() {
         use super::LeSer;
+
+        assert_eq!(SHORT1.serialized_size().unwrap(), 5);
 
         let encoded = SHORT1.ser().unwrap();
         assert_eq!(encoded, SHORT1_ENC_LE);
@@ -267,6 +302,8 @@ mod tests {
     fn be_long() {
         use super::BeSer;
 
+        assert_eq!(LONG1.serialized_size().unwrap(), 30);
+
         let msg = LONG1;
 
         let encoded = msg.ser().unwrap();
@@ -282,6 +319,8 @@ mod tests {
     #[test]
     fn le_long() {
         use super::LeSer;
+
+        assert_eq!(LONG1.serialized_size().unwrap(), 30);
 
         let msg = LONG1;
 

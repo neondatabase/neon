@@ -37,6 +37,5 @@ fn test1() {
     let dec1 = decode_header_data(&mut buf1);
     let dec2 = decode2(&mut buf2);
     assert_eq!(dec1, dec2);
-    eprintln!("{} {}", buf1.len(), buf2.len());
     assert_eq!(buf1, buf2);
 }
