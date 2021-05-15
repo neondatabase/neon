@@ -7,7 +7,6 @@ use crate::pq_protocol::{
 };
 use crate::replication::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
-use crate::wal_service::Connection;
 use crate::WalAcceptorConf;
 use anyhow::{bail, Result};
 use bytes::BytesMut;
@@ -33,15 +32,17 @@ pub struct SendWalConn {
 
 impl SendWalConn {
     /// Create a new `SendWal`, consuming the `Connection`.
-    pub fn new(conn: Connection) -> Self {
-        Self {
-            timeline: conn.timeline,
-            stream_in: conn.stream_in,
-            stream_out: conn.stream_out,
-            peer_addr: conn.peer_addr,
-            conf: conn.conf,
+    pub fn new(socket: TcpStream, conf: WalAcceptorConf) -> Result<Self> {
+        let peer_addr = socket.peer_addr()?;
+        let conn = SendWalConn {
+            timeline: None,
+            stream_in: BufReader::new(socket.try_clone()?),
+            stream_out: socket,
+            peer_addr,
+            conf,
             appname: None,
-        }
+        };
+        Ok(conn)
     }
 
     ///
