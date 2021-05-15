@@ -1,6 +1,6 @@
 pub mod rocksdb;
 
-use crate::waldecoder::{DecodedWALRecord, Oid};
+use crate::waldecoder::{DecodedWALRecord, Oid, TransactionId};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -112,7 +112,10 @@ pub trait Timeline {
     fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)>;
 
     /// Get vector of databases (represented using RelTag only dbnode and spcnode fields are used)
-    fn get_databases(&self) -> Result<Vec<RelTag>>;
+    fn get_databases(&self, lsn: Lsn) -> Result<Vec<RelTag>>;
+
+    /// Get vector of prepared twophase transactions
+    fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>>;
 }
 
 #[derive(Clone)]

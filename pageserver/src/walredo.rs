@@ -359,7 +359,7 @@ impl PostgresRedoManagerInternal {
                                 }
                             }
                         }
-                    } else {
+                    } else if info != pg_constants::XLOG_XACT_PREPARE {
                         trace!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {} main_data_offset {}, rec.len {}",
                                status,
                                record.lsn,

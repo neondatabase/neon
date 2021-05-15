@@ -915,6 +915,11 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 let _xid = buf.get_u32_le();
                 trace!("XLOG_XACT_ABORT-XACT_XINFO_HAS_TWOPHASE");
             }
+        } else if info == pg_constants::XLOG_XACT_PREPARE {
+            let mut blk = DecodedBkpBlock::new();
+            blk.forknum = pg_constants::PG_TWOPHASE_FORKNUM;
+            blk.blkno = xlogrec.xl_xid;
+            blk.will_init = true;
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_DBASE_ID {
         let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;

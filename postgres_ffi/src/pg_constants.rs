@@ -22,6 +22,7 @@ pub const PG_FILENODEMAP_FORKNUM: u8 = 43;
 pub const PG_XACT_FORKNUM: u8 = 44;
 pub const PG_MXACT_OFFSETS_FORKNUM: u8 = 45;
 pub const PG_MXACT_MEMBERS_FORKNUM: u8 = 46;
+pub const PG_TWOPHASE_FORKNUM: u8 = 47;
 
 // From storage_xlog.h
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
@@ -50,6 +51,7 @@ pub const CLOG_TRUNCATE: u8 = 0x10;
 
 // From xact.h
 pub const XLOG_XACT_COMMIT: u8 = 0x00;
+pub const XLOG_XACT_PREPARE: u8 = 0x10;
 pub const XLOG_XACT_ABORT: u8 = 0x20;
 
 // From srlu.h

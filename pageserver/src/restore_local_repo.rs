@@ -23,7 +23,7 @@ use anyhow::Result;
 use bytes::Bytes;
 
 use crate::repository::{BufferTag, RelTag, Timeline};
-use crate::waldecoder::{Oid, decode_wal_record, WalStreamDecoder};
+use crate::waldecoder::{decode_wal_record, Oid, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
@@ -121,25 +121,27 @@ fn restore_snapshot(
 
             // These special files appear in the snapshot, but are not needed by the page server
             Some("pg_control") => restore_nonrel_file(
-					conf,
-					timeline,
-					timelineid,
-					snapshot,
-                    pg_constants::GLOBALTABLESPACE_OID,
-                    0,
-					pg_constants::PG_CONTROLFILE_FORKNUM,
-					&direntry.path(),
-				)?,
+                conf,
+                timeline,
+                timelineid,
+                snapshot,
+                pg_constants::GLOBALTABLESPACE_OID,
+                0,
+                pg_constants::PG_CONTROLFILE_FORKNUM,
+                0,
+                &direntry.path(),
+            )?,
             Some("pg_filenode.map") => restore_nonrel_file(
-					conf,
-					timeline,
-					timelineid,
-					snapshot,
-                    pg_constants::GLOBALTABLESPACE_OID,
-                    0,
-					pg_constants::PG_FILENODEMAP_FORKNUM,
-					&direntry.path(),
-				)?,
+                conf,
+                timeline,
+                timelineid,
+                snapshot,
+                pg_constants::GLOBALTABLESPACE_OID,
+                0,
+                pg_constants::PG_FILENODEMAP_FORKNUM,
+                0,
+                &direntry.path(),
+            )?,
 
             // Load any relation files into the page server
             _ => restore_relfile(
@@ -167,15 +169,16 @@ fn restore_snapshot(
                 // These special files appear in the snapshot, but are not needed by the page server
                 Some("PG_VERSION") => continue,
                 Some("pg_filenode.map") => restore_nonrel_file(
-					conf,
-					timeline,
-					timelineid,
-					snapshot,
+                    conf,
+                    timeline,
+                    timelineid,
+                    snapshot,
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
-					pg_constants::PG_FILENODEMAP_FORKNUM,
-					&direntry.path(),
-				)?,
+                    pg_constants::PG_FILENODEMAP_FORKNUM,
+                    0,
+                    &direntry.path(),
+                )?,
 
                 // Load any relation files into the page server
                 _ => restore_relfile(
@@ -218,6 +221,21 @@ fn restore_snapshot(
             timelineid,
             snapshot,
             pg_constants::PG_MXACT_OFFSETS_FORKNUM,
+            &entry.path(),
+        )?;
+    }
+    for entry in fs::read_dir(snapshotpath.join("pg_twophase"))? {
+        let entry = entry?;
+        let xid = u32::from_str_radix(&entry.path().to_str().unwrap(), 16)?;
+        restore_nonrel_file(
+            conf,
+            timeline,
+            timelineid,
+            snapshot,
+            0,
+            0,
+            pg_constants::PG_TWOPHASE_FORKNUM,
+            xid,
             &entry.path(),
         )?;
     }
@@ -296,6 +314,7 @@ fn restore_nonrel_file(
     spcoid: Oid,
     dboid: Oid,
     forknum: u8,
+    blknum: u32,
     path: &Path,
 ) -> Result<()> {
     let lsn = Lsn::from_hex(snapshot)?;
@@ -314,7 +333,7 @@ fn restore_nonrel_file(
             relnode: 0,
             forknum,
         },
-        blknum: 0,
+        blknum,
     };
     timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]));
     Ok(())
@@ -344,7 +363,7 @@ fn restore_slru_file(
                 let tag = BufferTag {
                     rel: RelTag {
                         spcnode: 0,
-                        dbnode:  0,
+                        dbnode: 0,
                         relnode: 0,
                         forknum,
                     },

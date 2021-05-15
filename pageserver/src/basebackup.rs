@@ -12,17 +12,22 @@ use postgres_ffi::relfile_utils::*;
 use zenith_utils::lsn::Lsn;
 
 fn new_tar_header(path: &str, size: u64) -> anyhow::Result<Header> {
-	let mut header = Header::new_gnu();
-	header.set_size(size);
+    let mut header = Header::new_gnu();
+    header.set_size(size);
     header.set_path(path)?;
-	header.set_mode(0b110000000);
-	header.set_mtime(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs());
-	header.set_cksum();
-	Ok(header)
+    header.set_mode(0b110000000);
+    header.set_mtime(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    header.set_cksum();
+    Ok(header)
 }
 
 //
-// Generate SRLU segment files from repoistory
+// Generate SRLU segment files from repository
 //
 fn add_slru_segments(
     ar: &mut Builder<&mut dyn Write>,
@@ -52,7 +57,7 @@ fn add_slru_segments(
             let segno = page / pg_constants::SLRU_PAGES_PER_SEGMENT;
             if curr_segno.is_some() && curr_segno.unwrap() != segno {
                 let segname = format!("{}/{:>04X}", path, curr_segno.unwrap());
-				let header = new_tar_header(&segname, SEG_SIZE as u64)?;
+                let header = new_tar_header(&segname, SEG_SIZE as u64)?;
                 ar.append(&header, &seg_buf[..])?;
                 seg_buf = [0u8; SEG_SIZE];
             }
@@ -65,21 +70,21 @@ fn add_slru_segments(
     }
     if curr_segno.is_some() {
         let segname = format!("{}/{:>04X}", path, curr_segno.unwrap());
-		let header = new_tar_header(&segname, SEG_SIZE as u64)?;
+        let header = new_tar_header(&segname, SEG_SIZE as u64)?;
         ar.append(&header, &seg_buf[..])?;
     }
     Ok(())
 }
 
 //
-// Extract pg_filenode.map files from repoistory
+// Extract pg_filenode.map files from repository
 //
 fn add_relmap_files(
     ar: &mut Builder<&mut dyn Write>,
     timeline: &Arc<dyn Timeline>,
     lsn: Lsn,
 ) -> anyhow::Result<()> {
-    for db in timeline.get_databases()?.iter() {
+    for db in timeline.get_databases(lsn)?.iter() {
         let tag = BufferTag {
             rel: *db,
             blknum: 0,
@@ -92,7 +97,34 @@ fn add_relmap_files(
             assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
             format!("base/{}/pg_filenode.map", db.dbnode)
         };
-		let header = new_tar_header(&path, 512)?;
+        assert!(img.len() == 512);
+        let header = new_tar_header(&path, img.len() as u64)?;
+        ar.append(&header, &img[..])?;
+    }
+    Ok(())
+}
+
+//
+// Extract twophase state files
+//
+fn add_twophase_files(
+    ar: &mut Builder<&mut dyn Write>,
+    timeline: &Arc<dyn Timeline>,
+    lsn: Lsn,
+) -> anyhow::Result<()> {
+    for xid in timeline.get_twophase(lsn)?.iter() {
+        let tag = BufferTag {
+            rel: RelTag {
+                spcnode: 0,
+                dbnode: 0,
+                relnode: 0,
+                forknum: pg_constants::PG_TWOPHASE_FORKNUM,
+            },
+            blknum: *xid,
+        };
+        let img = timeline.get_page_at_lsn(tag, lsn)?;
+        let path = format!("pg_twophase/{:>08X}", xid);
+        let header = new_tar_header(&path, img.len() as u64)?;
         ar.append(&header, &img[..])?;
     }
     Ok(())
@@ -175,6 +207,7 @@ pub fn send_tarball_at_lsn(
         lsn,
     )?;
     add_relmap_files(&mut ar, timeline, lsn)?;
+    add_twophase_files(&mut ar, timeline, lsn)?;
 
     // FIXME: Also send all the WAL. The compute node would only need
     // the WAL that applies to non-relation files, because the page

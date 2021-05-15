@@ -827,12 +827,14 @@ impl Connection {
     ) -> anyhow::Result<()> {
         // check that the timeline exists
         let repository = page_cache::get_repository();
-        let timeline = repository.get_or_restore_timeline(timelineid).map_err(|_| {
-            anyhow!(
+        let timeline = repository
+            .get_or_restore_timeline(timelineid)
+            .map_err(|_| {
+                anyhow!(
                 "client requested basebackup on timeline {} which does not exist in page server",
                 timelineid
             )
-        })?;
+            })?;
         /* switch client to COPYOUT */
         let stream = &mut self.stream;
         stream.write_u8(b'H')?;

@@ -7,7 +7,7 @@
 
 use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::restore_timeline;
-use crate::waldecoder::{DecodedWALRecord, Oid, XlCreateDatabase, XlSmgrTruncate};
+use crate::waldecoder::{DecodedWALRecord, Oid, TransactionId, XlCreateDatabase, XlSmgrTruncate};
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -423,6 +423,19 @@ impl RocksTimeline {
                         let mut minkey = maxkey.clone();
                         minkey.lsn = Lsn(0); // first version
 
+                        // Special handling of delete of PREPARE WAL record
+                        if last_lsn < horizon
+                            && key.tag.rel.forknum == pg_constants::PG_TWOPHASE_FORKNUM
+                        {
+                            if (v[0] & UNUSED_VERSION_FLAG) == 0 {
+                                let mut v = v.to_owned();
+                                v[0] |= UNUSED_VERSION_FLAG;
+                                self.db.put(k, &v[..])?;
+                                deleted += 1;
+                            }
+                            maxkey = minkey;
+                            continue;
+                        }
                         // reconstruct most recent page version
                         if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
                             // force reconstruction of most recent page version
@@ -632,8 +645,45 @@ impl Timeline for RocksTimeline {
         self.relsize_get_nowait(rel, lsn)
     }
 
+    /// Get vector of prepared twophase transactions
+    fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>> {
+        let key = CacheKey {
+            // minimal key
+            tag: BufferTag {
+                rel: RelTag {
+                    forknum: pg_constants::PG_TWOPHASE_FORKNUM,
+                    spcnode: 0,
+                    dbnode: 0,
+                    relnode: 0,
+                },
+                blknum: 0,
+            },
+            lsn: Lsn(0),
+        };
+        let mut buf = BytesMut::new();
+        key.pack(&mut buf);
+        let mut gxacts = Vec::new();
+
+        let mut iter = self.db.raw_iterator();
+        iter.seek(&buf[..]);
+        while iter.valid() {
+            let k = iter.key().unwrap();
+            buf.clear();
+            buf.extend_from_slice(&k);
+            let key = CacheKey::unpack(&mut buf);
+            if key.tag.rel.forknum != pg_constants::PG_TWOPHASE_FORKNUM {
+                break; // we are done with this fork
+            }
+            if key.lsn <= lsn {
+                gxacts.push(key.tag.blknum); // XID
+            }
+            iter.next();
+        }
+        return Ok(gxacts);
+    }
+
     /// Get databases. This function is used to local pg_filenode.map files
-    fn get_databases(&self) -> Result<Vec<RelTag>> {
+    fn get_databases(&self, lsn: Lsn) -> Result<Vec<RelTag>> {
         let key = CacheKey {
             // minimal key
             tag: BufferTag {
@@ -658,13 +708,13 @@ impl Timeline for RocksTimeline {
             let k = iter.key().unwrap();
             buf.clear();
             buf.extend_from_slice(&k);
-            let tag = RelTag::unpack(&mut buf);
-            if tag.forknum != pg_constants::PG_FILENODEMAP_FORKNUM {
+            let key = CacheKey::unpack(&mut buf);
+            if key.tag.rel.forknum != pg_constants::PG_FILENODEMAP_FORKNUM {
                 break; // we are done with this fork
             }
-            if tag != prev_tag {
-                dbs.push(tag); // collect unique tags
-                prev_tag = tag;
+            if key.tag.rel != prev_tag && key.lsn <= lsn {
+                prev_tag = key.tag.rel;
+                dbs.push(prev_tag); // collect unique tags
             }
             iter.next();
         }
@@ -816,8 +866,8 @@ impl Timeline for RocksTimeline {
         let mut val_buf = BytesMut::new();
         content.pack(&mut val_buf);
 
-        // Zero size of page image indicates that SLRU page was truncated
-        if img_len == 0 && key.tag.rel.forknum > pg_constants::PG_XACT_FORKNUM {
+        // Zero size of page image indicates that page can be removed
+        if img_len == 0 {
             if (val_buf[0] & UNUSED_VERSION_FLAG) != 0 {
                 // records already marked for deletion
                 return;
