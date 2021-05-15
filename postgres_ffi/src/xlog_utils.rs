@@ -27,6 +27,8 @@ pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = XLP_REM_LEN_OFFS + 4 + 4;
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = XLOG_SIZE_OF_XLOG_SHORT_PHD + 8 + 4 + 4;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = XLOG_RECORD_CRC_OFFS + 4;
+pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
+
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
 pub type TimestampTz = u64;

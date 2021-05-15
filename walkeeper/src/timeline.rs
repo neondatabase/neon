@@ -1,18 +1,135 @@
 //! This module contains tools for managing timelines.
 //!
 
-use crate::wal_service::{HotStandbyFeedback, SafeKeeperInfo, SharedState, END_REPLICATION_MARKER};
-use crate::WalAcceptorConf;
-use anyhow::Result;
+use anyhow::{bail, Result};
+use fs2::FileExt;
 use lazy_static::lazy_static;
 use log::*;
 use pageserver::ZTimelineId;
 use postgres_ffi::xlog_utils::{find_end_of_wal, TimeLineID};
+use std::cmp::{max, min};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
+use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
+
+use crate::receive_wal::{SafeKeeperInfo, CONTROL_FILE_NAME, SK_FORMAT_VERSION, SK_MAGIC};
+use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};
+use crate::WalAcceptorConf;
+
+/// Shared state associated with database instance (tenant)
+#[derive(Debug)]
+pub struct SharedState {
+    /// quorum commit LSN
+    pub commit_lsn: Lsn,
+    /// information about this safekeeper
+    pub info: SafeKeeperInfo,
+    /// opened file control file handle (needed to hold exlusive file lock
+    pub control_file: Option<File>,
+    /// combined hot standby feedback from all replicas
+    pub hs_feedback: HotStandbyFeedback,
+}
+
+impl SharedState {
+    pub fn new() -> Self {
+        Self {
+            commit_lsn: Lsn(0),
+            info: SafeKeeperInfo::new(),
+            control_file: None,
+            hs_feedback: HotStandbyFeedback {
+                ts: 0,
+                xmin: u64::MAX,
+                catalog_xmin: u64::MAX,
+            },
+        }
+    }
+
+    /// Accumulate hot standby feedbacks from replicas
+    pub fn add_hs_feedback(&mut self, feedback: HotStandbyFeedback) {
+        self.hs_feedback.xmin = min(self.hs_feedback.xmin, feedback.xmin);
+        self.hs_feedback.catalog_xmin = min(self.hs_feedback.catalog_xmin, feedback.catalog_xmin);
+        self.hs_feedback.ts = max(self.hs_feedback.ts, feedback.ts);
+    }
+
+    /// Load and lock control file (prevent running more than one instance of safekeeper)
+    pub fn load_control_file(
+        &mut self,
+        conf: &WalAcceptorConf,
+        timelineid: ZTimelineId,
+    ) -> Result<()> {
+        if self.control_file.is_some() {
+            info!("control file for timeline {} is already open", timelineid);
+            return Ok(());
+        }
+
+        let control_file_path = conf
+            .data_dir
+            .join(timelineid.to_string())
+            .join(CONTROL_FILE_NAME);
+        info!("loading control file {}", control_file_path.display());
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&control_file_path)
+        {
+            Ok(file) => {
+                // Lock file to prevent two or more active wal_acceptors
+                match file.try_lock_exclusive() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        bail!(
+                            "Control file {:?} is locked by some other process: {}",
+                            &control_file_path,
+                            e
+                        );
+                    }
+                }
+                self.control_file = Some(file);
+
+                let cfile_ref = self.control_file.as_mut().unwrap();
+                match SafeKeeperInfo::des_from(cfile_ref) {
+                    Err(e) => {
+                        warn!("read from {:?} failed: {}", control_file_path, e);
+                    }
+                    Ok(info) => {
+                        if info.magic != SK_MAGIC {
+                            bail!("Invalid control file magic: {}", info.magic);
+                        }
+                        if info.format_version != SK_FORMAT_VERSION {
+                            bail!(
+                                "Incompatible format version: {} vs. {}",
+                                info.format_version,
+                                SK_FORMAT_VERSION
+                            );
+                        }
+                        self.info = info;
+                    }
+                }
+            }
+            Err(e) => {
+                panic!(
+                    "Failed to open control file {:?}: {}",
+                    &control_file_path, e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn save_control_file(&mut self, sync: bool) -> Result<()> {
+        let file = self.control_file.as_mut().unwrap();
+        file.seek(SeekFrom::Start(0))?;
+        self.info.ser_into(file)?;
+        if sync {
+            file.sync_all()?;
+        }
+        Ok(())
+    }
+}
 
 /// Database instance (tenant)
 #[derive(Debug)]

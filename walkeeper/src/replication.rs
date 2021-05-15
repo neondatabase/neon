@@ -4,13 +4,13 @@
 use crate::pq_protocol::{BeMessage, FeMessage};
 use crate::send_wal::SendWalConn;
 use crate::timeline::{Timeline, TimelineTools};
-use crate::wal_service::{HotStandbyFeedback, END_REPLICATION_MARKER, MAX_SEND_SIZE};
 use crate::WalAcceptorConf;
 use anyhow::{anyhow, bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use log::*;
-use postgres_ffi::xlog_utils::{get_current_timestamp, XLogFileName};
+use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -24,6 +24,17 @@ use zenith_utils::lsn::Lsn;
 const XLOG_HDR_SIZE: usize = 1 + 8 * 3; /* 'w' + startPos + walEnd + timestamp */
 const LIBPQ_HDR_SIZE: usize = 5; /* 1 byte with message type + 4 bytes length */
 const LIBPQ_MSG_SIZE_OFFS: usize = 1;
+pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
+
+type FullTransactionId = u64;
+
+/// Hot standby feedback received from replica
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotStandbyFeedback {
+    pub ts: TimestampTz,
+    pub xmin: FullTransactionId,
+    pub catalog_xmin: FullTransactionId,
+}
 
 /// A network connection that's speaking the replication protocol.
 pub struct ReplicationConn {
