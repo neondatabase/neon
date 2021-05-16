@@ -10,6 +10,18 @@ edition = "2018"
 clap = "2.33.0"
 anyhow = "1.0"
 serde_json = "1"
+# rand = "0.8.3"
+# tar = "0.4.33"
+# serde = { version = "1.0", features = ["derive"] }
+# toml = "0.5"
+# lazy_static = "1.4"
+# regex = "1"
+# # hex = "0.4.3"
+# bytes = "1.0.1"
+# # fs_extra = "1.2.0"
+# nix = "0.20"
+# # thiserror = "1"
+# url = "2.2.2"
 
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 

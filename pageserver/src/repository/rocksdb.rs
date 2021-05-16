@@ -11,6 +11,8 @@ use crate::waldecoder::{Oid, TransactionId};
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
+// use crate::PageServerConf;
+// use crate::branches;
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
@@ -18,7 +20,6 @@ use postgres_ffi::pg_constants;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -31,7 +32,6 @@ use zenith_utils::seqwait::SeqWait;
 static TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct RocksRepository {
-    repo_dir: PathBuf,
     conf: PageServerConf,
     timelines: Mutex<HashMap<ZTimelineId, Arc<RocksTimeline>>>,
 
@@ -158,11 +158,9 @@ impl CacheEntryContent {
 impl RocksRepository {
     pub fn new(
         conf: &PageServerConf,
-        repo_dir: &Path,
         walredo_mgr: Arc<dyn WalRedoManager>,
     ) -> RocksRepository {
         RocksRepository {
-            repo_dir: PathBuf::from(repo_dir),
             conf: conf.clone(),
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
@@ -188,7 +186,7 @@ impl Repository for RocksRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let timeline =
-                    RocksTimeline::new(&self.repo_dir, timelineid, self.walredo_mgr.clone());
+                    RocksTimeline::new(&self.conf, timelineid, self.walredo_mgr.clone());
 
                 restore_timeline(&self.conf, &timeline, timelineid)?;
 
@@ -216,7 +214,7 @@ impl Repository for RocksRepository {
     fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
-        let timeline = RocksTimeline::new(&self.repo_dir, timelineid, self.walredo_mgr.clone());
+        let timeline = RocksTimeline::new(&self.conf, timelineid, self.walredo_mgr.clone());
 
         let timeline_rc = Arc::new(timeline);
         let r = timelines.insert(timelineid, timeline_rc.clone());
@@ -229,8 +227,8 @@ impl Repository for RocksRepository {
 }
 
 impl RocksTimeline {
-    fn open_rocksdb(repo_dir: &Path, timelineid: ZTimelineId) -> rocksdb::DB {
-        let path = repo_dir.join("timelines").join(timelineid.to_string());
+    fn open_rocksdb(conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB {
+        let path = conf.timeline_path(timelineid);
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         opts.set_use_fsync(true);
@@ -246,12 +244,12 @@ impl RocksTimeline {
     }
 
     fn new(
-        repo_dir: &Path,
+        conf: &PageServerConf,
         timelineid: ZTimelineId,
         walredo_mgr: Arc<dyn WalRedoManager>,
     ) -> RocksTimeline {
         RocksTimeline {
-            db: RocksTimeline::open_rocksdb(repo_dir, timelineid),
+            db: RocksTimeline::open_rocksdb(conf, timelineid),
 
             walredo_mgr,
 

@@ -8,7 +8,6 @@ use crate::repository::Repository;
 use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
 use lazy_static::lazy_static;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 lazy_static! {
@@ -22,7 +21,7 @@ pub fn init(conf: &PageServerConf) {
     let walredo_mgr = PostgresRedoManager::new(conf);
 
     // we have already changed current dir to the repository.
-    let repo = RocksRepository::new(conf, Path::new("."), Arc::new(walredo_mgr));
+    let repo = RocksRepository::new(conf, Arc::new(walredo_mgr));
 
     *m = Some(Arc::new(repo));
 }

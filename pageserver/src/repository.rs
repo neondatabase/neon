@@ -291,6 +291,7 @@ mod tests {
     use std::path::Path;
     use std::str::FromStr;
     use std::time::Duration;
+    use std::env;
 
     fn get_test_conf() -> PageServerConf {
         PageServerConf {
@@ -299,6 +300,8 @@ mod tests {
             gc_horizon: 64 * 1024 * 1024,
             gc_period: Duration::from_secs(10),
             listen_addr: "127.0.0.1:5430".parse().unwrap(),
+            workdir: "".into(),
+            pg_distrib_dir: "".into(),
         }
     }
 
@@ -345,7 +348,9 @@ mod tests {
         let repo_dir = Path::new("../tmp_check/test_relsize_repo");
         let _ = fs::remove_dir_all(repo_dir);
         fs::create_dir_all(repo_dir)?;
-        let repo = rocksdb::RocksRepository::new(&get_test_conf(), repo_dir, Arc::new(walredo_mgr));
+        env::set_current_dir(repo_dir)?;
+
+        let repo = rocksdb::RocksRepository::new(&get_test_conf(), Arc::new(walredo_mgr));
 
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");

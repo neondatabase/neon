@@ -1,23 +1,24 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    fs::{self, OpenOptions},
+    io::Read,
+};
 
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use postgres::{Client, NoTls};
-
 use crate::local_env::LocalEnv;
-use crate::storage::{PageServerNode, WalProposerNode};
-use pageserver::{zenith_repo_dir, ZTimelineId};
+use pageserver::ZTimelineId;
+
+use crate::storage::PageServerNode;
 
 //
 // ComputeControlPlane
@@ -36,8 +37,8 @@ impl ComputeControlPlane {
         // it is running on default port. Change that when pageserver will have config.
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
-        let pgdatadirspath = env.repo_path.join("pgdatadirs");
-        let nodes: Result<BTreeMap<_, _>> = fs::read_dir(&pgdatadirspath)
+        let pgdatadirspath = &env.pg_data_dirs_path();
+        let nodes: Result<BTreeMap<_, _>> = fs::read_dir(pgdatadirspath)
             .with_context(|| format!("failed to list {}", pgdatadirspath.display()))?
             .into_iter()
             .map(|f| {
@@ -97,8 +98,14 @@ impl ComputeControlPlane {
         Ok(node)
     }
 
-    pub fn new_test_node(&mut self, timelineid: ZTimelineId) -> Arc<PostgresNode> {
-        let node = self.new_from_page_server(true, timelineid);
+    pub fn new_test_node(&mut self, branch_name: &str) -> Arc<PostgresNode> {
+        let timeline_id = self
+            .pageserver
+            .branch_get_by_name(branch_name)
+            .expect("failed to get timeline_id")
+            .timeline_id;
+
+        let node = self.new_from_page_server(true, timeline_id);
         let node = node.unwrap();
 
         // Configure the node to stream WAL directly to the pageserver
@@ -115,8 +122,14 @@ impl ComputeControlPlane {
         node
     }
 
-    pub fn new_test_master_node(&mut self, timelineid: ZTimelineId) -> Arc<PostgresNode> {
-        let node = self.new_from_page_server(true, timelineid).unwrap();
+    pub fn new_test_master_node(&mut self, branch_name: &str) -> Arc<PostgresNode> {
+        let timeline_id = self
+            .pageserver
+            .branch_get_by_name(branch_name)
+            .expect("failed to get timeline_id")
+            .timeline_id;
+
+        let node = self.new_from_page_server(true, timeline_id).unwrap();
 
         node.append_conf(
             "postgresql.conf",
@@ -126,8 +139,14 @@ impl ComputeControlPlane {
         node
     }
 
-    pub fn new_node(&mut self, timelineid: ZTimelineId) -> Result<Arc<PostgresNode>> {
-        let node = self.new_from_page_server(false, timelineid).unwrap();
+    pub fn new_node(&mut self, branch_name: &str) -> Result<Arc<PostgresNode>> {
+        let timeline_id = self
+            .pageserver
+            .branch_get_by_name(branch_name)
+            .expect("failed to get timeline_id")
+            .timeline_id;
+
+        let node = self.new_from_page_server(false, timeline_id).unwrap();
 
         // Configure the node to stream WAL directly to the pageserver
         node.append_conf(
@@ -291,9 +310,9 @@ impl PostgresNode {
                  max_replication_slots = 10\n\
                  hot_standby = on\n\
                  shared_buffers = 1MB\n\
-				 fsync = off\n\
+                 fsync = off\n\
                  max_connections = 100\n\
-				 wal_sender_timeout = 0\n\
+                 wal_sender_timeout = 0\n\
                  wal_level = replica\n\
                  listen_addresses = '{address}'\n\
                  port = {port}\n",
@@ -326,8 +345,8 @@ impl PostgresNode {
         Ok(())
     }
 
-    fn pgdata(&self) -> PathBuf {
-        self.env.repo_path.join("pgdatadirs").join(&self.name)
+    pub fn pgdata(&self) -> PathBuf {
+        self.env.pg_data_dir(&self.name)
     }
 
     pub fn status(&self) -> &str {
@@ -412,152 +431,6 @@ impl PostgresNode {
         }
 
         String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
-
-    fn dump_log_file(&self) {
-        if let Ok(mut file) = File::open(self.env.repo_path.join("pageserver.log")) {
-            let mut buffer = String::new();
-            file.read_to_string(&mut buffer).unwrap();
-            println!("--------------- pageserver.log:\n{}", buffer);
-        }
-    }
-
-    pub fn safe_psql(&self, db: &str, sql: &str) -> Vec<postgres::Row> {
-        let connstring = format!(
-            "host={} port={} dbname={} user={}",
-            self.address.ip(),
-            self.address.port(),
-            db,
-            self.whoami()
-        );
-        let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
-
-        println!("Running {}", sql);
-        let result = client.query(sql, &[]);
-        if result.is_err() {
-            self.dump_log_file();
-        }
-        result.unwrap()
-    }
-
-    pub fn open_psql(&self, db: &str) -> Client {
-        let connstring = format!(
-            "host={} port={} dbname={} user={}",
-            self.address.ip(),
-            self.address.port(),
-            db,
-            self.whoami()
-        );
-        Client::connect(connstring.as_str(), NoTls).unwrap()
-    }
-
-    pub fn start_proxy(&self, wal_acceptors: &str) -> WalProposerNode {
-        let proxy_path = self.env.pg_bin_dir().join("safekeeper_proxy");
-        match Command::new(proxy_path.as_path())
-            .args(&["--ztimelineid", &self.timelineid.to_string()])
-            .args(&["-s", wal_acceptors])
-            .args(&["-h", &self.address.ip().to_string()])
-            .args(&["-p", &self.address.port().to_string()])
-            .arg("-v")
-            .stderr(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(self.pgdata().join("safekeeper_proxy.log"))
-                    .unwrap(),
-            )
-            .spawn()
-        {
-            Ok(child) => WalProposerNode { pid: child.id() },
-            Err(e) => panic!("Failed to launch {:?}: {}", proxy_path, e),
-        }
-    }
-
-    pub fn pg_regress(&self) -> ExitStatus {
-        self.safe_psql("postgres", "CREATE DATABASE regression");
-        let data_dir = zenith_repo_dir();
-        let regress_run_path = data_dir.join("regress");
-        fs::create_dir_all(&regress_run_path).unwrap();
-        fs::create_dir_all(regress_run_path.join("testtablespace")).unwrap();
-        std::env::set_current_dir(regress_run_path).unwrap();
-
-        let regress_build_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install/build/src/test/regress");
-        let regress_src_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/postgres/src/test/regress");
-
-        let regress_check = Command::new(regress_build_path.join("pg_regress"))
-            .args(&[
-                "--bindir=''",
-                "--use-existing",
-                format!("--bindir={}", self.env.pg_bin_dir().to_str().unwrap()).as_str(),
-                format!("--dlpath={}", regress_build_path.to_str().unwrap()).as_str(),
-                format!(
-                    "--schedule={}",
-                    regress_src_path.join("parallel_schedule").to_str().unwrap()
-                )
-                .as_str(),
-                format!("--inputdir={}", regress_src_path.to_str().unwrap()).as_str(),
-            ])
-            .env_clear()
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("PGPORT", self.address.port().to_string())
-            .env("PGUSER", self.whoami())
-            .env("PGHOST", self.address.ip().to_string())
-            .status()
-            .expect("pg_regress failed");
-        if !regress_check.success() {
-            if let Ok(mut file) = File::open("regression.diffs") {
-                let mut buffer = String::new();
-                file.read_to_string(&mut buffer).unwrap();
-                println!("--------------- regression.diffs:\n{}", buffer);
-            }
-            self.dump_log_file();
-            if let Ok(mut file) = File::open(
-                self.env
-                    .repo_path
-                    .join("pgdatadirs")
-                    .join("pg1")
-                    .join("log"),
-            ) {
-                let mut buffer = String::new();
-                file.read_to_string(&mut buffer).unwrap();
-                println!("--------------- pgdatadirs/pg1/log:\n{}", buffer);
-            }
-        }
-        regress_check
-    }
-
-    pub fn pg_bench(&self, clients: u32, seconds: u32) -> ExitStatus {
-        let port = self.address.port().to_string();
-        let clients = clients.to_string();
-        let seconds = seconds.to_string();
-        let _pg_bench_init = Command::new(self.env.pg_bin_dir().join("pgbench"))
-            .args(&["-i", "-p", port.as_str(), "postgres"])
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .status()
-            .expect("pgbench -i");
-        let pg_bench_run = Command::new(self.env.pg_bin_dir().join("pgbench"))
-            .args(&[
-                "-p",
-                port.as_str(),
-                "-T",
-                seconds.as_str(),
-                "-P",
-                "1",
-                "-c",
-                clients.as_str(),
-                "-M",
-                "prepared",
-                "postgres",
-            ])
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .status()
-            .expect("pgbench run");
-        pg_bench_run
     }
 }
 

@@ -26,7 +26,46 @@ pub struct PageServerConf {
     pub listen_addr: SocketAddr,
     pub gc_horizon: u64,
     pub gc_period: Duration,
+    pub workdir: PathBuf,
+
+    pub pg_distrib_dir: PathBuf,
 }
+
+impl PageServerConf {
+
+    //
+    // Repository paths, relative to workdir.
+    //
+
+    fn tag_path(&self, name: &str) -> PathBuf {
+        std::path::Path::new("refs").join("tags").join(name)
+    }
+
+    fn branch_path(&self, name: &str) -> PathBuf {
+        std::path::Path::new("refs").join("branches").join(name)
+    }
+
+    fn timeline_path(&self, timelineid: ZTimelineId) -> PathBuf {
+        std::path::Path::new("timelines").join(timelineid.to_string())
+    }
+
+    fn snapshots_path(&self, timelineid: ZTimelineId) -> PathBuf {
+        std::path::Path::new("timelines").join(timelineid.to_string()).join("snapshots")
+    }
+
+    //
+    // Postgres distribution paths
+    //
+
+    pub fn pg_bin_dir(&self) -> PathBuf {
+        self.pg_distrib_dir.join("bin")
+    }
+
+    pub fn pg_lib_dir(&self) -> PathBuf {
+        self.pg_distrib_dir.join("lib")
+    }
+}
+
 
 /// Zenith Timeline ID is a 128-bit random ID.
 ///
@@ -89,10 +128,3 @@ impl fmt::Display for ZTimelineId {
     }
 }
 
-pub fn zenith_repo_dir() -> PathBuf {
-    // Find repository path
-    match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => PathBuf::from(val.to_str().unwrap()),
-        None => ".zenith".into(),
-    }
-}

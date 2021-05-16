@@ -30,6 +30,7 @@ use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
 use crate::ZTimelineId;
+use crate::branches;
 
 #[derive(Debug)]
 enum FeMessage {
@@ -690,6 +691,28 @@ impl Connection {
 
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
+
+        } else if query_string.starts_with(b"branch_create ") {
+            let query_str = String::from_utf8(query_string.to_vec())?;
+            let err = || anyhow!("invalid branch_create: '{}'", query_str);
+
+            // branch_create <branchname> <startpoint>
+            // TODO lazy static
+            let re = Regex::new(r"^branch_create (\w+) ([\w@\\]+)[\r\n\s]*;?$").unwrap();
+            let caps = re
+                .captures(&query_str)
+                .ok_or_else(err)?;
+
+            let branchname: String = String::from(caps.get(1).ok_or_else(err)?.as_str());
+            let startpoint_str: String = String::from(caps.get(2).ok_or_else(err)?.as_str());
+
+            let branch = branches::create_branch(&self.conf, &branchname, &startpoint_str)?;
+            let branch = serde_json::to_vec(&branch)?;
+
+            self.write_message_noflush(&BeMessage::RowDescription)?;
+            self.write_message_noflush(&BeMessage::DataRow(Bytes::from(branch)))?;
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.starts_with(b"pg_list") {
             let branches = crate::branches::get_branches(&*page_cache::get_repository())?;
             let branches_buf = serde_json::to_vec(&branches)?;
@@ -706,6 +729,15 @@ impl Connection {
         } else if query_string.to_ascii_lowercase().starts_with(b"set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
+            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            self.write_message(&BeMessage::ReadyForQuery)?;
+        } else if query_string.to_ascii_lowercase().starts_with(b"identify_system") {
+            // TODO: match postgres response formarmat for 'identify_system'
+            let system_id = crate::branches::get_system_id(&self.conf)?
+                .to_string();
+
+            self.write_message_noflush(&BeMessage::RowDescription)?;
+            self.write_message_noflush(&BeMessage::DataRow(Bytes::from(system_id)))?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
         } else {

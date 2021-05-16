@@ -1,21 +1,20 @@
-// Restart acceptors one by one while compute is under the load.
-use control_plane::compute::ComputeControlPlane;
-use control_plane::local_env;
-use control_plane::local_env::PointInTime;
-use control_plane::storage::TestStorageControlPlane;
-use pageserver::ZTimelineId;
-
 use rand::Rng;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{thread, time};
+
+use control_plane::compute::ComputeControlPlane;
+
+use integration_tests;
+use integration_tests::TestStorageControlPlane;
+use integration_tests::PostgresNodeExt;
 
 const DOWNTIME: u64 = 2;
 
 #[test]
 //#[ignore]
 fn test_embedded_wal_proposer() {
-    let local_env = local_env::test_env("test_embedded_wal_proposer");
+    let local_env = integration_tests::create_test_env("test_embedded_wal_proposer");
 
     const REDUNDANCY: usize = 3;
     let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
@@ -23,8 +22,7 @@ fn test_embedded_wal_proposer() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let maintli = storage_cplane.get_branch_timeline("main");
-    let node = compute_cplane.new_test_master_node(maintli);
+    let node = compute_cplane.new_test_master_node("main");
     node.append_conf(
         "postgresql.conf",
         &format!("wal_acceptors='{}'\n", wal_acceptors),
@@ -52,7 +50,7 @@ fn test_embedded_wal_proposer() {
 
 #[test]
 fn test_acceptors_normal_work() {
-    let local_env = local_env::test_env("test_acceptors_normal_work");
+    let local_env = integration_tests::create_test_env("test_acceptors_normal_work");
 
     const REDUNDANCY: usize = 3;
     let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
@@ -60,8 +58,7 @@ fn test_acceptors_normal_work() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let maintli = storage_cplane.get_branch_timeline("main");
-    let node = compute_cplane.new_test_master_node(maintli);
+    let node = compute_cplane.new_test_master_node("main");
     node.start().unwrap();
 
     // start proxy
@@ -93,36 +90,25 @@ fn test_many_timelines() {
     // Initialize a new repository, and set up WAL safekeepers and page server.
     const REDUNDANCY: usize = 3;
     const N_TIMELINES: usize = 5;
-    let local_env = local_env::test_env("test_many_timelines");
+    let local_env = integration_tests::create_test_env("test_many_timelines");
     let storage_cplane = TestStorageControlPlane::fault_tolerant(&local_env, REDUNDANCY);
     let mut compute_cplane = ComputeControlPlane::local(&local_env, &storage_cplane.pageserver);
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // Create branches
-    let mut timelines: Vec<ZTimelineId> = Vec::new();
-    let maintli = storage_cplane.get_branch_timeline("main"); // main branch
-    timelines.push(maintli);
-    let startpoint = local_env::find_end_of_wal(&local_env, maintli).unwrap();
+    let mut timelines: Vec<String> = Vec::new();
+    timelines.push("main".to_string());
+
     for i in 1..N_TIMELINES {
-        // additional branches
         let branchname = format!("experimental{}", i);
-        local_env::create_branch(
-            &local_env,
-            &branchname,
-            PointInTime {
-                timelineid: maintli,
-                lsn: startpoint,
-            },
-        )
-        .unwrap();
-        let tli = storage_cplane.get_branch_timeline(&branchname);
-        timelines.push(tli);
+        storage_cplane.pageserver.branch_create(&branchname, "main").unwrap();
+        timelines.push(branchname);
     }
 
     // start postgres on each timeline
     let mut nodes = Vec::new();
-    for tli in timelines {
-        let node = compute_cplane.new_test_node(tli);
+    for tli_name in timelines {
+        let node = compute_cplane.new_test_node(&tli_name);
         nodes.push(node.clone());
         node.start().unwrap();
         node.start_proxy(&wal_acceptors);
@@ -159,7 +145,7 @@ fn test_many_timelines() {
 // Majority is always alive
 #[test]
 fn test_acceptors_restarts() {
-    let local_env = local_env::test_env("test_acceptors_restarts");
+    let local_env = integration_tests::create_test_env("test_acceptors_restarts");
 
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
@@ -171,8 +157,7 @@ fn test_acceptors_restarts() {
     let mut rng = rand::thread_rng();
 
     // start postgres
-    let maintli = storage_cplane.get_branch_timeline("main");
-    let node = compute_cplane.new_test_master_node(maintli);
+    let node = compute_cplane.new_test_master_node("main");
     node.start().unwrap();
 
     // start proxy
@@ -222,7 +207,7 @@ fn start_acceptor(cplane: &Arc<TestStorageControlPlane>, no: usize) {
 // N_CRASHES env var
 #[test]
 fn test_acceptors_unavailability() {
-    let local_env = local_env::test_env("test_acceptors_unavailability");
+    let local_env = integration_tests::create_test_env("test_acceptors_unavailability");
 
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 2;
@@ -232,8 +217,7 @@ fn test_acceptors_unavailability() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let maintli = storage_cplane.get_branch_timeline("main");
-    let node = compute_cplane.new_test_master_node(maintli);
+    let node = compute_cplane.new_test_master_node("main");
     node.start().unwrap();
 
     // start proxy
@@ -307,7 +291,7 @@ fn simulate_failures(cplane: Arc<TestStorageControlPlane>) {
 // Race condition test
 #[test]
 fn test_race_conditions() {
-    let local_env = local_env::test_env("test_race_conditions");
+    let local_env = integration_tests::create_test_env("test_race_conditions");
 
     // Start pageserver that reads WAL directly from that postgres
     const REDUNDANCY: usize = 3;
@@ -319,8 +303,7 @@ fn test_race_conditions() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let maintli = storage_cplane.get_branch_timeline("main");
-    let node = compute_cplane.new_test_master_node(maintli);
+    let node = compute_cplane.new_test_master_node("main");
     node.start().unwrap();
 
     // start proxy
