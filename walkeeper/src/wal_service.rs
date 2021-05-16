@@ -27,7 +27,7 @@ pub fn thread_main(conf: WalAcceptorConf) -> Result<()> {
                 let conf = conf.clone();
                 thread::spawn(move || {
                     if let Err(err) = handle_socket(socket, conf) {
-                        error!("socket error: {}", err);
+                        error!("connection handler exited: {}", err);
                     }
                 });
             }
