@@ -141,7 +141,7 @@ jobs:
           working_directory: test_runner
           environment:
             - ZENITH_BIN: /tmp/zenith/bin
-            - POSTGRES_BIN: /tmp/zenith/pg_install
+            - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
             - TEST_OUTPUT: /tmp/test_output
           command: |
             TEST_FILE="<< parameters.test_file >>"

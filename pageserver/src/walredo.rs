@@ -457,7 +457,9 @@ impl PostgresRedoProcess {
     // Start postgres binary in special WAL redo mode.
     //
     // Tests who run pageserver binary are setting proper PG_BIN_DIR
-    // and PG_LIB_DIR so that WalRedo would start right postgres. We may later
+    // and PG_LIB_DIR so that WalRedo would start right postgres.
+
+    // do that: We may later
     // switch to setting same things in pageserver config file.
     async fn launch(datadir: &str) -> Result<PostgresRedoProcess, Error> {
         // Create empty data directory for wal-redo postgres deleting old one.

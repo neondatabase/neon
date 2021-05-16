@@ -4,7 +4,8 @@
 
 use log::*;
 use parse_duration::parse;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
+use std::{env, path::PathBuf};
 use std::io;
 use std::process::exit;
 use std::thread;
@@ -16,7 +17,7 @@ use daemonize::Daemonize;
 
 use slog::{Drain, FnValue};
 
-use pageserver::{page_cache, page_service, tui, zenith_repo_dir, PageServerConf};
+use pageserver::{page_cache, page_service, tui, PageServerConf, branches};
 
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 const DEFAULT_GC_PERIOD_SEC: u64 = 10;
@@ -48,6 +49,12 @@ fn main() -> Result<()> {
                 .help("Run in the background"),
         )
         .arg(
+            Arg::with_name("init")
+                .long("init")
+                .takes_value(false)
+                .help("Initialize pageserver repo"),
+        )
+        .arg(
             Arg::with_name("gc_horizon")
                 .long("gc_horizon")
                 .takes_value(true)
@@ -59,15 +66,54 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Interval between garbage collector iterations"),
         )
+        .arg(
+            Arg::with_name("workdir")
+                .short("D")
+                .long("workdir")
+                .takes_value(true)
+                .help("Working directory for the pageserver"),
+        )
         .get_matches();
+
+    let workdir = if let Some(workdir_arg) = arg_matches.value_of("workdir") {
+        PathBuf::from(workdir_arg)
+    } else if let Some(workdir_arg) = std::env::var_os("ZENITH_REPO_DIR") {
+        PathBuf::from(workdir_arg.to_str().unwrap())
+    } else {
+        PathBuf::from(".zenith")
+    };
+
+    let pg_distrib_dir: PathBuf = {
+        if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
+            postgres_bin.into()
+        } else {
+            let cwd = env::current_dir()?;
+            cwd.join("tmp_install")
+        }
+    };
+
+    if !pg_distrib_dir.join("bin/postgres").exists() {
+        anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
+    }
 
     let mut conf = PageServerConf {
         daemonize: false,
         interactive: false,
         gc_horizon: DEFAULT_GC_HORIZON,
         gc_period: Duration::from_secs(DEFAULT_GC_PERIOD_SEC),
-        listen_addr: "127.0.0.1:5430".parse().unwrap(),
+        listen_addr: "127.0.0.1:64000".parse().unwrap(),
+        workdir,
+        pg_distrib_dir,
     };
+
+    // Create repo and exit if init was requested
+    if arg_matches.is_present("init") {
+        branches::init_repo(&conf)?;
+        return Ok(());
+    }
+
+    // Set CWD to workdir for non-daemon modes
+    env::set_current_dir(&conf.workdir)?;
 
     if arg_matches.is_present("daemonize") {
         conf.daemonize = true;
@@ -98,8 +144,7 @@ fn main() -> Result<()> {
 }
 
 fn start_pageserver(conf: &PageServerConf) -> Result<()> {
-    let repodir = zenith_repo_dir();
-    let log_filename = repodir.join("pageserver.log");
+    let log_filename = "pageserver.log";
     // Don't open the same file for output multiple times;
     // the different fds could overwrite each other's output.
     let log_file = OpenOptions::new()
@@ -141,8 +186,8 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
         let stderr = log_file;
 
         let daemonize = Daemonize::new()
-            .pid_file(repodir.join("pageserver.pid"))
-            .working_directory(repodir)
+            .pid_file("pageserver.pid")
+            .working_directory(".")
             .stdout(stdout)
             .stderr(stderr);
 
@@ -153,25 +198,13 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
     } else {
         // change into the repository directory. In daemon mode, Daemonize
         // does this for us.
-        let repodir = zenith_repo_dir();
-        std::env::set_current_dir(&repodir)?;
-        info!("Changed current directory to repository in {:?}", &repodir);
+        std::env::set_current_dir(&conf.workdir)?;
+        info!("Changed current directory to repository in {:?}", &conf.workdir);
     }
 
     let mut threads = Vec::new();
 
     // TODO: Check that it looks like a valid repository before going further
-
-    // Create directory for wal-redo datadirs
-    match fs::create_dir("wal-redo") {
-        Ok(_) => {}
-        Err(e) => match e.kind() {
-            io::ErrorKind::AlreadyExists => {}
-            _ => {
-                anyhow::bail!("Failed to create wal-redo data directory: {}", e);
-            }
-        },
-    }
 
     page_cache::init(conf);
 

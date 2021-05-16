@@ -16,7 +16,7 @@ A fixture is created with the decorator @zenfixture, which is a wrapper around
 the standard pytest.fixture with some extra behavior.
 
 There are several environment variables that can control the running of tests:
-ZENITH_BIN, POSTGRES_BIN, etc. See README.md for more information.
+ZENITH_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
 
 To use fixtures in a test file, add this line of code:
 
@@ -78,7 +78,7 @@ class ZenithCli:
         self.bin_zenith = os.path.join(binpath, 'zenith')
         self.env = os.environ.copy()
         self.env['ZENITH_REPO_DIR'] = repo_dir
-        self.env['POSTGRES_BIN'] = pg_distrib_dir
+        self.env['POSTGRES_DISTRIB_DIR'] = pg_distrib_dir
 
     def run(self, arguments):
         """ Run "zenith" with the specified arguments.
@@ -108,11 +108,11 @@ class ZenithPageserver:
         self.running = False
 
     def start(self):
-        self.zenith_cli.run(['pageserver', 'start'])
+        self.zenith_cli.run(['start'])
         self.running = True
 
     def stop(self):
-        self.zenith_cli.run(['pageserver', 'stop'])
+        self.zenith_cli.run(['stop'])
         self.running = True
 
 
@@ -316,7 +316,7 @@ def zenith_binpath(base_dir):
 @zenfixture
 def pg_distrib_dir(base_dir):
     """ find the postgress install """
-    env_postgres_bin = os.environ.get('POSTGRES_BIN')
+    env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
     if env_postgres_bin:
         pg_dir = env_postgres_bin
     else:
