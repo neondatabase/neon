@@ -12,6 +12,11 @@ use std::str::FromStr;
 use pageserver::{branches::BranchInfo, ZTimelineId};
 use zenith_utils::lsn::Lsn;
 
+struct BranchTreeEl {
+    pub info: BranchInfo,
+    pub children: Vec<String>,
+}
+
 // Main entry point for the 'zenith' CLI utility
 //
 // This utility helps to manage zenith installation. That includes following:
@@ -159,6 +164,80 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// Print branches list as a tree-like structure.
+fn print_branches_tree(branches: Vec<BranchInfo>) {
+    let mut branches_hash: HashMap<String, BranchTreeEl> = HashMap::new();
+
+    // Form a hash table of branch timeline_id -> BranchTreeEl.
+    for branch in &branches {
+        branches_hash.insert(
+            branch.timeline_id.to_string(),
+            BranchTreeEl {
+                info: branch.clone(),
+                children: Vec::new(),
+            },
+        );
+    }
+
+    // Memorize all direct children of each branch.
+    for branch in &branches {
+        if let Some(name) = &branch.ancestor_id {
+            branches_hash
+                .get_mut(name)
+                .unwrap()
+                .children
+                .push(branch.timeline_id.to_string());
+        }
+    }
+
+    // Sort children by name to bring some order.
+    for (_tid, branch) in &mut branches_hash {
+        branch.children.sort();
+    }
+
+    for (_tid, branch) in &branches_hash {
+        // Start with root branches (no ancestors) first.
+        // Now it is 'main' branch only, but things may change.
+        if branch.info.ancestor_id.is_none() {
+            print_branch(0, 0, branch, &branches_hash);
+        }
+    }
+}
+
+// Recursively print branch info with all its children.
+fn print_branch(
+    nesting_level: usize,
+    padding: usize,
+    branch: &BranchTreeEl,
+    branches: &HashMap<String, BranchTreeEl>,
+) {
+    let new_padding: usize;
+
+    if nesting_level > 0 {
+        // Six extra chars for graphics, spaces and so on in addition to LSN length.
+        new_padding = padding + 6 + branch.info.ancestor_lsn.as_ref().unwrap().chars().count();
+
+        print!(
+            "{}└─ @{}:",
+            " ".repeat(padding),
+            branch.info.ancestor_lsn.as_ref().unwrap()
+        );
+    } else {
+        new_padding = 1;
+    }
+
+    print!(" {}\n", branch.info.name);
+
+    for child in &branch.children {
+        print_branch(
+            nesting_level + 1,
+            new_padding,
+            branches.get(child).unwrap(),
+            branches,
+        );
+    }
+}
+
 /// Returns a map of timeline IDs to branch_name@lsn strings.
 /// Connects to the pageserver to query this information.
 fn get_branch_infos(env: &local_env::LocalEnv) -> Result<HashMap<ZTimelineId, BranchInfo>> {
@@ -188,9 +267,8 @@ fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
         }
     } else {
         // No arguments, list branches
-        for branch in pageserver.branches_list()? {
-            println!(" {}", branch.name);
-        }
+        let branches = pageserver.branches_list().unwrap();
+        print_branches_tree(branches);
     }
 
     Ok(())

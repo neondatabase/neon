@@ -84,11 +84,18 @@ class ZenithCli:
         """ Run "zenith" with the specified arguments.
 
         arguments must be in list form, e.g. ['pg', 'create']
+
+        Return both stdout and stderr, which can be accessed as
+
+        result = zenith_cli.run(...)
+        assert(result.stderr == "")
+        print(result.stdout)
+
         """
         assert type(arguments) == list
         args = [self.bin_zenith] + arguments
         print('Running command "{}"'.format(' '.join(args)))
-        subprocess.run(args, env=self.env, check=True)
+        return subprocess.run(args, env=self.env, check=True, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 @zenfixture
