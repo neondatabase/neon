@@ -1,4 +1,6 @@
+import getpass
 import os
+import psycopg2
 import pytest
 import shutil
 import subprocess
@@ -126,29 +128,28 @@ def pageserver(zenith_cli):
 class Postgres:
     """ An object representing a running postgres daemon. """
 
-    def __init__(self, zenith_cli, repo_dir):
+    def __init__(self, zenith_cli, repo_dir, instance_num):
         self.zenith_cli = zenith_cli
+        self.instance_num = instance_num
         self.running = False
         self.host = 'localhost'
-        self.port = 55432
+        self.port = 55431 + instance_num
         self.repo_dir = repo_dir
-        # path to conf is <repo_dir>/pgdatadirs/pg1/postgresql.conf
+        # path to conf is <repo_dir>/pgdatadirs/pg<instance_num>/postgresql.conf
 
-    def create_start(self, config_lines=None):
+    def create_start(self, branch="main", config_lines=None):
         """ create the pg data directory, and start the server """
-        self.zenith_cli.run(['pg', 'create'])
+        self.zenith_cli.run(['pg', 'create', branch])
         if config_lines is None:
             config_lines = []
         self.config(config_lines)
-        # FIXME: where did the name pg1 come from?
-        self.zenith_cli.run(['pg', 'start', 'pg1'])
+        self.zenith_cli.run(['pg', 'start', 'pg{}'.format(self.instance_num)])
         self.running = True
-
+        return
 
     #lines should be an array of valid postgresql.conf rows
     def config(self, lines):
-        #TODO use real node name, not just guessed pg1
-        filename = 'pgdatadirs/pg1/postgresql.conf'
+        filename = 'pgdatadirs/pg{}/postgresql.conf'.format(self.instance_num)
         config_name = os.path.join(self.repo_dir, filename)
         with open(config_name, 'a') as conf:
             for line in lines:
@@ -157,16 +158,43 @@ class Postgres:
 
     def stop(self):
         if self.running:
-            self.zenith_cli.run(['pg', 'stop', 'pg1'])
+            self.zenith_cli.run(['pg', 'stop', 'pg{}'.format(self.instance_num)])
 
+    # Open a psycopg2 connection to the server, ready for running queries.
+    def connect(self):
+        username = getpass.getuser()
+        conn_str = 'host={} port={} dbname=postgres user={}'.format(
+            self.host, self.port, username)
+
+        return psycopg2.connect(conn_str)
+
+class PostgresFactory:
+    """ An object representing multiple running postgres daemons. """
+    def __init__(self, zenith_cli, repo_dir):
+        self.zenith_cli = zenith_cli
+        self.host = 'localhost'
+        self.repo_dir = repo_dir
+        self.num_instances = 0
+        self.instances = []
+
+    def create_start(self, branch="main", config_lines=None):
+        pg = Postgres(self.zenith_cli, self.repo_dir, self.num_instances + 1)
+        self.num_instances += 1
+        self.instances.append(pg)
+        pg.create_start(branch, config_lines)
+        return pg
+
+    def stop_all(self):
+        for pg in self.instances:
+            pg.stop()
 
 @zenfixture
 def postgres(zenith_cli, repo_dir):
-    pg = Postgres(zenith_cli, repo_dir)
-    yield pg
+    pgfactory = PostgresFactory(zenith_cli, repo_dir)
+    yield pgfactory
     # After the yield comes any cleanup code we need.
     print('Starting postgres cleanup')
-    pg.stop()
+    pgfactory.stop_all()
 
 
 class PgBin:
