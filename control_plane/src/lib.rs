@@ -12,7 +12,6 @@ use std::path::Path;
 
 pub mod compute;
 pub mod local_env;
-pub mod remotes;
 pub mod storage;
 
 /// Read a PID file
