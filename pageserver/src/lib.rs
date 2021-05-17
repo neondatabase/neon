@@ -32,7 +32,6 @@ pub struct PageServerConf {
 }
 
 impl PageServerConf {
-
     //
     // Repository paths, relative to workdir.
     //
@@ -50,7 +49,9 @@ impl PageServerConf {
     }
 
     fn snapshots_path(&self, timelineid: ZTimelineId) -> PathBuf {
-        std::path::Path::new("timelines").join(timelineid.to_string()).join("snapshots")
+        std::path::Path::new("timelines")
+            .join(timelineid.to_string())
+            .join("snapshots")
     }
 
     //
@@ -65,7 +66,6 @@ impl PageServerConf {
         self.pg_distrib_dir.join("lib")
     }
 }
-
 
 /// Zenith Timeline ID is a 128-bit random ID.
 ///
@@ -127,4 +127,3 @@ impl fmt::Display for ZTimelineId {
         f.write_str(&hex::encode(self.0))
     }
 }
-

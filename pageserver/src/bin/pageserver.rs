@@ -5,11 +5,11 @@
 use log::*;
 use parse_duration::parse;
 use std::fs::{File, OpenOptions};
-use std::{env, path::PathBuf};
 use std::io;
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
+use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -17,7 +17,7 @@ use daemonize::Daemonize;
 
 use slog::{Drain, FnValue};
 
-use pageserver::{page_cache, page_service, tui, PageServerConf, branches};
+use pageserver::{branches, page_cache, page_service, tui, PageServerConf};
 
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 const DEFAULT_GC_PERIOD_SEC: u64 = 10;
@@ -199,7 +199,10 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
         // change into the repository directory. In daemon mode, Daemonize
         // does this for us.
         std::env::set_current_dir(&conf.workdir)?;
-        info!("Changed current directory to repository in {:?}", &conf.workdir);
+        info!(
+            "Changed current directory to repository in {:?}",
+            &conf.workdir
+        );
     }
 
     let mut threads = Vec::new();

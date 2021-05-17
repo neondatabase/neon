@@ -103,8 +103,7 @@ pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
 
     let conf = if let Some(addr) = remote_pageserver {
         // check that addr is parsable
-        let _uri = Url::parse(addr)
-            .map_err(|e| anyhow!("{}: {}", addr, e))?;
+        let _uri = Url::parse(addr).map_err(|e| anyhow!("{}: {}", addr, e))?;
 
         LocalEnv {
             pageserver_connstring: format!("postgresql://{}/", addr),

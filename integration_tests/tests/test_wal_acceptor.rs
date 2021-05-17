@@ -6,8 +6,8 @@ use std::{thread, time};
 use control_plane::compute::ComputeControlPlane;
 
 use integration_tests;
-use integration_tests::TestStorageControlPlane;
 use integration_tests::PostgresNodeExt;
+use integration_tests::TestStorageControlPlane;
 
 const DOWNTIME: u64 = 2;
 
@@ -101,7 +101,10 @@ fn test_many_timelines() {
 
     for i in 1..N_TIMELINES {
         let branchname = format!("experimental{}", i);
-        storage_cplane.pageserver.branch_create(&branchname, "main").unwrap();
+        storage_cplane
+            .pageserver
+            .branch_create(&branchname, "main")
+            .unwrap();
         timelines.push(branchname);
     }
 

@@ -287,11 +287,11 @@ mod tests {
     use super::*;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
+    use std::env;
     use std::fs;
     use std::path::Path;
     use std::str::FromStr;
     use std::time::Duration;
-    use std::env;
 
     fn get_test_conf() -> PageServerConf {
         PageServerConf {

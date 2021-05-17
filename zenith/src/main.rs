@@ -1,13 +1,13 @@
+use anyhow::Result;
+use anyhow::{anyhow, Context};
+use clap::{App, Arg, ArgMatches, SubCommand};
 use std::collections::HashMap;
 use std::process::exit;
-use anyhow::{Context, anyhow};
-use anyhow::Result;
-use clap::{App, Arg, ArgMatches, SubCommand};
 
-use control_plane::local_env;
 use control_plane::compute::ComputeControlPlane;
+use control_plane::local_env;
 use control_plane::storage::PageServerNode;
-use pageserver::{ZTimelineId, branches::BranchInfo};
+use pageserver::{branches::BranchInfo, ZTimelineId};
 use zenith_utils::lsn::Lsn;
 
 // Main entry point for the 'zenith' CLI utility
@@ -33,7 +33,7 @@ fn main() -> Result<()> {
                     Arg::with_name("remote-pageserver")
                         .long("remote-pageserver")
                         .required(false)
-                        .value_name("pageserver-url")
+                        .value_name("pageserver-url"),
                 ),
         )
         .subcommand(
@@ -66,8 +66,7 @@ fn main() -> Result<()> {
     // Create config file
     if let ("init", Some(sub_args)) = matches.subcommand() {
         let pageserver_uri = sub_args.value_of("pageserver-url");
-        local_env::init(pageserver_uri)
-            .with_context(|| "Failed to create cofig file")?;
+        local_env::init(pageserver_uri).with_context(|| "Failed to create cofig file")?;
     }
 
     // all other commands would need config
@@ -91,7 +90,11 @@ fn main() -> Result<()> {
             if let Some(branchname) = sub_args.value_of("branchname") {
                 if let Some(startpoint_str) = sub_args.value_of("start-point") {
                     let branch = pageserver.branch_create(branchname, startpoint_str)?;
-                    println!("Created branch '{}' at {:?}", branch.name, branch.latest_valid_lsn.unwrap_or(Lsn(0)));
+                    println!(
+                        "Created branch '{}' at {:?}",
+                        branch.name,
+                        branch.latest_valid_lsn.unwrap_or(Lsn(0))
+                    );
                 } else {
                     panic!("Missing start-point");
                 }

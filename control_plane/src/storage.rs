@@ -1,18 +1,18 @@
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
-use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use postgres::{Client, NoTls};
 
-use pageserver::branches::BranchInfo;
 use crate::local_env::LocalEnv;
 use crate::read_pidfile;
+use pageserver::branches::BranchInfo;
 
 //
 // Control routines for pageserver.
@@ -43,10 +43,14 @@ impl PageServerNode {
 
     pub fn init(&self) -> Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        let status = cmd.args(&["--init", "-D", self.env.base_data_dir.to_str().unwrap()])
+        let status = cmd
+            .args(&["--init", "-D", self.env.base_data_dir.to_str().unwrap()])
             .env_clear()
             .env("RUST_BACKTRACE", "1")
-            .env("POSTGRES_DISTRIB_DIR", self.env.pg_distrib_dir.to_str().unwrap())
+            .env(
+                "POSTGRES_DISTRIB_DIR",
+                self.env.pg_distrib_dir.to_str().unwrap(),
+            )
             .env("ZENITH_REPO_DIR", self.repo_path())
             .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
@@ -77,15 +81,23 @@ impl PageServerNode {
         );
 
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        cmd.args(&["-l", self.address().to_string().as_str(), "-D", self.repo_path().to_str().unwrap()])
-            .arg("-d")
-            .env_clear()
-            .env("RUST_BACKTRACE", "1")
-            .env("POSTGRES_DISTRIB_DIR", self.env.pg_distrib_dir.to_str().unwrap())
-            .env("ZENITH_REPO_DIR", self.repo_path())
-            .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
+        cmd.args(&[
+            "-l",
+            self.address().to_string().as_str(),
+            "-D",
+            self.repo_path().to_str().unwrap(),
+        ])
+        .arg("-d")
+        .env_clear()
+        .env("RUST_BACKTRACE", "1")
+        .env(
+            "POSTGRES_DISTRIB_DIR",
+            self.env.pg_distrib_dir.to_str().unwrap(),
+        )
+        .env("ZENITH_REPO_DIR", self.repo_path())
+        .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
+        .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+        .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
 
         if !cmd.status()?.success() {
             bail!(
@@ -183,8 +195,13 @@ impl PageServerNode {
             .flatten()
             .ok_or_else(|| anyhow!("missing branch"))?;
 
-        let res: BranchInfo = serde_json::from_str(branch_json)
-            .map_err(|e| anyhow!("failed to parse branch_create response: {}: {}", branch_json, e))?;
+        let res: BranchInfo = serde_json::from_str(branch_json).map_err(|e| {
+            anyhow!(
+                "failed to parse branch_create response: {}: {}",
+                branch_json,
+                e
+            )
+        })?;
 
         Ok(res)
     }

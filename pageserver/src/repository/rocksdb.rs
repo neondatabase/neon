@@ -156,10 +156,7 @@ impl CacheEntryContent {
 }
 
 impl RocksRepository {
-    pub fn new(
-        conf: &PageServerConf,
-        walredo_mgr: Arc<dyn WalRedoManager>,
-    ) -> RocksRepository {
+    pub fn new(conf: &PageServerConf, walredo_mgr: Arc<dyn WalRedoManager>) -> RocksRepository {
         RocksRepository {
             conf: conf.clone(),
             timelines: Mutex::new(HashMap::new()),
@@ -185,8 +182,7 @@ impl Repository for RocksRepository {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let timeline =
-                    RocksTimeline::new(&self.conf, timelineid, self.walredo_mgr.clone());
+                let timeline = RocksTimeline::new(&self.conf, timelineid, self.walredo_mgr.clone());
 
                 restore_timeline(&self.conf, &timeline, timelineid)?;
 

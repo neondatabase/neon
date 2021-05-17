@@ -30,7 +30,8 @@ pub fn create_test_env(testname: &str) -> LocalEnv {
     // Remove remnants of old test repo
     let _ = fs::remove_dir_all(&base_path);
 
-    fs::create_dir_all(&base_path).expect(format!("could not create directory for {}", base_path_str).as_str());
+    fs::create_dir_all(&base_path)
+        .expect(format!("could not create directory for {}", base_path_str).as_str());
 
     let pgdatadirs_path = base_path.join("pgdatadirs");
     fs::create_dir(&pgdatadirs_path)
@@ -107,7 +108,7 @@ impl TestStorageControlPlane {
                 data_dir: datadir_base.join(format!("wal_acceptor_{}", i)),
                 systemid,
                 env: local_env.clone(),
-                pass_to_pageserver: i == 0
+                pass_to_pageserver: i == 0,
             };
             wal_acceptor.init();
             wal_acceptor.start();
@@ -343,15 +344,21 @@ impl WalAcceptorNode {
             [].to_vec()
         };
 
-        let status = Command::new(self.env.zenith_distrib_dir.as_ref().unwrap().join("wal_acceptor"))
-            .args(&["-D", self.data_dir.to_str().unwrap()])
-            .args(&["-l", self.listen.to_string().as_str()])
-            .args(&["--systemid", self.systemid.to_string().as_str()])
-            .args(&ps_arg)
-            .arg("-d")
-            .arg("-n")
-            .status()
-            .expect("failed to start wal_acceptor");
+        let status = Command::new(
+            self.env
+                .zenith_distrib_dir
+                .as_ref()
+                .unwrap()
+                .join("wal_acceptor"),
+        )
+        .args(&["-D", self.data_dir.to_str().unwrap()])
+        .args(&["-l", self.listen.to_string().as_str()])
+        .args(&["--systemid", self.systemid.to_string().as_str()])
+        .args(&ps_arg)
+        .arg("-d")
+        .arg("-n")
+        .status()
+        .expect("failed to start wal_acceptor");
 
         if !status.success() {
             panic!("wal_acceptor start failed");

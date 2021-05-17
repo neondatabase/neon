@@ -24,13 +24,13 @@ use std::time::Duration;
 use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
+use crate::branches;
 use crate::page_cache;
 use crate::repository::{BufferTag, RelTag};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
 use crate::ZTimelineId;
-use crate::branches;
 
 #[derive(Debug)]
 enum FeMessage {
@@ -691,7 +691,6 @@ impl Connection {
 
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
-
         } else if query_string.starts_with(b"branch_create ") {
             let query_str = String::from_utf8(query_string.to_vec())?;
             let err = || anyhow!("invalid branch_create: '{}'", query_str);
@@ -699,9 +698,7 @@ impl Connection {
             // branch_create <branchname> <startpoint>
             // TODO lazy static
             let re = Regex::new(r"^branch_create (\w+) ([\w@\\]+)[\r\n\s]*;?$").unwrap();
-            let caps = re
-                .captures(&query_str)
-                .ok_or_else(err)?;
+            let caps = re.captures(&query_str).ok_or_else(err)?;
 
             let branchname: String = String::from(caps.get(1).ok_or_else(err)?.as_str());
             let startpoint_str: String = String::from(caps.get(2).ok_or_else(err)?.as_str());
@@ -731,10 +728,12 @@ impl Connection {
             // on connect
             self.write_message_noflush(&BeMessage::CommandComplete)?;
             self.write_message(&BeMessage::ReadyForQuery)?;
-        } else if query_string.to_ascii_lowercase().starts_with(b"identify_system") {
+        } else if query_string
+            .to_ascii_lowercase()
+            .starts_with(b"identify_system")
+        {
             // TODO: match postgres response formarmat for 'identify_system'
-            let system_id = crate::branches::get_system_id(&self.conf)?
-                .to_string();
+            let system_id = crate::branches::get_system_id(&self.conf)?.to_string();
 
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&BeMessage::DataRow(Bytes::from(system_id)))?;

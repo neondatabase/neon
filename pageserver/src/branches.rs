@@ -4,19 +4,25 @@
 // TODO: move all paths construction to conf impl
 //
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
+use fs::File;
+use fs_extra;
 use postgres_ffi::xlog_utils;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::{Path, PathBuf}, process::{Command, Stdio}, str::FromStr};
-use fs_extra;
-use fs::File;
-use std::io::Read;
 use std::env;
+use std::io::Read;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    str::FromStr,
+};
 use zenith_utils::lsn::Lsn;
 
-use crate::{repository::Repository, ZTimelineId, PageServerConf};
+use crate::{repository::Repository, PageServerConf, ZTimelineId};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -71,10 +77,7 @@ pub fn init_repo(conf: &PageServerConf) -> Result<()> {
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-        .env(
-            "DYLD_LIBRARY_PATH",
-            conf.pg_lib_dir().to_str().unwrap(),
-        )
+        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
         .stdout(Stdio::null())
         .status()
         .with_context(|| "failed to execute initdb")?;
@@ -176,7 +179,11 @@ pub(crate) fn get_system_id(conf: &PageServerConf) -> Result<u64> {
     Ok(controlfile.system_identifier)
 }
 
-pub(crate) fn create_branch(conf: &PageServerConf, branchname: &str, startpoint_str: &str) -> Result<BranchInfo> {
+pub(crate) fn create_branch(
+    conf: &PageServerConf,
+    branchname: &str,
+    startpoint_str: &str,
+) -> Result<BranchInfo> {
     if conf.branch_path(&branchname).exists() {
         anyhow::bail!("branch {} already exists", branchname);
     }
@@ -208,7 +215,7 @@ pub(crate) fn create_branch(conf: &PageServerConf, branchname: &str, startpoint_
         &oldtimelinedir.join("wal"),
         &newtimelinedir.join("wal"),
         startpoint.lsn,
-        16 * 1024 * 1024 // FIXME: assume default WAL segment size
+        16 * 1024 * 1024, // FIXME: assume default WAL segment size
     )?;
 
     Ok(BranchInfo {
@@ -243,8 +250,9 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
 
     let lsn: Option<Lsn>;
     if let Some(lsnstr) = strings.next() {
-        lsn = Some(Lsn::from_str(lsnstr)
-            .with_context(|| "invalid LSN in point-in-time specification")?);
+        lsn = Some(
+            Lsn::from_str(lsnstr).with_context(|| "invalid LSN in point-in-time specification")?,
+        );
     } else {
         lsn = None
     }
@@ -337,8 +345,7 @@ fn create_timeline(conf: &PageServerConf, ancestor: Option<PointInTime>) -> Resu
 /// If the given LSN is in the middle of a segment, the last segment containing it
 /// is written out as .partial, and padded with zeros.
 ///
-fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: u64) -> Result<()>{
-
+fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: u64) -> Result<()> {
     let last_segno = upto.segment_number(wal_seg_size);
     let last_segoff = upto.segment_offset(wal_seg_size);
 
@@ -349,7 +356,7 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: u64) -> Res
 
             // Check if the filename looks like an xlog file, or a .partial file.
             if !xlog_utils::IsXLogFileName(fname) && !xlog_utils::IsPartialXLogFileName(fname) {
-                continue
+                continue;
             }
             let (segno, _tli) = xlog_utils::XLogFromFileName(fname, wal_seg_size as usize);
 
@@ -371,7 +378,10 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: u64) -> Res
             std::io::copy(&mut src_file.take(copylen), &mut dst_file)?;
 
             if copylen < wal_seg_size {
-                std::io::copy(&mut std::io::repeat(0).take(wal_seg_size - copylen), &mut dst_file)?;
+                std::io::copy(
+                    &mut std::io::repeat(0).take(wal_seg_size - copylen),
+                    &mut dst_file,
+                )?;
             }
         }
     }

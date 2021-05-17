@@ -1,8 +1,8 @@
 use control_plane::compute::ComputeControlPlane;
 
 use integration_tests;
-use integration_tests::TestStorageControlPlane;
 use integration_tests::PostgresNodeExt;
+use integration_tests::TestStorageControlPlane;
 
 // XXX: force all redo at the end
 // -- restart + seqscan won't read deleted stuff
