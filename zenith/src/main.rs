@@ -5,8 +5,8 @@ use clap::{App, Arg, ArgMatches, SubCommand};
 use std::collections::HashMap;
 use std::process::exit;
 use control_plane::storage::PageServerNode;
-use control_plane::{compute::ComputeControlPlane, local_env};
-use control_plane::{local_env::LocalEnv, remotes};
+use control_plane::compute::ComputeControlPlane;
+use control_plane::local_env::{self, LocalEnv};
 
 use pageserver::{branches::BranchInfo, ZTimelineId};
 use zenith_utils::lsn::Lsn;
@@ -257,7 +257,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 }
 
 fn handle_remote(remote_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> {
-    let mut remotes = remotes::load_remotes(local_env)?;
     match remote_match.subcommand() {
         ("add", Some(args)) => {
             let name = args.value_of("name").unwrap();
@@ -266,14 +265,16 @@ fn handle_remote(remote_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> 
             // validate the URL
             postgres::Config::from_str(url)?;
 
-            match remotes.entry(name.to_string()) {
+            let mut new_local_env = local_env.clone();
+
+            match new_local_env.remotes.entry(name.to_string()) {
                 Entry::Vacant(vacant) => {
                     vacant.insert(url.to_string());
                 }
                 Entry::Occupied(_) => bail!("origin '{}' already exists", name),
             }
 
-            remotes::save_remotes(local_env, &remotes)?;
+            local_env::save_config(&new_local_env)?;
         }
         _ => bail!("unknown command"),
     }

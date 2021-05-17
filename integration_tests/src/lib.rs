@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::{collections::BTreeMap, sync::{atomic::AtomicBool, Arc}};
 use std::{
     convert::TryInto,
     fs::{self, File, OpenOptions},
@@ -42,6 +42,7 @@ pub fn create_test_env(testname: &str) -> LocalEnv {
         pg_distrib_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install"),
         zenith_distrib_dir: Some(local_env::cargo_bin_dir()),
         base_data_dir: base_path,
+        remotes: BTreeMap::default(),
     }
 }
 

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use url::Url;
 
-use crate::remotes;
+pub type Remotes = BTreeMap<String, String>;
 
 //
 // This data structures represent deserialized zenith CLI config
@@ -32,6 +32,8 @@ pub struct LocalEnv {
 
     // Path to pageserver binary. Empty for remote pageserver.
     pub zenith_distrib_dir: Option<PathBuf>,
+
+    pub remotes: Remotes,
 }
 
 impl LocalEnv {
@@ -112,6 +114,7 @@ pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
             pg_distrib_dir,
             zenith_distrib_dir: None,
             base_data_dir: base_path,
+            remotes: BTreeMap::default(),
         }
     } else {
         // Find zenith binaries.
@@ -125,13 +128,12 @@ pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
             pg_distrib_dir,
             zenith_distrib_dir: Some(zenith_distrib_dir),
             base_data_dir: base_path,
+            remotes: BTreeMap::default(),
         }
     };
 
-    let toml = toml::to_string(&conf)?;
+    let toml = toml::to_string_pretty(&conf)?;
     fs::write(conf.base_data_dir.join("config"), toml)?;
-    // initialize remotes file
-    remotes::save_remotes(&conf, &BTreeMap::default())?;
 
     Ok(())
 }
@@ -152,6 +154,15 @@ pub fn load_config() -> Result<LocalEnv> {
     // load and parse file
     let config = fs::read_to_string(repopath.join("config"))?;
     toml::from_str(config.as_str()).map_err(|e| e.into())
+}
+
+// Save config. We use that to change set of remotes from CLI itself.
+pub fn save_config(conf: &LocalEnv) -> Result<()> {
+    let config_path = base_path().join("config");
+    let conf_str = toml::to_string_pretty(conf)?;
+
+    fs::write(config_path, conf_str)?;
+    Ok(())
 }
 
 // Find the directory where the binaries were put (i.e. target/debug/)
