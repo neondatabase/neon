@@ -24,4 +24,5 @@ thiserror = "1"
 pageserver = { path = "../pageserver" }
 walkeeper = { path = "../walkeeper" }
 postgres_ffi = { path = "../postgres_ffi" }
+zenith_utils = { path = "../zenith_utils" }
 workspace_hack = { path = "../workspace_hack" }

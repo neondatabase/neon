@@ -278,6 +278,7 @@ dependencies = [
  "toml",
  "walkeeper",
  "workspace_hack",
+ "zenith_utils",
 ]
 
 [[package]]
@@ -2454,6 +2455,7 @@ dependencies = [
  "postgres_ffi",
  "serde_json",
  "workspace_hack",
+ "zenith_utils",
 ]
 
 [[package]]

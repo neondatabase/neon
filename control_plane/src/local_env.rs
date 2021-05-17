@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use pageserver::zenith_repo_dir;
 use pageserver::ZTimelineId;
 use postgres_ffi::xlog_utils;
+use zenith_utils::lsn::Lsn;
 
 //
 // This data structure represents deserialized zenith config, which should be
@@ -260,7 +261,7 @@ pub fn cargo_bin_dir() -> PathBuf {
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
     pub timelineid: ZTimelineId,
-    pub lsn: u64,
+    pub lsn: Lsn,
 }
 
 fn create_timeline(local_env: &LocalEnv, ancestor: Option<PointInTime>) -> Result<ZTimelineId> {
@@ -278,24 +279,11 @@ fn create_timeline(local_env: &LocalEnv, ancestor: Option<PointInTime>) -> Resul
     fs::create_dir(&timelinedir.join("wal"))?;
 
     if let Some(ancestor) = ancestor {
-        let data = format!(
-            "{}@{:X}/{:X}",
-            ancestor.timelineid,
-            ancestor.lsn >> 32,
-            ancestor.lsn & 0xffffffff
-        );
+        let data = format!("{}@{}", ancestor.timelineid, ancestor.lsn);
         fs::write(timelinedir.join("ancestor"), data)?;
     }
 
     Ok(timelineid)
-}
-
-// Parse an LSN in the format used in filenames
-//
-// For example: 00000000015D3DD8
-//
-fn parse_lsn(s: &str) -> std::result::Result<u64, std::num::ParseIntError> {
-    u64::from_str_radix(s, 16)
 }
 
 // Create a new branch in the repository (for the "zenith branch" subcommand)
@@ -337,7 +325,7 @@ pub fn create_branch(
 }
 
 // Find the end of valid WAL in a wal directory
-pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<u64> {
+pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<Lsn> {
     let repopath = &local_env.repo_path;
     let waldir = repopath
         .join("timelines")
@@ -346,11 +334,11 @@ pub fn find_end_of_wal(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<u6
 
     let (lsn, _tli) = xlog_utils::find_end_of_wal(&waldir, 16 * 1024 * 1024, true);
 
-    Ok(lsn)
+    Ok(Lsn(lsn))
 }
 
 // Find the latest snapshot for a timeline
-fn find_latest_snapshot(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<(u64, PathBuf)> {
+fn find_latest_snapshot(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<(Lsn, PathBuf)> {
     let repopath = &local_env.repo_path;
 
     let snapshotsdir = repopath
@@ -358,17 +346,17 @@ fn find_latest_snapshot(local_env: &LocalEnv, timeline: ZTimelineId) -> Result<(
         .join(timeline.to_string())
         .join("snapshots");
     let paths = fs::read_dir(&snapshotsdir)?;
-    let mut maxsnapshot: u64 = 0;
+    let mut maxsnapshot = Lsn(0);
     let mut snapshotdir: Option<PathBuf> = None;
     for path in paths {
         let path = path?;
         let filename = path.file_name().to_str().unwrap().to_owned();
-        if let Ok(lsn) = parse_lsn(&filename) {
+        if let Ok(lsn) = Lsn::from_hex(&filename) {
             maxsnapshot = std::cmp::max(lsn, maxsnapshot);
             snapshotdir = Some(path.path());
         }
     }
-    if maxsnapshot == 0 {
+    if maxsnapshot == Lsn(0) {
         // TODO: check ancestor timeline
         anyhow::bail!("no snapshot found in {}", snapshotsdir.display());
     }

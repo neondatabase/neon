@@ -3,7 +3,7 @@ use std::process::exit;
 use std::str::FromStr;
 use std::{collections::HashMap, fs};
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use anyhow::{anyhow, bail};
 use clap::{App, Arg, ArgMatches, SubCommand};
 
@@ -12,6 +12,8 @@ use control_plane::storage::PageServerNode;
 use control_plane::{compute::ComputeControlPlane, local_env, storage};
 
 use pageserver::{branches::BranchInfo, ZTimelineId};
+
+use zenith_utils::lsn::Lsn;
 
 fn zenith_repo_dir() -> PathBuf {
     // Find repository path
@@ -256,15 +258,11 @@ fn run_branch_cmd(local_env: &LocalEnv, args: ArgMatches) -> Result<()> {
         if let Some(startpoint_str) = args.value_of("start-point") {
             let mut startpoint = parse_point_in_time(startpoint_str)?;
 
-            if startpoint.lsn == 0 {
+            if startpoint.lsn == Lsn(0) {
                 // Find end of WAL on the old timeline
                 let end_of_wal = local_env::find_end_of_wal(local_env, startpoint.timelineid)?;
 
-                println!(
-                    "branching at end of WAL: {:X}/{:X}",
-                    end_of_wal >> 32,
-                    end_of_wal & 0xffffffff
-                );
+                println!("branching at end of WAL: {}", end_of_wal);
 
                 startpoint.lsn = end_of_wal;
             }
@@ -314,18 +312,12 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
     let mut strings = s.split('@');
     let name = strings.next().unwrap();
 
-    let lsn: Option<u64>;
+    let lsn: Option<Lsn>;
     if let Some(lsnstr) = strings.next() {
-        let mut s = lsnstr.split('/');
-        let lsn_hi: u64 = s
-            .next()
-            .ok_or_else(|| anyhow!("invalid LSN in point-in-time specification"))?
-            .parse()?;
-        let lsn_lo: u64 = s
-            .next()
-            .ok_or_else(|| anyhow!("invalid LSN in point-in-time specification"))?
-            .parse()?;
-        lsn = Some(lsn_hi << 32 | lsn_lo);
+        lsn = Some(
+            Lsn::from_str(lsnstr)
+                .with_context(|| "invalid LSN in point-in-time specification")?
+                );
     } else {
         lsn = None
     }
@@ -347,7 +339,7 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
 
         let mut result = parse_point_in_time(&pointstr)?;
 
-        result.lsn = lsn.unwrap_or(0);
+        result.lsn = lsn.unwrap_or(Lsn(0));
         return Ok(result);
     }
 
@@ -357,7 +349,7 @@ fn parse_point_in_time(s: &str) -> Result<local_env::PointInTime> {
     if tlipath.exists() {
         let result = local_env::PointInTime {
             timelineid: ZTimelineId::from_str(name)?,
-            lsn: lsn.unwrap_or(0),
+            lsn: lsn.unwrap_or(Lsn(0)),
         };
 
         return Ok(result);
