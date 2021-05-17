@@ -7,7 +7,7 @@
 
 use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::restore_timeline;
-use crate::waldecoder::{DecodedWALRecord, Oid, TransactionId, XlCreateDatabase, XlSmgrTruncate};
+use crate::waldecoder::{Oid, TransactionId};
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -937,68 +937,6 @@ impl Timeline for RocksTimeline {
             "Create database {}/{}, copy {} entries",
             tablespace_id, db_id, n
         );
-        Ok(())
-    }
-
-    // Put the WAL record to the page cache. We make a separate copy of
-    // it for every block it modifies.
-    fn save_decoded_record(
-        &self,
-        decoded: DecodedWALRecord,
-        recdata: Bytes,
-        lsn: Lsn,
-    ) -> anyhow::Result<()> {
-        for blk in decoded.blocks.iter() {
-            let tag = BufferTag {
-                rel: RelTag {
-                    spcnode: blk.rnode_spcnode,
-                    dbnode: blk.rnode_dbnode,
-                    relnode: blk.rnode_relnode,
-                    forknum: blk.forknum as u8,
-                },
-                blknum: blk.blkno,
-            };
-
-            let rec = WALRecord {
-                lsn,
-                will_init: blk.will_init || blk.apply_image,
-                rec: recdata.clone(),
-                main_data_offset: decoded.main_data_offset as u32,
-            };
-
-            self.put_wal_record(tag, rec);
-        }
-        // include truncate wal record in all pages
-        if decoded.xl_rmid == pg_constants::RM_SMGR_ID
-            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_SMGR_TRUNCATE
-        {
-            let truncate = XlSmgrTruncate::decode(&decoded);
-            if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
-                let rel = RelTag {
-                    spcnode: truncate.rnode.spcnode,
-                    dbnode: truncate.rnode.dbnode,
-                    relnode: truncate.rnode.relnode,
-                    forknum: pg_constants::MAIN_FORKNUM,
-                };
-                self.put_truncation(rel, lsn, truncate.blkno)?;
-            }
-        } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
-            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_CREATE
-        {
-            let createdb = XlCreateDatabase::decode(&decoded);
-            self.put_create_database(
-                lsn,
-                createdb.db_id,
-                createdb.tablespace_id,
-                createdb.src_db_id,
-                createdb.src_tablespace_id,
-            )?;
-        }
-        // Now that this record has been handled, let the page cache know that
-        // it is up-to-date to this LSN
-        self.advance_last_record_lsn(lsn);
         Ok(())
     }
 

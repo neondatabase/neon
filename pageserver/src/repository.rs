@@ -1,9 +1,10 @@
 pub mod rocksdb;
 
-use crate::waldecoder::{DecodedWALRecord, Oid, TransactionId};
+use crate::waldecoder::{DecodedWALRecord, Oid, TransactionId, XlCreateDatabase, XlSmgrTruncate};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use std::fmt;
 use std::sync::Arc;
@@ -88,7 +89,63 @@ pub trait Timeline {
         decoded: DecodedWALRecord,
         recdata: Bytes,
         lsn: Lsn,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<()> {
+        // Figure out which blocks the record applies to, and "put" a separate copy
+        // of the record for each block.
+        for blk in decoded.blocks.iter() {
+            let tag = BufferTag {
+                rel: RelTag {
+                    spcnode: blk.rnode_spcnode,
+                    dbnode: blk.rnode_dbnode,
+                    relnode: blk.rnode_relnode,
+                    forknum: blk.forknum as u8,
+                },
+                blknum: blk.blkno,
+            };
+
+            let rec = WALRecord {
+                lsn,
+                will_init: blk.will_init || blk.apply_image,
+                rec: recdata.clone(),
+                main_data_offset: decoded.main_data_offset as u32,
+            };
+
+            self.put_wal_record(tag, rec);
+        }
+
+        // Handle a few special record types
+        if decoded.xl_rmid == pg_constants::RM_SMGR_ID
+            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                == pg_constants::XLOG_SMGR_TRUNCATE
+        {
+            let truncate = XlSmgrTruncate::decode(&decoded);
+            if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
+                let rel = RelTag {
+                    spcnode: truncate.rnode.spcnode,
+                    dbnode: truncate.rnode.dbnode,
+                    relnode: truncate.rnode.relnode,
+                    forknum: pg_constants::MAIN_FORKNUM,
+                };
+                self.put_truncation(rel, lsn, truncate.blkno)?;
+            }
+        } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
+            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                == pg_constants::XLOG_DBASE_CREATE
+        {
+            let createdb = XlCreateDatabase::decode(&decoded);
+            self.put_create_database(
+                lsn,
+                createdb.db_id,
+                createdb.tablespace_id,
+                createdb.src_db_id,
+                createdb.src_tablespace_id,
+            )?;
+        }
+        // Now that this record has been handled, let the repository know that
+        // it is up-to-date to this LSN
+        self.advance_last_record_lsn(lsn);
+        Ok(())
+    }
 
     /// Remember the all WAL before the given LSN has been processed.
     ///
