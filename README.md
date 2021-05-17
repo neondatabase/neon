@@ -11,7 +11,7 @@ cd zenith
 make
 ```
 
-2. Start pageserver and postggres on top of it (should be called from repo root):
+2. Start pageserver and postgres on top of it (should be called from repo root):
 ```sh
 # Create ~/.zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
@@ -30,7 +30,7 @@ Database initialized
 > ./target/debug/zenith pg start pg1
 
 # look up status and connection info
-> ./target/debug/zenith pg list     
+> ./target/debug/zenith pg list
 NODE		ADDRESS				STATUS
 pg1			127.0.0.1:55432		running
 ```

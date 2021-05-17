@@ -29,6 +29,8 @@ pub struct BranchInfo {
     pub name: String,
     pub timeline_id: ZTimelineId,
     pub latest_valid_lsn: Option<Lsn>,
+    pub ancestor_id: Option<String>,
+    pub ancestor_lsn: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,8 +119,10 @@ pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
 }
 
 pub(crate) fn get_branches(repository: &dyn Repository) -> Result<Vec<BranchInfo>> {
-    // adapted from CLI code
+    // Each branch has a corresponding record (text file) in the refs/branches
+    // with timeline_id.
     let branches_dir = std::path::Path::new("refs").join("branches");
+
     std::fs::read_dir(&branches_dir)?
         .map(|dir_entry_res| {
             let dir_entry = dir_entry_res?;
@@ -130,10 +134,26 @@ pub(crate) fn get_branches(repository: &dyn Repository) -> Result<Vec<BranchInfo
                 .map(|timeline| timeline.get_last_valid_lsn())
                 .ok();
 
+            let ancestor_path = std::path::Path::new("timelines")
+                .join(timeline_id.to_string())
+                .join("ancestor");
+            let mut ancestor_id: Option<String> = None;
+            let mut ancestor_lsn: Option<String> = None;
+
+            if ancestor_path.exists() {
+                let ancestor = std::fs::read_to_string(ancestor_path)?;
+                let mut strings = ancestor.split('@');
+
+                ancestor_id = Some(strings.next().unwrap().to_owned());
+                ancestor_lsn = Some(strings.next().unwrap().to_owned());
+            }
+
             Ok(BranchInfo {
                 name,
                 timeline_id,
                 latest_valid_lsn,
+                ancestor_id,
+                ancestor_lsn,
             })
         })
         .collect()
@@ -205,6 +225,8 @@ pub(crate) fn create_branch(
         name: branchname.to_string(),
         timeline_id: newtli,
         latest_valid_lsn: Some(startpoint.lsn),
+        ancestor_id: None,
+        ancestor_lsn: None,
     })
 }
 

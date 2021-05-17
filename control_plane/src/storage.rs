@@ -167,7 +167,7 @@ impl PageServerNode {
 
     pub fn branches_list(&self) -> Result<Vec<BranchInfo>> {
         let mut client = self.page_server_psql_client()?;
-        let query_result = client.simple_query("pg_list")?;
+        let query_result = client.simple_query("branch_list")?;
         let branches_json = query_result
             .first()
             .map(|msg| match msg {
