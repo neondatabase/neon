@@ -116,7 +116,7 @@ jobs:
       test_filter:
         type: string
         default: ""
-      # Use test_filter to name a python file containing tests to run.
+      # Use test_file to name a python file containing tests to run.
       # This parameter is required, to prevent the mistake of running all tests in one job.
       test_file:
         type: string
@@ -154,7 +154,11 @@ jobs:
             if [ -n "$TEST_FILTER" ]; then
               TEST_FILTER="-k $TEST_FILTER"
             fi
-            pytest --tb=short $TEST_FILE $TEST_FILTER $EXTRA_PARAMS
+            # Run the tests.
+            #
+            # The junit.xml file allows CircleCI to display more fine-grained test information
+            # in its "Tests" tab in the results page.
+            pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short $TEST_FILE $TEST_FILTER $EXTRA_PARAMS
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
@@ -176,7 +180,9 @@ jobs:
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output
-
+      # The store_test_results step tells CircleCI where to find the junit.xml file.
+      - store_test_results:
+          path: /tmp/test_output
 
 workflows:
   build_and_test:
