@@ -697,7 +697,8 @@ impl Connection {
 
             // branch_create <branchname> <startpoint>
             // TODO lazy static
-            let re = Regex::new(r"^branch_create (\w+) ([\w@\\]+)[\r\n\s]*;?$").unwrap();
+            // TOOD: escaping, to allow branch names with spaces
+            let re = Regex::new(r"^branch_create (\S+) (\S+)[\r\n\s]*;?$").unwrap();
             let caps = re.captures(&query_str).ok_or_else(err)?;
 
             let branchname: String = String::from(caps.get(1).ok_or_else(err)?.as_str());
