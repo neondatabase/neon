@@ -23,11 +23,10 @@ run_broken = pytest.mark.skipif(
 
 @run_broken
 def test_broken(zenith_cli, pageserver, postgres, pg_bin):
-    zenith_cli.run_init()
-    pageserver.start()
-    print('pageserver is running')
+    # Create a branch for us
+    zenith_cli.run(["branch", "test_broken", "empty"]);
 
-    postgres.create_start()
+    pg = postgres.create_start("test_broken")
     print('postgres is running')
 
     print('THIS NEXT COMMAND WILL FAIL:')

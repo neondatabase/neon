@@ -6,21 +6,18 @@ import psycopg2
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
+#
+# Test starting Postgres with custom options
+#
 def test_config(zenith_cli, pageserver, postgres, pg_bin):
-    zenith_cli.run_init()
-    pageserver.start()
-    print('pageserver is running')
+    # Create a branch for us
+    zenith_cli.run(["branch", "test_config", "empty"]);
 
     # change config
-    postgres.create_start(['log_min_messages=debug1'])
+    pg = postgres.create_start('test_config', ['log_min_messages=debug1'])
+    print('postgres is running on test_config branch')
 
-    print('postgres is running')
-
-    username = getpass.getuser()
-    conn_str = 'host={} port={} dbname=postgres user={}'.format(
-        postgres.host, postgres.port, username)
-    print('conn_str is', conn_str)
-    pg_conn = psycopg2.connect(conn_str)
+    pg_conn = psycopg2.connect(pg.connstr())
     pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
     cur = pg_conn.cursor()
 

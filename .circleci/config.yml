@@ -112,14 +112,16 @@ jobs:
     #description: "Run pytest"
     executor: python/default
     parameters:
-      # Use test_filter to name a test or a group of tests with the same prefix.
-      test_filter:
+      # pytest args to specify the tests to run.
+      #
+      # This can be a test file name, e.g. 'test_pgbench.py, or a subdirectory,
+      # or '-k foobar' to run tests containing string 'foobar'. See pytest man page
+      # section SPECIFYING TESTS / SELECTING TESTS for details.
+      #
+      # This parameter is required, to prevent the mistake of running all tests in one job.
+      test_selection:
         type: string
         default: ""
-      # Use test_file to name a python file containing tests to run.
-      # This parameter is required, to prevent the mistake of running all tests in one job.
-      test_file:
-        type: string
       # Arbitrary parameters to pytest. For example "-s" to prevent capturing stdout/stderr
       extra_params:
         type: string
@@ -144,21 +146,17 @@ jobs:
             - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
             - TEST_OUTPUT: /tmp/test_output
           command: |
-            TEST_FILE="<< parameters.test_file >>"
-            TEST_FILTER="<< parameters.test_filter >>"
+            TEST_SELECTION="<< parameters.test_selection >>"
             EXTRA_PARAMS="<< parameters.extra_params >>"
-            if [ -z "$TEST_FILE$TEST_FILTER" ]; then
-              echo "test_file or test_filter must be set"
+            if [ -z "$TEST_SELECTION" ]; then
+              echo "test_selection must be set"
               exit 1
-            fi
-            if [ -n "$TEST_FILTER" ]; then
-              TEST_FILTER="-k $TEST_FILTER"
             fi
             # Run the tests.
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
             # in its "Tests" tab in the results page.
-            pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short $TEST_FILE $TEST_FILTER $EXTRA_PARAMS
+            pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short $TEST_SELECTION $EXTRA_PARAMS
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
@@ -189,14 +187,13 @@ workflows:
     jobs:
       - build-zenith
       - run-pytest:
-          name: pgbench test
-          test_file: test_pgbench.py
+          name: pg_regress tests
+          test_selection: batch_pg_regress
+          needs_postgres_source: true
           requires:
             - build-zenith
       - run-pytest:
-          name: pg_regress test
-          test_file: test_pg_regress.py
-          extra_params: -s
-          needs_postgres_source: true
+          name: other tests
+          test_selection: batch_others
           requires:
             - build-zenith

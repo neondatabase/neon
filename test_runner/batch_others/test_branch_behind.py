@@ -8,14 +8,13 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # Create a couple of branches off the main branch, at a historical point in time.
 #
 def test_branch_behind(zenith_cli, pageserver, postgres, pg_bin):
-    zenith_cli.run_init()
-    pageserver.start()
-    print('pageserver is running')
+    # Branch at the point where only 100 rows were inserted
+    zenith_cli.run(["branch", "test_branch_behind", "empty"]);
 
-    pgmain = postgres.create_start()
-    print('postgres is running on main branch')
+    pgmain = postgres.create_start('test_branch_behind')
+    print("postgres is running on 'test_branch_behind' branch")
 
-    main_pg_conn = pgmain.connect();
+    main_pg_conn = psycopg2.connect(pgmain.connstr());
     main_pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
     main_cur = main_pg_conn.cursor()
 
@@ -33,7 +32,7 @@ def test_branch_behind(zenith_cli, pageserver, postgres, pg_bin):
     print('LSN after 100100 rows: ' + lsn_b)
 
     # Branch at the point where only 100 rows were inserted
-    zenith_cli.run(["branch", "hundred", "main@"+lsn_a]);
+    zenith_cli.run(["branch", "test_branch_behind_hundred", "test_branch_behind@"+lsn_a]);
 
     # Insert many more rows. This generates enough WAL to fill a few segments.
     main_cur.execute("INSERT INTO foo SELECT 'long string to consume some space' || g FROM generate_series(1, 100000) g");
@@ -44,20 +43,20 @@ def test_branch_behind(zenith_cli, pageserver, postgres, pg_bin):
     print('LSN after 200100 rows: ' + lsn_c)
 
     # Branch at the point where only 200 rows were inserted
-    zenith_cli.run(["branch", "more", "main@"+lsn_b]);
+    zenith_cli.run(["branch", "test_branch_behind_more", "test_branch_behind@"+lsn_b]);
 
-    pg_hundred = postgres.create_start("hundred")
-    pg_more = postgres.create_start("more")
+    pg_hundred = postgres.create_start("test_branch_behind_hundred")
+    pg_more = postgres.create_start("test_branch_behind_more")
 
     # On the 'hundred' branch, we should see only 100 rows
-    hundred_pg_conn = pg_hundred.connect()
+    hundred_pg_conn = psycopg2.connect(pg_hundred.connstr())
     hundred_pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
     hundred_cur = hundred_pg_conn.cursor()
     hundred_cur.execute('SELECT count(*) FROM foo');
     assert(hundred_cur.fetchone()[0] == 100);
 
     # On the 'more' branch, we should see 100200 rows
-    more_pg_conn = pg_more.connect()
+    more_pg_conn = psycopg2.connect(pg_more.connstr())
     more_pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
     more_cur = more_pg_conn.cursor()
     more_cur.execute('SELECT count(*) FROM foo');

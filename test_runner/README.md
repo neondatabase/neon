@@ -18,6 +18,15 @@ Prerequisites:
 - The zenith git repo, including the postgres submodule
   (for some tests, e.g. pg_regress)
 
+### Test Organization
+
+The tests are divided into a few batches, such that each batch takes roughly
+the same amount of time. The batches can be run in parallel, to minimize total
+runtime. Currently, there are only two batches:
+
+- test_batch_pg_regress: Runs PostgreSQL regression tests
+- test_others: All other tests
+
 ### Running the tests
 
 Because pytest will search all subdirectories for tests, it's easiest to
@@ -44,8 +53,7 @@ Useful environment variables:
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
-`TEST_SHARED_FIXTURES`: Try to re-use a single postgres and pageserver
-for all the tests.
+`TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 
 Let stdout and stderr go to the terminal instead of capturing them:
 `pytest -s ...`

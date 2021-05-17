@@ -11,14 +11,14 @@ HOST = 'localhost'
 PORT = 55432
 
 
-def test_pg_regress(zen_simple, test_output_dir, pg_distrib_dir, base_dir):
+def test_pg_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir, base_dir, capsys):
+
+    # Create a branch for us
+    zenith_cli.run(["branch", "test_pg_regress", "empty"]);
 
     # Connect to postgres and create a database called "regression".
-    username = getpass.getuser()
-    conn_str = 'host={} port={} dbname=postgres user={}'.format(
-        HOST, PORT, username)
-    print('conn_str is', conn_str)
-    pg_conn = psycopg2.connect(conn_str)
+    pg = postgres.create_start('test_pg_regress')
+    pg_conn = psycopg2.connect(pg.connstr())
     pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
     cur = pg_conn.cursor()
     cur.execute('CREATE DATABASE regression')
@@ -49,13 +49,13 @@ def test_pg_regress(zen_simple, test_output_dir, pg_distrib_dir, base_dir):
     ]
 
     env = {
-        'PGPORT': str(PORT),
-        'PGUSER': username,
-        'PGHOST': HOST,
+        'PGPORT': str(pg.port),
+        'PGUSER': pg.username,
+        'PGHOST': pg.host,
     }
 
     # Run the command.
     # We don't capture the output. It's not too chatty, and it always
     # logs the exact same data to `regression.out` anyway.
-
-    zen_simple.pg_bin.run(pg_regress_command, env=env, cwd=runpath)
+    with capsys.disabled():
+        pg_bin.run(pg_regress_command, env=env, cwd=runpath)

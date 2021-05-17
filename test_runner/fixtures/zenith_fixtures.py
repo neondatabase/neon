@@ -90,10 +90,6 @@ class ZenithCli:
         print('Running command "{}"'.format(' '.join(args)))
         subprocess.run(args, env=self.env, check=True)
 
-    def run_init(self):
-        """ Run the "zenith init <dir>" command. """
-        self.run(['init'])
-
 
 @zenfixture
 def zenith_cli(zenith_binpath, repo_dir, pg_distrib_dir):
@@ -107,23 +103,49 @@ class ZenithPageserver:
         self.zenith_cli = zenith_cli
         self.running = False
 
+    # Initialize the repository, i.e. run "zenith init"
+    def init(self):
+        self.zenith_cli.run(['init'])
+
+    # Start the page server
     def start(self):
         self.zenith_cli.run(['start'])
         self.running = True
 
+    # Stop the page server
     def stop(self):
         self.zenith_cli.run(['stop'])
         self.running = True
 
+    # The page server speaks the Postgres FE/BE protocol, so you can connect
+    # to it with any Postgres client, and run special commands. This function
+    # returns a libpq connection string for connecting to it.
+    def connstr(self):
+        username = getpass.getuser()
+        conn_str = 'host={} port={} dbname=postgres user={}'.format(
+            'localhost', 64000, username)
+        return conn_str
 
+# The 'pageserver' fixture provides a Page Server that's up and running.
+#
+# If TEST_SHARED_FIXTURES is set, the Page Server instance is shared by all
+# the tests. To avoid clashing with other tests, don't use the 'main' branch in
+# the tests directly. Instead, create a branch off the 'empty' branch and use
+# that.
+#
+# By convention, the test branches are named after the tests. For example,
+# test called 'test_foo' would create and use branches with the 'test_foo' prefix.
 @zenfixture
 def pageserver(zenith_cli):
     ps = ZenithPageserver(zenith_cli)
+    ps.init()
+    ps.start()
+    # For convenience in tests, create a branch from the freshly-initialized cluster.
+    zenith_cli.run(["branch", "empty", "main"]);
     yield ps
     # After the yield comes any cleanup code we need.
     print('Starting pageserver cleanup')
     ps.stop()
-
 
 class Postgres:
     """ An object representing a running postgres daemon. """
@@ -132,12 +154,13 @@ class Postgres:
         self.zenith_cli = zenith_cli
         self.instance_num = instance_num
         self.running = False
+        self.username = getpass.getuser()
         self.host = 'localhost'
         self.port = 55431 + instance_num
         self.repo_dir = repo_dir
         # path to conf is <repo_dir>/pgdatadirs/pg<instance_num>/postgresql.conf
 
-    def create_start(self, branch="main", config_lines=None):
+    def create_start(self, branch, config_lines=None):
         """ create the pg data directory, and start the server """
         self.zenith_cli.run(['pg', 'create', branch])
         if config_lines is None:
@@ -160,13 +183,11 @@ class Postgres:
         if self.running:
             self.zenith_cli.run(['pg', 'stop', 'pg{}'.format(self.instance_num)])
 
-    # Open a psycopg2 connection to the server, ready for running queries.
-    def connect(self):
-        username = getpass.getuser()
+    # Return a libpq connection string to connect to the Postgres instance
+    def connstr(self):
         conn_str = 'host={} port={} dbname=postgres user={}'.format(
-            self.host, self.port, username)
-
-        return psycopg2.connect(conn_str)
+            self.host, self.port, self.username)
+        return conn_str
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
@@ -325,43 +346,3 @@ def pg_distrib_dir(base_dir):
     if not os.path.exists(os.path.join(pg_dir, 'bin/postgres')):
         raise Exception('postgres not found at "{}"'.format(pg_dir))
     return pg_dir
-
-
-class SimpleTest:
-    """ A fixture object that contains the things we need for a simple test.
-
-    This is an object with common fixture members:
-        zenith_cli
-        pageserver
-        postgres
-        pg_bin
-
-    Example:
-
-        @zenfixture
-        def my_test(zen_simple):
-            zen_simple.pg_bin.run(['pgbench', '-i'])
-
-    """
-
-    def __init__(self, zenith_cli, pageserver, postgres, pg_bin):
-        self.zenith_cli = zenith_cli
-        self.pageserver = pageserver
-        self.postgres = postgres
-        self.pg_bin = pg_bin
-
-    def start(self):
-        """ Start a pageserver and postgres. """
-        self.zenith_cli.run_init()
-        self.pageserver.start()
-        print('pageserver is running')
-
-        self.postgres.create_start()
-        print('postgres is running')
-
-
-@zenfixture
-def zen_simple(zenith_cli, pageserver, postgres, pg_bin):
-    simple = SimpleTest(zenith_cli, pageserver, postgres, pg_bin)
-    simple.start()
-    return simple

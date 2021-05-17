@@ -5,44 +5,45 @@ import json
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
-HOST = 'localhost'
-PAGESERVER_PORT = 64000
-
-def test_status(zen_simple):
-    username = getpass.getuser()
-    conn_str = 'host={} port={} dbname=postgres user={}'.format(
-        HOST, PAGESERVER_PORT, username)
-    pg_conn = psycopg2.connect(conn_str)
+def test_status(pageserver):
+    pg_conn = psycopg2.connect(pageserver.connstr())
     pg_conn.autocommit = True
     cur = pg_conn.cursor()
     cur.execute('status;')
     assert cur.fetchone() == ('hello world',)
     pg_conn.close()
 
-def test_pg_list(zen_simple):
-    username = getpass.getuser()
-    page_server_conn_str = 'host={} port={} dbname=postgres user={}'.format(
-        HOST, PAGESERVER_PORT, username)
-    page_server_conn = psycopg2.connect(page_server_conn_str)
+def test_pg_list(pageserver, zenith_cli):
+
+    # Create a branch for us
+    zenith_cli.run(["branch", "test_pg_list_main", "empty"]);
+
+    page_server_conn = psycopg2.connect(pageserver.connstr())
     page_server_conn.autocommit = True
     page_server_cur = page_server_conn.cursor()
 
     page_server_cur.execute('pg_list;')
     branches = json.loads(page_server_cur.fetchone()[0])
+    # Filter out branches created by other tests
+    branches = [x for x in branches if x['name'].startswith('test_pg_list')]
+
     assert len(branches) == 1
-    assert branches[0]['name'] == 'main'
+    assert branches[0]['name'] == 'test_pg_list_main'
     assert 'timeline_id' in branches[0]
     assert 'latest_valid_lsn' in branches[0]
 
-    zen_simple.zenith_cli.run(['branch', 'experimental', 'main'])
-    zen_simple.zenith_cli.run(['pg', 'create', 'experimental'])
+    # Create another branch, and start Postgres on it
+    zenith_cli.run(['branch', 'test_pg_list_experimental', 'test_pg_list_main'])
+    zenith_cli.run(['pg', 'create', 'test_pg_list_experimental'])
 
     page_server_cur.execute('pg_list;')
     new_branches = json.loads(page_server_cur.fetchone()[0])
+    # Filter out branches created by other tests
+    new_branches = [x for x in new_branches if x['name'].startswith('test_pg_list')]
     assert len(new_branches) == 2
     new_branches.sort(key=lambda k: k['name'])
 
-    assert new_branches[0]['name'] == 'experimental'
+    assert new_branches[0]['name'] == 'test_pg_list_experimental'
     assert new_branches[0]['timeline_id'] != branches[0]['timeline_id']
 
     # TODO: do the LSNs have to match here?
