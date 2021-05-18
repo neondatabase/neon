@@ -80,11 +80,10 @@ impl ComputeControlPlane {
         &mut self,
         is_test: bool,
         timelineid: ZTimelineId,
+        name: &str,
     ) -> Result<Arc<PostgresNode>> {
-        let node_id = self.nodes.len() as u32 + 1;
-
         let node = Arc::new(PostgresNode {
-            name: format!("pg{}", node_id),
+            name: name.to_owned(),
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), self.get_port()),
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
@@ -105,7 +104,7 @@ impl ComputeControlPlane {
             .expect("failed to get timeline_id")
             .timeline_id;
 
-        let node = self.new_from_page_server(true, timeline_id);
+        let node = self.new_from_page_server(true, timeline_id, branch_name);
         let node = node.unwrap();
 
         // Configure the node to stream WAL directly to the pageserver
@@ -129,7 +128,9 @@ impl ComputeControlPlane {
             .expect("failed to get timeline_id")
             .timeline_id;
 
-        let node = self.new_from_page_server(true, timeline_id).unwrap();
+        let node = self
+            .new_from_page_server(true, timeline_id, branch_name)
+            .unwrap();
 
         node.append_conf(
             "postgresql.conf",
@@ -146,7 +147,9 @@ impl ComputeControlPlane {
             .expect("failed to get timeline_id")
             .timeline_id;
 
-        let node = self.new_from_page_server(false, timeline_id).unwrap();
+        let node = self
+            .new_from_page_server(false, timeline_id, branch_name)
+            .unwrap();
 
         // Configure the node to stream WAL directly to the pageserver
         node.append_conf(

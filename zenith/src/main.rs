@@ -20,10 +20,10 @@ use zenith_utils::lsn::Lsn;
 //   * Providing CLI api to the pageserver (local or remote)
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
-    let name_arg = Arg::with_name("NAME")
+    let timeline_arg = Arg::with_name("timeline")
         .short("n")
         .index(1)
-        .help("name of this postgres instance")
+        .help("timeline name")
         .required(true);
 
     let matches = App::new("zenith")
@@ -53,17 +53,10 @@ fn main() -> Result<()> {
             SubCommand::with_name("pg")
                 .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage postgres instances")
-                .subcommand(
-                    SubCommand::with_name("create")
-                        // .arg(name_arg.clone()
-                        //     .required(false)
-                        //     .help("name of this postgres instance (will be pgN if omitted)"))
-                        .arg(Arg::with_name("timeline").required(false).index(1)),
-                )
                 .subcommand(SubCommand::with_name("list"))
-                .subcommand(SubCommand::with_name("start").arg(name_arg.clone()))
-                .subcommand(SubCommand::with_name("stop").arg(name_arg.clone()))
-                .subcommand(SubCommand::with_name("destroy").arg(name_arg.clone())),
+                .subcommand(SubCommand::with_name("create").arg(timeline_arg.clone()))
+                .subcommand(SubCommand::with_name("start").arg(timeline_arg.clone()))
+                .subcommand(SubCommand::with_name("stop").arg(timeline_arg.clone())),
         )
         .subcommand(
             SubCommand::with_name("remote")
@@ -180,66 +173,68 @@ fn main() -> Result<()> {
 
 /// Returns a map of timeline IDs to branch_name@lsn strings.
 /// Connects to the pageserver to query this information.
-fn get_branch_infos(env: &local_env::LocalEnv) -> Result<HashMap<ZTimelineId, String>> {
+fn get_branch_infos(env: &local_env::LocalEnv) -> Result<HashMap<ZTimelineId, BranchInfo>> {
     let page_server = PageServerNode::from_env(env);
     let branch_infos: Vec<BranchInfo> = page_server.branches_list()?;
-    let branch_infos: Result<HashMap<ZTimelineId, String>> = branch_infos
+    let branch_infos: HashMap<ZTimelineId, BranchInfo> = branch_infos
         .into_iter()
-        .map(|branch_info| {
-            let lsn_string_opt = branch_info.latest_valid_lsn.map(|lsn| lsn.to_string());
-            let lsn_str = lsn_string_opt.as_deref().unwrap_or("?");
-            let branch_lsn_string = format!("{}@{}", branch_info.name, lsn_str);
-            Ok((branch_info.timeline_id, branch_lsn_string))
-        })
+        .map(|branch_info| (branch_info.timeline_id, branch_info))
         .collect();
 
-    branch_infos
+    Ok(branch_infos)
 }
 
 fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
     match pg_match.subcommand() {
-        ("create", Some(sub_m)) => {
-            let timeline_arg = sub_m.value_of("timeline").unwrap_or("main");
-            println!("Initializing Postgres on timeline {}...", timeline_arg);
-            cplane.new_node(timeline_arg)?;
-        }
         ("list", Some(_sub_m)) => {
             let branch_infos = get_branch_infos(env).unwrap_or_else(|e| {
                 eprintln!("Failed to load branch info: {}", e);
                 HashMap::new()
             });
 
-            println!("NODE\tADDRESS\t\tSTATUS\tBRANCH@LSN");
-            for (node_name, node) in cplane.nodes.iter() {
+            println!("BRANCH\tADDRESS\t\tLSN\t\tSTATUS");
+            for (timeline_name, node) in cplane.nodes.iter() {
                 println!(
                     "{}\t{}\t{}\t{}",
-                    node_name,
+                    timeline_name,
                     node.address,
-                    node.status(),
                     branch_infos
                         .get(&node.timelineid)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?")
+                        .map(|bi| bi
+                            .latest_valid_lsn
+                            .map_or("?".to_string(), |lsn| lsn.to_string()))
+                        .unwrap_or("?".to_string()),
+                    node.status(),
                 );
             }
         }
+        ("create", Some(sub_m)) => {
+            let timeline_name = sub_m.value_of("timeline").unwrap_or("main");
+            cplane.new_node(timeline_name)?;
+        }
         ("start", Some(sub_m)) => {
-            let name = sub_m.value_of("NAME").unwrap();
-            let node = cplane
-                .nodes
-                .get(name)
-                .ok_or_else(|| anyhow!("postgres {} is not found", name))?;
-            node.start()?;
+            let timeline_name = sub_m.value_of("timeline").unwrap_or("main");
+
+            let node = cplane.nodes.get(timeline_name);
+
+            println!("Starting postgres on timeline {}...", timeline_name);
+            if let Some(node) = node {
+                node.start()?;
+            } else {
+                let node = cplane.new_node(timeline_name)?;
+                node.start()?;
+            }
         }
         ("stop", Some(sub_m)) => {
-            let name = sub_m.value_of("NAME").unwrap();
+            let timeline_name = sub_m.value_of("timeline").unwrap_or("main");
             let node = cplane
                 .nodes
-                .get(name)
-                .ok_or_else(|| anyhow!("postgres {} is not found", name))?;
+                .get(timeline_name)
+                .ok_or_else(|| anyhow!("postgres {} is not found", timeline_name))?;
             node.stop()?;
+            // TODO: destroy data directory here
         }
 
         _ => {}
