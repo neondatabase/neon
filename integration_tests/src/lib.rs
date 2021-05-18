@@ -202,13 +202,7 @@ impl PostgresNodeExt for PostgresNode {
                 file.read_to_string(&mut buffer).unwrap();
                 println!("--------------- regression.diffs:\n{}", buffer);
             }
-            // self.dump_log_file();
-
-            if let Ok(mut file) = File::open(self.env.pg_data_dir("main").join("log")) {
-                let mut buffer = String::new();
-                file.read_to_string(&mut buffer).unwrap();
-                println!("--------------- pgdatadirs/main/log:\n{}", buffer);
-            }
+            self.dump_log_file();
         }
         regress_check
     }
@@ -287,7 +281,7 @@ impl PostgresNodeExt for PostgresNode {
         println!("Running {}", sql);
         let result = client.query(sql, &[]);
         if result.is_err() {
-            // self.dump_log_file();
+            self.dump_log_file();
         }
         result.unwrap()
     }

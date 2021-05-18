@@ -31,14 +31,6 @@ pub struct BranchInfo {
     pub latest_valid_lsn: Option<Lsn>,
 }
 
-// impl BranchInfo {
-//     pub fn lsn_string(&self) -> String {
-//         let lsn_string_opt = self.latest_valid_lsn.map(|lsn| lsn.to_string());
-//         let lsn_str = lsn_string_opt.as_deref().unwrap_or("?");
-//         format!("{}@{}", self.name, lsn_str)
-//     }
-// }
-
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
     pub timelineid: ZTimelineId,
@@ -116,14 +108,6 @@ pub fn init_repo(conf: &PageServerConf) -> Result<()> {
     let data = tli.to_string();
     fs::write(conf.branch_path("main"), data)?;
     println!("created main branch");
-
-    // XXX: do we need that now? -- yep, for test only
-
-    // // Also update the system id in the LocalEnv
-    // local_env.systemid = systemid;
-    // // write config
-    // let toml = toml::to_string(&local_env)?;
-    // fs::write(repopath.join("config"), toml)?;
 
     println!(
         "new zenith repository was created in {}",

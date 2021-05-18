@@ -38,7 +38,7 @@ impl ComputeControlPlane {
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
         let pgdatadirspath = &env.pg_data_dirs_path();
-        let nodes: Result<BTreeMap<_, _>> = fs::read_dir(pgdatadirspath)
+        let nodes: Result<BTreeMap<_, _>> = fs::read_dir(&pgdatadirspath)
             .with_context(|| format!("failed to list {}", pgdatadirspath.display()))?
             .into_iter()
             .map(|f| {
