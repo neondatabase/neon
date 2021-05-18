@@ -182,19 +182,7 @@ fn main() -> Result<()> {
 /// Connects to the pageserver to query this information.
 fn get_branch_infos(env: &local_env::LocalEnv) -> Result<HashMap<ZTimelineId, String>> {
     let page_server = PageServerNode::from_env(env);
-    let mut client = page_server.page_server_psql_client()?;
-    let branches_msgs = client.simple_query("pg_list")?;
-
-    let branches_json = branches_msgs
-        .first()
-        .map(|msg| match msg {
-            postgres::SimpleQueryMessage::Row(row) => row.get(0),
-            _ => None,
-        })
-        .flatten()
-        .ok_or_else(|| anyhow!("missing branches"))?;
-
-    let branch_infos: Vec<BranchInfo> = serde_json::from_str(branches_json)?;
+    let branch_infos: Vec<BranchInfo> = page_server.branches_list()?;
     let branch_infos: Result<HashMap<ZTimelineId, String>> = branch_infos
         .into_iter()
         .map(|branch_info| {
