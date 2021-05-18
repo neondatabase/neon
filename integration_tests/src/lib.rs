@@ -14,9 +14,20 @@ use nix::unistd::Pid;
 use postgres;
 
 use control_plane::compute::PostgresNode;
-use control_plane::local_env;
 use control_plane::read_pidfile;
 use control_plane::{local_env::LocalEnv, storage::PageServerNode};
+
+// Find the directory where the binaries were put (i.e. target/debug/)
+fn cargo_bin_dir() -> PathBuf {
+    let mut pathbuf = std::env::current_exe().unwrap();
+
+    pathbuf.pop();
+    if pathbuf.ends_with("deps") {
+        pathbuf.pop();
+    }
+
+    pathbuf
+}
 
 // local compute env for tests
 pub fn create_test_env(testname: &str) -> LocalEnv {
@@ -39,7 +50,7 @@ pub fn create_test_env(testname: &str) -> LocalEnv {
     LocalEnv {
         pageserver_connstring: "postgresql://127.0.0.1:64000".to_string(),
         pg_distrib_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp_install"),
-        zenith_distrib_dir: Some(local_env::cargo_bin_dir()),
+        zenith_distrib_dir: Some(cargo_bin_dir()),
         base_data_dir: base_path,
         remotes: BTreeMap::default(),
     }

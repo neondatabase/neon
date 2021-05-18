@@ -164,15 +164,3 @@ pub fn save_config(conf: &LocalEnv) -> Result<()> {
     fs::write(config_path, conf_str)?;
     Ok(())
 }
-
-// Find the directory where the binaries were put (i.e. target/debug/)
-pub fn cargo_bin_dir() -> PathBuf {
-    let mut pathbuf = std::env::current_exe().unwrap();
-
-    pathbuf.pop();
-    if pathbuf.ends_with("deps") {
-        pathbuf.pop();
-    }
-
-    pathbuf
-}
