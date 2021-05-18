@@ -37,7 +37,17 @@ pub fn forknumber_to_name(forknum: u8) -> Option<&'static str> {
         pg_constants::FSM_FORKNUM => Some("fsm"),
         pg_constants::VISIBILITYMAP_FORKNUM => Some("vm"),
         pg_constants::INIT_FORKNUM => Some("init"),
-        _ => panic!("unrecognized fork number"),
+
+        // These should not appear in WAL records, but we use them internally,
+        // and need to be prepared to print them out in log messages and such
+        pg_constants::PG_CONTROLFILE_FORKNUM => Some("controlfile"),
+        pg_constants::PG_FILENODEMAP_FORKNUM => Some("filenodemap"),
+        pg_constants::PG_XACT_FORKNUM => Some("xact"),
+        pg_constants::PG_MXACT_OFFSETS_FORKNUM => Some("mxact_offsets"),
+        pg_constants::PG_MXACT_MEMBERS_FORKNUM => Some("mxact_members"),
+        pg_constants::PG_TWOPHASE_FORKNUM => Some("twophase"),
+
+        _ => Some("UNKNOWN FORKNUM"),
     }
 }
 
