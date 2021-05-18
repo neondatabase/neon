@@ -74,7 +74,6 @@ impl FeStartupMessage {
             _ => StartupRequestCode::Normal,
         };
 
-        // FIXME: A buffer pool would be nice, to avoid zeroing the buffer.
         let params_len = len - 8;
         let mut params_bytes = vec![0u8; params_len];
         reader.read_exact(params_bytes.as_mut())?;
