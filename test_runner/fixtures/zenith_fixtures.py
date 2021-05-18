@@ -158,21 +158,23 @@ class Postgres:
         self.host = 'localhost'
         self.port = 55431 + instance_num
         self.repo_dir = repo_dir
-        # path to conf is <repo_dir>/pgdatadirs/pg<instance_num>/postgresql.conf
+        self.branch = None
+        # path to conf is <repo_dir>/pgdatadirs/<branch_name>/postgresql.conf
 
     def create_start(self, branch, config_lines=None):
         """ create the pg data directory, and start the server """
         self.zenith_cli.run(['pg', 'create', branch])
+        self.branch = branch
         if config_lines is None:
             config_lines = []
         self.config(config_lines)
-        self.zenith_cli.run(['pg', 'start', 'pg{}'.format(self.instance_num)])
+        self.zenith_cli.run(['pg', 'start', branch])
         self.running = True
         return
 
     #lines should be an array of valid postgresql.conf rows
     def config(self, lines):
-        filename = 'pgdatadirs/pg{}/postgresql.conf'.format(self.instance_num)
+        filename = 'pgdatadirs/{}/postgresql.conf'.format(self.branch)
         config_name = os.path.join(self.repo_dir, filename)
         with open(config_name, 'a') as conf:
             for line in lines:
@@ -181,7 +183,7 @@ class Postgres:
 
     def stop(self):
         if self.running:
-            self.zenith_cli.run(['pg', 'stop', 'pg{}'.format(self.instance_num)])
+            self.zenith_cli.run(['pg', 'stop', self.branch])
 
     # Return a libpq connection string to connect to the Postgres instance
     def connstr(self):

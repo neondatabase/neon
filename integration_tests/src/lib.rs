@@ -203,10 +203,11 @@ impl PostgresNodeExt for PostgresNode {
                 println!("--------------- regression.diffs:\n{}", buffer);
             }
             // self.dump_log_file();
-            if let Ok(mut file) = File::open(self.env.pg_data_dir("pg1").join("log")) {
+
+            if let Ok(mut file) = File::open(self.env.pg_data_dir("main").join("log")) {
                 let mut buffer = String::new();
                 file.read_to_string(&mut buffer).unwrap();
-                println!("--------------- pgdatadirs/pg1/log:\n{}", buffer);
+                println!("--------------- pgdatadirs/main/log:\n{}", buffer);
             }
         }
         regress_check
