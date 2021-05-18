@@ -211,8 +211,8 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
 
     page_cache::init(conf);
 
-    // GetPage@LSN requests are served by another thread. (It uses async I/O,
-    // but the code in page_service sets up it own thread pool for that)
+    // Spawn a thread to listen for connections. It will spawn further threads
+    // for each connection.
     let conf_copy = conf.clone();
     let page_server_thread = thread::Builder::new()
         .name("Page Service thread".into())
