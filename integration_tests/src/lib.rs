@@ -108,7 +108,7 @@ impl TestStorageControlPlane {
                 data_dir: datadir_base.join(format!("wal_acceptor_{}", i)),
                 systemid,
                 env: local_env.clone(),
-                pass_to_pageserver: i == 0,
+                pass_to_pageserver: true,
             };
             wal_acceptor.init();
             wal_acceptor.start();
