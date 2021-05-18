@@ -189,19 +189,24 @@ impl SharedState {
                 self.control_file = Some(file);
 
                 let cfile_ref = self.control_file.as_mut().unwrap();
-                let my_info = SafeKeeperInfo::des_from(cfile_ref)?;
-
-                if my_info.magic != SK_MAGIC {
-                    bail!("Invalid control file magic: {}", my_info.magic);
+                match SafeKeeperInfo::des_from(cfile_ref) {
+                    Err(e) => {
+                        warn!("read from {:?} failed: {}", control_file_path, e);
+                    }
+                    Ok(info) => {
+                        if info.magic != SK_MAGIC {
+                            bail!("Invalid control file magic: {}", info.magic);
+                        }
+                        if info.format_version != SK_FORMAT_VERSION {
+                            bail!(
+                                "Incompatible format version: {} vs. {}",
+                                info.format_version,
+                                SK_FORMAT_VERSION
+                            );
+                        }
+                        self.info = info;
+                    }
                 }
-                if my_info.format_version != SK_FORMAT_VERSION {
-                    bail!(
-                        "Incompatible format version: {} vs. {}",
-                        my_info.format_version,
-                        SK_FORMAT_VERSION
-                    );
-                }
-                self.info = my_info;
             }
             Err(e) => {
                 panic!(
