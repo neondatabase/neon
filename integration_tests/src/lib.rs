@@ -1,23 +1,22 @@
+use std::collections::BTreeMap;
+use std::convert::TryInto;
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use anyhow::{bail, Result};
-use std::{collections::BTreeMap, sync::{atomic::AtomicBool, Arc}};
-use std::{
-    convert::TryInto,
-    fs::{self, File, OpenOptions},
-    io::Read,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    process::{Command, ExitStatus},
-    sync::atomic::Ordering,
-};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use postgres;
 
 use control_plane::compute::PostgresNode;
 use control_plane::local_env;
 use control_plane::read_pidfile;
 use control_plane::{local_env::LocalEnv, storage::PageServerNode};
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
-
-use postgres;
 
 // local compute env for tests
 pub fn create_test_env(testname: &str) -> LocalEnv {

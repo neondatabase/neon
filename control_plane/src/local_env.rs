@@ -6,9 +6,9 @@
 //
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, env};
 use std::fs;
 use std::path::PathBuf;
+use std::{collections::BTreeMap, env};
 use url::Url;
 
 pub type Remotes = BTreeMap<String, String>;
