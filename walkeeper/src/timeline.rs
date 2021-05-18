@@ -22,19 +22,19 @@ use crate::WalAcceptorConf;
 
 /// Shared state associated with database instance (tenant)
 #[derive(Debug)]
-pub struct SharedState {
+struct SharedState {
     /// quorum commit LSN
-    pub commit_lsn: Lsn,
+    commit_lsn: Lsn,
     /// information about this safekeeper
-    pub info: SafeKeeperInfo,
+    info: SafeKeeperInfo,
     /// opened file control file handle (needed to hold exlusive file lock
-    pub control_file: Option<File>,
+    control_file: Option<File>,
     /// combined hot standby feedback from all replicas
-    pub hs_feedback: HotStandbyFeedback,
+    hs_feedback: HotStandbyFeedback,
 }
 
 impl SharedState {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             commit_lsn: Lsn(0),
             info: SafeKeeperInfo::new(),
@@ -141,7 +141,7 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    pub fn new(timelineid: ZTimelineId, shared_state: SharedState) -> Timeline {
+    fn new(timelineid: ZTimelineId, shared_state: SharedState) -> Timeline {
         Timeline {
             timelineid,
             mutex: Mutex::new(shared_state),
