@@ -93,28 +93,16 @@ fn main() -> Result<()> {
     match matches.subcommand() {
         ("init", Some(_)) => {
             let pageserver = PageServerNode::from_env(&env);
-            pageserver.init()?;
+            if let Err(e) = pageserver.init() {
+                eprintln!("pageserver init failed: {}", e);
+                exit(1);
+            }
         }
 
         ("branch", Some(sub_args)) => {
-            let pageserver = PageServerNode::from_env(&env);
-
-            if let Some(branchname) = sub_args.value_of("branchname") {
-                if let Some(startpoint_str) = sub_args.value_of("start-point") {
-                    let branch = pageserver.branch_create(branchname, startpoint_str)?;
-                    println!(
-                        "Created branch '{}' at {:?}",
-                        branch.name,
-                        branch.latest_valid_lsn.unwrap_or(Lsn(0))
-                    );
-                } else {
-                    panic!("Missing start-point");
-                }
-            } else {
-                // No arguments, list branches
-                for branch in pageserver.branches_list()? {
-                    println!(" {}", branch.name);
-                }
+            if let Err(e) = handle_branch(sub_args, &env) {
+                eprintln!("branch command failed: {}", e);
+                exit(1);
             }
         }
 
@@ -182,6 +170,30 @@ fn get_branch_infos(env: &local_env::LocalEnv) -> Result<HashMap<ZTimelineId, Br
         .collect();
 
     Ok(branch_infos)
+}
+
+fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+    let pageserver = PageServerNode::from_env(&env);
+
+    if let Some(branchname) = branch_match.value_of("branchname") {
+        if let Some(startpoint_str) = branch_match.value_of("start-point") {
+            let branch = pageserver.branch_create(branchname, startpoint_str)?;
+            println!(
+                "Created branch '{}' at {:?}",
+                branch.name,
+                branch.latest_valid_lsn.unwrap_or(Lsn(0))
+            );
+        } else {
+            bail!("Missing start-point");
+        }
+    } else {
+        // No arguments, list branches
+        for branch in pageserver.branches_list()? {
+            println!(" {}", branch.name);
+        }
+    }
+
+    Ok(())
 }
 
 fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
