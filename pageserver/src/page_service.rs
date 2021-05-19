@@ -20,7 +20,6 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::thread;
-use std::time::Duration;
 use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
@@ -614,6 +613,7 @@ impl Connection {
                 }
                 Some(FeMessage::Query(m)) => {
                     self.process_query(m.body)?;
+                    self.write_message(&BeMessage::ReadyForQuery)?;
                 }
                 Some(FeMessage::Parse(m)) => {
                     unnamed_query_string = m.query_string;
@@ -631,6 +631,7 @@ impl Connection {
                 }
                 Some(FeMessage::Execute(_)) => {
                     self.process_query(unnamed_query_string.clone())?;
+                    self.stream.flush()?;
                 }
                 Some(FeMessage::Sync) => {
                     self.write_message(&BeMessage::ReadyForQuery)?;
@@ -684,7 +685,6 @@ impl Connection {
             // Check that the timeline exists
             self.handle_basebackup_request(timelineid, lsn)?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.starts_with(b"callmemaybe ") {
             let query_str = String::from_utf8(query_string.to_vec())?;
 
@@ -707,7 +707,6 @@ impl Connection {
             walreceiver::launch_wal_receiver(&self.conf, timelineid, &connstr);
 
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.starts_with(b"branch_create ") {
             let query_str = String::from_utf8(query_string.to_vec())?;
             let err = || anyhow!("invalid branch_create: '{}'", query_str);
@@ -727,7 +726,6 @@ impl Connection {
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&BeMessage::DataRow(Bytes::from(branch)))?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.starts_with(b"pg_list") {
             let branches = crate::branches::get_branches(&*page_cache::get_repository())?;
             let branches_buf = serde_json::to_vec(&branches)?;
@@ -735,17 +733,14 @@ impl Connection {
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&BeMessage::DataRow(Bytes::from(branches_buf)))?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.starts_with(b"status") {
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&HELLO_WORLD_ROW)?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string.to_ascii_lowercase().starts_with(b"set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         } else if query_string
             .to_ascii_lowercase()
             .starts_with(b"identify_system")
@@ -756,12 +751,10 @@ impl Connection {
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&BeMessage::DataRow(Bytes::from(system_id)))?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         } else {
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&HELLO_WORLD_ROW)?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
-            self.write_message(&BeMessage::ReadyForQuery)?;
         }
 
         Ok(())
@@ -770,8 +763,9 @@ impl Connection {
     fn handle_controlfile(&mut self) -> io::Result<()> {
         self.write_message_noflush(&BeMessage::RowDescription)?;
         self.write_message_noflush(&BeMessage::ControlFile)?;
-        self.write_message_noflush(&BeMessage::CommandComplete)?;
-        self.write_message(&BeMessage::ReadyForQuery)
+        self.write_message(&BeMessage::CommandComplete)?;
+
+        Ok(())
     }
 
     fn handle_pagerequests(&mut self, timelineid: ZTimelineId) -> anyhow::Result<()> {
@@ -909,11 +903,6 @@ impl Connection {
         self.stream.write_u32::<BE>(4)?;
         self.stream.flush()?;
         debug!("CopyDone sent!");
-
-        // FIXME: I'm getting an error from the tokio copyout driver without this.
-        // I think it happens when the CommandComplete, CloseComplete and ReadyForQuery
-        // are sent in the same TCP packet as the CopyDone. I don't understand why.
-        thread::sleep(Duration::from_secs(1));
 
         Ok(())
     }
