@@ -438,6 +438,53 @@ mod tests {
         Ok(())
     }
 
+    /// Test get_relsize() and truncation with a file larger than 1 GB, so that it's
+    /// split into multiple 1 GB segments in Postgres.
+    ///
+    /// This isn't very interesting with the RocksDb implementation, as we don't pay
+    /// any attention to Postgres segment boundaries there.
+    #[test]
+    fn test_large_rel() -> Result<()> {
+        let repo = get_test_repo("test_large_rel")?;
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        let tline = repo.create_empty_timeline(timelineid)?;
+
+        tline.init_valid_lsn(Lsn(1));
+
+        let mut lsn = 0;
+        for i in 0..pg_constants::RELSEG_SIZE + 1 {
+            let img = TEST_IMG(&format!("foo blk {} at {}", i, Lsn(lsn)));
+            lsn += 1;
+            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img);
+        }
+        tline.advance_last_valid_lsn(Lsn(lsn));
+
+        assert_eq!(
+            tline.get_relsize(TESTREL_A, Lsn(lsn))?,
+            pg_constants::RELSEG_SIZE + 1
+        );
+
+        // Truncate one block
+        lsn += 1;
+        tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
+        tline.advance_last_valid_lsn(Lsn(lsn));
+        assert_eq!(
+            tline.get_relsize(TESTREL_A, Lsn(lsn))?,
+            pg_constants::RELSEG_SIZE
+        );
+
+        // Truncate another block
+        lsn += 1;
+        tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE - 1)?;
+        tline.advance_last_valid_lsn(Lsn(lsn));
+        assert_eq!(
+            tline.get_relsize(TESTREL_A, Lsn(lsn))?,
+            pg_constants::RELSEG_SIZE - 1
+        );
+
+        Ok(())
+    }
+
     // Mock WAL redo manager that doesn't do much
     struct TestRedoManager {}
 

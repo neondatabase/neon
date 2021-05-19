@@ -136,8 +136,10 @@ pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
 pub const SIZEOF_XLOGRECORD: u32 = 24;
 
-// FIXME:
+// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
+// --with-segsize=SEGSIZE, but assume the defaults for now.
 pub const BLCKSZ: u16 = 8192;
+pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 
 //
 // from xlogrecord.h
