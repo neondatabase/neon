@@ -68,7 +68,9 @@ pub fn parse_relfilename(fname: &str) -> Result<(u32, u8, u32), FilePathError> {
         static ref RELFILE_RE: Regex =
             Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();
     }
-    let caps = RELFILE_RE.captures(fname).ok_or(FilePathError::InvalidFileName)?;
+    let caps = RELFILE_RE
+        .captures(fname)
+        .ok_or(FilePathError::InvalidFileName)?;
 
     let relnode_str = caps.name("relnode").unwrap().as_str();
     let relnode = relnode_str.parse::<u32>()?;
