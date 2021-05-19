@@ -578,12 +578,25 @@ impl Connection {
             }
 
             BeMessage::ErrorResponse(error_msg) => {
+                let severity = Bytes::from("SERROR\0");
+                let code = Bytes::from("CXX000\0");
+
                 self.stream.write_u8(b'E')?;
-                self.stream
-                    .write_u32::<BE>(4 + 1 + error_msg.len() as u32 + 2)?;
+                self.stream.write_u32::<BE>(
+                    4 + severity.len() as u32
+                        + code.len() as u32
+                        + (1 + error_msg.len() as u32 + 1)
+                        + 1,
+                )?;
+
+                self.stream.write_all(&severity)?;
+
+                self.stream.write_all(&code)?;
+
                 self.stream.write_u8(b'M')?; /* primary human-readable error message */
                 self.stream.write_all(error_msg.as_bytes())?;
                 self.stream.write_u8(0)?; /* end of M field */
+
                 self.stream.write_u8(0)?; /* end of all fields */
             }
         }
@@ -624,10 +637,8 @@ impl Connection {
                 }
                 Some(FeMessage::Query(m)) => {
                     if let Err(e) = self.process_query(m.body) {
-                        self.write_message_noflush(&BeMessage::ErrorResponse(format!(
-                            "ERROR: {}",
-                            e
-                        )))?;
+                        let errmsg = format!("{}", e);
+                        self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
                     }
                     self.write_message(&BeMessage::ReadyForQuery)?;
                 }
