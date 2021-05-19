@@ -26,9 +26,9 @@ use crate::repository::{BufferTag, RelTag, Timeline};
 use crate::waldecoder::{decode_wal_record, Oid, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
-use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -124,8 +124,8 @@ fn restore_snapshot(
                 conf,
                 timeline,
                 timelineid,
-                snapshot,
-                pg_constants::GLOBALTABLESPACE_OID,
+                "0",
+                0,
                 0,
                 pg_constants::PG_CONTROLFILE_FORKNUM,
                 0,
@@ -403,13 +403,23 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
-    const SEG_SIZE: u64 = 16 * 1024 * 1024;
-    let mut segno = startpoint.segment_number(SEG_SIZE);
-    let mut offset = startpoint.segment_offset(SEG_SIZE);
+    let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
+    let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = Lsn(0);
+
+    let mut checkpoint = CheckPoint::new(startpoint.0, 1);
+    let checkpoint_tag = BufferTag::fork(pg_constants::PG_CHECKPOINT_FORKNUM);
+    let pg_control_tag = BufferTag::fork(pg_constants::PG_CONTROLFILE_FORKNUM);
+    if let Some(pg_control_bytes) = timeline.get_page_image(pg_control_tag, Lsn(0))? {
+        let pg_control = decode_pg_control(pg_control_bytes)?;
+        checkpoint = pg_control.checkPointCopy.clone();
+    } else {
+        error!("No control file is found in reposistory");
+    }
+
     loop {
         // FIXME: assume postgresql tli 1 for now
-        let filename = XLogFileName(1, segno, 16 * 1024 * 1024);
+        let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
         let mut path = walpath.clone() + "/" + &filename;
 
         // It could be as .partial
@@ -432,7 +442,7 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
 
         let mut buf = Vec::new();
         let nread = file.read_to_end(&mut buf)?;
-        if nread != 16 * 1024 * 1024 - offset as usize {
+        if nread != pg_constants::WAL_SEGMENT_SIZE - offset as usize {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);
         }
@@ -447,7 +457,7 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
-                let decoded = decode_wal_record(recdata.clone());
+                let decoded = decode_wal_record(&mut checkpoint, recdata.clone());
                 timeline.save_decoded_record(decoded, recdata, lsn)?;
                 last_lsn = lsn;
             } else {
@@ -462,6 +472,7 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
         offset = 0;
     }
     info!("reached end of WAL at {}", last_lsn);
-
+    let checkpoint_bytes = encode_checkpoint(checkpoint);
+    timeline.put_page_image(checkpoint_tag, Lsn(0), checkpoint_bytes);
     Ok(())
 }

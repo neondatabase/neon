@@ -11,6 +11,20 @@ use integration_tests::TestStorageControlPlane;
 
 const DOWNTIME: u64 = 2;
 
+fn start_node_with_wal_proposer(
+    timeline: &str,
+    compute_cplane: &mut ComputeControlPlane,
+    wal_acceptors: &String,
+) -> Arc<PostgresNode> {
+    let node = compute_cplane.new_test_master_node(timeline);
+    node.append_conf(
+        "postgresql.conf",
+        &format!("wal_acceptors='{}'\n", wal_acceptors),
+    );
+    node.start().unwrap();
+    node
+}
+
 #[test]
 //#[ignore]
 fn test_embedded_wal_proposer() {
@@ -22,12 +36,7 @@ fn test_embedded_wal_proposer() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node("main");
-    node.append_conf(
-        "postgresql.conf",
-        &format!("wal_acceptors='{}'\n", wal_acceptors),
-    );
-    node.start().unwrap();
+    let node = start_node_with_wal_proposer("main", &mut compute_cplane, &wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
@@ -58,11 +67,7 @@ fn test_acceptors_normal_work() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node("main");
-    node.start().unwrap();
-
-    // start proxy
-    let _proxy = node.start_proxy(&wal_acceptors);
+    let node = start_node_with_wal_proposer("main", &mut compute_cplane, &wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
@@ -111,10 +116,8 @@ fn test_many_timelines() {
     // start postgres on each timeline
     let mut nodes = Vec::new();
     for tli_name in timelines {
-        let node = compute_cplane.new_test_node(&tli_name);
+        let node = start_node_with_wal_proposer(&tli_name, &mut compute_cplane, &wal_acceptors);
         nodes.push(node.clone());
-        node.start().unwrap();
-        node.start_proxy(&wal_acceptors);
     }
 
     // create schema
@@ -160,11 +163,8 @@ fn test_acceptors_restarts() {
     let mut rng = rand::thread_rng();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node("main");
-    node.start().unwrap();
+    let node = start_node_with_wal_proposer("main", &mut compute_cplane, &wal_acceptors);
 
-    // start proxy
-    let _proxy = node.start_proxy(&wal_acceptors);
     let mut failed_node: Option<usize> = None;
 
     // check basic work with table
@@ -220,11 +220,7 @@ fn test_acceptors_unavailability() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node("main");
-    node.start().unwrap();
-
-    // start proxy
-    let _proxy = node.start_proxy(&wal_acceptors);
+    let node = start_node_with_wal_proposer("main", &mut compute_cplane, &wal_acceptors);
 
     // check basic work with table
     node.safe_psql(
@@ -306,11 +302,7 @@ fn test_race_conditions() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // start postgres
-    let node = compute_cplane.new_test_master_node("main");
-    node.start().unwrap();
-
-    // start proxy
-    let _proxy = node.start_proxy(&wal_acceptors);
+    let node = start_node_with_wal_proposer("main", &mut compute_cplane, &wal_acceptors);
 
     // check basic work with table
     node.safe_psql(

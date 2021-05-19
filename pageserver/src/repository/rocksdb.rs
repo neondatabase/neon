@@ -16,7 +16,8 @@ use crate::ZTimelineId;
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
-use postgres_ffi::pg_constants;
+use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
+use postgres_ffi::*;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -340,7 +341,7 @@ impl RocksTimeline {
     //
     // The caller must ensure that WAL has been received up to 'lsn'.
     //
-    fn relsize_get_nowait(&self, rel: RelTag, lsn: Lsn) -> anyhow::Result<u32> {
+    fn relsize_get_nowait(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
         assert!(lsn <= self.last_valid_lsn.load());
 
         let mut key = CacheKey {
@@ -375,7 +376,8 @@ impl RocksTimeline {
         Ok(0)
     }
 
-    fn do_gc(&self, conf: &'static PageServerConf) -> anyhow::Result<Bytes> {
+
+    fn do_gc(&self, conf: &'static PageServerConf) -> Result<Bytes> {
         loop {
             thread::sleep(conf.gc_period);
             let last_lsn = self.get_last_valid_lsn();
@@ -529,7 +531,7 @@ impl RocksTimeline {
     //
     // Wait until WAL has been received up to the given LSN.
     //
-    fn wait_lsn(&self, mut lsn: Lsn) -> anyhow::Result<Lsn> {
+    fn wait_lsn(&self, mut lsn: Lsn) -> Result<Lsn> {
         // When invalid LSN is requested, it means "don't wait, return latest version of the page"
         // This is necessary for bootstrap.
         if lsn == Lsn(0) {
@@ -541,7 +543,7 @@ impl RocksTimeline {
             );
             lsn = last_valid_lsn;
         }
-
+        //trace!("Start waiting for LSN {}, valid LSN is {}", lsn,  self.last_valid_lsn.load());
         self.last_valid_lsn
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
@@ -550,6 +552,7 @@ impl RocksTimeline {
                     lsn
                 )
             })?;
+        //trace!("Stop waiting for LSN {}, valid LSN is {}", lsn,  self.last_valid_lsn.load());
 
         Ok(lsn)
     }
@@ -646,7 +649,21 @@ impl Timeline for RocksTimeline {
                 break; // we are done with this fork
             }
             if key.lsn <= lsn {
-                gxacts.push(key.tag.blknum); // XID
+                let xid = key.tag.blknum;
+                let tag = BufferTag {
+                    rel: RelTag {
+                        forknum: pg_constants::PG_XACT_FORKNUM,
+                        spcnode: 0,
+                        dbnode: 0,
+                        relnode: 0,
+                    },
+                    blknum: xid / pg_constants::CLOG_XACTS_PER_PAGE,
+                };
+                let clog_page = self.get_page_at_lsn(tag, lsn)?;
+                let status = transaction_id_get_status(xid, &clog_page[..]);
+                if status == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
+                    gxacts.push(xid);
+                }
             }
             iter.next();
         }
@@ -772,7 +789,7 @@ impl Timeline for RocksTimeline {
     /// Adds a relation-wide WAL record (like truncate) to the repository,
     /// associating it with all pages started with specified block number
     ///
-    fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> anyhow::Result<()> {
+    fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()> {
         // What was the size of the relation before this record?
         let last_lsn = self.last_valid_lsn.load();
         let old_rel_size = self.relsize_get_nowait(rel, last_lsn)?;
@@ -793,6 +810,24 @@ impl Timeline for RocksTimeline {
         self.num_entries.fetch_add(n, Ordering::Relaxed);
         self.num_wal_records.fetch_add(n, Ordering::Relaxed);
         Ok(())
+    }
+
+    ///
+    /// Get page image at particular LSN
+    ///
+    fn get_page_image(&self, tag: BufferTag, lsn: Lsn) -> Result<Option<Bytes>> {
+        let key = CacheKey { tag, lsn };
+        let mut key_buf = BytesMut::new();
+        key.pack(&mut key_buf);
+        if let Some(bytes) = self.db.get(&key_buf[..])? {
+            let mut buf = BytesMut::new();
+            buf.extend_from_slice(&bytes);
+            let content = CacheEntryContent::unpack(&mut buf);
+            if let CacheEntryContent::PageImage(img) = content {
+                return Ok(Some(img));
+            }
+        }
+        return Ok(None);
     }
 
     ///
@@ -835,7 +870,7 @@ impl Timeline for RocksTimeline {
         tablespace_id: Oid,
         src_db_id: Oid,
         src_tablespace_id: Oid,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let key = CacheKey {
             tag: BufferTag {
                 rel: RelTag {
@@ -874,6 +909,7 @@ impl Timeline for RocksTimeline {
 
     /// Remember that WAL has been received and added to the timeline up to the given LSN
     fn advance_last_valid_lsn(&self, lsn: Lsn) {
+        let lsn = Lsn((lsn.0 + 7) & !7); // align position on 8 bytes
         let old = self.last_valid_lsn.advance(lsn);
 
         // Can't move backwards.
@@ -891,7 +927,8 @@ impl Timeline for RocksTimeline {
     /// NOTE: this updates last_valid_lsn as well.
     ///
     fn advance_last_record_lsn(&self, lsn: Lsn) {
-        // Can't move backwards.
+        let lsn = Lsn((lsn.0 + 7) & !7); // align position on 8 bytes
+                                         // Can't move backwards.
         let old = self.last_record_lsn.fetch_max(lsn);
         assert!(old <= lsn);
 

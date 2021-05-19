@@ -7,8 +7,8 @@ use tar::{Builder, Header};
 use walkdir::WalkDir;
 
 use crate::repository::{BufferTag, RelTag, Timeline};
-use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
+use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
 
 fn new_tar_header(path: &str, size: u64) -> anyhow::Result<Header> {
@@ -130,6 +130,38 @@ fn add_twophase_files(
     Ok(())
 }
 
+//
+// Add generated pg_control file
+//
+fn add_pgcontrol_file(
+    ar: &mut Builder<&mut dyn Write>,
+    timeline: &Arc<dyn Timeline>,
+    lsn: Lsn,
+) -> anyhow::Result<()> {
+    if let Some(checkpoint_bytes) =
+        timeline.get_page_image(BufferTag::fork(pg_constants::PG_CHECKPOINT_FORKNUM), Lsn(0))?
+    {
+        if let Some(pg_control_bytes) = timeline.get_page_image(
+            BufferTag::fork(pg_constants::PG_CONTROLFILE_FORKNUM),
+            Lsn(0),
+        )? {
+            let mut pg_control = postgres_ffi::decode_pg_control(pg_control_bytes)?;
+            let mut checkpoint = postgres_ffi::decode_checkpoint(checkpoint_bytes)?;
+
+            checkpoint.redo = lsn.0;
+            // TODO: When we restart master there are no active transaction and oldestXid is
+            // equal to nextXid if there are no prepared transactions.
+            // Let's ignore them for a while...
+            checkpoint.oldestXid = checkpoint.nextXid.value as u32;
+            pg_control.checkPointCopy = checkpoint;
+            let pg_control_bytes = postgres_ffi::encode_pg_control(pg_control);
+            let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
+            ar.append(&header, &pg_control_bytes[..])?;
+        }
+    }
+    Ok(())
+}
+
 ///
 /// Generate tarball with non-relational files from repository
 ///
@@ -143,7 +175,6 @@ pub fn send_tarball_at_lsn(
     let mut ar = Builder::new(write);
 
     let snappath = format!("timelines/{}/snapshots/{:016X}", timelineid, snapshot_lsn.0);
-    let walpath = format!("timelines/{}/wal", timelineid);
 
     debug!("sending tarball of snapshot in {}", snappath);
     for entry in WalkDir::new(&snappath) {
@@ -171,6 +202,7 @@ pub fn send_tarball_at_lsn(
                 ar.append_path_with_name(fullpath, relpath)?;
             } else if !is_rel_file_path(relpath.to_str().unwrap()) {
                 if entry.file_name() != "pg_filenode.map"
+                    && entry.file_name() != "pg_control"
                     && !relpath.starts_with("pg_xact/")
                     && !relpath.starts_with("pg_multixact/")
                 {
@@ -208,28 +240,8 @@ pub fn send_tarball_at_lsn(
     )?;
     add_relmap_files(&mut ar, timeline, lsn)?;
     add_twophase_files(&mut ar, timeline, lsn)?;
+    add_pgcontrol_file(&mut ar, timeline, lsn)?;
 
-    // FIXME: Also send all the WAL. The compute node would only need
-    // the WAL that applies to non-relation files, because the page
-    // server handles all the relation files. But we don't have a
-    // mechanism for separating relation and non-relation WAL at the
-    // moment.
-    for entry in std::fs::read_dir(&walpath)? {
-        let entry = entry?;
-        let fullpath = &entry.path();
-        let relpath = fullpath.strip_prefix(&walpath).unwrap();
-
-        if !entry.path().is_file() {
-            continue;
-        }
-
-        let archive_fname = relpath.to_str().unwrap();
-        let archive_fname = archive_fname
-            .strip_suffix(".partial")
-            .unwrap_or(&archive_fname);
-        let archive_path = "pg_wal/".to_owned() + archive_fname;
-        ar.append_path_with_name(fullpath, archive_path)?;
-    }
     ar.finish()?;
     debug!("all tarred up!");
     Ok(())

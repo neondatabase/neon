@@ -51,13 +51,13 @@ impl Lsn {
     }
 
     /// Compute the offset into a segment
-    pub fn segment_offset(self, seg_sz: u64) -> u64 {
-        self.0 % seg_sz
+    pub fn segment_offset(self, seg_sz: usize) -> usize {
+        (self.0 % seg_sz as u64) as usize
     }
 
     /// Compute the segment number
-    pub fn segment_number(self, seg_sz: u64) -> u64 {
-        self.0 / seg_sz
+    pub fn segment_number(self, seg_sz: usize) -> u64 {
+        self.0 / seg_sz as u64
     }
 
     /// Compute the offset into a block
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(Lsn(1234).checked_sub(1233u64), Some(Lsn(1)));
         assert_eq!(Lsn(1234).checked_sub(1235u64), None);
 
-        let seg_sz = 16u64 * 1024 * 1024;
+        let seg_sz: usize = 16 * 1024 * 1024;
         assert_eq!(Lsn(0x1000007).segment_offset(seg_sz), 7u64);
         assert_eq!(Lsn(0x1000007).segment_number(seg_sz), 1u64);
 

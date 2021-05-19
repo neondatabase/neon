@@ -7,6 +7,7 @@
 //!
 
 use crate::page_cache;
+use crate::repository::*;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -17,6 +18,7 @@ use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use std::collections::HashMap;
@@ -145,6 +147,11 @@ fn walreceiver_main(
         error!("No previous WAL position");
     }
 
+    startpoint = Lsn::max(
+        startpoint,
+        Lsn(end_of_wal.0 & !(pg_constants::WAL_SEGMENT_SIZE as u64 - 1)),
+    );
+
     // There might be some padding after the last full record, skip it.
     //
     // FIXME: It probably would be better to always start streaming from the beginning
@@ -164,6 +171,14 @@ fn walreceiver_main(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
+    let mut checkpoint = CheckPoint::new(startpoint.0, identify.timeline);
+    let checkpoint_tag = BufferTag::fork(pg_constants::PG_CHECKPOINT_FORKNUM);
+    if let Some(checkpoint_bytes) = timeline.get_page_image(checkpoint_tag, Lsn(0))? {
+        checkpoint = decode_checkpoint(checkpoint_bytes)?;
+        trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
+    } else {
+        error!("No checkpoint record was found in reposistory");
+    }
     while let Some(replication_message) = physical_stream.next()? {
         match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
@@ -173,21 +188,21 @@ fn walreceiver_main(
                 let startlsn = Lsn::from(xlog_data.wal_start());
                 let endlsn = startlsn + data.len() as u64;
 
-                write_wal_file(
-                    startlsn,
-                    timelineid,
-                    16 * 1024 * 1024, // FIXME
-                    data,
-                )?;
+                write_wal_file(startlsn, timelineid, pg_constants::WAL_SEGMENT_SIZE, data)?;
 
                 trace!("received XLogData between {} and {}", startlsn, endlsn);
 
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    let decoded = decode_wal_record(recdata.clone());
+                    let old_checkpoint_bytes = encode_checkpoint(checkpoint);
+                    let decoded = decode_wal_record(&mut checkpoint, recdata.clone());
                     timeline.save_decoded_record(decoded, recdata, lsn)?;
 
+                    let new_checkpoint_bytes = encode_checkpoint(checkpoint);
+                    if new_checkpoint_bytes != old_checkpoint_bytes {
+                        timeline.put_page_image(checkpoint_tag, Lsn(0), new_checkpoint_bytes);
+                    }
                     // Now that this record has been handled, let the page cache know that
                     // it is up-to-date to this LSN
                     timeline.advance_last_record_lsn(lsn);
@@ -299,7 +314,7 @@ fn write_wal_file(
     let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
 
     /* Extract WAL location for this block */
-    let mut xlogoff = start_pos.segment_offset(wal_seg_size as u64) as usize;
+    let mut xlogoff = start_pos.segment_offset(wal_seg_size);
 
     while bytes_left != 0 {
         let bytes_to_write;
@@ -315,7 +330,7 @@ fn write_wal_file(
         }
 
         /* Open file */
-        let segno = start_pos.segment_number(wal_seg_size as u64);
+        let segno = start_pos.segment_number(wal_seg_size);
         let wal_file_name = XLogFileName(
             1, // FIXME: always use Postgres timeline 1
             segno,
@@ -367,7 +382,7 @@ fn write_wal_file(
         xlogoff += bytes_to_write;
 
         /* Did we reach the end of a WAL segment? */
-        if start_pos.segment_offset(wal_seg_size as u64) == 0 {
+        if start_pos.segment_offset(wal_seg_size) == 0 {
             xlogoff = 0;
             if partial {
                 fs::rename(&wal_file_partial_path, &wal_file_path)?;

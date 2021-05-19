@@ -23,15 +23,21 @@ pub const PG_XACT_FORKNUM: u8 = 44;
 pub const PG_MXACT_OFFSETS_FORKNUM: u8 = 45;
 pub const PG_MXACT_MEMBERS_FORKNUM: u8 = 46;
 pub const PG_TWOPHASE_FORKNUM: u8 = 47;
+pub const PG_CHECKPOINT_FORKNUM: u8 = 48;
 
 // From storage_xlog.h
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
+
+// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
+// --with-segsize=SEGSIZE, but assume the defaults for now.
+pub const BLCKSZ: u16 = 8192;
+pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 
 //
 // constants from clog.h
 //
 pub const CLOG_XACTS_PER_BYTE: u32 = 4;
-pub const CLOG_XACTS_PER_PAGE: u32 = 8192 * CLOG_XACTS_PER_BYTE;
+pub const CLOG_XACTS_PER_PAGE: u32 = BLCKSZ as u32 * CLOG_XACTS_PER_BYTE;
 pub const CLOG_BITS_PER_XACT: u8 = 2;
 pub const CLOG_XACT_BITMASK: u8 = (1 << CLOG_BITS_PER_XACT) - 1;
 
@@ -42,6 +48,7 @@ pub const SIZE_OF_PAGE_HEADER: u16 = 24;
 pub const BITS_PER_HEAPBLOCK: u16 = 2;
 pub const HEAPBLOCKS_PER_PAGE: u16 = (BLCKSZ - SIZE_OF_PAGE_HEADER) * 8 / BITS_PER_HEAPBLOCK;
 
+pub const TRANSACTION_STATUS_IN_PROGRESS: u8 = 0x00;
 pub const TRANSACTION_STATUS_COMMITTED: u8 = 0x01;
 pub const TRANSACTION_STATUS_ABORTED: u8 = 0x02;
 pub const TRANSACTION_STATUS_SUB_COMMITTED: u8 = 0x03;
@@ -136,11 +143,6 @@ pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
 pub const SIZEOF_XLOGRECORD: u32 = 24;
 
-// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
-// --with-segsize=SEGSIZE, but assume the defaults for now.
-pub const BLCKSZ: u16 = 8192;
-pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
-
 //
 // from xlogrecord.h
 //
@@ -162,3 +164,12 @@ pub const BKPBLOCK_SAME_REL: u8 = 0x80; /* RelFileNode omitted, same as previous
 pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
 pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
+
+/* From transam.h */
+pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
+pub const INVALID_TRANSACTION_ID: u32 = 0;
+pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
+pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
+
+/* FIXME: pageserver should request wal_seg_size from compute node */
+pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;

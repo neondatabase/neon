@@ -48,6 +48,9 @@ pub trait Timeline {
     /// Does relation exist?
     fn get_relsize_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool>;
 
+    /// Get page image at the particular LSN
+    fn get_page_image(&self, tag: BufferTag, lsn: Lsn) -> Result<Option<Bytes>>;
+
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
     //
@@ -64,7 +67,7 @@ pub trait Timeline {
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes);
 
     /// Truncate relation
-    fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> anyhow::Result<()>;
+    fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
 
     /// Create a new database from a template database
     ///
@@ -89,7 +92,7 @@ pub trait Timeline {
         decoded: DecodedWALRecord,
         recdata: Bytes,
         lsn: Lsn,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         // Figure out which blocks the record applies to, and "put" a separate copy
         // of the record for each block.
         for blk in decoded.blocks.iter() {
@@ -233,6 +236,18 @@ pub struct BufferTag {
 }
 
 impl BufferTag {
+    pub fn fork(forknum: u8) -> BufferTag {
+        BufferTag {
+            rel: RelTag {
+                forknum,
+                spcnode: 0,
+                dbnode: 0,
+                relnode: 0,
+            },
+            blknum: 0,
+        }
+    }
+
     pub fn pack(&self, buf: &mut BytesMut) {
         self.rel.pack(buf);
         buf.put_u32(self.blknum);

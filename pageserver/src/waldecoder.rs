@@ -1,25 +1,32 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
-use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::XLogRecord;
+use postgres_ffi::*;
 use std::cmp::min;
 use std::str;
 use thiserror::Error;
 use zenith_utils::lsn::Lsn;
 
-// FIXME: this is configurable in PostgreSQL, 16 MB is the default
-const WAL_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+pub type Oid = u32;
+pub type TransactionId = u32;
+pub type BlockNumber = u32;
+pub type OffsetNumber = u16;
+pub type MultiXactId = TransactionId;
+pub type MultiXactOffset = u32;
+pub type MultiXactStatus = u32;
+pub type TimeLineID = u32;
+pub type PgTime = i64;
 
 // From PostgreSQL headers
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct XLogPageHeaderData {
-    xlp_magic: u16,    /* magic value for correctness checks */
-    xlp_info: u16,     /* flag bits, see below */
-    xlp_tli: u32,      /* TimeLineID of first record on page */
-    xlp_pageaddr: u64, /* XLOG address of this page */
-    xlp_rem_len: u32,  /* total len of remaining data for record */
+    xlp_magic: u16,      /* magic value for correctness checks */
+    xlp_info: u16,       /* flag bits, see below */
+    xlp_tli: TimeLineID, /* TimeLineID of first record on page */
+    xlp_pageaddr: u64,   /* XLOG address of this page */
+    xlp_rem_len: u32,    /* total len of remaining data for record */
 }
 
 // FIXME: this assumes MAXIMUM_ALIGNOF 8. There are 4 padding bytes at end
@@ -92,7 +99,7 @@ impl WalStreamDecoder {
     pub fn poll_decode(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError> {
         loop {
             // parse and verify page boundaries as we go
-            if self.lsn.segment_offset(WAL_SEGMENT_SIZE) == 0 {
+            if self.lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE) == 0 {
                 // parse long header
 
                 if self.inputbuf.remaining() < SizeOfXLogLongPHD {
@@ -185,7 +192,8 @@ impl WalStreamDecoder {
                     let xlogrec = XLogRecord::from_bytes(&mut buf);
                     if xlogrec.is_xlog_switch_record() {
                         trace!("saw xlog switch record at {}", self.lsn);
-                        self.padlen = self.lsn.calc_padding(WAL_SEGMENT_SIZE) as u32;
+                        self.padlen =
+                            self.lsn.calc_padding(pg_constants::WAL_SEGMENT_SIZE as u64) as u32;
                     } else {
                         // Pad to an 8-byte boundary
                         self.padlen = self.lsn.calc_padding(8u32) as u32;
@@ -305,14 +313,6 @@ pub struct DecodedWALRecord {
     pub blocks: Vec<DecodedBkpBlock>,
     pub main_data_offset: usize,
 }
-
-pub type Oid = u32;
-pub type TransactionId = u32;
-pub type BlockNumber = u32;
-pub type OffsetNumber = u16;
-pub type MultiXactId = TransactionId;
-pub type MultiXactOffset = u32;
-pub type MultiXactStatus = u32;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -549,7 +549,7 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
+pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedWALRecord {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -567,7 +567,12 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         xlogrec.xl_rmid,
         xlogrec.xl_info
     );
-
+    if xlogrec.xl_xid > checkpoint.nextXid.value as u32 {
+        // TODO: handle XID wraparound
+        checkpoint.nextXid = FullTransactionId {
+            value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | xlogrec.xl_xid as u64,
+        };
+    }
     let remaining = xlogrec.xl_tot_len - SizeOfXLogRecord;
 
     if buf.remaining() != remaining as usize {
@@ -1055,8 +1060,29 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 blk.blkno = blkno;
                 blocks.push(blk);
             }
+            if xlrec.mid > checkpoint.nextMulti {
+                checkpoint.nextMulti = xlrec.mid;
+            }
+            if xlrec.moff > checkpoint.nextMultiOffset {
+                checkpoint.nextMultiOffset = xlrec.moff;
+            }
+            let max_xid = xlrec
+                .members
+                .iter()
+                .fold(checkpoint.nextXid.value as u32, |acc, mbr| {
+                    if mbr.xid > acc {
+                        mbr.xid
+                    } else {
+                        acc
+                    }
+                });
+            checkpoint.nextXid = FullTransactionId {
+                value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | max_xid as u64,
+            };
         } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
             let xlrec = XlMultiXactTruncate::decode(&mut buf);
+            checkpoint.oldestXid = xlrec.end_trunc_off;
+            checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
             let first_off_blkno =
                 xlrec.start_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
             let last_off_blkno =

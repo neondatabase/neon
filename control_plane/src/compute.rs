@@ -345,6 +345,10 @@ impl PostgresNode {
             ),
         );
 
+        fs::create_dir_all(self.pgdata().join("pg_wal"))?;
+        fs::create_dir_all(self.pgdata().join("pg_wal").join("archive_status"))?;
+        self.pg_resetwal(&["-f"])?;
+
         Ok(())
     }
 
@@ -397,6 +401,19 @@ impl PostgresNode {
             .with_context(|| "pg_ctl failed")?;
         if !pg_ctl.success() {
             anyhow::bail!("pg_ctl failed");
+        }
+        Ok(())
+    }
+
+    fn pg_resetwal(&self, args: &[&str]) -> Result<()> {
+        let pg_resetwal_path = self.env.pg_bin_dir().join("pg_resetwal");
+
+        let pg_ctl = Command::new(pg_resetwal_path)
+            .args([&["-D", self.pgdata().to_str().unwrap()], args].concat())
+            .status()
+            .with_context(|| "pg_resetwal failed")?;
+        if !pg_ctl.success() {
+            anyhow::bail!("pg_resetwal failed");
         }
         Ok(())
     }

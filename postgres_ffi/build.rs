@@ -18,6 +18,8 @@ fn main() {
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
         .whitelist_type("ControlFileData")
+        .whitelist_type("CheckPoint")
+        .whitelist_type("FullTransactionId")
         .whitelist_var("PG_CONTROL_FILE_SIZE")
         .whitelist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
         .whitelist_type("DBState")

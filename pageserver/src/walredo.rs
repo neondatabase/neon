@@ -39,6 +39,7 @@ use crate::repository::BufferTag;
 use crate::repository::WALRecord;
 use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
+use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::XLogRecord;
 
@@ -241,22 +242,6 @@ impl PostgresRedoManagerInternal {
         }
     }
 
-    fn transaction_id_set_status_bit(&self, xid: u32, status: u8, page: &mut BytesMut) {
-        trace!(
-            "handle_apply_request for RM_XACT_ID-{} (1-commit, 2-abort, 3-sub_commit)",
-            status
-        );
-
-        let byteno: usize = ((xid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
-            / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
-
-        let bshift: u8 = ((xid % pg_constants::CLOG_XACTS_PER_BYTE)
-            * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
-
-        page[byteno] =
-            (page[byteno] & !(pg_constants::CLOG_XACT_BITMASK << bshift)) | (status << bshift);
-    }
-
     ///
     /// Process one request for WAL redo.
     ///
@@ -308,7 +293,7 @@ impl PostgresRedoManagerInternal {
                     let mut status = 0;
                     if info == pg_constants::XLOG_XACT_COMMIT {
                         status = pg_constants::TRANSACTION_STATUS_COMMITTED;
-                        self.transaction_id_set_status_bit(xlogrec.xl_xid, status, &mut page);
+                        transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
                         let mut xinfo = 0;
@@ -328,13 +313,13 @@ impl PostgresRedoManagerInternal {
                                 // only update xids on the requested page
                                 if tag.blknum == blkno {
                                     status = pg_constants::TRANSACTION_STATUS_SUB_COMMITTED;
-                                    self.transaction_id_set_status_bit(subxact, status, &mut page);
+                                    transaction_id_set_status(subxact, status, &mut page);
                                 }
                             }
                         }
                     } else if info == pg_constants::XLOG_XACT_ABORT {
                         status = pg_constants::TRANSACTION_STATUS_ABORTED;
-                        self.transaction_id_set_status_bit(xlogrec.xl_xid, status, &mut page);
+                        transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
                         let mut xinfo = 0;
@@ -354,7 +339,7 @@ impl PostgresRedoManagerInternal {
                                 // only update xids on the requested page
                                 if tag.blknum == blkno {
                                     status = pg_constants::TRANSACTION_STATUS_ABORTED;
-                                    self.transaction_id_set_status_bit(subxact, status, &mut page);
+                                    transaction_id_set_status(subxact, status, &mut page);
                                 }
                             }
                         }
