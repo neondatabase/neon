@@ -102,18 +102,20 @@ fn main() -> Result<()> {
         gc_horizon: DEFAULT_GC_HORIZON,
         gc_period: Duration::from_secs(DEFAULT_GC_PERIOD_SEC),
         listen_addr: "127.0.0.1:64000".parse().unwrap(),
-        workdir,
+        // we will change the current working directory to the repository below,
+        // so always set 'workdir' to '.'
+        workdir: PathBuf::from("."),
         pg_distrib_dir,
     };
 
     // Create repo and exit if init was requested
     if arg_matches.is_present("init") {
-        branches::init_repo(&conf)?;
+        branches::init_repo(&conf, &workdir)?;
         return Ok(());
     }
 
     // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&conf.workdir)?;
+    env::set_current_dir(&workdir)?;
 
     if arg_matches.is_present("daemonize") {
         conf.daemonize = true;

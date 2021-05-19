@@ -287,23 +287,11 @@ mod tests {
     use super::*;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
-    use std::env;
+    use postgres_ffi::pg_constants;
     use std::fs;
-    use std::path::Path;
+    use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
-
-    fn get_test_conf() -> PageServerConf {
-        PageServerConf {
-            daemonize: false,
-            interactive: false,
-            gc_horizon: 64 * 1024 * 1024,
-            gc_period: Duration::from_secs(10),
-            listen_addr: "127.0.0.1:5430".parse().unwrap(),
-            workdir: "".into(),
-            pg_distrib_dir: "".into(),
-        }
-    }
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -333,6 +321,28 @@ mod tests {
         buf.freeze()
     }
 
+    fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
+        let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
+        let _ = fs::remove_dir_all(&repo_dir);
+        fs::create_dir_all(&repo_dir)?;
+
+        let conf = PageServerConf {
+            daemonize: false,
+            interactive: false,
+            gc_horizon: 64 * 1024 * 1024,
+            gc_period: Duration::from_secs(10),
+            listen_addr: "127.0.0.1:5430".parse().unwrap(),
+            workdir: repo_dir.into(),
+            pg_distrib_dir: "".into(),
+        };
+
+        let walredo_mgr = TestRedoManager {};
+
+        let repo = rocksdb::RocksRepository::new(&conf, Arc::new(walredo_mgr));
+
+        Ok(Box::new(repo))
+    }
+
     /// Test get_relsize() and truncation.
     ///
     /// FIXME: The RocksRepository implementation returns wrong relation size, if
@@ -343,19 +353,12 @@ mod tests {
     /// "// CORRECT: <correct answer>"
     #[test]
     fn test_relsize() -> Result<()> {
-        let walredo_mgr = TestRedoManager {};
-
-        let repo_dir = Path::new("../tmp_check/test_relsize_repo");
-        let _ = fs::remove_dir_all(repo_dir);
-        fs::create_dir_all(repo_dir)?;
-        env::set_current_dir(repo_dir)?;
-
-        let repo = rocksdb::RocksRepository::new(&get_test_conf(), Arc::new(walredo_mgr));
 
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
-        // Create it
+        // Create timeline to work on
+        let repo = get_test_repo("test_relsize")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid)?;
 

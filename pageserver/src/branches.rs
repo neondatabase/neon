@@ -45,12 +45,12 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn init_repo(conf: &PageServerConf) -> Result<()> {
+pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
     // top-level dir may exist if we are creating it through CLI
-    fs::create_dir_all(&conf.workdir)
-        .with_context(|| format!("could not create directory {}", &conf.workdir.display()))?;
+    fs::create_dir_all(repo_dir)
+        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
 
-    env::set_current_dir(&conf.workdir)?;
+    env::set_current_dir(repo_dir)?;
 
     fs::create_dir(std::path::Path::new("timelines"))?;
     fs::create_dir(std::path::Path::new("refs"))?;
@@ -58,12 +58,12 @@ pub fn init_repo(conf: &PageServerConf) -> Result<()> {
     fs::create_dir(std::path::Path::new("refs").join("tags"))?;
     fs::create_dir(std::path::Path::new("wal-redo"))?;
 
-    println!("created directory structure in {}", &conf.workdir.display());
+    println!("created directory structure in {}", repo_dir.display());
 
     // Create initial timeline
     let tli = create_timeline(conf, None)?;
     let timelinedir = conf.timeline_path(tli);
-    println!("created initial timeline {}", timelinedir.display());
+    println!("created initial timeline {}", tli);
 
     // Run initdb
     //
@@ -110,7 +110,6 @@ pub fn init_repo(conf: &PageServerConf) -> Result<()> {
 
     let target = timelinedir.join("snapshots").join(&lsnstr);
     fs::rename(tmppath, &target)?;
-    println!("moved 'tmp' to {}", target.display());
 
     // Create 'main' branch to refer to the initial timeline
     let data = tli.to_string();
@@ -127,7 +126,7 @@ pub fn init_repo(conf: &PageServerConf) -> Result<()> {
 
     println!(
         "new zenith repository was created in {}",
-        conf.workdir.display()
+        repo_dir.display()
     );
 
     Ok(())

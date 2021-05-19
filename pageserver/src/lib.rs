@@ -26,6 +26,13 @@ pub struct PageServerConf {
     pub listen_addr: SocketAddr,
     pub gc_horizon: u64,
     pub gc_period: Duration,
+
+    // Repository directory, relative to current working directory.
+    // Normally, the page server changes the current working directory
+    // to the repository, and 'workdir' is always '.'. But we don't do
+    // that during unit testing, because the current directory is global
+    // to the process but different unit tests work on different
+    // repositories.
     pub workdir: PathBuf,
 
     pub pg_distrib_dir: PathBuf,
@@ -37,21 +44,19 @@ impl PageServerConf {
     //
 
     fn tag_path(&self, name: &str) -> PathBuf {
-        std::path::Path::new("refs").join("tags").join(name)
+        self.workdir.join("refs").join("tags").join(name)
     }
 
     fn branch_path(&self, name: &str) -> PathBuf {
-        std::path::Path::new("refs").join("branches").join(name)
+        self.workdir.join("refs").join("branches").join(name)
     }
 
     fn timeline_path(&self, timelineid: ZTimelineId) -> PathBuf {
-        std::path::Path::new("timelines").join(timelineid.to_string())
+        self.workdir.join("timelines").join(timelineid.to_string())
     }
 
     fn snapshots_path(&self, timelineid: ZTimelineId) -> PathBuf {
-        std::path::Path::new("timelines")
-            .join(timelineid.to_string())
-            .join("snapshots")
+        self.timeline_path(timelineid).join("snapshots")
     }
 
     //
