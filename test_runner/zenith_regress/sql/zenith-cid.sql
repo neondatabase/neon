@@ -1,0 +1,26 @@
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+CREATE TABLE cursor (a int);
+INSERT INTO cursor VALUES (1);
+DECLARE c1 NO SCROLL CURSOR FOR SELECT * FROM cursor FOR UPDATE;
+UPDATE cursor SET a = 2;
+FETCH ALL FROM c1;
+COMMIT;
+DROP TABLE cursor;
+
+create table to_be_evicted(x bigint);
+begin;
+insert into to_be_evicted values (1);
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+insert into to_be_evicted select x*10 from to_be_evicted;
+select sum(x) from to_be_evicted;
+end;
+drop table to_be_evicted;
