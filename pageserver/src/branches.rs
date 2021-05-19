@@ -4,7 +4,7 @@
 // TODO: move all paths construction to conf impl
 //
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use fs::File;
 use fs_extra;
@@ -274,7 +274,7 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
         }
     }
 
-    panic!("could not parse point-in-time {}", s);
+    bail!("could not parse point-in-time {}", s);
 }
 
 // If control file says the cluster was shut down cleanly, modify it, to mark

@@ -60,6 +60,7 @@ enum BeMessage {
     CommandComplete,
     ControlFile,
     CopyData(Bytes),
+    ErrorResponse(String),
 }
 
 // Wrapped in libpq CopyData
@@ -575,6 +576,16 @@ impl Connection {
                 self.stream.write_u32::<BE>(4 + data.len() as u32)?;
                 self.stream.write_all(&data)?;
             }
+
+            BeMessage::ErrorResponse(error_msg) => {
+                self.stream.write_u8(b'E')?;
+                self.stream
+                    .write_u32::<BE>(4 + 1 + error_msg.len() as u32 + 2)?;
+                self.stream.write_u8(b'M')?; /* primary human-readable error message */
+                self.stream.write_all(error_msg.as_bytes())?;
+                self.stream.write_u8(0)?; /* end of M field */
+                self.stream.write_u8(0)?; /* end of all fields */
+            }
         }
 
         Ok(())
@@ -612,7 +623,12 @@ impl Connection {
                     }
                 }
                 Some(FeMessage::Query(m)) => {
-                    self.process_query(m.body)?;
+                    if let Err(e) = self.process_query(m.body) {
+                        self.write_message_noflush(&BeMessage::ErrorResponse(format!(
+                            "ERROR: {}",
+                            e
+                        )))?;
+                    }
                     self.write_message(&BeMessage::ReadyForQuery)?;
                 }
                 Some(FeMessage::Parse(m)) => {
@@ -752,9 +768,7 @@ impl Connection {
             self.write_message_noflush(&BeMessage::DataRow(Bytes::from(system_id)))?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
         } else {
-            self.write_message_noflush(&BeMessage::RowDescription)?;
-            self.write_message_noflush(&HELLO_WORLD_ROW)?;
-            self.write_message_noflush(&BeMessage::CommandComplete)?;
+            bail!("unknown command");
         }
 
         Ok(())
