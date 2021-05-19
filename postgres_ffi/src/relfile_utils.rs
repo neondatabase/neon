@@ -2,6 +2,7 @@
 //! Common utilities for dealing with PostgreSQL relation files.
 //!
 use crate::pg_constants;
+use lazy_static::lazy_static;
 use regex::Regex;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -63,9 +64,11 @@ pub fn forknumber_to_name(forknum: u8) -> Option<&'static str> {
 /// See functions relpath() and _mdfd_segpath() in PostgreSQL sources.
 ///
 pub fn parse_relfilename(fname: &str) -> Result<(u32, u8, u32), FilePathError> {
-    let re = Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();
-
-    let caps = re.captures(fname).ok_or(FilePathError::InvalidFileName)?;
+    lazy_static! {
+        static ref RELFILE_RE: Regex =
+            Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();
+    }
+    let caps = RELFILE_RE.captures(fname).ok_or(FilePathError::InvalidFileName)?;
 
     let relnode_str = caps.name("relnode").unwrap().as_str();
     let relnode = relnode_str.parse::<u32>()?;

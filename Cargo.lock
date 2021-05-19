@@ -1359,6 +1359,7 @@ dependencies = [
  "chrono",
  "crc32c",
  "hex",
+ "lazy_static",
  "log",
  "rand",
  "regex",
