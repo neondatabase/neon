@@ -1,0 +1,98 @@
+env:
+  CIRRUS_CLONE_SUBMODULES: true
+  CIRRUS_CLONE_DEPTH: 1
+
+# Use a custom image, which contains all the dependencies for building PostgreSQL
+# and Zenith.
+container:
+  dockerfile: ci/Dockerfile
+  # The default is 2 vCPUs and 4 GB of memory. Request a bit more oomph to make
+  # the Rust build go faster.
+  cpu: 4
+  memory: 8G
+
+task:
+  # cache Rust dependencies
+  cargo_registry_cache:
+    folder: $CARGO_HOME/registry
+    fingerprint_script: cat Cargo.lock
+  cargo_git_cache:
+    folder: $CARGO_HOME/git
+    fingerprint_script: cat Cargo.lock
+
+  # cache Rust binaries
+  target_cache:
+    folder: target
+    fingerprint_script:
+      - rustc --version
+      - cat Cargo.lock
+
+  # cache Postgres binaries
+  postgres_cache:
+    folder: tmp_install
+    fingerprint_script:
+      - git submodule status
+      # trigger rebuild if the configure options in Makefile are changed
+      - cat Makefile
+
+  before_cache_script: rm -rf $CARGO_HOME/registry/index
+
+  env:
+    TEST_OUTPUT: ${CIRRUS_WORKING_DIR}/test_output
+
+  #
+  # The complete CI consists of Build task, and a bunch of Test tasks.
+  # The Test tasks depend on the Build tasks, so they won't run until the Build
+  # has finished.
+  #
+  # Cirrus doesn't have an easy way to pass data from one task to another, which
+  # makes is tricky to build in one task, and run the test in another. We do it
+  # by caching the binaries in the 'target_cache' and 'postgres_cache' steps above.
+  # With the 'matrix' instruction, the Build and Test tasks begin with the same
+  # '*_cache' intructions above.  The Build task builds and populates the caches
+  # (if needed), and the Test tasks assume that the caches are populated and will
+  # fail if they're not.
+  #
+  # An alternative would be to perform all the Build and Test steps in one task,
+  # but then the Test tasks couldn't run in parallel.
+  #
+  matrix:
+    - name: Build
+      build_postgres_script: |
+        # Build postgres if the postgres_cache step didn't find a build.
+        # `make` can't figure out whether the cache is valid, since
+        # it only compares file timestamps.
+        if [ ! -e tmp_install/bin/postgres ]; then
+          make -j4 -O postgres
+        fi
+
+      # Build the rust code, including test binaries
+      build_zenith_script: cargo build --bins --tests
+
+      # Run rust unit tests
+      # FIXME: remove -p zenith_utils once integration tests are moved to python
+      cargo_test_script: cargo test -p zenith_utils
+
+    - name: Test pg_regress
+      depends_on: Build
+      test_script: cd test_runner && pytest --junitxml=$TEST_OUTPUT/pg_regress-junit.xml --tb=short batch_pg_regress
+
+    - name: Other tests
+      depends_on: Build
+      test_script: cd test_runner && pytest --junitxml=$TEST_OUTPUT/others-junit.xml --tb=short batch_others
+
+#  log_artifacts:
+#    path: test_output/**log
+
+  # Capture regression.diffs and *.out created by pg_regress
+#  pg_regress_artifacts:
+#    path: test_output/**/regression.*
+
+#  pytest_timing_artifacts:
+#    path: test_output/**-junit.xml
+
+  artifacts:
+    paths:
+      - test_output/**log
+      - test_output/**/regression.*
+      - test_output/**-junit.xml
