@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail};
 use anyhow::{Context, Result};
-use clap::{App, Arg, ArgMatches, SubCommand};
+use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env::{self, LocalEnv};
 use control_plane::storage::PageServerNode;
@@ -27,6 +27,7 @@ fn main() -> Result<()> {
         .required(true);
 
     let matches = App::new("zenith")
+        .setting(AppSettings::ArgRequiredElseHelp)
         .about("Zenith CLI")
         .subcommand(
             SubCommand::with_name("init")
@@ -45,11 +46,12 @@ fn main() -> Result<()> {
                 .arg(Arg::with_name("start-point").required(false).index(2)),
         )
         .subcommand(SubCommand::with_name("status"))
-        .subcommand(SubCommand::with_name("start"))
-        .subcommand(SubCommand::with_name("stop"))
-        .subcommand(SubCommand::with_name("restart"))
+        .subcommand(SubCommand::with_name("start").about("Start local pageserver"))
+        .subcommand(SubCommand::with_name("stop").about("Stop local pageserver"))
+        .subcommand(SubCommand::with_name("restart").about("Restart local pageserver"))
         .subcommand(
             SubCommand::with_name("pg")
+                .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage postgres instances")
                 .subcommand(
                     SubCommand::with_name("create")
@@ -65,6 +67,7 @@ fn main() -> Result<()> {
         )
         .subcommand(
             SubCommand::with_name("remote")
+                .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage remote pagerservers")
                 .subcommand(
                     SubCommand::with_name("add")

@@ -353,7 +353,6 @@ mod tests {
     /// "// CORRECT: <correct answer>"
     #[test]
     fn test_relsize() -> Result<()> {
-
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
