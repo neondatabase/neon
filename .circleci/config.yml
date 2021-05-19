@@ -11,18 +11,10 @@ executors:
 
 jobs:
 
-  # A job to build postgres and zenith
-  build-zenith:
+  # A job to build postgres
+  build-postgres:
     executor: zenith-build-executor
     steps:
-        # FIXME cache the previous result? persist_to_workspace? create a new docker container?
-        # Alternatively, we might only install the postgres deps at the last minute before we build postgres.
-      - run:
-          name: apt install dependencies
-          command: |
-            sudo apt update
-            sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl4-openssl-dev libssl-dev clang
-
         # Checkout the git repo (circleci doesn't have a flag to enable submodules here)
       - checkout
 
@@ -38,6 +30,15 @@ jobs:
           keys:
             # Restore ONLY if the rev key matches exactly
             - postgres-cache-v01-{{ checksum "/tmp/cache-key-postgres" }}
+
+        # FIXME We could cache our own docker container, instead of installing packages every time.
+      - run:
+          name: apt install dependencies
+          command: |
+            if [ ! -e tmp_install/bin/postgres ]; then
+              sudo apt update
+              sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl4-openssl-dev
+            fi
 
         # Build postgres if the restore_cache didn't find a build.
         # `make` can't figure out whether the cache is valid, since
@@ -57,14 +58,39 @@ jobs:
           paths:
             - tmp_install
 
+  # A job to build zenith rust code
+  build-zenith:
+    executor: zenith-build-executor
+    steps:
+      - run:
+          name: apt install dependencies
+          command: |
+            sudo apt update
+            sudo apt install libssl-dev clang
+
+        # Checkout the git repo (without submodules)
+      - checkout
+
+        # Grab the postgres git revision to build a cache key.
+        # Note this works even though the submodule hasn't been checkout out yet.
+      - run:
+          name: Get postgres cache key
+          command: |
+            git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+
+      - restore_cache:
+          name: Restore postgres cache
+          keys:
+            # Restore ONLY if the rev key matches exactly
+            - postgres-cache-v01-{{ checksum "/tmp/cache-key-postgres" }}
+
       - restore_cache:
           name: Restore rust cache
           keys:
-            # Choose an exact match first, if it exists.
+            # Require an exact match. While an out of date cache might speed up the build,
+            # there's no way to clean out old packages, so the cache grows every time something
+            # changes.
             - rust-cache-deps-v01-{{ checksum "Cargo.lock" }}
-            # Fall back to an out of date cache. Cargo can figure out what needs rebuilding.
-            # FIXME: imperfect match disabled due to issue #90.
-            #- rust-cache-deps-v01-
 
         # Build the rust code, including test binaries
       - run: cargo build --bins --tests
@@ -185,7 +211,10 @@ jobs:
 workflows:
   build_and_test:
     jobs:
-      - build-zenith
+      - build-postgres
+      - build-zenith:
+          requires:
+            - build-postgres
       - run-pytest:
           name: pg_regress tests
           test_selection: batch_pg_regress
