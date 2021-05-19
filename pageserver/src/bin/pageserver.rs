@@ -195,14 +195,6 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
             Ok(_) => info!("Success, daemonized"),
             Err(e) => error!("Error, {}", e),
         }
-    } else {
-        // change into the repository directory. In daemon mode, Daemonize
-        // does this for us.
-        std::env::set_current_dir(&conf.workdir)?;
-        info!(
-            "Changed current directory to repository in {:?}",
-            &conf.workdir
-        );
     }
 
     let mut threads = Vec::new();
