@@ -1,0 +1,11 @@
+# Local binaries
+/pg_regress
+
+# Generated subdirectories
+/tmp_check/
+/results/
+/log/
+
+# Note: regression.* are only left behind on a failure; that's why they're not ignored
+#/regression.diffs
+#/regression.out
