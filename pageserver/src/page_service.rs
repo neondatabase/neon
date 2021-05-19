@@ -577,10 +577,17 @@ impl Connection {
                 self.stream.write_all(&data)?;
             }
 
+            // ErrorResponse is a zero-terminated array of zero-terminated fields.
+            // First byte of each field represents type of this field. Set just enough fields
+            // to satisfy rust-postgres client: 'S' -- severity, 'C' -- error, 'M' -- error
+            // message text.
             BeMessage::ErrorResponse(error_msg) => {
+                // For all the errors set Severity to Error and error code to
+                // 'internal error'.
                 let severity = Bytes::from("SERROR\0");
                 let code = Bytes::from("CXX000\0");
 
+                // 'E' signalizes ErrorResponse messages
                 self.stream.write_u8(b'E')?;
                 self.stream.write_u32::<BE>(
                     4 + severity.len() as u32
@@ -589,15 +596,17 @@ impl Connection {
                         + 1,
                 )?;
 
+                // Send severity and code fields
                 self.stream.write_all(&severity)?;
-
                 self.stream.write_all(&code)?;
 
-                self.stream.write_u8(b'M')?; /* primary human-readable error message */
+                // Send error message field
+                self.stream.write_u8(b'M')?;
                 self.stream.write_all(error_msg.as_bytes())?;
-                self.stream.write_u8(0)?; /* end of M field */
+                self.stream.write_u8(0)?;
 
-                self.stream.write_u8(0)?; /* end of all fields */
+                // Terminate fields
+                self.stream.write_u8(0)?;
             }
         }
 
