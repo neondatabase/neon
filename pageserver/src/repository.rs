@@ -198,7 +198,7 @@ impl RelTag {
         buf.put_u32(self.dbnode);
         buf.put_u32(self.relnode);
     }
-    pub fn unpack(buf: &mut BytesMut) -> RelTag {
+    pub fn unpack(buf: &mut Bytes) -> RelTag {
         RelTag {
             forknum: buf.get_u8(),
             spcnode: buf.get_u32(),
@@ -237,7 +237,7 @@ impl BufferTag {
         self.rel.pack(buf);
         buf.put_u32(self.blknum);
     }
-    pub fn unpack(buf: &mut BytesMut) -> BufferTag {
+    pub fn unpack(buf: &mut Bytes) -> BufferTag {
         BufferTag {
             rel: RelTag::unpack(buf),
             blknum: buf.get_u32(),
@@ -264,7 +264,7 @@ impl WALRecord {
         buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
     }
-    pub fn unpack(buf: &mut BytesMut) -> WALRecord {
+    pub fn unpack(buf: &mut Bytes) -> WALRecord {
         let lsn = Lsn::from(buf.get_u64());
         let will_init = buf.get_u8() != 0;
         let main_data_offset = buf.get_u32();
