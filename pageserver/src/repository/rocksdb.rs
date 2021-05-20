@@ -376,7 +376,6 @@ impl RocksTimeline {
         Ok(0)
     }
 
-
     fn do_gc(&self, conf: &'static PageServerConf) -> Result<Bytes> {
         loop {
             thread::sleep(conf.gc_period);

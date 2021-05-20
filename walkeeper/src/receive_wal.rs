@@ -360,7 +360,7 @@ impl ReceiveWalConn {
         const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
         /* Extract WAL location for this block */
-        let mut xlogoff = start_pos.segment_offset(wal_seg_size as u64) as usize;
+        let mut xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
 
         while bytes_left != 0 {
             let bytes_to_write;
@@ -376,7 +376,7 @@ impl ReceiveWalConn {
             }
 
             /* Open file */
-            let segno = start_pos.segment_number(wal_seg_size as u64);
+            let segno = start_pos.segment_number(wal_seg_size);
             let wal_file_name = XLogFileName(timeline, segno, wal_seg_size);
             let wal_file_path = self
                 .conf
@@ -435,7 +435,7 @@ impl ReceiveWalConn {
             xlogoff += bytes_to_write;
 
             /* Did we reach the end of a WAL segment? */
-            if start_pos.segment_offset(wal_seg_size as u64) == 0 {
+            if start_pos.segment_offset(wal_seg_size) == 0 {
                 xlogoff = 0;
                 if partial {
                     fs::rename(&wal_file_partial_path, &wal_file_path)?;

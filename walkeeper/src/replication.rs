@@ -175,7 +175,7 @@ impl ReplicationConn {
                 Some(file) => file,
                 None => {
                     // Open a new file.
-                    let segno = start_pos.segment_number(wal_seg_size as u64);
+                    let segno = start_pos.segment_number(wal_seg_size);
                     let wal_file_name = XLogFileName(timeline, segno, wal_seg_size);
                     let timeline_id = self.timeline.get().timelineid.to_string();
                     let wal_file_path = self.conf.data_dir.join(timeline_id).join(wal_file_name);
@@ -183,7 +183,7 @@ impl ReplicationConn {
                 }
             };
 
-            let xlogoff = start_pos.segment_offset(wal_seg_size as u64) as usize;
+            let xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
 
             // How much to read and send in message? We cannot cross the WAL file
             // boundary, and we don't want send more than MAX_SEND_SIZE.
@@ -223,7 +223,7 @@ impl ReplicationConn {
 
             // Decide whether to reuse this file. If we don't set wal_file here
             // a new file will be opened next time.
-            if start_pos.segment_offset(wal_seg_size as u64) != 0 {
+            if start_pos.segment_offset(wal_seg_size) != 0 {
                 wal_file = Some(file);
             }
         }

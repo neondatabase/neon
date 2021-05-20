@@ -293,10 +293,6 @@ impl PostgresRedoManagerInternal {
                     let mut status = 0;
                     if info == pg_constants::XLOG_XACT_COMMIT {
                         status = pg_constants::TRANSACTION_STATUS_COMMITTED;
-                        info!(
-                            "Mark transaction {} as committed at LSN {}",
-                            xlogrec.xl_xid, lsn
-                        );
                         transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();

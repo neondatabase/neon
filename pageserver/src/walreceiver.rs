@@ -196,7 +196,6 @@ fn walreceiver_main(
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                     let old_checkpoint_bytes = encode_checkpoint(checkpoint);
-                    //info!("Decode WAL record at LSN {}", lsn);
                     let decoded = decode_wal_record(&mut checkpoint, recdata.clone());
                     timeline.save_decoded_record(decoded, recdata, lsn)?;
 

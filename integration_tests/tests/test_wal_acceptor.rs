@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::{thread, time};
 
-use control_plane::compute::{PostgresNode, ComputeControlPlane};
+use control_plane::compute::{ComputeControlPlane, PostgresNode};
 
 use integration_tests;
 use integration_tests::PostgresNodeExt;
