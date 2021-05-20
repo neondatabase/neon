@@ -59,6 +59,10 @@ impl PageServerConf {
         self.timeline_path(timelineid).join("snapshots")
     }
 
+    fn ancestor_path(&self, timelineid: ZTimelineId) -> PathBuf {
+        self.timeline_path(timelineid).join("ancestor")
+    }
+
     //
     // Postgres distribution paths
     //
