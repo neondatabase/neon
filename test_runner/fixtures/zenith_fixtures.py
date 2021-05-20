@@ -186,9 +186,9 @@ class Postgres:
             self.zenith_cli.run(['pg', 'stop', self.branch])
 
     # Return a libpq connection string to connect to the Postgres instance
-    def connstr(self):
-        conn_str = 'host={} port={} dbname=postgres user={}'.format(
-            self.host, self.port, self.username)
+    def connstr(self, dbname='postgres'):
+        conn_str = 'host={} port={} dbname={} user={}'.format(
+            self.host, self.port, dbname, self.username)
         return conn_str
 
 class PostgresFactory:
