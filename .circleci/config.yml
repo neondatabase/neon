@@ -100,6 +100,7 @@ jobs:
       - run:
           name: Rust build << parameters.build_type >>
           command: |
+            export CARGO_INCREMENTAL=0
             BUILD_TYPE="<< parameters.build_type >>"
             if [[ $BUILD_TYPE == "debug" ]]; then
               echo "Build in debug mode"
@@ -128,6 +129,7 @@ jobs:
       - run:
           name: cargo install
           command: |
+            export CARGO_INCREMENTAL=0
             BUILD_TYPE="<< parameters.build_type >>"
             if [[ $BUILD_TYPE == "debug" ]]; then
               echo "Install debug mode"
