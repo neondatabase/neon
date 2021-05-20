@@ -130,11 +130,11 @@ impl PageServerNode {
         // wait for pageserver stop
         for _ in 0..5 {
             let stream = TcpStream::connect(self.address());
+            thread::sleep(Duration::from_secs(1));
             if let Err(_e) = stream {
                 return Ok(());
             }
             println!("Stopping pageserver on {}", self.address());
-            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
