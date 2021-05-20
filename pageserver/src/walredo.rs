@@ -260,7 +260,7 @@ impl PostgresRedoManagerInternal {
         let start = Instant::now();
 
         let apply_result: Result<Bytes, Error>;
-        if tag.rel.forknum >= pg_constants::PG_XACT_FORKNUM {
+        if tag.rel.forknum > pg_constants::INIT_FORKNUM {
             const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
             let mut page = BytesMut::new();
             if let Some(fpi) = base_img {
@@ -396,7 +396,7 @@ impl PostgresRedoManagerInternal {
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
                     page.clear();
-                    page.extend_from_slice(&buf[..]);
+                    page.extend_from_slice(&buf[12..]); // skip xl_relmap_update
                     assert!(page.len() == 512); // size of pg_filenode.map
                 }
             }
