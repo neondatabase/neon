@@ -424,13 +424,9 @@ impl PagestreamBeMessage {
 ///
 /// Listens for connections, and launches a new handler thread for each.
 ///
-pub fn thread_main(conf: &'static PageServerConf) {
-    info!("Starting page server on {}", conf.listen_addr);
-
-    let listener = TcpListener::bind(conf.listen_addr).unwrap();
-
+pub fn thread_main(conf: &'static PageServerConf, listener: TcpListener) -> anyhow::Result<()> {
     loop {
-        let (socket, peer_addr) = listener.accept().unwrap();
+        let (socket, peer_addr) = listener.accept()?;
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
         let mut conn_handler = Connection::new(conf, socket);

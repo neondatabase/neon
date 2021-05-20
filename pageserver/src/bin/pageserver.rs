@@ -4,12 +4,15 @@
 
 use log::*;
 use parse_duration::parse;
-use std::fs::{File, OpenOptions};
 use std::io;
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
 use std::{env, path::PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    net::TcpListener,
+};
 
 use anyhow::{Context, Result};
 use clap::{App, Arg};
@@ -168,21 +171,21 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
 
-    let tui_thread: Option<thread::JoinHandle<()>>;
-    if conf.interactive {
+    let tui_thread = if conf.interactive {
         // Initialize the UI
-        tui_thread = Some(
+        Some(
             thread::Builder::new()
                 .name("UI thread".into())
                 .spawn(|| {
                     let _ = tui::ui_main();
                 })
                 .unwrap(),
-        );
-        //threads.push(tui_thread);
+        )
     } else {
-        tui_thread = None;
-    }
+        None
+    };
+
+    // TODO: Check that it looks like a valid repository before going further
 
     if conf.daemonize {
         info!("daemonizing...");
@@ -204,32 +207,28 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         }
     }
 
-    let mut threads = Vec::new();
+    // Check that we can bind to address before further initialization
+    info!("Starting pageserver on {}", conf.listen_addr);
+    let pageserver_listener = TcpListener::bind(conf.listen_addr)?;
 
-    // TODO: Check that it looks like a valid repository before going further
-
+    // Initialize page cache, this will spawn walredo_thread
     page_cache::init(conf);
 
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.
-    let page_server_thread = thread::Builder::new()
+    let page_service_thread = thread::Builder::new()
         .name("Page Service thread".into())
-        .spawn(move || {
-            // thread code
-            page_service::thread_main(conf);
-        })
-        .unwrap();
-    threads.push(page_server_thread);
+        .spawn(move || page_service::thread_main(conf, pageserver_listener))?;
 
     if let Some(tui_thread) = tui_thread {
         // The TUI thread exits when the user asks to Quit.
         tui_thread.join().unwrap();
     } else {
-        // In non-interactive mode, wait forever.
-        for t in threads {
-            t.join().unwrap()
-        }
+        page_service_thread
+            .join()
+            .expect("Page service thread has panicked")?
     }
+
     Ok(())
 }
 
