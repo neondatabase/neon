@@ -165,7 +165,7 @@ fn main() -> Result<()> {
 }
 
 // Print branches list as a tree-like structure.
-fn print_branches_tree(branches: Vec<BranchInfo>) {
+fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
     let mut branches_hash: HashMap<String, BranchTreeEl> = HashMap::new();
 
     // Form a hash table of branch timeline_id -> BranchTreeEl.
@@ -184,7 +184,7 @@ fn print_branches_tree(branches: Vec<BranchInfo>) {
         if let Some(name) = &branch.ancestor_id {
             branches_hash
                 .get_mut(name)
-                .unwrap()
+                .with_context(|| "missing branch info in the HashMap")?
                 .children
                 .push(branch.timeline_id.to_string());
         }
@@ -199,9 +199,11 @@ fn print_branches_tree(branches: Vec<BranchInfo>) {
         // Start with root branches (no ancestors) first.
         // Now it is 'main' branch only, but things may change.
         if branch.info.ancestor_id.is_none() {
-            print_branch(0, 0, branch, &branches_hash);
+            print_branch(0, 0, branch, &branches_hash)?;
         }
     }
+
+    Ok(())
 }
 
 // Recursively print branch info with all its children.
@@ -210,18 +212,20 @@ fn print_branch(
     padding: usize,
     branch: &BranchTreeEl,
     branches: &HashMap<String, BranchTreeEl>,
-) {
+) -> Result<()> {
     let new_padding: usize;
 
     if nesting_level > 0 {
-        // Six extra chars for graphics, spaces and so on in addition to LSN length.
-        new_padding = padding + 6 + branch.info.ancestor_lsn.as_ref().unwrap().chars().count();
+        let lsn = branch
+            .info
+            .ancestor_lsn
+            .as_ref()
+            .with_context(|| "missing branch info in the HashMap")?;
 
-        print!(
-            "{}└─ @{}:",
-            " ".repeat(padding),
-            branch.info.ancestor_lsn.as_ref().unwrap()
-        );
+        // Six extra chars for graphics, spaces and so on in addition to LSN length.
+        new_padding = padding + 6 + lsn.chars().count();
+
+        print!("{}└─ @{}:", " ".repeat(padding), lsn);
     } else {
         new_padding = 1;
     }
@@ -232,10 +236,14 @@ fn print_branch(
         print_branch(
             nesting_level + 1,
             new_padding,
-            branches.get(child).unwrap(),
+            branches
+                .get(child)
+                .with_context(|| "missing branch info in the HashMap")?,
             branches,
-        );
+        )?;
     }
+
+    Ok(())
 }
 
 /// Returns a map of timeline IDs to branch_name@lsn strings.
@@ -267,8 +275,8 @@ fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
         }
     } else {
         // No arguments, list branches
-        let branches = pageserver.branches_list().unwrap();
-        print_branches_tree(branches);
+        let branches = pageserver.branches_list()?;
+        print_branches_tree(branches)?;
     }
 
     Ok(())
