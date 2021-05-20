@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(Lsn(1234).checked_sub(1235u64), None);
 
         let seg_sz: usize = 16 * 1024 * 1024;
-        assert_eq!(Lsn(0x1000007).segment_offset(seg_sz), 7u64);
+        assert_eq!(Lsn(0x1000007).segment_offset(seg_sz), 7);
         assert_eq!(Lsn(0x1000007).segment_number(seg_sz), 1u64);
 
         assert_eq!(Lsn(0x4007).block_offset(), 7u64);
@@ -239,8 +239,8 @@ mod tests {
         assert_eq!(Lsn(0x4007).remaining_in_block(), 8185u64);
         assert_eq!(Lsn(0x4000).remaining_in_block(), 8192u64);
 
-        assert_eq!(Lsn(0xffff01).calc_padding(seg_sz), 255u64);
-        assert_eq!(Lsn(0x2000000).calc_padding(seg_sz), 0u64);
+        assert_eq!(Lsn(0xffff01).calc_padding(seg_sz as u64), 255u64);
+        assert_eq!(Lsn(0x2000000).calc_padding(seg_sz as u64), 0u64);
         assert_eq!(Lsn(0xffff01).calc_padding(8u32), 7u64);
         assert_eq!(Lsn(0xffff00).calc_padding(8u32), 0u64);
     }
