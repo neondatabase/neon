@@ -29,7 +29,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - postgres-cache-v01-{{ checksum "/tmp/cache-key-postgres" }}
+            - v02-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
 
         # FIXME We could cache our own docker container, instead of installing packages every time.
       - run:
@@ -54,13 +54,17 @@ jobs:
 
       - save_cache:
           name: Save postgres cache
-          key: postgres-cache-v01-{{ checksum "/tmp/cache-key-postgres" }}
+          key: v02-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
           paths:
             - tmp_install
 
   # A job to build zenith rust code
   build-zenith:
     executor: zenith-build-executor
+    parameters:
+      build_type:
+        type: enum
+        enum: ["debug", "release"]
     steps:
       - run:
           name: apt install dependencies
@@ -82,7 +86,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - postgres-cache-v01-{{ checksum "/tmp/cache-key-postgres" }}
+            - v02-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
 
       - restore_cache:
           name: Restore rust cache
@@ -90,14 +94,24 @@ jobs:
             # Require an exact match. While an out of date cache might speed up the build,
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
-            - rust-cache-deps-v01-{{ checksum "Cargo.lock" }}
+            - v02-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
 
         # Build the rust code, including test binaries
-      - run: cargo build --bins --tests
+      - run:
+          name: Rust build << parameters.build_type >>
+          command: |
+            BUILD_TYPE="<< parameters.build_type >>"
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              echo "Build in debug mode"
+              cargo build --bins --tests
+            elif [[ $BUILD_TYPE == "release" ]]; then
+              echo "Build in release mode"
+              cargo build --release --bins --tests
+            fi
 
       - save_cache:
           name: Save rust cache
-          key: rust-cache-deps-v01-{{ checksum "Cargo.lock" }}
+          key: v02-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
           paths:
             - ~/.cargo/registry
             - ~/.cargo/git
@@ -144,6 +158,10 @@ jobs:
       # or '-k foobar' to run tests containing string 'foobar'. See pytest man page
       # section SPECIFYING TESTS / SELECTING TESTS for details.
       #
+      # Select the type of Rust build. Must be "release" or "debug".
+      build_type:
+        type: string
+        default: "debug"
       # This parameter is required, to prevent the mistake of running all tests in one job.
       test_selection:
         type: string
@@ -213,16 +231,26 @@ workflows:
     jobs:
       - build-postgres
       - build-zenith:
+          name: build-zenith-<< matrix.build_type >>
+          matrix:
+            parameters:
+              build_type: ["debug", "release"]
           requires:
             - build-postgres
       - run-pytest:
-          name: pg_regress tests
+          name: pg_regress tests << matrix.build_type >>
+          matrix:
+            parameters:
+              build_type: ["debug", "release"]
           test_selection: batch_pg_regress
           needs_postgres_source: true
           requires:
-            - build-zenith
+            - build-zenith-<< matrix.build_type >>
       - run-pytest:
-          name: other tests
+          name: other tests << matrix.build_type >>
+          matrix:
+            parameters:
+              build_type: ["debug", "release"]
           test_selection: batch_others
           requires:
-            - build-zenith
+            - build-zenith-<< matrix.build_type >>
