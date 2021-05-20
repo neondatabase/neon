@@ -233,7 +233,9 @@ impl TimelineTools for Option<Arc<Timeline>> {
     fn find_end_of_wal(&self, data_dir: &Path, precise: bool) -> (Lsn, TimeLineID) {
         let seg_size = self.get().get_info().server.wal_seg_size as usize;
         let (lsn, timeline) = find_end_of_wal(data_dir, seg_size, precise);
-        (Lsn(lsn), timeline)
+        let wal_start = Lsn((seg_size * 2) as u64); // FIXME: handle pg_resetwal
+        let lsn = Lsn::max(Lsn(lsn), wal_start);
+        (lsn, timeline)
     }
 }
 
