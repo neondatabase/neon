@@ -420,8 +420,16 @@ impl PostgresNode {
         self.pg_ctl(&["restart"])
     }
 
-    pub fn stop(&self) -> Result<()> {
-        self.pg_ctl(&["-m", "immediate", "stop"])
+    pub fn stop(&self, destroy: bool) -> Result<()> {
+        self.pg_ctl(&["-m", "immediate", "stop"])?;
+        if destroy {
+            println!(
+                "Destroying postgres data directory '{}'",
+                self.pgdata().to_str().unwrap()
+            );
+            fs::remove_dir_all(&self.pgdata())?;
+        }
+        Ok(())
     }
 
     pub fn connstr(&self) -> String {
@@ -453,7 +461,7 @@ impl Drop for PostgresNode {
     // and checking it here. But let just clean datadirs on start.
     fn drop(&mut self) {
         if self.is_test {
-            let _ = self.stop();
+            let _ = self.stop(true);
         }
     }
 }

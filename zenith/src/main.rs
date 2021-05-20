@@ -61,7 +61,16 @@ fn main() -> Result<()> {
                 .subcommand(SubCommand::with_name("list"))
                 .subcommand(SubCommand::with_name("create").arg(timeline_arg.clone()))
                 .subcommand(SubCommand::with_name("start").arg(timeline_arg.clone()))
-                .subcommand(SubCommand::with_name("stop").arg(timeline_arg.clone())),
+                .subcommand(
+                    SubCommand::with_name("stop")
+                        .arg(timeline_arg.clone())
+                        .arg(
+                            Arg::with_name("destroy")
+                                .help("Also delete data directory (now optional, should be default in future)")
+                                .long("destroy")
+                                .required(false)
+                        )
+                )
         )
         .subcommand(
             SubCommand::with_name("remote")
@@ -356,12 +365,13 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
         }
         ("stop", Some(sub_m)) => {
             let timeline_name = sub_m.value_of("timeline").unwrap_or("main");
+            let destroy = sub_m.is_present("destroy");
+
             let node = cplane
                 .nodes
                 .get(timeline_name)
                 .ok_or_else(|| anyhow!("postgres {} is not found", timeline_name))?;
-            node.stop()?;
-            // TODO: destroy data directory here
+            node.stop(destroy)?;
         }
 
         _ => {}
