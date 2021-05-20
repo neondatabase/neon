@@ -116,7 +116,8 @@ impl ComputeControlPlane {
                 node.connstr()
             )
             .as_str(),
-        );
+        )
+        .unwrap();
 
         node
     }
@@ -135,21 +136,16 @@ impl ComputeControlPlane {
         node.append_conf(
             "postgresql.conf",
             "synchronous_standby_names = 'safekeeper_proxy'\n",
-        );
+        )
+        .unwrap();
 
         node
     }
 
     pub fn new_node(&mut self, branch_name: &str) -> Result<Arc<PostgresNode>> {
-        let timeline_id = self
-            .pageserver
-            .branch_get_by_name(branch_name)
-            .expect("failed to get timeline_id")
-            .timeline_id;
+        let timeline_id = self.pageserver.branch_get_by_name(branch_name)?.timeline_id;
 
-        let node = self
-            .new_from_page_server(false, timeline_id, branch_name)
-            .unwrap();
+        let node = self.new_from_page_server(false, timeline_id, branch_name)?;
 
         // Configure the node to stream WAL directly to the pageserver
         node.append_conf(
@@ -160,7 +156,7 @@ impl ComputeControlPlane {
                 node.connstr()
             )
             .as_str(),
-        );
+        )?;
 
         Ok(node)
     }
@@ -321,13 +317,13 @@ impl PostgresNode {
                 address = self.address.ip(),
                 port = self.address.port()
             ),
-        );
+        )?;
 
         // Never clean up old WAL. TODO: We should use a replication
         // slot or something proper, to prevent the compute node
         // from removing WAL that hasn't been streamed to the safekeepr or
         // page server yet. But this will do for now.
-        self.append_conf("postgresql.conf", "wal_keep_size='10TB'\n");
+        self.append_conf("postgresql.conf", "wal_keep_size='10TB'\n")?;
 
         // Connect it to the page server.
 
@@ -342,7 +338,7 @@ impl PostgresNode {
                 self.pageserver.address().port(),
                 self.timelineid
             ),
-        );
+        )?;
 
         fs::create_dir_all(self.pgdata().join("pg_wal"))?;
         fs::create_dir_all(self.pgdata().join("pg_wal").join("archive_status"))?;
@@ -367,13 +363,12 @@ impl PostgresNode {
         }
     }
 
-    pub fn append_conf(&self, config: &str, opts: &str) {
+    pub fn append_conf(&self, config: &str, opts: &str) -> Result<()> {
         OpenOptions::new()
             .append(true)
-            .open(self.pgdata().join(config).to_str().unwrap())
-            .unwrap()
-            .write_all(opts.as_bytes())
-            .unwrap();
+            .open(self.pgdata().join(config).to_str().unwrap())?
+            .write_all(opts.as_bytes())?;
+        Ok(())
     }
 
     fn pg_ctl(&self, args: &[&str]) -> Result<()> {
