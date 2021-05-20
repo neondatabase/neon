@@ -31,9 +31,8 @@ fn main() -> Result<()> {
         .help("timeline name")
         .required(true);
 
-    let matches = App::new("zenith")
+    let matches = App::new("Zenith CLI")
         .setting(AppSettings::ArgRequiredElseHelp)
-        .about("Zenith CLI")
         .subcommand(
             SubCommand::with_name("init")
                 .about("Initialize a new Zenith repository")
