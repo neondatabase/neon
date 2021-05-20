@@ -29,7 +29,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v02-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
+            - v03-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
 
         # FIXME We could cache our own docker container, instead of installing packages every time.
       - run:
@@ -54,7 +54,7 @@ jobs:
 
       - save_cache:
           name: Save postgres cache
-          key: v02-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
+          key: v03-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
           paths:
             - tmp_install
 
@@ -86,7 +86,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v02-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
+            - v03-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
 
       - restore_cache:
           name: Restore rust cache
@@ -94,7 +94,7 @@ jobs:
             # Require an exact match. While an out of date cache might speed up the build,
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
-            - v02-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+            - v03-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
 
         # Build the rust code, including test binaries
       - run:
@@ -111,7 +111,7 @@ jobs:
 
       - save_cache:
           name: Save rust cache
-          key: v02-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+          key: v03-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
           paths:
             - ~/.cargo/registry
             - ~/.cargo/git
@@ -128,9 +128,18 @@ jobs:
       - run:
           name: cargo install
           command: |
-            cargo install --debug --locked --root /tmp/zenith --path pageserver
-            cargo install --debug --locked --root /tmp/zenith --path walkeeper
-            cargo install --debug --locked --root /tmp/zenith --path zenith
+            BUILD_TYPE="<< parameters.build_type >>"
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              echo "Install debug mode"
+              CARGO_FLAGS="--debug"
+            elif [[ $BUILD_TYPE == "release" ]]; then
+              echo "Install release mode"
+              # The default is release mode; there is no --release flag.
+              CARGO_FLAGS=""
+            fi
+            cargo install $CARGO_FLAGS --locked --root /tmp/zenith --path pageserver
+            cargo install $CARGO_FLAGS --locked --root /tmp/zenith --path walkeeper
+            cargo install $CARGO_FLAGS --locked --root /tmp/zenith --path zenith
 
         # Install the postgres binaries, for use by test jobs
         # FIXME: this is a silly way to do "install"; maybe just output a standard
