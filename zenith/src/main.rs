@@ -181,25 +181,25 @@ fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
 
     // Memorize all direct children of each branch.
     for branch in &branches {
-        if let Some(name) = &branch.ancestor_id {
+        if let Some(tid) = &branch.ancestor_id {
             branches_hash
-                .get_mut(name)
+                .get_mut(tid)
                 .with_context(|| "missing branch info in the HashMap")?
                 .children
                 .push(branch.timeline_id.to_string());
         }
     }
 
-    // Sort children by name to bring some order.
+    // Sort children by tid to bring some minimal order.
     for (_tid, branch) in &mut branches_hash {
         branch.children.sort();
     }
 
     for (_tid, branch) in &branches_hash {
         // Start with root branches (no ancestors) first.
-        // Now it is 'main' branch only, but things may change.
+        // Now there is 'main' branch only, but things may change.
         if branch.info.ancestor_id.is_none() {
-            print_branch(0, 0, branch, &branches_hash)?;
+            print_branch(0, &Vec::from([true]), branch, &branches_hash)?;
         }
     }
 
@@ -209,11 +209,12 @@ fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
 // Recursively print branch info with all its children.
 fn print_branch(
     nesting_level: usize,
-    padding: usize,
+    is_last: &Vec<bool>,
     branch: &BranchTreeEl,
     branches: &HashMap<String, BranchTreeEl>,
 ) -> Result<()> {
-    let new_padding: usize;
+    // Draw main padding
+    print!(" ");
 
     if nesting_level > 0 {
         let lsn = branch
@@ -221,21 +222,49 @@ fn print_branch(
             .ancestor_lsn
             .as_ref()
             .with_context(|| "missing branch info in the HashMap")?;
+        let mut br_sym = "┣━";
 
-        // Six extra chars for graphics, spaces and so on in addition to LSN length.
-        new_padding = padding + 6 + lsn.chars().count();
+        // Draw each nesting padding with proper style
+        // depending on whether its branch ended or not.
+        if nesting_level > 1 {
+            for l in &is_last[1..is_last.len() - 1] {
+                if *l {
+                    print!("   ");
+                } else {
+                    print!("┃  ");
+                }
+            }
+        }
 
-        print!("{}└─ @{}:", " ".repeat(padding), lsn);
-    } else {
-        new_padding = 1;
+        // We are the last in this sub-branch
+        if *is_last.last().unwrap() {
+            br_sym = "┗━";
+        }
+
+        print!("{} @{}: ", br_sym, lsn);
     }
 
-    print!(" {}\n", branch.info.name);
+    // Finally print a branch name with new line
+    println!("{}", branch.info.name);
+
+    let len = branch.children.len();
+    let mut i: usize = 0;
+    let mut is_last_new = is_last.clone();
+    is_last_new.push(false);
 
     for child in &branch.children {
+        i += 1;
+
+        // Mark that the last padding is the end of the branch
+        if i == len {
+            if let Some(last) = is_last_new.last_mut() {
+                *last = true;
+            }
+        }
+
         print_branch(
             nesting_level + 1,
-            new_padding,
+            &is_last_new,
             branches
                 .get(child)
                 .with_context(|| "missing branch info in the HashMap")?,
