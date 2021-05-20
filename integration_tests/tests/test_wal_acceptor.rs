@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::{thread, time};
 
-use control_plane::compute::ComputeControlPlane;
+use control_plane::compute::{PostgresNode, ComputeControlPlane};
 
 use integration_tests;
 use integration_tests::PostgresNodeExt;
@@ -26,7 +26,6 @@ fn start_node_with_wal_proposer(
 }
 
 #[test]
-//#[ignore]
 fn test_embedded_wal_proposer() {
     let local_env = integration_tests::create_test_env("test_embedded_wal_proposer");
 

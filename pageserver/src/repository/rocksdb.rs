@@ -707,11 +707,11 @@ impl Timeline for RocksTimeline {
     /// Get range [begin,end) of stored blocks. Used mostly for SMGR pseudorelations
     /// but can be also applied to normal relations.
     fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)> {
-        let lsn = self.wait_lsn(lsn)?;
+        let _lsn = self.wait_lsn(lsn)?;
         let mut key = CacheKey {
             // minimal key to start with
             tag: BufferTag { rel, blknum: 0 },
-            lsn,
+            lsn: Lsn(0),
         };
         let mut iter = self.db.raw_iterator();
         iter.seek(key.to_bytes()); // locate first entry
@@ -817,12 +817,8 @@ impl Timeline for RocksTimeline {
     ///
     fn get_page_image(&self, tag: BufferTag, lsn: Lsn) -> Result<Option<Bytes>> {
         let key = CacheKey { tag, lsn };
-        let mut key_buf = BytesMut::new();
-        key.pack(&mut key_buf);
-        if let Some(bytes) = self.db.get(&key_buf[..])? {
-            let mut buf = BytesMut::new();
-            buf.extend_from_slice(&bytes);
-            let content = CacheEntryContent::unpack(&mut buf);
+        if let Some(bytes) = self.db.get(key.to_bytes())? {
+            let content = CacheEntryContent::from_slice(&bytes);
             if let CacheEntryContent::PageImage(img) = content {
                 return Ok(Some(img));
             }

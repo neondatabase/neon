@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use fs::File;
 use fs_extra;
-use postgres_ffi::xlog_utils;
+use postgres_ffi::{pg_constants, xlog_utils};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -98,9 +98,6 @@ pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
 
     // Remove pg_wal
     fs::remove_dir_all(tmppath.join("pg_wal"))?;
-
-    force_crash_recovery(&tmppath)?;
-    println!("updated pg_control");
 
     let target = timelinedir.join("snapshots").join(&lsnstr);
     fs::rename(tmppath, &target)?;
@@ -229,7 +226,7 @@ pub(crate) fn create_branch(
         &oldtimelinedir.join("wal"),
         &newtimelinedir.join("wal"),
         startpoint.lsn,
-        16 * 1024 * 1024, // FIXME: assume default WAL segment size
+        pg_constants::WAL_SEGMENT_SIZE,
     )?;
 
     Ok(BranchInfo {
@@ -310,31 +307,6 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
     bail!("could not parse point-in-time {}", s);
 }
 
-// If control file says the cluster was shut down cleanly, modify it, to mark
-// it as crashed. That forces crash recovery when you start the cluster.
-//
-// FIXME:
-// We currently do this to the initial snapshot in "zenith init". It would
-// be more natural to do this when the snapshot is restored instead, but we
-// currently don't have any code to create new snapshots, so it doesn't matter
-// Or better yet, use a less hacky way of putting the cluster into recovery.
-// Perhaps create a backup label file in the data directory when it's restored.
-fn force_crash_recovery(datadir: &Path) -> Result<()> {
-    // Read in the control file
-    let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
-    let mut controlfile =
-        postgres_ffi::decode_pg_control(Bytes::from(fs::read(controlfilepath.as_path())?))?;
-
-    controlfile.state = postgres_ffi::DBState_DB_IN_PRODUCTION;
-
-    fs::write(
-        controlfilepath.as_path(),
-        postgres_ffi::encode_pg_control(controlfile),
-    )?;
-
-    Ok(())
-}
-
 fn create_timeline(conf: &PageServerConf, ancestor: Option<PointInTime>) -> Result<ZTimelineId> {
     // Create initial timeline
     let mut tli_buf = [0u8; 16];
@@ -361,7 +333,7 @@ fn create_timeline(conf: &PageServerConf, ancestor: Option<PointInTime>) -> Resu
 /// If the given LSN is in the middle of a segment, the last segment containing it
 /// is written out as .partial, and padded with zeros.
 ///
-fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: u64) -> Result<()> {
+fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: usize) -> Result<()> {
     let last_segno = upto.segment_number(wal_seg_size);
     let last_segoff = upto.segment_offset(wal_seg_size);
 
@@ -391,11 +363,11 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: u64) -> Res
 
             let src_file = File::open(entry.path())?;
             let mut dst_file = File::create(dst_dir.join(&dst_fname))?;
-            std::io::copy(&mut src_file.take(copylen), &mut dst_file)?;
+            std::io::copy(&mut src_file.take(copylen as u64), &mut dst_file)?;
 
             if copylen < wal_seg_size {
                 std::io::copy(
-                    &mut std::io::repeat(0).take(wal_seg_size - copylen),
+                    &mut std::io::repeat(0).take((wal_seg_size - copylen) as u64),
                     &mut dst_file,
                 )?;
             }
@@ -407,7 +379,7 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: u64) -> Res
 // Find the end of valid WAL in a wal directory
 pub fn find_end_of_wal(conf: &PageServerConf, timeline: ZTimelineId) -> Result<Lsn> {
     let waldir = conf.timeline_path(timeline).join("wal");
-    let (lsn, _tli) = xlog_utils::find_end_of_wal(&waldir, 16 * 1024 * 1024, true);
+    let (lsn, _tli) = xlog_utils::find_end_of_wal(&waldir, pg_constants::WAL_SEGMENT_SIZE, true);
     Ok(Lsn(lsn))
 }
 

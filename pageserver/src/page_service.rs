@@ -925,7 +925,7 @@ impl Connection {
         // find latest snapshot
         let snapshot_lsn =
             restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
-        let req_lsn = lsn.unwrap_or(snapshot_lsn);
+        let req_lsn = lsn.unwrap_or(timeline.get_last_valid_lsn());
         basebackup::send_tarball_at_lsn(
             &mut CopyDataSink { stream },
             timelineid,

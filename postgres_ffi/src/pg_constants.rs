@@ -83,6 +83,7 @@ pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 // pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
 
 // From pg_control.h and rmgrlist.h
+pub const XLOG_NEXTOID: u8 = 0x30;
 pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
 

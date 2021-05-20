@@ -256,7 +256,6 @@ impl PostgresNode {
     // new data directory
     pub fn init_from_page_server(&self) -> Result<()> {
         let pgdata = self.pgdata();
-
         println!(
             "Extracting base backup to create postgres instance: path={} port={}",
             pgdata.display(),
@@ -348,7 +347,6 @@ impl PostgresNode {
         fs::create_dir_all(self.pgdata().join("pg_wal"))?;
         fs::create_dir_all(self.pgdata().join("pg_wal").join("archive_status"))?;
         self.pg_resetwal(&["-f"])?;
-
         Ok(())
     }
 

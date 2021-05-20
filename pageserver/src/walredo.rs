@@ -293,6 +293,10 @@ impl PostgresRedoManagerInternal {
                     let mut status = 0;
                     if info == pg_constants::XLOG_XACT_COMMIT {
                         status = pg_constants::TRANSACTION_STATUS_COMMITTED;
+                        info!(
+                            "Mark transaction {} as committed at LSN {}",
+                            xlogrec.xl_xid, lsn
+                        );
                         transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
@@ -350,7 +354,7 @@ impl PostgresRedoManagerInternal {
                                record.main_data_offset, record.rec.len());
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
-                    let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+                    let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
                     if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
                         page.copy_from_slice(&ZERO_PAGE);
                     } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {

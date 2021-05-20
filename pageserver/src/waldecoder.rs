@@ -84,6 +84,13 @@ impl WalStreamDecoder {
         }
     }
 
+    pub fn set_position(&mut self, lsn: Lsn) {
+        self.lsn = lsn;
+        self.contlen = 0;
+        self.padlen = 0;
+        self.inputbuf.clear();
+    }
+
     pub fn feed_bytes(&mut self, buf: &[u8]) {
         self.inputbuf.extend_from_slice(buf);
     }
@@ -957,7 +964,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             trace!("XLOG_TBLSPC_DROP is not handled yet");
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
         if info == pg_constants::XLOG_HEAP_INSERT {
             let xlrec = XlHeapInsert::decode(&mut buf);
@@ -1011,7 +1018,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             }
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
             let xlrec = XlHeapMultiInsert::decode(&mut buf);
             if (xlrec.flags
@@ -1030,7 +1037,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             }
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
             let mut blk = DecodedBkpBlock::new();
             blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
@@ -1117,6 +1124,14 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         blk.rnode_relnode = 0;
         blk.will_init = true;
         blocks.push(blk);
+    } else if xlogrec.xl_rmid == pg_constants::RM_XLOG_ID {
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+        if info == pg_constants::XLOG_NEXTOID {
+            let next_oid = buf.get_u32_le();
+            if next_oid > checkpoint.nextOid {
+                checkpoint.nextOid = next_oid;
+            }
+        }
     }
 
     DecodedWALRecord {

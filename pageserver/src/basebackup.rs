@@ -149,6 +149,7 @@ fn add_pgcontrol_file(
             let mut checkpoint = postgres_ffi::decode_checkpoint(checkpoint_bytes)?;
 
             checkpoint.redo = lsn.0;
+            checkpoint.nextXid.value += 1;
             // TODO: When we restart master there are no active transaction and oldestXid is
             // equal to nextXid if there are no prepared transactions.
             // Let's ignore them for a while...

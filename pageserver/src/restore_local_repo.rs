@@ -454,6 +454,8 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
             if rec.is_err() {
                 // Assume that an error means we've reached the end of
                 // a partial WAL record. So that's ok.
+                trace!("WAL decoder error {:?}", rec);
+                waldecoder.set_position(Lsn((segno + 1) * pg_constants::WAL_SEGMENT_SIZE as u64));
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
@@ -466,7 +468,10 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
             nrecords += 1;
         }
 
-        info!("restored {} records from WAL file {}", nrecords, filename);
+        info!(
+            "restored {} records from WAL file {} at {}",
+            nrecords, filename, last_lsn
+        );
 
         segno += 1;
         offset = 0;
