@@ -32,7 +32,7 @@ use zenith_utils::seqwait::SeqWait;
 static TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct RocksRepository {
-    conf: PageServerConf,
+    conf: &'static PageServerConf,
     timelines: Mutex<HashMap<ZTimelineId, Arc<RocksTimeline>>>,
 
     walredo_mgr: Arc<dyn WalRedoManager>,
@@ -178,9 +178,12 @@ impl CacheEntryContent {
 }
 
 impl RocksRepository {
-    pub fn new(conf: &PageServerConf, walredo_mgr: Arc<dyn WalRedoManager>) -> RocksRepository {
+    pub fn new(
+        conf: &'static PageServerConf,
+        walredo_mgr: Arc<dyn WalRedoManager>,
+    ) -> RocksRepository {
         RocksRepository {
-            conf: conf.clone(),
+            conf: conf,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
         }
@@ -204,22 +207,22 @@ impl Repository for RocksRepository {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let timeline = RocksTimeline::new(&self.conf, timelineid, self.walredo_mgr.clone());
+                let timeline = RocksTimeline::new(self.conf, timelineid, self.walredo_mgr.clone());
 
-                restore_timeline(&self.conf, &timeline, timelineid)?;
+                restore_timeline(self.conf, &timeline, timelineid)?;
 
                 let timeline_rc = Arc::new(timeline);
 
                 timelines.insert(timelineid, timeline_rc.clone());
 
                 if self.conf.gc_horizon != 0 {
-                    let conf_copy = self.conf.clone();
                     let timeline_rc_copy = timeline_rc.clone();
+                    let conf = self.conf;
                     let _gc_thread = thread::Builder::new()
                         .name("Garbage collection thread".into())
                         .spawn(move || {
                             // FIXME
-                            timeline_rc_copy.do_gc(&conf_copy).expect("GC thread died");
+                            timeline_rc_copy.do_gc(conf).expect("GC thread died");
                         })
                         .unwrap();
                 }
@@ -262,7 +265,7 @@ impl RocksTimeline {
     }
 
     fn new(
-        conf: &PageServerConf,
+        conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         walredo_mgr: Arc<dyn WalRedoManager>,
     ) -> RocksTimeline {
@@ -372,7 +375,7 @@ impl RocksTimeline {
         Ok(0)
     }
 
-    fn do_gc(&self, conf: &PageServerConf) -> anyhow::Result<Bytes> {
+    fn do_gc(&self, conf: &'static PageServerConf) -> anyhow::Result<Bytes> {
         loop {
             thread::sleep(conf.gc_period);
             let last_lsn = self.get_last_valid_lsn();

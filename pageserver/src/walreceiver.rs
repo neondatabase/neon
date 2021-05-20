@@ -45,7 +45,7 @@ lazy_static! {
 
 // Launch a new WAL receiver, or tell one that's running about change in connection string
 pub fn launch_wal_receiver(
-    conf: &PageServerConf,
+    conf: &'static PageServerConf,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
 ) {
@@ -62,11 +62,10 @@ pub fn launch_wal_receiver(
             receivers.insert(timelineid, receiver);
 
             // Also launch a new thread to handle this connection
-            let conf_copy = conf.clone();
             let _walreceiver_thread = thread::Builder::new()
                 .name("WAL receiver thread".into())
                 .spawn(move || {
-                    thread_main(&conf_copy, timelineid);
+                    thread_main(conf, timelineid);
                 })
                 .unwrap();
         }
@@ -87,7 +86,7 @@ fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
 //
 // This is the entry point for the WAL receiver thread.
 //
-fn thread_main(conf: &PageServerConf, timelineid: ZTimelineId) {
+fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId) {
     info!(
         "WAL receiver thread started for timeline : '{}'",
         timelineid

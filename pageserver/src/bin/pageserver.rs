@@ -142,10 +142,12 @@ fn main() -> Result<()> {
         conf.gc_period = parse(period)?;
     }
 
-    start_pageserver(&conf)
+    let leaked: &'static PageServerConf = Box::leak(Box::new(conf));
+
+    start_pageserver(leaked)
 }
 
-fn start_pageserver(conf: &PageServerConf) -> Result<()> {
+fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     let log_filename = "pageserver.log";
     // Don't open the same file for output multiple times;
     // the different fds could overwrite each other's output.
@@ -207,12 +209,11 @@ fn start_pageserver(conf: &PageServerConf) -> Result<()> {
 
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.
-    let conf_copy = conf.clone();
     let page_server_thread = thread::Builder::new()
         .name("Page Service thread".into())
         .spawn(move || {
             // thread code
-            page_service::thread_main(&conf_copy);
+            page_service::thread_main(conf);
         })
         .unwrap();
     threads.push(page_server_thread);

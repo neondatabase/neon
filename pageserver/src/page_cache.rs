@@ -14,7 +14,7 @@ lazy_static! {
     pub static ref REPOSITORY: Mutex<Option<Arc<dyn Repository + Send + Sync>>> = Mutex::new(None);
 }
 
-pub fn init(conf: &PageServerConf) {
+pub fn init(conf: &'static PageServerConf) {
     let mut m = REPOSITORY.lock().unwrap();
 
     // Set up a WAL redo manager, for applying WAL records.

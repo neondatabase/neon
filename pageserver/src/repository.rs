@@ -335,10 +335,13 @@ mod tests {
             workdir: repo_dir.into(),
             pg_distrib_dir: "".into(),
         };
+        // Make a static copy of the config. This can never be free'd, but that's
+        // OK in a test.
+        let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
         let walredo_mgr = TestRedoManager {};
 
-        let repo = rocksdb::RocksRepository::new(&conf, Arc::new(walredo_mgr));
+        let repo = rocksdb::RocksRepository::new(conf, Arc::new(walredo_mgr));
 
         Ok(Box::new(repo))
     }

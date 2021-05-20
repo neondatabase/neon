@@ -424,7 +424,7 @@ impl PagestreamBeMessage {
 ///
 /// Listens for connections, and launches a new handler thread for each.
 ///
-pub fn thread_main(conf: &PageServerConf) {
+pub fn thread_main(conf: &'static PageServerConf) {
     info!("Starting page server on {}", conf.listen_addr);
 
     let listener = TcpListener::bind(conf.listen_addr).unwrap();
@@ -433,7 +433,7 @@ pub fn thread_main(conf: &PageServerConf) {
         let (socket, peer_addr) = listener.accept().unwrap();
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
-        let mut conn_handler = Connection::new(conf.clone(), socket);
+        let mut conn_handler = Connection::new(conf, socket);
 
         thread::spawn(move || {
             if let Err(err) = conn_handler.run() {
@@ -448,11 +448,11 @@ struct Connection {
     stream_in: BufReader<TcpStream>,
     stream: BufWriter<TcpStream>,
     init_done: bool,
-    conf: PageServerConf,
+    conf: &'static PageServerConf,
 }
 
 impl Connection {
-    pub fn new(conf: PageServerConf, socket: TcpStream) -> Connection {
+    pub fn new(conf: &'static PageServerConf, socket: TcpStream) -> Connection {
         Connection {
             stream_in: BufReader::new(socket.try_clone().unwrap()),
             stream: BufWriter::new(socket),

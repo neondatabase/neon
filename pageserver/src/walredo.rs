@@ -75,7 +75,7 @@ pub struct PostgresRedoManager {
 }
 
 struct PostgresRedoManagerInternal {
-    _conf: PageServerConf,
+    _conf: &'static PageServerConf,
 
     request_rx: mpsc::Receiver<WalRedoRequest>,
 }
@@ -106,7 +106,7 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     /// This launches a new thread to handle the requests.
-    pub fn new(conf: &PageServerConf) -> PostgresRedoManager {
+    pub fn new(conf: &'static PageServerConf) -> PostgresRedoManager {
         let (tx, rx) = mpsc::channel();
 
         //
@@ -115,7 +115,6 @@ impl PostgresRedoManager {
         // Get mutable references to the values that we need to pass to the
         // thread.
         let request_rx = rx;
-        let conf_copy = conf.clone();
 
         // Currently, the join handle is not saved anywhere and we
         // won't try restart the thread if it dies.
@@ -123,7 +122,7 @@ impl PostgresRedoManager {
             .name("WAL redo thread".into())
             .spawn(move || {
                 let mut internal = PostgresRedoManagerInternal {
-                    _conf: conf_copy,
+                    _conf: conf,
                     request_rx,
                 };
                 internal.wal_redo_main();
