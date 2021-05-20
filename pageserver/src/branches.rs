@@ -12,10 +12,10 @@ use postgres_ffi::{pg_constants, xlog_utils};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::{
     collections::HashMap,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
@@ -65,17 +65,20 @@ pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
     // and move it to the right location from there.
     let tmppath = std::path::Path::new("tmp");
 
+    print!("running initdb... ");
+    io::stdout().flush()?;
+
     let initdb_path = conf.pg_bin_dir().join("initdb");
-    let initdb = Command::new(initdb_path)
+    let initdb_otput = Command::new(initdb_path)
         .args(&["-D", tmppath.to_str().unwrap()])
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
         .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
         .stdout(Stdio::null())
-        .status()
+        .output()
         .with_context(|| "failed to execute initdb")?;
-    if !initdb.success() {
+    if !initdb_otput.status.success() {
         anyhow::bail!("initdb failed");
     }
     println!("initdb succeeded");
