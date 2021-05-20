@@ -113,10 +113,13 @@ impl PageServerNode {
             if client.is_ok() {
                 break;
             } else {
-                println!("page server not responding yet, retrying ({})...", retries);
+                println!("Pageserver not responding yet, retrying ({})...", retries);
                 thread::sleep(Duration::from_secs(1));
             }
         }
+
+        println!("Pageserver started");
+
         Ok(())
     }
 
@@ -132,6 +135,7 @@ impl PageServerNode {
             let stream = TcpStream::connect(self.address());
             thread::sleep(Duration::from_secs(1));
             if let Err(_e) = stream {
+                println!("Pageserver stopped");
                 return Ok(());
             }
             println!("Stopping pageserver on {}", self.address());
