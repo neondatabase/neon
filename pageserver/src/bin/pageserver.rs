@@ -108,15 +108,6 @@ fn main() -> Result<()> {
         pg_distrib_dir,
     };
 
-    // Create repo and exit if init was requested
-    if arg_matches.is_present("init") {
-        branches::init_repo(&conf, &workdir)?;
-        return Ok(());
-    }
-
-    // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&workdir)?;
-
     if arg_matches.is_present("daemonize") {
         conf.daemonize = true;
     }
@@ -142,9 +133,21 @@ fn main() -> Result<()> {
         conf.gc_period = parse(period)?;
     }
 
-    let leaked: &'static PageServerConf = Box::leak(Box::new(conf));
+    // The configuration is all set up now. Turn it into a 'static
+    // that can be freely stored in structs and passed across threads
+    // as a ref.
+    let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-    start_pageserver(leaked)
+    // Create repo and exit if init was requested
+    if arg_matches.is_present("init") {
+        branches::init_repo(conf, &workdir)?;
+        return Ok(());
+    }
+
+    // Set CWD to workdir for non-daemon modes
+    env::set_current_dir(&workdir)?;
+
+    start_pageserver(conf)
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
