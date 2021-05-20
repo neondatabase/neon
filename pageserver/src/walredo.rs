@@ -23,7 +23,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::sync::Mutex;
@@ -76,7 +76,7 @@ pub struct PostgresRedoManager {
 }
 
 struct PostgresRedoManagerInternal {
-    _conf: &'static PageServerConf,
+    conf: &'static PageServerConf,
 
     request_rx: mpsc::Receiver<WalRedoRequest>,
 }
@@ -122,10 +122,7 @@ impl PostgresRedoManager {
         let _walredo_thread = std::thread::Builder::new()
             .name("WAL redo thread".into())
             .spawn(move || {
-                let mut internal = PostgresRedoManagerInternal {
-                    _conf: conf,
-                    request_rx,
-                };
+                let mut internal = PostgresRedoManagerInternal { conf, request_rx };
                 internal.wal_redo_main();
             })
             .unwrap();
@@ -214,14 +211,13 @@ impl PostgresRedoManagerInternal {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
-        let datadir = format!("wal-redo-datadir");
+        let datadir = self.conf.workdir.join("wal-redo-datadir");
 
         info!("launching WAL redo postgres process");
 
         process = runtime
             .block_on(PostgresRedoProcess::launch(&datadir))
             .unwrap();
-        info!("WAL redo postgres started");
 
         // Loop forever, handling requests as they come.
         loop {
@@ -237,7 +233,7 @@ impl PostgresRedoManagerInternal {
             let _ = request.response_channel.send(result);
 
             if !result_ok {
-                error!("wal-redo-postgres filed to apply request {:?}", request);
+                error!("wal-redo-postgres failed to apply request {:?}", request);
             }
         }
     }
@@ -445,11 +441,17 @@ impl PostgresRedoProcess {
 
     // do that: We may later
     // switch to setting same things in pageserver config file.
-    async fn launch(datadir: &str) -> Result<PostgresRedoProcess, Error> {
-        // Create empty data directory for wal-redo postgres deleting old one.
-        fs::remove_dir_all(datadir).ok();
+    async fn launch(datadir: &Path) -> Result<PostgresRedoProcess, Error> {
+        // Create empty data directory for wal-redo postgres, deleting old one first.
+        if datadir.exists() {
+            info!("directory {:?} exists, removing", &datadir);
+            if let Err(e) = fs::remove_dir_all(&datadir) {
+                error!("could not remove old wal-redo-datadir: {:?}", e);
+            }
+        }
+        info!("running initdb in {:?}", datadir.display());
         let initdb = Command::new("initdb")
-            .args(&["-D", datadir])
+            .args(&["-D", datadir.to_str().unwrap()])
             .arg("-N")
             .output()
             .await
@@ -481,7 +483,10 @@ impl PostgresRedoProcess {
             .spawn()
             .expect("postgres --wal-redo command failed to start");
 
-        info!("launched WAL redo postgres process on {}", datadir);
+        info!(
+            "launched WAL redo postgres process on {:?}",
+            datadir.display()
+        );
 
         let stdin = child.stdin.take().expect("failed to open child's stdin");
         let stderr = child.stderr.take().expect("failed to open child's stderr");
