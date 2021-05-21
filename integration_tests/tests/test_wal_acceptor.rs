@@ -17,10 +17,10 @@ fn start_node_with_wal_proposer(
     wal_acceptors: &String,
 ) -> Arc<PostgresNode> {
     let node = compute_cplane.new_test_master_node(timeline);
-    node.append_conf(
+    let _node = node.append_conf(
         "postgresql.conf",
         &format!("wal_acceptors='{}'\n", wal_acceptors),
-    )?;
+    );
     node.start().unwrap();
     node
 }
