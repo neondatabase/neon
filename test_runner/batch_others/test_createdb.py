@@ -22,10 +22,13 @@ def test_createdb(zenith_cli, pageserver, postgres, pg_bin):
 
     cur.execute('CREATE DATABASE foodb');
 
+    cur.execute('SELECT pg_current_wal_insert_lsn()');
+    lsn = cur.fetchone()[0]
+
     conn.close();
 
     # Create a branch
-    zenith_cli.run(["branch", "test_createdb2", "test_createdb"]);
+    zenith_cli.run(["branch", "test_createdb2", "test_createdb@"+lsn]);
 
     pg2 = postgres.create_start('test_createdb2')
 
