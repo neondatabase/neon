@@ -866,34 +866,42 @@ impl Timeline for RocksTimeline {
         src_db_id: Oid,
         src_tablespace_id: Oid,
     ) -> Result<()> {
-        let key = CacheKey {
-            tag: BufferTag {
-                rel: RelTag {
-                    spcnode: src_tablespace_id,
-                    dbnode: src_db_id,
-                    relnode: 0,
-                    forknum: 0u8,
-                },
-                blknum: 0,
-            },
-            lsn: Lsn(0),
-        };
-        let mut iter = self.db.raw_iterator();
-        iter.seek(key.to_bytes());
         let mut n = 0;
-        while iter.valid() {
-            let mut key = CacheKey::from_slice(iter.key().unwrap());
-            if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
-                break;
-            }
-            key.tag.rel.spcnode = tablespace_id;
-            key.tag.rel.dbnode = db_id;
-            key.lsn = lsn;
+        for forknum in &[
+            pg_constants::MAIN_FORKNUM,
+            pg_constants::FSM_FORKNUM,
+            pg_constants::VISIBILITYMAP_FORKNUM,
+            pg_constants::INIT_FORKNUM,
+            pg_constants::PG_FILENODEMAP_FORKNUM,
+        ] {
+            let key = CacheKey {
+                tag: BufferTag {
+                    rel: RelTag {
+                        spcnode: src_tablespace_id,
+                        dbnode: src_db_id,
+                        relnode: 0,
+                        forknum: *forknum,
+                    },
+                    blknum: 0,
+                },
+                lsn: Lsn(0),
+            };
+            let mut iter = self.db.raw_iterator();
+            iter.seek(key.to_bytes());
+            while iter.valid() {
+                let mut key = CacheKey::from_slice(iter.key().unwrap());
+                if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
+                    break;
+                }
+                key.tag.rel.spcnode = tablespace_id;
+                key.tag.rel.dbnode = db_id;
+                key.lsn = lsn;
 
-            let v = iter.value().unwrap();
-            self.db.put(key.to_bytes(), v)?;
-            n += 1;
-            iter.next();
+                let v = iter.value().unwrap();
+                self.db.put(key.to_bytes(), v)?;
+                n += 1;
+                iter.next();
+            }
         }
         info!(
             "Create database {}/{}, copy {} entries",

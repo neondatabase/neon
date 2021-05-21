@@ -83,6 +83,7 @@ fn add_relmap_files(
     ar: &mut Builder<&mut dyn Write>,
     timeline: &Arc<dyn Timeline>,
     lsn: Lsn,
+    snappath: &str,
 ) -> anyhow::Result<()> {
     for db in timeline.get_databases(lsn)?.iter() {
         let tag = BufferTag {
@@ -95,8 +96,12 @@ fn add_relmap_files(
         } else {
             // User defined tablespaces are not supported
             assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
+            let src_path = format!("{}/base/1/PG_VERSION", snappath);
+            let dst_path = format!("base/{}/PG_VERSION", db.dbnode);
+            ar.append_path_with_name(&src_path, &dst_path)?;
             format!("base/{}/pg_filenode.map", db.dbnode)
         };
+        info!("Deliver {}", path);
         assert!(img.len() == 512);
         let header = new_tar_header(&path, img.len() as u64)?;
         ar.append(&header, &img[..])?;
@@ -239,7 +244,7 @@ pub fn send_tarball_at_lsn(
         pg_constants::PG_MXACT_OFFSETS_FORKNUM,
         lsn,
     )?;
-    add_relmap_files(&mut ar, timeline, lsn)?;
+    add_relmap_files(&mut ar, timeline, lsn, &snappath)?;
     add_twophase_files(&mut ar, timeline, lsn)?;
     add_pgcontrol_file(&mut ar, timeline, lsn)?;
 
