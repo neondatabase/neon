@@ -800,20 +800,21 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         blocks.push(blk);
     } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
         let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
-        if info == pg_constants::XLOG_XACT_COMMIT {
-            let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_XACT_FORKNUM;
-            blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
-            trace!(
-                "XLOG_XACT_COMMIT xl_info {} xl_prev {:X}/{:X}  xid {} updates block {} main_data_len {}",
-                xlogrec.xl_info, (xlogrec.xl_prev >> 32),
-                xlogrec.xl_prev & 0xffffffff,
-                xlogrec.xl_xid,
-                blk.blkno,
-                main_data_len
-            );
-            blocks.push(blk);
-
+        if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_COMMIT_PREPARED {
+			if info == pg_constants::XLOG_XACT_COMMIT {
+				let mut blk = DecodedBkpBlock::new();
+				blk.forknum = pg_constants::PG_XACT_FORKNUM;
+				blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
+				trace!(
+					"XLOG_XACT_COMMIT xl_info {} xl_prev {:X}/{:X}  xid {} updates block {} main_data_len {}",
+					xlogrec.xl_info, (xlogrec.xl_prev >> 32),
+					xlogrec.xl_prev & 0xffffffff,
+					xlogrec.xl_xid,
+					blk.blkno,
+					main_data_len
+				);
+				blocks.push(blk);
+			}
             //parse commit record to extract subtrans entries
             // xl_xact_commit starts with time of commit
             let _xact_time = buf.get_i64_le();
@@ -864,23 +865,29 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
-                let _xid = buf.get_u32_le();
+                let xid = buf.get_u32_le();
+				let mut blk = DecodedBkpBlock::new();
+				blk.forknum = pg_constants::PG_XACT_FORKNUM;
+				blk.blkno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+				blocks.push(blk);
                 trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
                 //TODO handle this to be able to restore pg_twophase on node start
             }
-        } else if info == pg_constants::XLOG_XACT_ABORT {
-            let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_XACT_FORKNUM;
-            blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
-            trace!(
-                "XLOG_XACT_ABORT xl_info {} xl_prev {:X}/{:X} xid {} updates block {} main_data_len {}",
-                xlogrec.xl_info, (xlogrec.xl_prev >> 32),
-                xlogrec.xl_prev & 0xffffffff,
-                xlogrec.xl_xid,
-                blk.blkno,
-                main_data_len
-            );
-            blocks.push(blk);
+        } else if info == pg_constants::XLOG_XACT_ABORT || info == pg_constants::XLOG_XACT_ABORT_PREPARED {
+			if info == pg_constants::XLOG_XACT_ABORT {
+				let mut blk = DecodedBkpBlock::new();
+				blk.forknum = pg_constants::PG_XACT_FORKNUM;
+				blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
+				trace!(
+					"XLOG_XACT_ABORT xl_info {} xl_prev {:X}/{:X} xid {} updates block {} main_data_len {}",
+					xlogrec.xl_info, (xlogrec.xl_prev >> 32),
+					xlogrec.xl_prev & 0xffffffff,
+					xlogrec.xl_xid,
+					blk.blkno,
+					main_data_len
+				);
+				blocks.push(blk);
+			}
             //parse abort record to extract subtrans entries
             // xl_xact_abort starts with time of commit
             let _xact_time = buf.get_i64_le();
@@ -924,7 +931,11 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
-                let _xid = buf.get_u32_le();
+                let xid = buf.get_u32_le();
+				let mut blk = DecodedBkpBlock::new();
+				blk.forknum = pg_constants::PG_XACT_FORKNUM;
+				blk.blkno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+				blocks.push(blk);
                 trace!("XLOG_XACT_ABORT-XACT_XINFO_HAS_TWOPHASE");
             }
         } else if info == pg_constants::XLOG_XACT_PREPARE {
@@ -932,6 +943,8 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             blk.forknum = pg_constants::PG_TWOPHASE_FORKNUM;
             blk.blkno = xlogrec.xl_xid;
             blk.will_init = true;
+            blocks.push(blk);
+			info!("Prepare transaction {}", xlogrec.xl_xid);
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_DBASE_ID {
         let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;

@@ -60,6 +60,8 @@ pub const CLOG_TRUNCATE: u8 = 0x10;
 pub const XLOG_XACT_COMMIT: u8 = 0x00;
 pub const XLOG_XACT_PREPARE: u8 = 0x10;
 pub const XLOG_XACT_ABORT: u8 = 0x20;
+pub const XLOG_XACT_COMMIT_PREPARED: u8 = 0x30;
+pub const XLOG_XACT_ABORT_PREPARED: u8 = 0x40;
 
 // From srlu.h
 pub const SLRU_PAGES_PER_SEGMENT: u32 = 32;
