@@ -20,7 +20,7 @@ fn start_node_with_wal_proposer(
     node.append_conf(
         "postgresql.conf",
         &format!("wal_acceptors='{}'\n", wal_acceptors),
-    );
+    )?;
     node.start().unwrap();
     node
 }
