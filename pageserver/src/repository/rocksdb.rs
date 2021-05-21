@@ -542,13 +542,13 @@ impl RocksTimeline {
             );
             lsn = last_valid_lsn;
         }
-        //trace!("Start waiting for LSN {}, valid LSN is {}", lsn,  self.last_valid_lsn.load());
+        trace!("Start waiting for LSN {}, valid LSN is {}", lsn,  self.last_valid_lsn.load());
         self.last_valid_lsn
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
                 format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive",
-                    lsn
+                    "Timed out while waiting for WAL record at LSN {} to arrive. valid LSN in {}",
+                    lsn, self.last_valid_lsn.load(),
                 )
             })?;
         //trace!("Stop waiting for LSN {}, valid LSN is {}", lsn,  self.last_valid_lsn.load());
