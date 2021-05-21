@@ -556,13 +556,6 @@ mod tests {
     }
 
     /// Test get_relsize() and truncation.
-    ///
-    /// FIXME: The RocksRepository implementation returns wrong relation size, if
-    /// you make a request with an old LSN. It seems to ignore the requested LSN
-    /// and always return result as of latest LSN. For such cases, the expected
-    /// results below match the current RocksRepository behavior, so that the test
-    /// passes, and the actually correct answers are in comments like
-    /// "// CORRECT: <correct answer>"
     #[test]
     fn test_relsize() -> Result<()> {
         // get_timeline() with non-existent timeline id should fail
@@ -582,13 +575,15 @@ mod tests {
 
         tline.advance_last_valid_lsn(Lsn(5));
 
+        // FIXME: The rocksdb implementation erroneously returns 'true' here, even
+        // though the relation was created only at a later LSN
         // rocksdb implementation erroneosly returns 'true' here
         assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(1))?, true); // CORRECT: false
-                                                                        // likewise, it returns wrong size here
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(1))?, 3); // CORRECT: 0 (or error?)
+        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
+        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(1))?, 0); // CORRECT: throw error
 
         assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(2))?, true);
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(2))?, 3); // CORRECT: 1
+        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(2))?, 1);
         assert_eq!(tline.get_relsize(TESTREL_A, Lsn(5))?, 3);
 
         // Check page contents at each LSN
@@ -640,7 +635,7 @@ mod tests {
         );
 
         // should still see the truncated block with older LSN
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(5))?, 2); // CORRECT: 3
+        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(5))?, 3);
         assert_eq!(
             tline.get_page_at_lsn(TEST_BUF(2), Lsn(5))?,
             TEST_IMG("foo blk 2 at 5")

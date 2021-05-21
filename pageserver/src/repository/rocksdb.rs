@@ -353,6 +353,12 @@ impl RocksTimeline {
             if iter.valid() {
                 let thiskey = RepositoryKey::from_slice(iter.key().unwrap());
                 if thiskey.tag.rel == rel {
+                    // Ignore entries with later LSNs.
+                    if thiskey.lsn > lsn {
+                        key.tag.blknum = thiskey.tag.blknum;
+                        continue;
+                    }
+
                     let content = CacheEntryContent::from_slice(iter.value().unwrap());
                     if let CacheEntryContent::Truncation = content {
                         if thiskey.tag.blknum > 0 {
