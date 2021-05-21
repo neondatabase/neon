@@ -9,6 +9,8 @@ use postgres_ffi::relfile_utils::forknumber_to_name;
 use std::fmt;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
+use log::*;
+use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
@@ -69,6 +71,12 @@ pub trait Timeline {
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
 
+    /// Put raw data
+    fn put_raw_data(&self, key: RepositoryKey, data: &[u8]) -> Result<()>;
+
+    /// Get repository iterator
+    fn iterator(&self) -> Box<dyn RepositoryIterator + '_>;
+
     /// Create a new database from a template database
     ///
     /// In PostgreSQL, CREATE DATABASE works by scanning the data directory and
@@ -81,7 +89,49 @@ pub trait Timeline {
         tablespace_id: Oid,
         src_db_id: Oid,
         src_tablespace_id: Oid,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let mut n = 0;
+        for forknum in &[
+            pg_constants::MAIN_FORKNUM,
+            pg_constants::FSM_FORKNUM,
+            pg_constants::VISIBILITYMAP_FORKNUM,
+            pg_constants::INIT_FORKNUM,
+            pg_constants::PG_FILENODEMAP_FORKNUM,
+        ] {
+            let key = RepositoryKey {
+                tag: BufferTag {
+                    rel: RelTag {
+                        spcnode: src_tablespace_id,
+                        dbnode: src_db_id,
+                        relnode: 0,
+                        forknum: *forknum,
+                    },
+                    blknum: 0,
+                },
+                lsn: Lsn(0),
+            };
+            let mut iter = self.iterator();
+            iter.first(&key);
+            while iter.valid() {
+                let mut key = iter.key();
+                if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
+                    break;
+                }
+                key.tag.rel.spcnode = tablespace_id;
+                key.tag.rel.dbnode = db_id;
+                key.lsn = lsn;
+
+                self.put_raw_data(key, iter.value())?;
+                n += 1;
+                iter.next();
+            }
+        }
+        info!(
+            "Create database {}/{}, copy {} entries",
+            tablespace_id, db_id, n
+        );
+        Ok(())
+    }
 
     ///
     /// Helper function to parse a WAL record and call the above functions for all the
@@ -167,15 +217,159 @@ pub trait Timeline {
     fn advance_last_record_lsn(&self, lsn: Lsn);
     fn get_last_record_lsn(&self) -> Lsn;
 
+    //
+    // Wait until WAL has been received up to the given LSN.
+    //
+    fn wait_lsn(&self, lsn: Lsn) -> Result<Lsn>;
+
     /// Get range [begin,end) of stored blocks. Used mostly for SMGR pseudorelations
     /// but can be also applied to normal relations.
-    fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)>;
+    fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)> {
+        let _lsn = self.wait_lsn(lsn)?;
+        let mut key = RepositoryKey {
+            // minimal key to start with
+            tag: BufferTag { rel, blknum: 0 },
+            lsn: Lsn(0),
+        };
+        let mut iter = self.iterator();
+        iter.first(&key);
+        if iter.valid() {
+            let thiskey = iter.key();
+            let tag = thiskey.tag;
+            if tag.rel == rel {
+                // still trversing this relation
+                let first_blknum = tag.blknum;
+                key.tag.blknum = u32::MAX; // maximal key
+                iter.last(&key); // locate last entry
+                if iter.valid() {
+                    let thiskey = iter.key();
+                    let last_blknum = thiskey.tag.blknum;
+                    return Ok((first_blknum, last_blknum + 1)); // upper boundary is exclusive
+                }
+            }
+        }
+        Ok((0, 0)) // empty range
+    }
 
     /// Get vector of databases (represented using RelTag only dbnode and spcnode fields are used)
-    fn get_databases(&self, lsn: Lsn) -> Result<Vec<RelTag>>;
+    fn get_databases(&self, lsn: Lsn) -> Result<Vec<RelTag>> {
+        let key = RepositoryKey {
+            // minimal key
+            tag: BufferTag {
+                rel: RelTag {
+                    forknum: pg_constants::PG_FILENODEMAP_FORKNUM,
+                    spcnode: 0,
+                    dbnode: 0,
+                    relnode: 0,
+                },
+                blknum: 0,
+            },
+            lsn: Lsn(0),
+        };
+        let mut dbs = Vec::new();
+
+        let mut iter = self.iterator();
+        iter.first(&key);
+        let mut prev_tag = key.tag.rel;
+        while iter.valid() {
+            let key = iter.key();
+            if key.tag.rel.forknum != pg_constants::PG_FILENODEMAP_FORKNUM {
+                break; // we are done with this fork
+            }
+            if key.tag.rel != prev_tag && key.lsn <= lsn {
+                prev_tag = key.tag.rel;
+                dbs.push(prev_tag); // collect unique tags
+            }
+            iter.next();
+        }
+        return Ok(dbs);
+    }
 
     /// Get vector of prepared twophase transactions
-    fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>>;
+    fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>> {
+        let key = RepositoryKey {
+            // minimal key
+            tag: BufferTag {
+                rel: RelTag {
+                    forknum: pg_constants::PG_TWOPHASE_FORKNUM,
+                    spcnode: 0,
+                    dbnode: 0,
+                    relnode: 0,
+                },
+                blknum: 0,
+            },
+            lsn: Lsn(0),
+        };
+        let mut gxacts = Vec::new();
+
+        let mut iter = self.iterator();
+        iter.first(&key);
+        while iter.valid() {
+            let key = iter.key();
+            if key.tag.rel.forknum != pg_constants::PG_TWOPHASE_FORKNUM {
+                break; // we are done with this fork
+            }
+            if key.lsn <= lsn {
+                let xid = key.tag.blknum;
+                let tag = BufferTag {
+                    rel: RelTag {
+                        forknum: pg_constants::PG_XACT_FORKNUM,
+                        spcnode: 0,
+                        dbnode: 0,
+                        relnode: 0,
+                    },
+                    blknum: xid / pg_constants::CLOG_XACTS_PER_PAGE,
+                };
+                let clog_page = self.get_page_at_lsn(tag, lsn)?;
+                let status = transaction_id_get_status(xid, &clog_page[..]);
+                if status == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
+                    gxacts.push(xid);
+                }
+            }
+            iter.next();
+        }
+        return Ok(gxacts);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct RepositoryKey {
+    pub tag: BufferTag,
+    pub lsn: Lsn,
+}
+
+impl RepositoryKey {
+    fn pack(&self, buf: &mut BytesMut) {
+        self.tag.pack(buf);
+        buf.put_u64(self.lsn.0);
+    }
+    fn unpack(buf: &mut Bytes) -> RepositoryKey {
+        RepositoryKey {
+            tag: BufferTag::unpack(buf),
+            lsn: Lsn::from(buf.get_u64()),
+        }
+    }
+
+    fn from_slice(slice: &[u8]) -> Self {
+        let mut buf = Bytes::copy_from_slice(slice);
+        Self::unpack(&mut buf)
+    }
+
+    fn to_bytes(&self) -> BytesMut {
+        let mut buf = BytesMut::new();
+        self.pack(&mut buf);
+        buf
+    }
+}
+
+pub trait RepositoryIterator {
+    fn first(&mut self, key: &RepositoryKey);
+    fn last(&mut self, key: &RepositoryKey);
+    fn next(&mut self);
+    fn prev(&mut self);
+    fn valid(&self) -> bool;
+    fn key(&self) -> RepositoryKey;
+    fn value(&self) -> &[u8];
 }
 
 #[derive(Clone)]
