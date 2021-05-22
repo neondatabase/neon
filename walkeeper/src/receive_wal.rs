@@ -22,7 +22,7 @@ use crate::WalAcceptorConf;
 use pageserver::ZTimelineId;
 use postgres_ffi::xlog_utils::{TimeLineID, XLogFileName, MAX_SEND_SIZE, XLOG_BLCKSZ};
 
-pub const SK_MAGIC: u32 = 0xCafeCeefu32;
+pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 1;
 const SK_PROTOCOL_VERSION: u32 = 1;
 const UNKNOWN_SERVER_VERSION: u32 = 0;

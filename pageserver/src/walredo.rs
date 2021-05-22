@@ -170,22 +170,21 @@ impl WalRedoManager for PostgresRedoManager {
 }
 
 fn mx_offset_to_flags_offset(xid: MultiXactId) -> usize {
-    return ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32) as u16
+    ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32) as u16
         % pg_constants::MULTIXACT_MEMBERGROUPS_PER_PAGE
-        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE) as usize;
+        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE) as usize
 }
 
 fn mx_offset_to_flags_bitshift(xid: MultiXactId) -> u16 {
-    return (xid as u16) % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP
-        * pg_constants::MXACT_MEMBER_BITS_PER_XACT;
+    (xid as u16) % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP
+        * pg_constants::MXACT_MEMBER_BITS_PER_XACT
 }
 
 /* Location (byte offset within page) of TransactionId of given member */
 fn mx_offset_to_member_offset(xid: MultiXactId) -> usize {
-    return mx_offset_to_flags_offset(xid)
+    mx_offset_to_flags_offset(xid)
         + (pg_constants::MULTIXACT_FLAGBYTES_PER_GROUP
-            + (xid as u16 % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP) * 4)
-            as usize;
+            + (xid as u16 % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP) * 4) as usize
 }
 
 ///
@@ -347,9 +346,9 @@ impl PostgresRedoManagerInternal {
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
                     let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-                    if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
-                        page.copy_from_slice(&ZERO_PAGE);
-                    } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
+                    if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE
+                        || info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE
+                    {
                         page.copy_from_slice(&ZERO_PAGE);
                     } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                         let xlrec = XlMultiXactCreate::decode(&mut buf);
@@ -388,7 +387,7 @@ impl PostgresRedoManagerInternal {
                         // empty page image indicates that this SLRU page is truncated and can be removed by GC
                         page.clear();
                     } else {
-                        assert!(false);
+                        panic!();
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
                     page.clear();

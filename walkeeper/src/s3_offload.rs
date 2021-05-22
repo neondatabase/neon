@@ -12,8 +12,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::iter::FromIterator;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::SystemTime;
 use tokio::runtime;
 use tokio::time::sleep;
@@ -42,7 +41,7 @@ pub fn thread_main(conf: WalAcceptorConf) {
 async fn offload_files(
     bucket: &Bucket,
     listing: &HashSet<String>,
-    dir_path: &PathBuf,
+    dir_path: &Path,
     conf: &WalAcceptorConf,
 ) -> Result<u64> {
     let horizon = SystemTime::now() - conf.ttl.unwrap();
@@ -93,11 +92,10 @@ async fn main_loop(conf: &WalAcceptorConf) -> Result<()> {
         let results = bucket
             .list("walarchive/".to_string(), Some("".to_string()))
             .await?;
-        let listing = HashSet::from_iter(
-            results
-                .iter()
-                .flat_map(|b| b.contents.iter().map(|o| o.key.clone())),
-        );
+        let listing = results
+            .iter()
+            .flat_map(|b| b.contents.iter().map(|o| o.key.clone()))
+            .collect();
 
         let n = offload_files(&bucket, &listing, &conf.data_dir, conf).await?;
         info!("Offload {} files to S3", n);

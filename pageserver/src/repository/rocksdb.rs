@@ -184,7 +184,7 @@ impl RocksRepository {
         walredo_mgr: Arc<dyn WalRedoManager>,
     ) -> RocksRepository {
         RocksRepository {
-            conf: conf,
+            conf,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
         }
@@ -666,7 +666,7 @@ impl Timeline for RocksTimeline {
             }
             iter.next();
         }
-        return Ok(gxacts);
+        Ok(gxacts)
     }
 
     /// Get databases. This function is used to local pg_filenode.map files
@@ -700,7 +700,7 @@ impl Timeline for RocksTimeline {
             }
             iter.next();
         }
-        return Ok(dbs);
+        Ok(dbs)
     }
 
     /// Get range [begin,end) of stored blocks. Used mostly for SMGR pseudorelations
@@ -822,7 +822,7 @@ impl Timeline for RocksTimeline {
                 return Ok(Some(img));
             }
         }
-        return Ok(None);
+        Ok(None)
     }
 
     ///
