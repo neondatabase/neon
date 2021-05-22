@@ -5,7 +5,6 @@ use std::{thread, time};
 
 use control_plane::compute::{ComputeControlPlane, PostgresNode};
 
-use integration_tests;
 use integration_tests::PostgresNodeExt;
 use integration_tests::TestStorageControlPlane;
 
@@ -14,7 +13,7 @@ const DOWNTIME: u64 = 2;
 fn start_node_with_wal_proposer(
     timeline: &str,
     compute_cplane: &mut ComputeControlPlane,
-    wal_acceptors: &String,
+    wal_acceptors: &str,
 ) -> Arc<PostgresNode> {
     let node = compute_cplane.new_test_master_node(timeline);
     let _node = node.append_conf(
@@ -100,8 +99,7 @@ fn test_many_timelines() {
     let wal_acceptors = storage_cplane.get_wal_acceptor_conn_info();
 
     // Create branches
-    let mut timelines: Vec<String> = Vec::new();
-    timelines.push("main".to_string());
+    let mut timelines: Vec<String> = vec!["main".to_string()];
 
     for i in 1..N_TIMELINES {
         let branchname = format!("experimental{}", i);

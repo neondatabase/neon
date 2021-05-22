@@ -87,7 +87,7 @@ impl ReplicationConn {
     /// Helper function that parses a pair of LSNs.
     fn parse_start_stop(cmd: &[u8]) -> Result<(Lsn, Lsn)> {
         let re = Regex::new(r"([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
-        let caps = re.captures_iter(str::from_utf8(&cmd[..])?);
+        let caps = re.captures_iter(str::from_utf8(cmd)?);
         let mut lsns = caps.map(|cap| cap[1].parse::<Lsn>());
         let start_pos = lsns
             .next()
@@ -107,10 +107,10 @@ impl ReplicationConn {
 
         // If that failed, try it without the .partial extension.
         match File::open(&wal_file_path) {
-            Ok(opened_file) => return Ok(opened_file),
+            Ok(opened_file) => Ok(opened_file),
             Err(e) => {
                 error!("Failed to open log file {:?}: {}", &wal_file_path, e);
-                return Err(e.into());
+                Err(e.into())
             }
         }
     }

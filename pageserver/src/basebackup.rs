@@ -51,7 +51,7 @@ fn add_slru_segments(
         let tag = BufferTag { rel, blknum: page };
         let img = timeline.get_page_at_lsn(tag, lsn)?;
         // Zero length image indicates truncated segment: just skip it
-        if img.len() != 0 {
+        if !img.is_empty() {
             assert!(img.len() == pg_constants::BLCKSZ as usize);
 
             let segno = page / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -381,7 +381,7 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
         let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
 
         Ok(())
-    } else if let Some(_) = path.strip_prefix("pg_tblspc/") {
+    } else if path.strip_prefix("pg_tblspc/").is_some() {
         // TODO
         error!("tablespaces not implemented yet");
         Err(FilePathError::InvalidFileName)

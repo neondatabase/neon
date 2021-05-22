@@ -7,7 +7,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use fs::File;
-use fs_extra;
 use postgres_ffi::{pg_constants, xlog_utils};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -340,40 +339,38 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: usize) -> R
     let last_segno = upto.segment_number(wal_seg_size);
     let last_segoff = upto.segment_offset(wal_seg_size);
 
-    for entry in fs::read_dir(src_dir).unwrap() {
-        if let Ok(entry) = entry {
-            let entry_name = entry.file_name();
-            let fname = entry_name.to_str().unwrap();
+    for entry in fs::read_dir(src_dir).unwrap().flatten() {
+        let entry_name = entry.file_name();
+        let fname = entry_name.to_str().unwrap();
 
-            // Check if the filename looks like an xlog file, or a .partial file.
-            if !xlog_utils::IsXLogFileName(fname) && !xlog_utils::IsPartialXLogFileName(fname) {
-                continue;
-            }
-            let (segno, _tli) = xlog_utils::XLogFromFileName(fname, wal_seg_size as usize);
+        // Check if the filename looks like an xlog file, or a .partial file.
+        if !xlog_utils::IsXLogFileName(fname) && !xlog_utils::IsPartialXLogFileName(fname) {
+            continue;
+        }
+        let (segno, _tli) = xlog_utils::XLogFromFileName(fname, wal_seg_size as usize);
 
-            let copylen;
-            let mut dst_fname = PathBuf::from(fname);
-            if segno > last_segno {
-                // future segment, skip
-                continue;
-            } else if segno < last_segno {
-                copylen = wal_seg_size;
-                dst_fname.set_extension("");
-            } else {
-                copylen = last_segoff;
-                dst_fname.set_extension("partial");
-            }
+        let copylen;
+        let mut dst_fname = PathBuf::from(fname);
+        if segno > last_segno {
+            // future segment, skip
+            continue;
+        } else if segno < last_segno {
+            copylen = wal_seg_size;
+            dst_fname.set_extension("");
+        } else {
+            copylen = last_segoff;
+            dst_fname.set_extension("partial");
+        }
 
-            let src_file = File::open(entry.path())?;
-            let mut dst_file = File::create(dst_dir.join(&dst_fname))?;
-            std::io::copy(&mut src_file.take(copylen as u64), &mut dst_file)?;
+        let src_file = File::open(entry.path())?;
+        let mut dst_file = File::create(dst_dir.join(&dst_fname))?;
+        std::io::copy(&mut src_file.take(copylen as u64), &mut dst_file)?;
 
-            if copylen < wal_seg_size {
-                std::io::copy(
-                    &mut std::io::repeat(0).take((wal_seg_size - copylen) as u64),
-                    &mut dst_file,
-                )?;
-            }
+        if copylen < wal_seg_size {
+            std::io::copy(
+                &mut std::io::repeat(0).take((wal_seg_size - copylen) as u64),
+                &mut dst_file,
+            )?;
         }
     }
     Ok(())

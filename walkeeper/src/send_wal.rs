@@ -49,7 +49,7 @@ impl SendWalConn {
     /// Send WAL to replica or WAL receiver using standard libpq replication protocol
     ///
     pub fn run(mut self) -> Result<()> {
-        let peer_addr = self.peer_addr.clone();
+        let peer_addr = self.peer_addr;
         info!("WAL sender to {:?} is started", peer_addr);
 
         // Handle the startup message first.

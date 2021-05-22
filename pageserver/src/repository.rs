@@ -347,7 +347,7 @@ mod tests {
             gc_horizon: 64 * 1024 * 1024,
             gc_period: Duration::from_secs(10),
             listen_addr: "127.0.0.1:5430".parse().unwrap(),
-            workdir: repo_dir.into(),
+            workdir: repo_dir,
             pg_distrib_dir: "".into(),
         };
         // Make a static copy of the config. This can never be free'd, but that's
