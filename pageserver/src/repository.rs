@@ -177,6 +177,25 @@ pub struct RepositoryStats {
     pub num_getpage_requests: Lsn,
 }
 
+///
+/// Relation data file segment id throughout the Postgres cluster.
+///
+/// Every data file in Postgres is uniquely identified by 4 numbers:
+/// - relation id / node (`relnode`)
+/// - database id (`dbnode`)
+/// - tablespace id (`spcnode`), in short this is a unique id of a separate
+///   directory to store data files.
+/// - forknumber (`forknum`) is used to split different kinds of data of the same relation
+///   between some set of files (`relnode`, `relnode_fsm`, `relnode_vm`).
+///
+/// In native Postgres code `RelFileNode` structure and individual `ForkNumber` value
+/// are used for the same purpose.
+/// [See more related comments here](https:///github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/relfilenode.h#L57).
+///
+/// We use additional fork numbers to logically separate relational and
+/// non-relational data inside pageserver key-value storage.
+/// See, e.g., `ROCKSDB_SPECIAL_FORKNUM`.
+///
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct RelTag {
     pub forknum: u8,
@@ -203,6 +222,13 @@ impl fmt::Display for RelTag {
     }
 }
 
+///
+/// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
+/// This is used as a part of the key inside key-value storage (RocksDB currently).
+///
+/// In Postgres `BufferTag` structure is used for exactly the same purpose.
+/// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
+///
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct BufferTag {
     pub rel: RelTag,
