@@ -574,10 +574,10 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         xlogrec.xl_rmid,
         xlogrec.xl_info
     );
-    if xlogrec.xl_xid > checkpoint.nextXid.value as u32 {
+    if xlogrec.xl_xid >= checkpoint.nextXid.value as u32 {
         // TODO: handle XID wraparound
         checkpoint.nextXid = FullTransactionId {
-            value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | xlogrec.xl_xid as u64,
+            value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | (xlogrec.xl_xid+1) as u64,
         };
     }
     let remaining = xlogrec.xl_tot_len - SizeOfXLogRecord;
@@ -1080,18 +1080,18 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 blk.blkno = blkno;
                 blocks.push(blk);
             }
-            if xlrec.mid > checkpoint.nextMulti {
-                checkpoint.nextMulti = xlrec.mid;
+            if xlrec.mid >= checkpoint.nextMulti {
+                checkpoint.nextMulti = xlrec.mid+1;
             }
-            if xlrec.moff > checkpoint.nextMultiOffset {
-                checkpoint.nextMultiOffset = xlrec.moff;
+            if xlrec.moff+xlrec.nmembers > checkpoint.nextMultiOffset {
+                checkpoint.nextMultiOffset = xlrec.moff+xlrec.nmembers;
             }
             let max_xid = xlrec
                 .members
                 .iter()
                 .fold(checkpoint.nextXid.value as u32, |acc, mbr| {
-                    if mbr.xid > acc {
-                        mbr.xid
+                    if mbr.xid >= acc {
+                        mbr.xid+1
                     } else {
                         acc
                     }
