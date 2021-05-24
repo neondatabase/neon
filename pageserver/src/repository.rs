@@ -15,21 +15,17 @@ use zenith_utils::lsn::Lsn;
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository {
     /// Get Timeline handle for given zenith timeline ID.
-    ///
-    /// The Timeline is expected to be already "open", i.e. `get_or_restore_timeline`
-    /// should've been called on it earlier already.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
-    /// Get Timeline handle for given zenith timeline ID.
-    ///
-    /// Creates a new Timeline object if it's not "open" already.
-    fn get_or_restore_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
+    /// Create a new, empty timeline. The caller is responsible for loading data into it
+    fn create_empty_timeline(
+        &self,
+        timelineid: ZTimelineId,
+        start_lsn: Lsn,
+    ) -> Result<Arc<dyn Timeline>>;
 
-    /// Create an empty timeline, without loading any data into it from possible on-disk snapshot.
-    ///
-    /// For unit tests.
-    #[cfg(test)]
-    fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
+    /// Branch a timeline
+    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
     //fn get_stats(&self) -> RepositoryStats;
 }
@@ -163,6 +159,13 @@ pub trait Timeline {
     /// valid LSN, so that the WAL receiver knows where to restart streaming.
     fn advance_last_record_lsn(&self, lsn: Lsn);
     fn get_last_record_lsn(&self) -> Lsn;
+
+    ///
+    /// Flush to disk all data that was written with the put_* functions
+    ///
+    /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
+    /// know anything about them here in the repository.
+    fn checkpoint(&self) -> Result<()>;
 }
 
 #[derive(Clone)]
@@ -352,7 +355,7 @@ mod tests {
         // Create timeline to work on
         let repo = get_test_repo("test_relsize")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
         tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"));
@@ -439,7 +442,7 @@ mod tests {
     fn test_large_rel() -> Result<()> {
         let repo = get_test_repo("test_large_rel")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
 

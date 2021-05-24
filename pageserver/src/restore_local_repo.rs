@@ -1,15 +1,7 @@
-//
-// Restore chunks from local Zenith repository
-//
-// This runs once at Page Server startup. It loads all the "snapshots" and all
-// WAL from all timelines from the local zenith repository into the in-memory page
-// cache.
-//
-// This also initializes the "last valid LSN" in the page cache to the last LSN
-// seen in the WAL, so that when the WAL receiver is started, it starts
-// streaming from that LSN.
-//
-
+//!
+//! Import data and WAL from a PostgreSQL data directory and WAL segments into
+//! zenith repository
+//!
 use log::*;
 use std::cmp::max;
 use std::fs;
@@ -30,53 +22,6 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use zenith_utils::lsn::Lsn;
-
-///
-/// Load all WAL and all relation data pages from local disk into the repository.
-///
-pub fn restore_timeline(
-    conf: &PageServerConf,
-    timeline: &dyn Timeline,
-    timelineid: ZTimelineId,
-) -> Result<()> {
-    let timelinepath = PathBuf::from("timelines").join(timelineid.to_string());
-
-    if !timelinepath.exists() {
-        anyhow::bail!("timeline {} does not exist in the page server's repository");
-    }
-
-    // Scan .zenith/timelines/<timeline>/snapshots
-    let snapshotspath = PathBuf::from("timelines")
-        .join(timelineid.to_string())
-        .join("snapshots");
-
-    let mut last_snapshot_lsn: Lsn = Lsn(0);
-
-    for direntry in fs::read_dir(&snapshotspath).unwrap() {
-        let direntry = direntry?;
-        let filename = direntry.file_name();
-        let lsn = Lsn::from_filename(&filename)?;
-        last_snapshot_lsn = max(lsn, last_snapshot_lsn);
-
-        // FIXME: pass filename as Path instead of str?
-        let filename_str = filename.into_string().unwrap();
-        restore_snapshot(conf, timeline, timelineid, &filename_str)?;
-        info!("restored snapshot at {:?}", filename_str);
-    }
-
-    if last_snapshot_lsn == Lsn(0) {
-        error!(
-            "could not find valid snapshot in {}",
-            snapshotspath.display()
-        );
-        // TODO return error?
-    }
-    timeline.init_valid_lsn(last_snapshot_lsn);
-
-    restore_wal(timeline, timelineid, last_snapshot_lsn)?;
-
-    Ok(())
-}
 
 ///
 /// Find latest snapshot in a timeline's 'snapshots' directory
@@ -102,19 +47,16 @@ pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Re
     Ok(last_snapshot_lsn)
 }
 
-fn restore_snapshot(
-    _conf: &PageServerConf,
+///
+/// Import all relation data pages from local disk into the repository.
+///
+pub fn import_timeline_from_postgres_datadir(
+    path: &Path,
     timeline: &dyn Timeline,
-    timelineid: ZTimelineId,
-    snapshot: &str,
+    lsn: Lsn,
 ) -> Result<()> {
-    let snapshotpath = PathBuf::from("timelines")
-        .join(timelineid.to_string())
-        .join("snapshots")
-        .join(snapshot);
-
     // Scan 'global'
-    for direntry in fs::read_dir(snapshotpath.join("global"))? {
+    for direntry in fs::read_dir(path.join("global"))? {
         let direntry = direntry?;
         match direntry.file_name().to_str() {
             None => continue,
@@ -124,19 +66,19 @@ fn restore_snapshot(
             Some("pg_filenode.map") => continue,
 
             // Load any relation files into the page server
-            _ => restore_relfile(
+            _ => import_relfile(
+                &direntry.path(),
                 timeline,
-                snapshot,
+                lsn,
                 pg_constants::GLOBALTABLESPACE_OID,
                 0,
-                &direntry.path(),
             )?,
         }
     }
 
     // Scan 'base'. It contains database dirs, the database OID is the filename.
     // E.g. 'base/12345', where 12345 is the database OID.
-    for direntry in fs::read_dir(snapshotpath.join("base"))? {
+    for direntry in fs::read_dir(path.join("base"))? {
         let direntry = direntry?;
 
         let dboid = direntry.file_name().to_str().unwrap().parse::<u32>()?;
@@ -151,30 +93,31 @@ fn restore_snapshot(
                 Some("pg_filenode.map") => continue,
 
                 // Load any relation files into the page server
-                _ => restore_relfile(
+                _ => import_relfile(
+                    &direntry.path(),
                     timeline,
-                    snapshot,
+                    lsn,
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
-                    &direntry.path(),
                 )?,
             }
         }
     }
     // TODO: Scan pg_tblspc
 
+    timeline.checkpoint()?;
+
     Ok(())
 }
 
-fn restore_relfile(
+// subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
+fn import_relfile(
+    path: &Path,
     timeline: &dyn Timeline,
-    snapshot: &str,
+    lsn: Lsn,
     spcoid: Oid,
     dboid: Oid,
-    path: &Path,
 ) -> Result<()> {
-    let lsn = Lsn::from_hex(snapshot)?;
-
     // Does it look like a relation file?
 
     let p = parse_relfilename(path.file_name().unwrap().to_str().unwrap());
@@ -228,24 +171,22 @@ fn restore_relfile(
     Ok(())
 }
 
-// Scan WAL on a timeline, starting from given LSN, and load all the records
-// into the page cache.
-fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn) -> Result<()> {
-    let walpath = format!("timelines/{}/wal", timelineid);
-
+/// Scan PostgreSQL WAL files in given directory, and load all records >= 'startpoint' into
+/// the repository.
+pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: Lsn) -> Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
-    let mut last_lsn = Lsn(0);
+    let mut last_lsn = startpoint;
     loop {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
-        let mut path = walpath.clone() + "/" + &filename;
+        let mut path = walpath.join(&filename);
 
         // It could be as .partial
         if !PathBuf::from(&path).exists() {
-            path += ".partial";
+            path = walpath.join(filename + ".partial");
         }
 
         // Slurp the WAL file
@@ -287,12 +228,16 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
             nrecords += 1;
         }
 
-        info!("restored {} records from WAL file {}", nrecords, filename);
+        info!(
+            "imported {} records from WAL file {} up to {}",
+            nrecords,
+            path.display(),
+            last_lsn
+        );
 
         segno += 1;
         offset = 0;
     }
     info!("reached end of WAL at {}", last_lsn);
-
     Ok(())
 }

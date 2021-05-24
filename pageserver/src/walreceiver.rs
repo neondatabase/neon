@@ -10,7 +10,7 @@ use crate::page_cache;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
-use anyhow::Error;
+use anyhow::{Error, Result};
 use lazy_static::lazy_static;
 use log::*;
 use postgres::fallible_iterator::FallibleIterator;
@@ -20,6 +20,7 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
+use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -139,7 +140,7 @@ fn walreceiver_main(
     // If we had previously received WAL up to some point in the middle of a WAL record, we
     // better start from the end of last full WAL record, not in the middle of one. Hence,
     // use 'last_record_lsn' rather than 'last_valid_lsn' here.
-    let last_rec_lsn = timeline.get_last_record_lsn();
+    let mut last_rec_lsn = timeline.get_last_record_lsn();
     let mut startpoint = last_rec_lsn;
 
     if startpoint == Lsn(0) {
@@ -173,6 +174,7 @@ fn walreceiver_main(
                 let data = xlog_data.data();
                 let startlsn = Lsn::from(xlog_data.wal_start());
                 let endlsn = startlsn + data.len() as u64;
+                let prev_last_rec_lsn = last_rec_lsn;
 
                 write_wal_file(startlsn, timelineid, pg_constants::WAL_SEGMENT_SIZE, data)?;
 
@@ -187,6 +189,7 @@ fn walreceiver_main(
                     // Now that this record has been handled, let the page cache know that
                     // it is up-to-date to this LSN
                     timeline.advance_last_record_lsn(lsn);
+                    last_rec_lsn = lsn;
                 }
 
                 // Update the last_valid LSN value in the page cache one more time. We updated
@@ -196,6 +199,33 @@ fn walreceiver_main(
                 // middle of a record, if the request LSN was taken from the server's current
                 // flush ptr.
                 timeline.advance_last_valid_lsn(endlsn);
+
+                // Somewhat arbitrarily, if we have at least 10 complete wal segments (16 MB each),
+                // "checkpoint" the repository to flush all the changes from WAL we've processed
+                // so far to disk. After this, we don't need the original WAL anymore, and it
+                // can be removed.
+                //
+                // TODO: We don't actually dare to remove the WAL. It's useful for debugging,
+                // and we might it for logical decoiding other things in the future. Although
+                // we should also be able to fetch it back from the WAL safekeepers or S3 if
+                // needed.
+                if prev_last_rec_lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE)
+                    != last_rec_lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE)
+                {
+                    info!("switched segment {} to {}", prev_last_rec_lsn, last_rec_lsn);
+                    let (oldest_segno, newest_segno) = find_wal_file_range(
+                        timelineid,
+                        pg_constants::WAL_SEGMENT_SIZE,
+                        last_rec_lsn,
+                    )?;
+
+                    if newest_segno - oldest_segno >= 10 {
+                        timeline.checkpoint()?;
+
+                        // TODO: This is where we could remove WAL older than last_rec_lsn.
+                        //remove_wal_files(timelineid, pg_constants::WAL_SEGMENT_SIZE, last_rec_lsn)?;
+                    }
+                }
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!("caught up at LSN {}", endlsn);
@@ -231,6 +261,45 @@ fn walreceiver_main(
         }
     }
     Ok(())
+}
+
+fn find_wal_file_range(
+    timeline: ZTimelineId,
+    wal_seg_size: usize,
+    written_upto: Lsn,
+) -> Result<(u64, u64)> {
+    let written_upto_segno = written_upto.segment_number(wal_seg_size);
+
+    let mut oldest_segno = written_upto_segno;
+    let mut newest_segno = written_upto_segno;
+    // Scan the wal directory, and count how many WAL filed we could remove
+    let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
+    for entry in fs::read_dir(wal_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            continue;
+        }
+
+        let filename = path.file_name().unwrap().to_str().unwrap();
+
+        if IsXLogFileName(filename) {
+            let (segno, _tli) = XLogFromFileName(filename, wal_seg_size);
+
+            if segno > written_upto_segno {
+                // that's strange.
+                warn!("there is a WAL file from future at {}", path.display());
+                continue;
+            }
+
+            oldest_segno = min(oldest_segno, segno);
+            newest_segno = max(newest_segno, segno);
+        }
+    }
+    // FIXME: would be good to assert that there are no gaps in the WAL files
+
+    Ok((oldest_segno, newest_segno))
 }
 
 /// Data returned from the postgres `IDENTIFY_SYSTEM` command

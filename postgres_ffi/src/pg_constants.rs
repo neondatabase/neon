@@ -16,6 +16,8 @@ pub const FSM_FORKNUM: u8 = 1;
 pub const VISIBILITYMAP_FORKNUM: u8 = 2;
 pub const INIT_FORKNUM: u8 = 3;
 
+pub const ROCKSDB_SPECIAL_FORKNUM: u8 = 50;
+
 // From storage_xlog.h
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 

@@ -6,19 +6,19 @@
 // LSN.
 
 use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
-use crate::restore_local_repo::restore_timeline;
+use crate::restore_local_repo::import_timeline_wal;
 use crate::waldecoder::Oid;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
-// use crate::PageServerConf;
-// use crate::branches;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
+use postgres_ffi::pg_constants;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -87,6 +87,43 @@ struct CacheKey {
     pub tag: BufferTag,
     pub lsn: Lsn,
 }
+
+//
+// In addition to those per-page entries, the 'last_valid_lsn' and 'last_record_lsn'
+// values are also persisted in the rocskdb repository. They are stored with CacheKeys
+// with ROCKSDB_SPECIAL_FORKNUM, and 'blknum' indicates which value it is. The
+// rest of the key fields are zero. We use a CacheKey as the key for these too,
+// so that whenever we iterate through keys in the repository, we can safely parse
+// the key blob as CacheKey without checking for these special values first.
+//
+// FIXME: This is quite a similar concept to the special entries created by
+// `BufferTag::fork` function. Merge them somehow? These special keys are specific
+// to the rocksb implementation, not exposed to the rest of the system, but the
+// other special forks created by `BufferTag::fork` are also used elsewhere.
+//
+impl CacheKey {
+    const fn special(id: u32) -> CacheKey {
+        CacheKey {
+            tag: BufferTag {
+                rel: RelTag {
+                    forknum: pg_constants::ROCKSDB_SPECIAL_FORKNUM,
+                    spcnode: 0,
+                    dbnode: 0,
+                    relnode: 0,
+                },
+                blknum: id,
+            },
+            lsn: Lsn(0),
+        }
+    }
+
+    fn is_special(&self) -> bool {
+        self.tag.rel.forknum == pg_constants::ROCKSDB_SPECIAL_FORKNUM
+    }
+}
+
+static LAST_VALID_LSN_KEY: CacheKey = CacheKey::special(0);
+static LAST_VALID_RECORD_LSN_KEY: CacheKey = CacheKey::special(1);
 
 impl CacheKey {
     fn pack(&self, buf: &mut BytesMut) {
@@ -189,52 +226,54 @@ impl RocksRepository {
     }
 }
 
-// Get handle to a given timeline. It is assumed to already exist.
-impl Repository for RocksRepository {
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
-        let timelines = self.timelines.lock().unwrap();
-
-        match timelines.get(&timelineid) {
-            Some(timeline) => Ok(timeline.clone()),
-            None => bail!("timeline not found"),
-        }
-    }
-
-    fn get_or_restore_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
+impl RocksRepository {
+    fn get_rocks_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<RocksTimeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let timeline = RocksTimeline::new(self.conf, timelineid, self.walredo_mgr.clone());
+                let timeline =
+                    RocksTimeline::open(self.conf, timelineid, self.walredo_mgr.clone())?;
 
-                restore_timeline(self.conf, &timeline, timelineid)?;
+                // Load any new WAL after the last checkpoint into the repository.
+                info!(
+                    "Loading WAL for timeline {} starting at {}",
+                    timelineid,
+                    timeline.get_last_record_lsn()
+                );
+                let wal_dir = self.conf.timeline_path(timelineid).join("wal");
+                import_timeline_wal(&wal_dir, &timeline, timeline.get_last_record_lsn())?;
 
                 let timeline_rc = Arc::new(timeline);
 
+                if self.conf.gc_horizon != 0 {
+                    RocksTimeline::launch_gc_thread(self.conf, timeline_rc.clone());
+                }
+
                 timelines.insert(timelineid, timeline_rc.clone());
 
-                if self.conf.gc_horizon != 0 {
-                    let timeline_rc_copy = timeline_rc.clone();
-                    let conf = self.conf;
-                    let _gc_thread = thread::Builder::new()
-                        .name("Garbage collection thread".into())
-                        .spawn(move || {
-                            // FIXME
-                            timeline_rc_copy.do_gc(conf).expect("GC thread died");
-                        })
-                        .unwrap();
-                }
                 Ok(timeline_rc)
             }
         }
     }
+}
 
-    #[cfg(test)]
-    fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
+// Get handle to a given timeline. It is assumed to already exist.
+impl Repository for RocksRepository {
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
+        Ok(self.get_rocks_timeline(timelineid)?)
+    }
+
+    fn create_empty_timeline(
+        &self,
+        timelineid: ZTimelineId,
+        start_lsn: Lsn,
+    ) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
-        let timeline = RocksTimeline::new(&self.conf, timelineid, self.walredo_mgr.clone());
+        let timeline =
+            RocksTimeline::create(&self.conf, timelineid, self.walredo_mgr.clone(), start_lsn)?;
 
         let timeline_rc = Arc::new(timeline);
         let r = timelines.insert(timelineid, timeline_rc.clone());
@@ -244,13 +283,39 @@ impl Repository for RocksRepository {
 
         Ok(timeline_rc)
     }
+
+    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, at_lsn: Lsn) -> Result<()> {
+        let src_timeline = self.get_rocks_timeline(src)?;
+
+        info!("branching at {}", at_lsn);
+
+        let dst_timeline =
+            RocksTimeline::create(&self.conf, dst, self.walredo_mgr.clone(), at_lsn)?;
+
+        // Copy all entries <= LSN
+        //
+        // This is very inefficient, a far cry from the promise of cheap copy-on-write
+        // branching. But it will do for now.
+        let mut iter = src_timeline.db.raw_iterator();
+        iter.seek_to_first();
+        while iter.valid() {
+            let k = iter.key().unwrap();
+            let key = CacheKey::from_slice(k);
+
+            if !key.is_special() && key.lsn <= at_lsn {
+                let v = iter.value().unwrap();
+                dst_timeline.db.put(k, v)?;
+            }
+            iter.next();
+        }
+        Ok(())
+    }
 }
 
 impl RocksTimeline {
-    fn open_rocksdb(conf: &PageServerConf, timelineid: ZTimelineId) -> rocksdb::DB {
-        let path = conf.timeline_path(timelineid);
+    /// common options used by `open` and `create`
+    fn get_rocksdb_opts() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
-        opts.create_if_missing(true);
         opts.set_use_fsync(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_compaction_filter("ttl", move |_level: u32, _key: &[u8], val: &[u8]| {
@@ -260,31 +325,87 @@ impl RocksTimeline {
                 rocksdb::compaction_filter::Decision::Keep
             }
         });
-        rocksdb::DB::open(&opts, &path).unwrap()
+        opts
     }
 
-    fn new(
-        conf: &'static PageServerConf,
+    /// Open a RocksDB database, and load the last valid and record LSNs into memory.
+    fn open(
+        conf: &PageServerConf,
         timelineid: ZTimelineId,
         walredo_mgr: Arc<dyn WalRedoManager>,
-    ) -> RocksTimeline {
-        RocksTimeline {
-            db: RocksTimeline::open_rocksdb(conf, timelineid),
+    ) -> Result<RocksTimeline> {
+        let path = conf.timeline_path(timelineid);
+        let db = rocksdb::DB::open(&RocksTimeline::get_rocksdb_opts(), path)?;
 
+        // Load these into memory
+        let lsnstr = db
+            .get(LAST_VALID_LSN_KEY.to_bytes())
+            .with_context(|| "last_valid_lsn not found in repository")?
+            .ok_or(anyhow!("empty last_valid_lsn"))?;
+        let last_valid_lsn = Lsn::from_str(std::str::from_utf8(&lsnstr)?)?;
+        let lsnstr = db
+            .get(LAST_VALID_RECORD_LSN_KEY.to_bytes())
+            .with_context(|| "last_record_lsn not found in repository")?
+            .ok_or(anyhow!("empty last_record_lsn"))?;
+        let last_record_lsn = Lsn::from_str(std::str::from_utf8(&lsnstr)?)?;
+
+        let timeline = RocksTimeline {
+            db,
             walredo_mgr,
 
-            last_valid_lsn: SeqWait::new(Lsn(0)),
-            last_record_lsn: AtomicLsn::new(0),
+            last_valid_lsn: SeqWait::new(last_valid_lsn),
+            last_record_lsn: AtomicLsn::new(last_record_lsn.0),
 
             num_entries: AtomicU64::new(0),
             num_page_images: AtomicU64::new(0),
             num_wal_records: AtomicU64::new(0),
             num_getpage_requests: AtomicU64::new(0),
-        }
+        };
+        Ok(timeline)
     }
-}
 
-impl RocksTimeline {
+    /// Create a new RocksDB database. It is initally empty, except for the last
+    /// valid and last record LSNs, which are set to 'start_lsn'.
+    fn create(
+        conf: &PageServerConf,
+        timelineid: ZTimelineId,
+        walredo_mgr: Arc<dyn WalRedoManager>,
+        start_lsn: Lsn,
+    ) -> Result<RocksTimeline> {
+        let path = conf.timeline_path(timelineid);
+        let mut opts = RocksTimeline::get_rocksdb_opts();
+        opts.create_if_missing(true);
+        opts.set_error_if_exists(true);
+        let db = rocksdb::DB::open(&opts, path)?;
+
+        let timeline = RocksTimeline {
+            db,
+            walredo_mgr,
+
+            last_valid_lsn: SeqWait::new(start_lsn),
+            last_record_lsn: AtomicLsn::new(start_lsn.0),
+
+            num_entries: AtomicU64::new(0),
+            num_page_images: AtomicU64::new(0),
+            num_wal_records: AtomicU64::new(0),
+            num_getpage_requests: AtomicU64::new(0),
+        };
+        // Write the initial last_valid/record_lsn values
+        timeline.checkpoint()?;
+        Ok(timeline)
+    }
+
+    fn launch_gc_thread(conf: &'static PageServerConf, timeline_rc: Arc<RocksTimeline>) {
+        let timeline_rc_copy = timeline_rc.clone();
+        let _gc_thread = thread::Builder::new()
+            .name("Garbage collection thread".into())
+            .spawn(move || {
+                // FIXME
+                timeline_rc_copy.do_gc(conf).expect("GC thread died");
+            })
+            .unwrap();
+    }
+
     ///
     /// Collect all the WAL records that are needed to reconstruct a page
     /// image for the given cache entry.
@@ -811,6 +932,23 @@ impl Timeline for RocksTimeline {
 
     fn get_last_valid_lsn(&self) -> Lsn {
         self.last_valid_lsn.load()
+    }
+
+    // Flush all the changes written so far with PUT functions to disk.
+    // RocksDB writes out things as we go (?), so we don't need to do much here. We just
+    // write out the last valid and record LSNs.
+    fn checkpoint(&self) -> Result<()> {
+        let last_valid_lsn = self.last_valid_lsn.load();
+        self.db
+            .put(LAST_VALID_LSN_KEY.to_bytes(), last_valid_lsn.to_string())?;
+        self.db.put(
+            LAST_VALID_RECORD_LSN_KEY.to_bytes(),
+            self.last_record_lsn.load().to_string(),
+        )?;
+
+        trace!("checkpoint at {}", last_valid_lsn);
+
+        Ok(())
     }
 
     //

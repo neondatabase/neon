@@ -21,6 +21,8 @@ use std::{
 };
 use zenith_utils::lsn::Lsn;
 
+use crate::page_cache;
+use crate::restore_local_repo;
 use crate::{repository::Repository, PageServerConf, ZTimelineId};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -38,7 +40,7 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
+pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // top-level dir may exist if we are creating it through CLI
     fs::create_dir_all(repo_dir)
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
@@ -49,14 +51,8 @@ pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
     fs::create_dir(std::path::Path::new("refs"))?;
     fs::create_dir(std::path::Path::new("refs").join("branches"))?;
     fs::create_dir(std::path::Path::new("refs").join("tags"))?;
-    fs::create_dir(std::path::Path::new("wal-redo"))?;
 
     println!("created directory structure in {}", repo_dir.display());
-
-    // Create initial timeline
-    let tli = create_timeline(conf, None)?;
-    let timelinedir = conf.timeline_path(tli);
-    println!("created initial timeline {}", tli);
 
     // Run initdb
     //
@@ -89,6 +85,27 @@ pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
     let lsn = controlfile.checkPoint;
     let lsnstr = format!("{:016X}", lsn);
 
+    // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
+    let tli = create_timeline(conf, None)?;
+    let timelinedir = conf.timeline_path(tli);
+
+    // We don't use page_cache here, because we don't want to spawn the WAL redo thread during
+    // repository initialization.
+    //
+    // FIXME: That caused trouble, because the WAL redo thread launched initdb in the background,
+    // and it kept running even after the "zenith init" had exited. In tests, we started the
+    // page server immediately after that, so that initdb was still running in the background,
+    // and we failed to run initdb again in the same directory. This has been solved for the
+    // rapid init+start case now, but the general race condition remains if you restart the the
+    // server quickly.
+    let repo = crate::repository::rocksdb::RocksRepository::new(
+        conf,
+        std::sync::Arc::new(crate::walredo::DummyRedoManager {}),
+    );
+    let timeline = repo.create_empty_timeline(tli, Lsn(lsn))?;
+
+    restore_local_repo::import_timeline_from_postgres_datadir(&tmppath, &*timeline, Lsn(lsn))?;
+
     // Move the initial WAL file
     fs::rename(
         tmppath.join("pg_wal").join("000000010000000000000001"),
@@ -96,7 +113,11 @@ pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
             .join("wal")
             .join("000000010000000000000001.partial"),
     )?;
-    println!("moved initial WAL file");
+    println!("created initial timeline {}", tli);
+
+    let data = tli.to_string();
+    fs::write(conf.branch_path("main"), data)?;
+    println!("created main branch");
 
     // Remove pg_wal
     fs::remove_dir_all(tmppath.join("pg_wal"))?;
@@ -104,13 +125,11 @@ pub fn init_repo(conf: &PageServerConf, repo_dir: &Path) -> Result<()> {
     force_crash_recovery(&tmppath)?;
     println!("updated pg_control");
 
+    // Move the data directory as an initial base backup.
+    // FIXME: It would be enough to only copy the non-relation files here, the relation
+    // data was already loaded into the repository.
     let target = timelinedir.join("snapshots").join(&lsnstr);
     fs::rename(tmppath, &target)?;
-
-    // Create 'main' branch to refer to the initial timeline
-    let data = tli.to_string();
-    fs::write(conf.branch_path("main"), data)?;
-    println!("created main branch");
 
     println!(
         "new zenith repository was created in {}",
@@ -213,12 +232,13 @@ pub(crate) fn create_branch(
         startpoint.lsn = end_of_wal;
     }
 
-    // create a new timeline for it
+    // create a new timeline directory for it
     let newtli = create_timeline(conf, Some(startpoint))?;
     let newtimelinedir = conf.timeline_path(newtli);
 
-    let data = newtli.to_string();
-    fs::write(conf.branch_path(&branchname), data)?;
+    // Let the Repository backend do its initialization
+    let repo = page_cache::get_repository();
+    repo.branch_timeline(startpoint.timelineid, newtli, startpoint.lsn)?;
 
     // Copy the latest snapshot (TODO: before the startpoint) and all WAL
     // TODO: be smarter and avoid the copying...
@@ -233,6 +253,12 @@ pub(crate) fn create_branch(
         startpoint.lsn,
         pg_constants::WAL_SEGMENT_SIZE,
     )?;
+
+    // Remember the human-readable branch name for the new timeline.
+    // FIXME: there's a race condition, if you create a branch with the same
+    // name concurrently.
+    let data = newtli.to_string();
+    fs::write(conf.branch_path(&branchname), data)?;
 
     Ok(BranchInfo {
         name: branchname.to_string(),

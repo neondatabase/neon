@@ -58,6 +58,24 @@ pub trait WalRedoManager: Send + Sync {
     ) -> Result<Bytes, WalRedoError>;
 }
 
+///
+/// A dummy WAL Redo Manager implementation that doesn't allow replaying
+/// anything. Currently used during bootstrapping (zenith init), to create
+/// a Repository object without launching the real WAL redo process.
+///
+pub struct DummyRedoManager {}
+impl crate::walredo::WalRedoManager for DummyRedoManager {
+    fn request_redo(
+        &self,
+        _tag: BufferTag,
+        _lsn: Lsn,
+        _base_img: Option<Bytes>,
+        _records: Vec<WALRecord>,
+    ) -> Result<Bytes, WalRedoError> {
+        Err(WalRedoError::InvalidState)
+    }
+}
+
 static TIMEOUT: Duration = Duration::from_secs(20);
 
 ///
@@ -92,6 +110,9 @@ struct WalRedoRequest {
 pub enum WalRedoError {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
+
+    #[error("cannot perform WAL redo now")]
+    InvalidState,
 }
 
 ///
