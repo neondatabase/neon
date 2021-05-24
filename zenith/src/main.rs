@@ -199,11 +199,11 @@ fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
     }
 
     // Sort children by tid to bring some minimal order.
-    for (_tid, branch) in &mut branches_hash {
+    for branch in &mut branches_hash.values_mut() {
         branch.children.sort();
     }
 
-    for (_tid, branch) in &branches_hash {
+    for branch in branches_hash.values() {
         // Start with root branches (no ancestors) first.
         // Now there is 'main' branch only, but things may change.
         if branch.info.ancestor_id.is_none() {
@@ -217,7 +217,7 @@ fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
 // Recursively print branch info with all its children.
 fn print_branch(
     nesting_level: usize,
-    is_last: &Vec<bool>,
+    is_last: &[bool],
     branch: &BranchTreeEl,
     branches: &HashMap<String, BranchTreeEl>,
 ) -> Result<()> {
@@ -257,7 +257,7 @@ fn print_branch(
 
     let len = branch.children.len();
     let mut i: usize = 0;
-    let mut is_last_new = is_last.clone();
+    let mut is_last_new = Vec::from(is_last);
     is_last_new.push(false);
 
     for child in &branch.children {
@@ -340,7 +340,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                         .map(|bi| bi
                             .latest_valid_lsn
                             .map_or("?".to_string(), |lsn| lsn.to_string()))
-                        .unwrap_or("?".to_string()),
+                        .unwrap_or_else(|| "?".to_string()),
                     node.status(),
                 );
             }

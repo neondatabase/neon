@@ -1126,7 +1126,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 blocks.push(blk);
             }
         } else {
-            assert!(false);
+            panic!()
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
         let xlrec = XlRelmapUpdate::decode(&mut buf);

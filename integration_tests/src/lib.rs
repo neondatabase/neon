@@ -1,3 +1,6 @@
+use anyhow::{bail, Result};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fs::{self, File, OpenOptions};
@@ -7,11 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-use anyhow::{bail, Result};
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
-use postgres;
 
 use control_plane::compute::PostgresNode;
 use control_plane::read_pidfile;
@@ -41,11 +39,11 @@ pub fn create_test_env(testname: &str) -> LocalEnv {
     let _ = fs::remove_dir_all(&base_path);
 
     fs::create_dir_all(&base_path)
-        .expect(format!("could not create directory for {}", base_path_str).as_str());
+        .unwrap_or_else(|_| panic!("could not create directory for {}", base_path_str));
 
     let pgdatadirs_path = base_path.join("pgdatadirs");
     fs::create_dir(&pgdatadirs_path)
-        .expect(format!("could not create directory {:?}", pgdatadirs_path).as_str());
+        .unwrap_or_else(|_| panic!("could not create directory {:?}", pgdatadirs_path));
 
     LocalEnv {
         pageserver_connstring: "postgresql://127.0.0.1:64000".to_string(),

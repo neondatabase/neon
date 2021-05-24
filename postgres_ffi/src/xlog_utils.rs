@@ -199,33 +199,31 @@ pub fn find_end_of_wal(
     let mut high_tli: TimeLineID = 0;
     let mut high_ispartial = false;
 
-    for entry in fs::read_dir(data_dir).unwrap() {
-        if let Ok(entry) = entry {
-            let ispartial: bool;
-            let entry_name = entry.file_name();
-            let fname = entry_name.to_str().unwrap();
-            /*
-             * Check if the filename looks like an xlog file, or a .partial file.
-             */
-            if IsXLogFileName(fname) {
-                ispartial = false;
-            } else if IsPartialXLogFileName(fname) {
-                ispartial = true;
-            } else {
-                continue;
-            }
-            let (segno, tli) = XLogFromFileName(fname, wal_seg_size);
-            if !ispartial && entry.metadata().unwrap().len() != wal_seg_size as u64 {
-                continue;
-            }
-            if segno > high_segno
-                || (segno == high_segno && tli > high_tli)
-                || (segno == high_segno && tli == high_tli && high_ispartial && !ispartial)
-            {
-                high_segno = segno;
-                high_tli = tli;
-                high_ispartial = ispartial;
-            }
+    for entry in fs::read_dir(data_dir).unwrap().flatten() {
+        let ispartial: bool;
+        let entry_name = entry.file_name();
+        let fname = entry_name.to_str().unwrap();
+        /*
+         * Check if the filename looks like an xlog file, or a .partial file.
+         */
+        if IsXLogFileName(fname) {
+            ispartial = false;
+        } else if IsPartialXLogFileName(fname) {
+            ispartial = true;
+        } else {
+            continue;
+        }
+        let (segno, tli) = XLogFromFileName(fname, wal_seg_size);
+        if !ispartial && entry.metadata().unwrap().len() != wal_seg_size as u64 {
+            continue;
+        }
+        if segno > high_segno
+            || (segno == high_segno && tli > high_tli)
+            || (segno == high_segno && tli == high_tli && high_ispartial && !ispartial)
+        {
+            high_segno = segno;
+            high_tli = tli;
+            high_ispartial = ispartial;
         }
     }
     if high_segno > 0 {

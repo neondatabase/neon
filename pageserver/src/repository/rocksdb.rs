@@ -153,7 +153,7 @@ impl RocksRepository {
         walredo_mgr: Arc<dyn WalRedoManager>,
     ) -> RocksRepository {
         RocksRepository {
-            conf: conf,
+            conf,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
         }
@@ -590,7 +590,7 @@ impl Timeline for RocksTimeline {
         self.relsize_get_nowait(rel, lsn)
     }
 
-	///
+    ///
     /// Does relation exist at given LSN?
     ///
     /// FIXME: this actually returns true, if the relation exists at *any* LSN
@@ -679,7 +679,7 @@ impl Timeline for RocksTimeline {
                 return Ok(Some(img));
             }
         }
-        return Ok(None);
+        Ok(None)
     }
 
     ///

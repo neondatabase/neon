@@ -49,7 +49,7 @@ impl LocalEnv {
         Ok(self
             .zenith_distrib_dir
             .as_ref()
-            .ok_or(anyhow!("Can not manage remote pageserver"))?
+            .ok_or_else(|| anyhow!("Can not manage remote pageserver"))?
             .join("pageserver"))
     }
 

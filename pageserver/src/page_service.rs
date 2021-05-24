@@ -77,7 +77,7 @@ enum PagestreamBeMessage {
     Read(PagestreamReadResponse),
 }
 
-const HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(Bytes::from_static(b"hello world"));
+static HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(Bytes::from_static(b"hello world"));
 
 #[derive(Debug)]
 struct PagestreamRequest {
@@ -921,7 +921,7 @@ impl Connection {
         // find latest snapshot
         let snapshot_lsn =
             restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
-        let req_lsn = lsn.unwrap_or(timeline.get_last_valid_lsn());
+        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
         basebackup::send_tarball_at_lsn(
             &mut CopyDataSink { stream },
             timelineid,

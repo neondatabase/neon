@@ -75,7 +75,7 @@ pub fn encode_pg_control(controlfile: ControlFileData) -> Bytes {
 pub fn encode_checkpoint(checkpoint: CheckPoint) -> Bytes {
     let b: [u8; SIZEOF_CHECKPOINT];
     b = unsafe { std::mem::transmute::<CheckPoint, [u8; SIZEOF_CHECKPOINT]>(checkpoint) };
-    return Bytes::copy_from_slice(&b[..]);
+    Bytes::copy_from_slice(&b[..])
 }
 
 pub fn decode_checkpoint(mut buf: Bytes) -> Result<CheckPoint, anyhow::Error> {
