@@ -1068,10 +1068,12 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 blocks.push(blk);
             }
             if xlrec.mid > checkpoint.nextMulti {
-                checkpoint.nextMulti = xlrec.mid;
+                // See MultiXactAdvanceNextMXact in postgres code
+                checkpoint.nextMulti = xlrec.mid + 1;
             }
             if xlrec.moff > checkpoint.nextMultiOffset {
-                checkpoint.nextMultiOffset = xlrec.moff;
+                // See MultiXactAdvanceNextMXact in postgres code
+                checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
             }
             let max_xid = xlrec
                 .members
