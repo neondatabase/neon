@@ -14,8 +14,7 @@
 //! TODO: Even though the postgres code runs in a separate process,
 //! it's not a secure sandbox.
 //!
-use byteorder::{ByteOrder, LittleEndian};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use log::*;
 use std::assert;
 use std::cell::RefCell;
@@ -37,11 +36,7 @@ use zenith_utils::lsn::Lsn;
 
 use crate::repository::BufferTag;
 use crate::repository::WALRecord;
-use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
-use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
-use postgres_ffi::pg_constants;
-use postgres_ffi::xlog_utils::XLogRecord;
 
 ///
 /// WAL Redo Manager is responsible for replaying WAL records.
@@ -169,24 +164,6 @@ impl WalRedoManager for PostgresRedoManager {
     }
 }
 
-fn mx_offset_to_flags_offset(xid: MultiXactId) -> usize {
-    ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32) as u16
-        % pg_constants::MULTIXACT_MEMBERGROUPS_PER_PAGE
-        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE) as usize
-}
-
-fn mx_offset_to_flags_bitshift(xid: MultiXactId) -> u16 {
-    (xid as u16) % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP
-        * pg_constants::MXACT_MEMBER_BITS_PER_XACT
-}
-
-/* Location (byte offset within page) of TransactionId of given member */
-fn mx_offset_to_member_offset(xid: MultiXactId) -> usize {
-    mx_offset_to_flags_offset(xid)
-        + (pg_constants::MULTIXACT_FLAGBYTES_PER_GROUP
-            + (xid as u16 % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP) * 4) as usize
-}
-
 ///
 /// WAL redo thread
 ///
@@ -255,151 +232,7 @@ impl PostgresRedoManagerInternal {
         let start = Instant::now();
 
         let apply_result: Result<Bytes, Error>;
-        if tag.rel.forknum > pg_constants::INIT_FORKNUM {
-            const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-            let mut page = BytesMut::new();
-            if let Some(fpi) = base_img {
-                page.extend_from_slice(&fpi[..]);
-            } else {
-                page.extend_from_slice(&ZERO_PAGE);
-            }
-            for record in records {
-                let mut buf = record.rec.clone();
-
-                // 1. Parse XLogRecord struct
-                // FIXME: refactor to avoid code duplication.
-                let xlogrec = XLogRecord::from_bytes(&mut buf);
-
-                //move to main data
-                // TODO probably, we should store some records in our special format
-                // to avoid this weird parsing on replay
-                let skip = (record.main_data_offset - pg_constants::SIZEOF_XLOGRECORD) as usize;
-                if buf.remaining() > skip {
-                    buf.advance(skip);
-                }
-
-                if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
-                    let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
-                    if info == pg_constants::CLOG_ZEROPAGE {
-                        page.copy_from_slice(&ZERO_PAGE);
-                    }
-                } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
-                    let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
-                    let mut status = 0;
-                    if info == pg_constants::XLOG_XACT_COMMIT {
-                        status = pg_constants::TRANSACTION_STATUS_COMMITTED;
-                        transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
-                        //handle subtrans
-                        let _xact_time = buf.get_i64_le();
-                        let mut xinfo = 0;
-                        if xlogrec.xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
-                            xinfo = buf.get_u32_le();
-                            if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
-                                let _dbid = buf.get_u32_le();
-                                let _tsid = buf.get_u32_le();
-                            }
-                        }
-
-                        if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
-                            let nsubxacts = buf.get_i32_le();
-                            for _i in 0..nsubxacts {
-                                let subxact = buf.get_u32_le();
-                                let blkno = subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
-                                // only update xids on the requested page
-                                if tag.blknum == blkno {
-                                    status = pg_constants::TRANSACTION_STATUS_SUB_COMMITTED;
-                                    transaction_id_set_status(subxact, status, &mut page);
-                                }
-                            }
-                        }
-                    } else if info == pg_constants::XLOG_XACT_ABORT {
-                        status = pg_constants::TRANSACTION_STATUS_ABORTED;
-                        transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
-                        //handle subtrans
-                        let _xact_time = buf.get_i64_le();
-                        let mut xinfo = 0;
-                        if xlogrec.xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
-                            xinfo = buf.get_u32_le();
-                            if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
-                                let _dbid = buf.get_u32_le();
-                                let _tsid = buf.get_u32_le();
-                            }
-                        }
-
-                        if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
-                            let nsubxacts = buf.get_i32_le();
-                            for _i in 0..nsubxacts {
-                                let subxact = buf.get_u32_le();
-                                let blkno = subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
-                                // only update xids on the requested page
-                                if tag.blknum == blkno {
-                                    status = pg_constants::TRANSACTION_STATUS_ABORTED;
-                                    transaction_id_set_status(subxact, status, &mut page);
-                                }
-                            }
-                        }
-                    } else if info != pg_constants::XLOG_XACT_PREPARE {
-                        trace!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {} main_data_offset {}, rec.len {}",
-                               status,
-                               record.lsn,
-                               record.main_data_offset, record.rec.len());
-                    }
-                } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
-                    let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-                    if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE
-                        || info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE
-                    {
-                        page.copy_from_slice(&ZERO_PAGE);
-                    } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
-                        let xlrec = XlMultiXactCreate::decode(&mut buf);
-                        if tag.rel.forknum == pg_constants::PG_MXACT_OFFSETS_FORKNUM {
-                            let offs = (xlrec.mid % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32
-                                * 4) as usize;
-                            LittleEndian::write_u32(&mut page[offs..offs + 4], xlrec.moff);
-                        } else {
-                            assert!(tag.rel.forknum == pg_constants::PG_MXACT_MEMBERS_FORKNUM);
-                            for i in 0..xlrec.nmembers {
-                                let blkno = i / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-                                if blkno == tag.blknum {
-                                    // update only target block
-                                    let offset = xlrec.moff + i;
-                                    let memberoff = mx_offset_to_member_offset(offset);
-                                    let flagsoff = mx_offset_to_flags_offset(offset);
-                                    let bshift = mx_offset_to_flags_bitshift(offset);
-                                    let mut flagsval =
-                                        LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
-                                    flagsval &=
-                                        !(((1 << pg_constants::MXACT_MEMBER_BITS_PER_XACT) - 1)
-                                            << bshift);
-                                    flagsval |= xlrec.members[i as usize].status << bshift;
-                                    LittleEndian::write_u32(
-                                        &mut page[flagsoff..flagsoff + 4],
-                                        flagsval,
-                                    );
-                                    LittleEndian::write_u32(
-                                        &mut page[memberoff..memberoff + 4],
-                                        xlrec.members[i as usize].xid,
-                                    );
-                                }
-                            }
-                        }
-                    } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
-                        // empty page image indicates that this SLRU page is truncated and can be removed by GC
-                        page.clear();
-                    } else {
-                        panic!();
-                    }
-                } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
-                    page.clear();
-                    page.extend_from_slice(&buf[12..]); // skip xl_relmap_update
-                    assert!(page.len() == 512); // size of pg_filenode.map
-                }
-            }
-
-            apply_result = Ok::<Bytes, Error>(page.freeze());
-        } else {
-            apply_result = process.apply_wal_records(tag, base_img, records).await;
-        }
+        apply_result = process.apply_wal_records(tag, base_img, records).await;
 
         let duration = start.elapsed();
 

@@ -7,7 +7,7 @@
 
 use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::restore_timeline;
-use crate::waldecoder::{Oid, TransactionId};
+use crate::waldecoder::Oid;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -16,8 +16,6 @@ use crate::ZTimelineId;
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
-use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
-use postgres_ffi::*;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -417,19 +415,6 @@ impl RocksTimeline {
                         let mut minkey = maxkey.clone();
                         minkey.lsn = Lsn(0); // first version
 
-                        // Special handling of delete of PREPARE WAL record
-                        if last_lsn < horizon
-                            && key.tag.rel.forknum == pg_constants::PG_TWOPHASE_FORKNUM
-                        {
-                            if (v[0] & UNUSED_VERSION_FLAG) == 0 {
-                                let mut v = v.to_owned();
-                                v[0] |= UNUSED_VERSION_FLAG;
-                                self.db.put(key.to_bytes(), &v[..])?;
-                                deleted += 1;
-                            }
-                            maxkey = minkey;
-                            continue;
-                        }
                         // reconstruct most recent page version
                         if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
                             // force reconstruction of most recent page version
@@ -623,116 +608,6 @@ impl Timeline for RocksTimeline {
         self.relsize_get_nowait(rel, lsn)
     }
 
-    /// Get vector of prepared twophase transactions
-    fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>> {
-        let key = CacheKey {
-            // minimal key
-            tag: BufferTag {
-                rel: RelTag {
-                    forknum: pg_constants::PG_TWOPHASE_FORKNUM,
-                    spcnode: 0,
-                    dbnode: 0,
-                    relnode: 0,
-                },
-                blknum: 0,
-            },
-            lsn: Lsn(0),
-        };
-        let mut gxacts = Vec::new();
-
-        let mut iter = self.db.raw_iterator();
-        iter.seek(key.to_bytes());
-        while iter.valid() {
-            let key = CacheKey::from_slice(iter.key().unwrap());
-            if key.tag.rel.forknum != pg_constants::PG_TWOPHASE_FORKNUM {
-                break; // we are done with this fork
-            }
-            if key.lsn <= lsn {
-                let xid = key.tag.blknum;
-                let tag = BufferTag {
-                    rel: RelTag {
-                        forknum: pg_constants::PG_XACT_FORKNUM,
-                        spcnode: 0,
-                        dbnode: 0,
-                        relnode: 0,
-                    },
-                    blknum: xid / pg_constants::CLOG_XACTS_PER_PAGE,
-                };
-                let clog_page = self.get_page_at_lsn(tag, lsn)?;
-                let status = transaction_id_get_status(xid, &clog_page[..]);
-                if status == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
-                    gxacts.push(xid);
-                }
-            }
-            iter.next();
-        }
-        Ok(gxacts)
-    }
-
-    /// Get databases. This function is used to local pg_filenode.map files
-    fn get_databases(&self, lsn: Lsn) -> Result<Vec<RelTag>> {
-        let key = CacheKey {
-            // minimal key
-            tag: BufferTag {
-                rel: RelTag {
-                    forknum: pg_constants::PG_FILENODEMAP_FORKNUM,
-                    spcnode: 0,
-                    dbnode: 0,
-                    relnode: 0,
-                },
-                blknum: 0,
-            },
-            lsn: Lsn(0),
-        };
-        let mut dbs = Vec::new();
-
-        let mut iter = self.db.raw_iterator();
-        iter.seek(key.to_bytes());
-        let mut prev_tag = key.tag.rel;
-        while iter.valid() {
-            let key = CacheKey::from_slice(iter.key().unwrap());
-            if key.tag.rel.forknum != pg_constants::PG_FILENODEMAP_FORKNUM {
-                break; // we are done with this fork
-            }
-            if key.tag.rel != prev_tag && key.lsn <= lsn {
-                prev_tag = key.tag.rel;
-                dbs.push(prev_tag); // collect unique tags
-            }
-            iter.next();
-        }
-        Ok(dbs)
-    }
-
-    /// Get range [begin,end) of stored blocks. Used mostly for SMGR pseudorelations
-    /// but can be also applied to normal relations.
-    fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)> {
-        let _lsn = self.wait_lsn(lsn)?;
-        let mut key = CacheKey {
-            // minimal key to start with
-            tag: BufferTag { rel, blknum: 0 },
-            lsn: Lsn(0),
-        };
-        let mut iter = self.db.raw_iterator();
-        iter.seek(key.to_bytes()); // locate first entry
-        if iter.valid() {
-            let thiskey = CacheKey::from_slice(iter.key().unwrap());
-            let tag = thiskey.tag;
-            if tag.rel == rel {
-                // still trversing this relation
-                let first_blknum = tag.blknum;
-                key.tag.blknum = u32::MAX; // maximal key
-                let mut iter = self.db.raw_iterator();
-                iter.seek_for_prev(key.to_bytes()); // localte last entry
-                if iter.valid() {
-                    let thiskey = CacheKey::from_slice(iter.key().unwrap());
-                    let last_blknum = thiskey.tag.blknum;
-                    return Ok((first_blknum, last_blknum + 1)); // upper boundary is exclusive
-                }
-            }
-        }
-        Ok((0, 0)) // empty range
-    }
-
     ///
     /// Does relation exist at given LSN?
     ///
@@ -812,20 +687,6 @@ impl Timeline for RocksTimeline {
     }
 
     ///
-    /// Get page image at particular LSN
-    ///
-    fn get_page_image(&self, tag: BufferTag, lsn: Lsn) -> Result<Option<Bytes>> {
-        let key = CacheKey { tag, lsn };
-        if let Some(bytes) = self.db.get(key.to_bytes())? {
-            let content = CacheEntryContent::from_slice(&bytes);
-            if let CacheEntryContent::PageImage(img) = content {
-                return Ok(Some(img));
-            }
-        }
-        Ok(None)
-    }
-
-    ///
     /// Memorize a full image of a page version
     ///
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) {
@@ -866,42 +727,35 @@ impl Timeline for RocksTimeline {
         src_db_id: Oid,
         src_tablespace_id: Oid,
     ) -> Result<()> {
-        let mut n = 0;
-        for forknum in &[
-            pg_constants::MAIN_FORKNUM,
-            pg_constants::FSM_FORKNUM,
-            pg_constants::VISIBILITYMAP_FORKNUM,
-            pg_constants::INIT_FORKNUM,
-            pg_constants::PG_FILENODEMAP_FORKNUM,
-        ] {
-            let key = CacheKey {
-                tag: BufferTag {
-                    rel: RelTag {
-                        spcnode: src_tablespace_id,
-                        dbnode: src_db_id,
-                        relnode: 0,
-                        forknum: *forknum,
-                    },
-                    blknum: 0,
+        let key = CacheKey {
+            tag: BufferTag {
+                rel: RelTag {
+                    spcnode: src_tablespace_id,
+                    dbnode: src_db_id,
+                    relnode: 0,
+                    forknum: 0u8,
                 },
-                lsn: Lsn(0),
-            };
-            let mut iter = self.db.raw_iterator();
-            iter.seek(key.to_bytes());
-            while iter.valid() {
-                let mut key = CacheKey::from_slice(iter.key().unwrap());
-                if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
-                    break;
-                }
-                key.tag.rel.spcnode = tablespace_id;
-                key.tag.rel.dbnode = db_id;
-                key.lsn = lsn;
-
-                let v = iter.value().unwrap();
-                self.db.put(key.to_bytes(), v)?;
-                n += 1;
-                iter.next();
+                blknum: 0,
+            },
+            lsn: Lsn(0),
+        };
+        let mut iter = self.db.raw_iterator();
+        iter.seek(key.to_bytes());
+        let mut n = 0;
+        while iter.valid() {
+            let mut key = CacheKey::from_slice(iter.key().unwrap());
+            if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
+                break;
             }
+
+            key.tag.rel.spcnode = tablespace_id;
+            key.tag.rel.dbnode = db_id;
+            key.lsn = lsn;
+
+            let v = iter.value().unwrap();
+            self.db.put(key.to_bytes(), v)?;
+            n += 1;
+            iter.next();
         }
         info!(
             "Create database {}/{}, copy {} entries",
@@ -912,7 +766,6 @@ impl Timeline for RocksTimeline {
 
     /// Remember that WAL has been received and added to the timeline up to the given LSN
     fn advance_last_valid_lsn(&self, lsn: Lsn) {
-        let lsn = Lsn((lsn.0 + 7) & !7); // align position on 8 bytes
         let old = self.last_valid_lsn.advance(lsn);
 
         // Can't move backwards.
@@ -930,8 +783,7 @@ impl Timeline for RocksTimeline {
     /// NOTE: this updates last_valid_lsn as well.
     ///
     fn advance_last_record_lsn(&self, lsn: Lsn) {
-        let lsn = Lsn((lsn.0 + 7) & !7); // align position on 8 bytes
-                                         // Can't move backwards.
+        // Can't move backwards.
         let old = self.last_record_lsn.fetch_max(lsn);
         assert!(old <= lsn);
 

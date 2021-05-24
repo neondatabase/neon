@@ -1,6 +1,6 @@
 pub mod rocksdb;
 
-use crate::waldecoder::{DecodedWALRecord, Oid, TransactionId, XlCreateDatabase, XlSmgrTruncate};
+use crate::waldecoder::{DecodedWALRecord, Oid, XlCreateDatabase, XlSmgrTruncate};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -47,9 +47,6 @@ pub trait Timeline {
 
     /// Does relation exist?
     fn get_relsize_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool>;
-
-    /// Get page image at the particular LSN
-    fn get_page_image(&self, tag: BufferTag, lsn: Lsn) -> Result<Option<Bytes>>;
 
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
@@ -166,16 +163,6 @@ pub trait Timeline {
     /// valid LSN, so that the WAL receiver knows where to restart streaming.
     fn advance_last_record_lsn(&self, lsn: Lsn);
     fn get_last_record_lsn(&self) -> Lsn;
-
-    /// Get range [begin,end) of stored blocks. Used mostly for SMGR pseudorelations
-    /// but can be also applied to normal relations.
-    fn get_range(&self, rel: RelTag, lsn: Lsn) -> Result<(u32, u32)>;
-
-    /// Get vector of databases (represented using RelTag only dbnode and spcnode fields are used)
-    fn get_databases(&self, lsn: Lsn) -> Result<Vec<RelTag>>;
-
-    /// Get vector of prepared twophase transactions
-    fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>>;
 }
 
 #[derive(Clone)]
@@ -236,18 +223,6 @@ pub struct BufferTag {
 }
 
 impl BufferTag {
-    pub fn fork(forknum: u8) -> BufferTag {
-        BufferTag {
-            rel: RelTag {
-                forknum,
-                spcnode: 0,
-                dbnode: 0,
-                relnode: 0,
-            },
-            blknum: 0,
-        }
-    }
-
     pub fn pack(&self, buf: &mut BytesMut) {
         self.rel.pack(buf);
         buf.put_u32(self.blknum);

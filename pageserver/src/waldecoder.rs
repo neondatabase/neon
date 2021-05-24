@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
+use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::XLogRecord;
-use postgres_ffi::*;
 use std::cmp::min;
 use std::str;
 use thiserror::Error;
@@ -14,19 +14,17 @@ pub type OffsetNumber = u16;
 pub type MultiXactId = TransactionId;
 pub type MultiXactOffset = u32;
 pub type MultiXactStatus = u32;
-pub type TimeLineID = u32;
-pub type PgTime = i64;
 
 // From PostgreSQL headers
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct XLogPageHeaderData {
-    xlp_magic: u16,      /* magic value for correctness checks */
-    xlp_info: u16,       /* flag bits, see below */
-    xlp_tli: TimeLineID, /* TimeLineID of first record on page */
-    xlp_pageaddr: u64,   /* XLOG address of this page */
-    xlp_rem_len: u32,    /* total len of remaining data for record */
+    xlp_magic: u16,    /* magic value for correctness checks */
+    xlp_info: u16,     /* flag bits, see below */
+    xlp_tli: u32,      /* TimeLineID of first record on page */
+    xlp_pageaddr: u64, /* XLOG address of this page */
+    xlp_rem_len: u32,  /* total len of remaining data for record */
 }
 
 // FIXME: this assumes MAXIMUM_ALIGNOF 8. There are 4 padding bytes at end
@@ -82,13 +80,6 @@ impl WalStreamDecoder {
             inputbuf: BytesMut::new(),
             recordbuf: BytesMut::new(),
         }
-    }
-
-    pub fn set_position(&mut self, lsn: Lsn) {
-        self.lsn = lsn;
-        self.contlen = 0;
-        self.padlen = 0;
-        self.inputbuf.clear();
     }
 
     pub fn feed_bytes(&mut self, buf: &[u8]) {
@@ -556,7 +547,7 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedWALRecord {
+pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -574,12 +565,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         xlogrec.xl_rmid,
         xlogrec.xl_info
     );
-    if xlogrec.xl_xid > checkpoint.nextXid.value as u32 {
-        // TODO: handle XID wraparound
-        checkpoint.nextXid = FullTransactionId {
-            value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | xlogrec.xl_xid as u64,
-        };
-    }
+
     let remaining = xlogrec.xl_tot_len - SizeOfXLogRecord;
 
     if buf.remaining() != remaining as usize {
@@ -790,30 +776,10 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         assert_eq!(buf.remaining(), main_data_len as usize);
     }
 
-    //5. Handle special CLOG and XACT records
-    if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
-        let mut blk = DecodedBkpBlock::new();
-        blk.forknum = pg_constants::PG_XACT_FORKNUM;
-        blk.blkno = buf.get_i32_le() as u32;
-        blk.will_init = true;
-        trace!("RM_CLOG_ID updates block {}", blk.blkno);
-        blocks.push(blk);
-    } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
+    //5. Handle special XACT records
+    if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
         let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
         if info == pg_constants::XLOG_XACT_COMMIT {
-            let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_XACT_FORKNUM;
-            blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
-            trace!(
-                "XLOG_XACT_COMMIT xl_info {} xl_prev {:X}/{:X}  xid {} updates block {} main_data_len {}",
-                xlogrec.xl_info, (xlogrec.xl_prev >> 32),
-                xlogrec.xl_prev & 0xffffffff,
-                xlogrec.xl_xid,
-                blk.blkno,
-                main_data_len
-            );
-            blocks.push(blk);
-
             //parse commit record to extract subtrans entries
             // xl_xact_commit starts with time of commit
             let _xact_time = buf.get_i64_le();
@@ -828,17 +794,8 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
                 let nsubxacts = buf.get_i32_le();
-                let mut prev_blkno = u32::MAX;
                 for _i in 0..nsubxacts {
-                    let subxact = buf.get_u32_le();
-                    let blkno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
-                    if prev_blkno != blkno {
-                        prev_blkno = blkno;
-                        let mut blk = DecodedBkpBlock::new();
-                        blk.forknum = pg_constants::PG_XACT_FORKNUM;
-                        blk.blkno = blkno;
-                        blocks.push(blk);
-                    }
+                    let _subxact = buf.get_u32_le();
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
@@ -869,18 +826,6 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 //TODO handle this to be able to restore pg_twophase on node start
             }
         } else if info == pg_constants::XLOG_XACT_ABORT {
-            let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_XACT_FORKNUM;
-            blk.blkno = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
-            trace!(
-                "XLOG_XACT_ABORT xl_info {} xl_prev {:X}/{:X} xid {} updates block {} main_data_len {}",
-                xlogrec.xl_info, (xlogrec.xl_prev >> 32),
-                xlogrec.xl_prev & 0xffffffff,
-                xlogrec.xl_xid,
-                blk.blkno,
-                main_data_len
-            );
-            blocks.push(blk);
             //parse abort record to extract subtrans entries
             // xl_xact_abort starts with time of commit
             let _xact_time = buf.get_i64_le();
@@ -895,17 +840,8 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
                 let nsubxacts = buf.get_i32_le();
-                let mut prev_blkno = u32::MAX;
                 for _i in 0..nsubxacts {
-                    let subxact = buf.get_u32_le();
-                    let blkno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
-                    if prev_blkno != blkno {
-                        prev_blkno = blkno;
-                        let mut blk = DecodedBkpBlock::new();
-                        blk.forknum = pg_constants::PG_XACT_FORKNUM;
-                        blk.blkno = blkno;
-                        blocks.push(blk);
-                    }
+                    let _subxact = buf.get_u32_le();
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
@@ -927,11 +863,6 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 let _xid = buf.get_u32_le();
                 trace!("XLOG_XACT_ABORT-XACT_XINFO_HAS_TWOPHASE");
             }
-        } else if info == pg_constants::XLOG_XACT_PREPARE {
-            let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_TWOPHASE_FORKNUM;
-            blk.blkno = xlogrec.xl_xid;
-            blk.will_init = true;
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_DBASE_ID {
         let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
@@ -964,7 +895,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             trace!("XLOG_TBLSPC_DROP is not handled yet");
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
-        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
         let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
         if info == pg_constants::XLOG_HEAP_INSERT {
             let xlrec = XlHeapInsert::decode(&mut buf);
@@ -1018,7 +949,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             }
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
-        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
         if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
             let xlrec = XlHeapMultiInsert::decode(&mut buf);
             if (xlrec.flags
@@ -1034,104 +965,6 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 blk.rnode_dbnode = blocks[0].rnode_dbnode;
                 blk.rnode_relnode = blocks[0].rnode_relnode;
                 blocks.push(blk);
-            }
-        }
-    } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
-        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-        if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
-            let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
-            blk.blkno = buf.get_u32_le();
-            blk.will_init = true;
-            blocks.push(blk);
-        } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
-            let mut blk = DecodedBkpBlock::new();
-            blk.forknum = pg_constants::PG_MXACT_MEMBERS_FORKNUM;
-            blk.blkno = buf.get_u32_le();
-            blk.will_init = true;
-            blocks.push(blk);
-        } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
-            let xlrec = XlMultiXactCreate::decode(&mut buf);
-            // Update offset page
-            let mut blk = DecodedBkpBlock::new();
-            blk.blkno = xlrec.mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
-            blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
-            blocks.push(blk);
-            let first_mbr_blkno = xlrec.moff / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-            let last_mbr_blkno =
-                (xlrec.moff + xlrec.nmembers - 1) / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-            for blkno in first_mbr_blkno..=last_mbr_blkno {
-                // Update members page
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::PG_MXACT_MEMBERS_FORKNUM;
-                blk.blkno = blkno;
-                blocks.push(blk);
-            }
-            if xlrec.mid > checkpoint.nextMulti {
-                // See MultiXactAdvanceNextMXact in postgres code
-                checkpoint.nextMulti = xlrec.mid + 1;
-            }
-            if xlrec.moff > checkpoint.nextMultiOffset {
-                // See MultiXactAdvanceNextMXact in postgres code
-                checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
-            }
-            let max_xid = xlrec
-                .members
-                .iter()
-                .fold(checkpoint.nextXid.value as u32, |acc, mbr| {
-                    if mbr.xid > acc {
-                        mbr.xid
-                    } else {
-                        acc
-                    }
-                });
-            checkpoint.nextXid = FullTransactionId {
-                value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | max_xid as u64,
-            };
-        } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
-            let xlrec = XlMultiXactTruncate::decode(&mut buf);
-            checkpoint.oldestXid = xlrec.end_trunc_off;
-            checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
-            let first_off_blkno =
-                xlrec.start_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
-            let last_off_blkno =
-                xlrec.end_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
-            for blkno in first_off_blkno..last_off_blkno {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
-                blk.blkno = blkno;
-                blk.will_init = true;
-                blocks.push(blk);
-            }
-            let first_mbr_blkno =
-                xlrec.start_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-            let last_mbr_blkno =
-                xlrec.end_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-            for blkno in first_mbr_blkno..last_mbr_blkno {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::PG_MXACT_MEMBERS_FORKNUM;
-                blk.blkno = blkno;
-                blk.will_init = true;
-                blocks.push(blk);
-            }
-        } else {
-            panic!()
-        }
-    } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
-        let xlrec = XlRelmapUpdate::decode(&mut buf);
-        let mut blk = DecodedBkpBlock::new();
-        blk.forknum = pg_constants::PG_FILENODEMAP_FORKNUM;
-        blk.rnode_spcnode = xlrec.tsid;
-        blk.rnode_dbnode = xlrec.dbid;
-        blk.rnode_relnode = 0;
-        blk.will_init = true;
-        blocks.push(blk);
-    } else if xlogrec.xl_rmid == pg_constants::RM_XLOG_ID {
-        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-        if info == pg_constants::XLOG_NEXTOID {
-            let next_oid = buf.get_u32_le();
-            if next_oid > checkpoint.nextOid {
-                checkpoint.nextOid = next_oid;
             }
         }
     }

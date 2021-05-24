@@ -26,9 +26,9 @@ use crate::repository::{BufferTag, RelTag, Timeline};
 use crate::waldecoder::{decode_wal_record, Oid, WalStreamDecoder};
 use crate::PageServerConf;
 use crate::ZTimelineId;
+use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
-use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -103,7 +103,7 @@ pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Re
 }
 
 fn restore_snapshot(
-    conf: &PageServerConf,
+    _conf: &PageServerConf,
     timeline: &dyn Timeline,
     timelineid: ZTimelineId,
     snapshot: &str,
@@ -120,28 +120,8 @@ fn restore_snapshot(
             None => continue,
 
             // These special files appear in the snapshot, but are not needed by the page server
-            Some("pg_control") => restore_nonrel_file(
-                conf,
-                timeline,
-                timelineid,
-                "0",
-                0,
-                0,
-                pg_constants::PG_CONTROLFILE_FORKNUM,
-                0,
-                &direntry.path(),
-            )?,
-            Some("pg_filenode.map") => restore_nonrel_file(
-                conf,
-                timeline,
-                timelineid,
-                snapshot,
-                pg_constants::GLOBALTABLESPACE_OID,
-                0,
-                pg_constants::PG_FILENODEMAP_FORKNUM,
-                0,
-                &direntry.path(),
-            )?,
+            Some("pg_control") => continue,
+            Some("pg_filenode.map") => continue,
 
             // Load any relation files into the page server
             _ => restore_relfile(
@@ -168,17 +148,7 @@ fn restore_snapshot(
 
                 // These special files appear in the snapshot, but are not needed by the page server
                 Some("PG_VERSION") => continue,
-                Some("pg_filenode.map") => restore_nonrel_file(
-                    conf,
-                    timeline,
-                    timelineid,
-                    snapshot,
-                    pg_constants::DEFAULTTABLESPACE_OID,
-                    dboid,
-                    pg_constants::PG_FILENODEMAP_FORKNUM,
-                    0,
-                    &direntry.path(),
-                )?,
+                Some("pg_filenode.map") => continue,
 
                 // Load any relation files into the page server
                 _ => restore_relfile(
@@ -190,54 +160,6 @@ fn restore_snapshot(
                 )?,
             }
         }
-    }
-    for entry in fs::read_dir(snapshotpath.join("pg_xact"))? {
-        let entry = entry?;
-        restore_slru_file(
-            conf,
-            timeline,
-            timelineid,
-            snapshot,
-            pg_constants::PG_XACT_FORKNUM,
-            &entry.path(),
-        )?;
-    }
-    for entry in fs::read_dir(snapshotpath.join("pg_multixact").join("members"))? {
-        let entry = entry?;
-        restore_slru_file(
-            conf,
-            timeline,
-            timelineid,
-            snapshot,
-            pg_constants::PG_MXACT_MEMBERS_FORKNUM,
-            &entry.path(),
-        )?;
-    }
-    for entry in fs::read_dir(snapshotpath.join("pg_multixact").join("offsets"))? {
-        let entry = entry?;
-        restore_slru_file(
-            conf,
-            timeline,
-            timelineid,
-            snapshot,
-            pg_constants::PG_MXACT_OFFSETS_FORKNUM,
-            &entry.path(),
-        )?;
-    }
-    for entry in fs::read_dir(snapshotpath.join("pg_twophase"))? {
-        let entry = entry?;
-        let xid = u32::from_str_radix(&entry.path().to_str().unwrap(), 16)?;
-        restore_nonrel_file(
-            conf,
-            timeline,
-            timelineid,
-            snapshot,
-            0,
-            0,
-            pg_constants::PG_TWOPHASE_FORKNUM,
-            xid,
-            &entry.path(),
-        )?;
     }
     // TODO: Scan pg_tblspc
 
@@ -306,96 +228,6 @@ fn restore_relfile(
     Ok(())
 }
 
-fn restore_nonrel_file(
-    _conf: &PageServerConf,
-    timeline: &dyn Timeline,
-    _timelineid: ZTimelineId,
-    snapshot: &str,
-    spcoid: Oid,
-    dboid: Oid,
-    forknum: u8,
-    blknum: u32,
-    path: &Path,
-) -> Result<()> {
-    let lsn = Lsn::from_hex(snapshot)?;
-
-    // Does it look like a relation file?
-
-    let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    // read the whole file
-    file.read_to_end(&mut buffer)?;
-
-    let tag = BufferTag {
-        rel: RelTag {
-            spcnode: spcoid,
-            dbnode: dboid,
-            relnode: 0,
-            forknum,
-        },
-        blknum,
-    };
-    timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]));
-    Ok(())
-}
-
-fn restore_slru_file(
-    _conf: &PageServerConf,
-    timeline: &dyn Timeline,
-    _timelineid: ZTimelineId,
-    snapshot: &str,
-    forknum: u8,
-    path: &Path,
-) -> Result<()> {
-    let lsn = Lsn::from_hex(snapshot)?;
-
-    // Does it look like a relation file?
-
-    let mut file = File::open(path)?;
-    let mut buf: [u8; 8192] = [0u8; 8192];
-    let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
-
-    let mut blknum: u32 = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
-    loop {
-        let r = file.read_exact(&mut buf);
-        match r {
-            Ok(_) => {
-                let tag = BufferTag {
-                    rel: RelTag {
-                        spcnode: 0,
-                        dbnode: 0,
-                        relnode: 0,
-                        forknum,
-                    },
-                    blknum,
-                };
-                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
-                /*
-                if oldest_lsn == 0 || p.lsn < oldest_lsn {
-                    oldest_lsn = p.lsn;
-                }
-                 */
-            }
-
-            // TODO: UnexpectedEof is expected
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::UnexpectedEof => {
-                    // reached EOF. That's expected.
-                    // FIXME: maybe check that we read the full length of the file?
-                    break;
-                }
-                _ => {
-                    error!("error reading file: {:?} ({})", path, e);
-                    break;
-                }
-            },
-        };
-        blknum += 1;
-    }
-
-    Ok(())
-}
-
 // Scan WAL on a timeline, starting from given LSN, and load all the records
 // into the page cache.
 fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn) -> Result<()> {
@@ -406,17 +238,6 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = Lsn(0);
-
-    let mut checkpoint = CheckPoint::new(startpoint.0, 1);
-    let checkpoint_tag = BufferTag::fork(pg_constants::PG_CHECKPOINT_FORKNUM);
-    let pg_control_tag = BufferTag::fork(pg_constants::PG_CONTROLFILE_FORKNUM);
-    if let Some(pg_control_bytes) = timeline.get_page_image(pg_control_tag, Lsn(0))? {
-        let pg_control = decode_pg_control(pg_control_bytes)?;
-        checkpoint = pg_control.checkPointCopy.clone();
-    } else {
-        error!("No control file is found in reposistory");
-    }
-
     loop {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
@@ -454,12 +275,10 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
             if rec.is_err() {
                 // Assume that an error means we've reached the end of
                 // a partial WAL record. So that's ok.
-                trace!("WAL decoder error {:?}", rec);
-                waldecoder.set_position(Lsn((segno + 1) * pg_constants::WAL_SEGMENT_SIZE as u64));
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
-                let decoded = decode_wal_record(&mut checkpoint, recdata.clone());
+                let decoded = decode_wal_record(recdata.clone());
                 timeline.save_decoded_record(decoded, recdata, lsn)?;
                 last_lsn = lsn;
             } else {
@@ -468,16 +287,12 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
             nrecords += 1;
         }
 
-        info!(
-            "restored {} records from WAL file {} at {}",
-            nrecords, filename, last_lsn
-        );
+        info!("restored {} records from WAL file {}", nrecords, filename);
 
         segno += 1;
         offset = 0;
     }
     info!("reached end of WAL at {}", last_lsn);
-    let checkpoint_bytes = encode_checkpoint(checkpoint);
-    timeline.put_page_image(checkpoint_tag, Lsn(0), checkpoint_bytes);
+
     Ok(())
 }
