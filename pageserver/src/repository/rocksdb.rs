@@ -28,7 +28,7 @@ use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
-static TIMEOUT: Duration = Duration::from_secs(60);
+static TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct RocksRepository {
     conf: &'static PageServerConf,
