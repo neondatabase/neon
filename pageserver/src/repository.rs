@@ -6,6 +6,7 @@ use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::forknumber_to_name;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
@@ -176,29 +177,12 @@ pub struct RepositoryStats {
     pub num_getpage_requests: Lsn,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct RelTag {
     pub forknum: u8,
     pub spcnode: u32,
     pub dbnode: u32,
     pub relnode: u32,
-}
-
-impl RelTag {
-    pub fn pack(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.forknum);
-        buf.put_u32(self.spcnode);
-        buf.put_u32(self.dbnode);
-        buf.put_u32(self.relnode);
-    }
-    pub fn unpack(buf: &mut Bytes) -> RelTag {
-        RelTag {
-            forknum: buf.get_u8(),
-            spcnode: buf.get_u32(),
-            dbnode: buf.get_u32(),
-            relnode: buf.get_u32(),
-        }
-    }
 }
 
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:
@@ -219,23 +203,10 @@ impl fmt::Display for RelTag {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct BufferTag {
     pub rel: RelTag,
     pub blknum: u32,
-}
-
-impl BufferTag {
-    pub fn pack(&self, buf: &mut BytesMut) {
-        self.rel.pack(buf);
-        buf.put_u32(self.blknum);
-    }
-    pub fn unpack(buf: &mut Bytes) -> BufferTag {
-        BufferTag {
-            rel: RelTag::unpack(buf),
-            blknum: buf.get_u32(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

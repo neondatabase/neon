@@ -15,6 +15,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use postgres_ffi::pg_constants;
+use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -24,6 +25,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 
@@ -82,7 +84,7 @@ pub struct RocksTimeline {
 // stored directly in the cache entry in that you still need to run the WAL redo
 // routine to generate the page image.
 //
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
 struct CacheKey {
     pub tag: BufferTag,
     pub lsn: Lsn,
@@ -124,30 +126,6 @@ impl CacheKey {
 
 static LAST_VALID_LSN_KEY: CacheKey = CacheKey::special(0);
 static LAST_VALID_RECORD_LSN_KEY: CacheKey = CacheKey::special(1);
-
-impl CacheKey {
-    fn pack(&self, buf: &mut BytesMut) {
-        self.tag.pack(buf);
-        buf.put_u64(self.lsn.0);
-    }
-    fn unpack(buf: &mut Bytes) -> CacheKey {
-        CacheKey {
-            tag: BufferTag::unpack(buf),
-            lsn: Lsn::from(buf.get_u64()),
-        }
-    }
-
-    fn from_slice(slice: &[u8]) -> Self {
-        let mut buf = Bytes::copy_from_slice(slice);
-        Self::unpack(&mut buf)
-    }
-
-    fn to_bytes(&self) -> BytesMut {
-        let mut buf = BytesMut::new();
-        self.pack(&mut buf);
-        buf
-    }
-}
 
 enum CacheEntryContent {
     PageImage(Bytes),
@@ -300,7 +278,7 @@ impl Repository for RocksRepository {
         iter.seek_to_first();
         while iter.valid() {
             let k = iter.key().unwrap();
-            let key = CacheKey::from_slice(k);
+            let key = CacheKey::des(k)?;
 
             if !key.is_special() && key.lsn <= at_lsn {
                 let v = iter.value().unwrap();
@@ -339,12 +317,12 @@ impl RocksTimeline {
 
         // Load these into memory
         let lsnstr = db
-            .get(LAST_VALID_LSN_KEY.to_bytes())
+            .get(LAST_VALID_LSN_KEY.ser()?)
             .with_context(|| "last_valid_lsn not found in repository")?
             .ok_or(anyhow!("empty last_valid_lsn"))?;
         let last_valid_lsn = Lsn::from_str(std::str::from_utf8(&lsnstr)?)?;
         let lsnstr = db
-            .get(LAST_VALID_RECORD_LSN_KEY.to_bytes())
+            .get(LAST_VALID_RECORD_LSN_KEY.ser()?)
             .with_context(|| "last_record_lsn not found in repository")?
             .ok_or(anyhow!("empty last_record_lsn"))?;
         let last_record_lsn = Lsn::from_str(std::str::from_utf8(&lsnstr)?)?;
@@ -423,12 +401,13 @@ impl RocksTimeline {
         let mut records: Vec<WALRecord> = Vec::new();
 
         let mut iter = self.db.raw_iterator();
-        iter.seek_for_prev(key.to_bytes());
+        let serialized_key = key.ser().expect("serialize CacheKey should always succeed");
+        iter.seek_for_prev(serialized_key);
 
         // Scan backwards, collecting the WAL records, until we hit an
         // old page image.
         while iter.valid() {
-            let key = CacheKey::from_slice(iter.key().unwrap());
+            let key = CacheKey::des(iter.key().unwrap()).unwrap();
             if key.tag != tag {
                 break;
             }
@@ -472,9 +451,9 @@ impl RocksTimeline {
         };
         let mut iter = self.db.raw_iterator();
         loop {
-            iter.seek_for_prev(key.to_bytes());
+            iter.seek_for_prev(key.ser()?);
             if iter.valid() {
-                let thiskey = CacheKey::from_slice(iter.key().unwrap());
+                let thiskey = CacheKey::des(iter.key().unwrap())?;
                 if thiskey.tag.rel == rel {
                     // Ignore entries with later LSNs.
                     if thiskey.lsn > lsn {
@@ -527,9 +506,9 @@ impl RocksTimeline {
                 let mut deleted = 0u64;
                 loop {
                     let mut iter = self.db.raw_iterator();
-                    iter.seek_for_prev(maxkey.to_bytes());
+                    iter.seek_for_prev(maxkey.ser()?);
                     if iter.valid() {
-                        let key = CacheKey::from_slice(iter.key().unwrap());
+                        let key = CacheKey::des(iter.key().unwrap())?;
                         let v = iter.value().unwrap();
 
                         inspected += 1;
@@ -564,12 +543,12 @@ impl RocksTimeline {
                             reconstructed += 1;
                         }
 
-                        iter.seek_for_prev(maxkey.to_bytes());
+                        iter.seek_for_prev(maxkey.ser()?);
                         if iter.valid() {
                             // do not remove last version
                             if last_lsn > horizon {
                                 // locate most recent record before horizon
-                                let key = CacheKey::from_slice(iter.key().unwrap());
+                                let key = CacheKey::des(iter.key().unwrap())?;
                                 if key.tag == maxkey.tag {
                                     let v = iter.value().unwrap();
                                     if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
@@ -607,7 +586,7 @@ impl RocksTimeline {
                                 if !iter.valid() {
                                     break;
                                 }
-                                let key = CacheKey::from_slice(iter.key().unwrap());
+                                let key = CacheKey::des(iter.key().unwrap())?;
                                 if key.tag != maxkey.tag {
                                     break;
                                 }
@@ -615,7 +594,7 @@ impl RocksTimeline {
                                 if (v[0] & UNUSED_VERSION_FLAG) == 0 {
                                     let mut v = v.to_owned();
                                     v[0] |= UNUSED_VERSION_FLAG;
-                                    self.db.put(key.to_bytes(), &v[..])?;
+                                    self.db.put(key.ser()?, &v[..])?;
                                     deleted += 1;
                                     trace!(
                                         "deleted: {} blk {} at {}",
@@ -692,10 +671,10 @@ impl Timeline for RocksTimeline {
         let key = CacheKey { tag, lsn };
 
         let mut iter = self.db.raw_iterator();
-        iter.seek_for_prev(key.to_bytes());
+        iter.seek_for_prev(key.ser()?);
 
         if iter.valid() {
-            let key = CacheKey::from_slice(iter.key().unwrap());
+            let key = CacheKey::des(iter.key().unwrap())?;
             if key.tag == tag {
                 let content = CacheEntryContent::from_slice(iter.value().unwrap());
                 let page_img: Bytes;
@@ -755,9 +734,9 @@ impl Timeline for RocksTimeline {
             lsn,
         };
         let mut iter = self.db.raw_iterator();
-        iter.seek_for_prev(key.to_bytes());
+        iter.seek_for_prev(key.ser()?);
         if iter.valid() {
-            let key = CacheKey::from_slice(iter.key().unwrap());
+            let key = CacheKey::des(iter.key().unwrap())?;
             if key.tag.rel == rel {
                 debug!("Relation {} exists at {}", rel, lsn);
                 return Ok(true);
@@ -779,7 +758,8 @@ impl Timeline for RocksTimeline {
 
         let content = CacheEntryContent::WALRecord(rec);
 
-        let _res = self.db.put(key.to_bytes(), content.to_bytes());
+        let serialized_key = key.ser().expect("serialize CacheKey should always succeed");
+        let _res = self.db.put(serialized_key, content.to_bytes());
         trace!(
             "put_wal_record rel {} blk {} at {}",
             tag.rel,
@@ -810,7 +790,7 @@ impl Timeline for RocksTimeline {
                 lsn,
             };
             trace!("put_wal_record lsn: {}", key.lsn);
-            let _res = self.db.put(key.to_bytes(), content.to_bytes());
+            let _res = self.db.put(key.ser()?, content.to_bytes());
         }
         let n = (old_rel_size - nblocks) as u64;
         self.num_entries.fetch_add(n, Ordering::Relaxed);
@@ -840,7 +820,8 @@ impl Timeline for RocksTimeline {
         }
 
         trace!("put_wal_record lsn: {}", key.lsn);
-        let _res = self.db.put(key.to_bytes(), content.to_bytes());
+        let serialized_key = key.ser().expect("serialize CacheKey should always succeed");
+        let _res = self.db.put(serialized_key, content.to_bytes());
 
         trace!(
             "put_page_image rel {} blk {} at {}",
@@ -872,10 +853,10 @@ impl Timeline for RocksTimeline {
             lsn: Lsn(0),
         };
         let mut iter = self.db.raw_iterator();
-        iter.seek(key.to_bytes());
+        iter.seek(key.ser()?);
         let mut n = 0;
         while iter.valid() {
-            let mut key = CacheKey::from_slice(iter.key().unwrap());
+            let mut key = CacheKey::des(iter.key().unwrap())?;
             if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
                 break;
             }
@@ -885,7 +866,7 @@ impl Timeline for RocksTimeline {
             key.lsn = lsn;
 
             let v = iter.value().unwrap();
-            self.db.put(key.to_bytes(), v)?;
+            self.db.put(key.ser()?, v)?;
             n += 1;
             iter.next();
         }
@@ -951,9 +932,9 @@ impl Timeline for RocksTimeline {
     fn checkpoint(&self) -> Result<()> {
         let last_valid_lsn = self.last_valid_lsn.load();
         self.db
-            .put(LAST_VALID_LSN_KEY.to_bytes(), last_valid_lsn.to_string())?;
+            .put(LAST_VALID_LSN_KEY.ser()?, last_valid_lsn.to_string())?;
         self.db.put(
-            LAST_VALID_RECORD_LSN_KEY.to_bytes(),
+            LAST_VALID_RECORD_LSN_KEY.ser()?,
             self.last_record_lsn.load().to_string(),
         )?;
 

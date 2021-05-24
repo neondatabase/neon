@@ -16,7 +16,6 @@
 //!
 use bytes::{BufMut, Bytes, BytesMut};
 use log::*;
-use std::assert;
 use std::cell::RefCell;
 use std::fs;
 use std::fs::OpenOptions;
@@ -32,6 +31,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
 use crate::repository::BufferTag;
@@ -456,9 +456,26 @@ fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
 
     buf.put_u8(b'B');
     buf.put_u32(len as u32);
-    tag.pack(&mut buf);
 
-    assert!(buf.len() == 1 + len);
+    // FIXME: this is a temporary hack that should go away when we refactor
+    // the postgres protocol serialization + handlers.
+    //
+    // BytesMut is a dynamic growable buffer, used a lot in tokio code but
+    // not in the std library. To write to a BytesMut from a serde serializer,
+    // we need to either:
+    // - pre-allocate the required buffer space. This is annoying because we
+    //   shouldn't care what the exact serialized size is-- that's the
+    //   serializer's job.
+    // - Or, we need to create a temporary "writer" (which implements the
+    //   `Write` trait). It's a bit awkward, because the writer consumes the
+    //   underlying BytesMut, and we need to extract it later with
+    //   `into_inner`.
+    let mut writer = buf.writer();
+    tag.ser_into(&mut writer)
+        .expect("serialize BufferTag should always succeed");
+    let buf = writer.into_inner();
+
+    debug_assert!(buf.len() == 1 + len);
 
     buf.freeze()
 }
@@ -471,10 +488,13 @@ fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
 
     buf.put_u8(b'P');
     buf.put_u32(len as u32);
-    tag.pack(&mut buf);
+    let mut writer = buf.writer();
+    tag.ser_into(&mut writer)
+        .expect("serialize BufferTag should always succeed");
+    let mut buf = writer.into_inner();
     buf.put(base_img);
 
-    assert!(buf.len() == 1 + len);
+    debug_assert!(buf.len() == 1 + len);
 
     buf.freeze()
 }
@@ -488,7 +508,7 @@ fn build_apply_record_msg(endlsn: Lsn, rec: Bytes) -> Bytes {
     buf.put_u64(endlsn.0);
     buf.put(rec);
 
-    assert!(buf.len() == 1 + len);
+    debug_assert!(buf.len() == 1 + len);
 
     buf.freeze()
 }
@@ -499,9 +519,12 @@ fn build_get_page_msg(tag: BufferTag) -> Bytes {
 
     buf.put_u8(b'G');
     buf.put_u32(len as u32);
-    tag.pack(&mut buf);
+    let mut writer = buf.writer();
+    tag.ser_into(&mut writer)
+        .expect("serialize BufferTag should always succeed");
+    let buf = writer.into_inner();
 
-    assert!(buf.len() == 1 + len);
+    debug_assert!(buf.len() == 1 + len);
 
     buf.freeze()
 }
