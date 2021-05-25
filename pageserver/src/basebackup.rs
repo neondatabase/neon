@@ -161,7 +161,7 @@ fn add_pgcontrol_file(
             // TODO: When we restart master there are no active transaction and oldestXid is
             // equal to nextXid if there are no prepared transactions.
             // Let's ignore them for a while...
-            checkpoint.oldestXid = checkpoint.nextXid.value as u32;
+            //checkpoint.oldestXid = checkpoint.nextXid.value as u32;
             pg_control.checkPointCopy = checkpoint;
             let pg_control_bytes = postgres_ffi::encode_pg_control(pg_control);
             let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
