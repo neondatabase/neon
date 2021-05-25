@@ -4,14 +4,32 @@ Zenith substitutes PostgreSQL storage layer and redistributes data across a clus
 
 ## Running local installation
 
-1. Build zenith and patched postgres
+1. Install build dependencies and other useful packages
+
+On Ubuntu or Debian this set of packages should be sufficient to build the code:
+```text
+apt install build-essential libtool libreadline-dev zlib1g-dev flex bison \
+libxml2-dev libcurl4-openssl-dev libssl-dev clang
+```
+
+[Rust] 1.48 or later is also required.
+
+To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
+
+To run the integration tests (not required to use the code), install
+Python (3.6 or higher), and install python3 packages with `pip` (called `pip3` on some systems):
+```
+pip install pytest psycopg2
+```
+
+2. Build zenith and patched postgres
 ```sh
 git clone --recursive https://github.com/libzenith/zenith.git
 cd zenith
 make -j5
 ```
 
-2. Start pageserver and postgres on top of it (should be called from repo root):
+3. Start pageserver and postgres on top of it (should be called from repo root):
 ```sh
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
@@ -35,8 +53,8 @@ BRANCH	ADDRESS		LSN		STATUS
 main	127.0.0.1:55432	0/1609610	running
 ```
 
-3. Now it is possible to connect to postgres and run some queries:
-```sh
+4. Now it is possible to connect to postgres and run some queries:
+```text
 > psql -p55432 -h 127.0.0.1 postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
 CREATE TABLE
@@ -49,7 +67,7 @@ postgres=# select * from t;
 (1 row)
 ```
 
-4. And create branches and run postgres on them:
+5. And create branches and run postgres on them:
 ```sh
 # create branch named migration_check
 > ./target/debug/zenith branch migration_check main
@@ -83,33 +101,34 @@ INSERT 0 1
 ```sh
 git clone --recursive https://github.com/libzenith/zenith.git
 make # builds also postgres and installs it to ./tmp_install
+cd test_runner
 pytest
 ```
 
 ## Source tree layout
 
-/walkeeper:
+`/walkeeper`:
 
 WAL safekeeper. Written in Rust.
 
-/pageserver:
+`/pageserver`:
 
 Page Server. Written in Rust.
 
 Depends on the modified 'postgres' binary for WAL redo.
 
-/integration_tests:
-
-Tests with different combinations of a Postgres compute node, WAL safekeeper and Page Server.
-
-/vendor/postgres:
+`/vendor/postgres`:
 
 PostgreSQL source tree, with the modifications needed for Zenith.
 
-/vendor/postgres/src/bin/safekeeper:
+`/vendor/postgres/src/bin/safekeeper`:
 
 Extension (safekeeper_proxy) that runs in the compute node, and connects to the WAL safekeepers
 and streams the WAL
 
+`/test_runner`:
+
+Integration tests, written in Python using the `pytest` framework.
 
 
+[Rust]: https://www.rust-lang.org/learn/get-started
