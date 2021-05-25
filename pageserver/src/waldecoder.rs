@@ -803,6 +803,10 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         } else {
 			assert!(info == pg_constants::CLOG_TRUNCATE);
 			blk.will_drop = true;
+            checkpoint.oldestXid = buf.get_u32_le();
+            checkpoint.oldestXidDB = buf.get_u32_le();
+            info!("RM_CLOG_ID truncate blkno {} oldestXid {} oldestXidDB {}",
+            blk.blkno, checkpoint.oldestXid, checkpoint.oldestXidDB);
 		}
         trace!("RM_CLOG_ID updates block {}", blk.blkno);
         blocks.push(blk);
@@ -1121,7 +1125,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             };
         } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
             let xlrec = XlMultiXactTruncate::decode(&mut buf);
-            checkpoint.oldestXid = xlrec.end_trunc_off;
+            checkpoint.oldestMulti = xlrec.end_trunc_off;
             checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
             let first_off_blkno =
                 xlrec.start_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
