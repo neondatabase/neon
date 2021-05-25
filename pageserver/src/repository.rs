@@ -363,7 +363,7 @@ mod tests {
         // though the relation was created only at a later LSN
         // rocksdb implementation erroneosly returns 'true' here
         assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(1))?, true); // CORRECT: false
-        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
+                                                                        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
         assert_eq!(tline.get_relsize(TESTREL_A, Lsn(1))?, 0); // CORRECT: throw error
 
         assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(2))?, true);
