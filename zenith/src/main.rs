@@ -12,8 +12,13 @@ use std::str::FromStr;
 use pageserver::{branches::BranchInfo, ZTimelineId};
 use zenith_utils::lsn::Lsn;
 
+///
+/// Branches tree element used as a value in the HashMap.
+///
 struct BranchTreeEl {
+    /// `BranchInfo` received from the `pageserver` via the `branch_list` libpq API call.
     pub info: BranchInfo,
+    /// Holds all direct children of this branch referenced using `timeline_id`.
     pub children: Vec<String>,
 }
 
@@ -172,7 +177,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// Print branches list as a tree-like structure.
+///
+/// Prints branches list as a tree-like structure.
+///
 fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
     let mut branches_hash: HashMap<String, BranchTreeEl> = HashMap::new();
 
@@ -214,7 +221,9 @@ fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
     Ok(())
 }
 
-// Recursively print branch info with all its children.
+///
+/// Recursively prints branch info with all its children.
+///
 fn print_branch(
     nesting_level: usize,
     is_last: &[bool],
