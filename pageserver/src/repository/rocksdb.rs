@@ -565,7 +565,13 @@ impl Timeline for RocksTimeline {
                     self.put_page_image(tag, lsn, page_img.clone());
                 } else {
                     // No base image, and no WAL record. Huh?
-                    bail!("no page image or WAL record for requested page");
+                    bail!(
+                        "no page image or WAL record for requested page {} blk {} at lsn {}({})",
+                        tag.rel,
+                        tag.blknum,
+                        req_lsn,
+                        lsn
+                    );
                 }
                 // FIXME: assumes little-endian. Only used for the debugging log though
                 let page_lsn_hi =
