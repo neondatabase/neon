@@ -201,7 +201,7 @@ fn walreceiver_main(
 
                     let new_checkpoint_bytes = encode_checkpoint(checkpoint);
                     if new_checkpoint_bytes != old_checkpoint_bytes {
-                        timeline.put_page_image(checkpoint_tag, Lsn(0), new_checkpoint_bytes);
+                        timeline.put_page_image(checkpoint_tag, Lsn(0), new_checkpoint_bytes)?;
                     }
                     // Now that this record has been handled, let the page cache know that
                     // it is up-to-date to this LSN

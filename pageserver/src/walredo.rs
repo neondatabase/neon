@@ -445,9 +445,6 @@ impl PostgresRedoManagerInternal {
                                 }
                             }
                         }
-                    } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
-                        // empty page image indicates that this SLRU page is truncated and can be removed by GC
-                        page.clear();
                     } else {
                         panic!();
                     }

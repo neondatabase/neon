@@ -63,13 +63,16 @@ pub trait Timeline {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord);
+    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes);
+    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
+
+    /// Drop relation or file segment
+    fn put_drop(&self, tag: BufferTag, lsn: Lsn) -> Result<()>;
 
     /// Put raw data
     fn put_raw_data(&self, key: RepositoryKey, data: &[u8]) -> Result<()>;
@@ -156,14 +159,18 @@ pub trait Timeline {
                 blknum: blk.blkno,
             };
 
-            let rec = WALRecord {
-                lsn,
-                will_init: blk.will_init || blk.apply_image,
-                rec: recdata.clone(),
-                main_data_offset: decoded.main_data_offset as u32,
-            };
+			if blk.will_drop {
+				self.put_drop(tag, lsn)?;
+			} else {
+				let rec = WALRecord {
+					lsn,
+					will_init: blk.will_init || blk.apply_image,
+					rec: recdata.clone(),
+					main_data_offset: decoded.main_data_offset as u32,
+				};
 
-            self.put_wal_record(tag, rec);
+				self.put_wal_record(tag, rec)?;
+			}
         }
 
         // Handle a few special record types
@@ -285,6 +292,21 @@ pub trait Timeline {
         return Ok(dbs);
     }
 
+	fn get_tx_status(&self, xid: TransactionId, lsn: Lsn) -> Result<u8> {
+        let tag = BufferTag {
+            rel: RelTag {
+                forknum: pg_constants::PG_XACT_FORKNUM,
+                spcnode: 0,
+                dbnode: 0,
+                relnode: 0,
+            },
+            blknum: xid / pg_constants::CLOG_XACTS_PER_PAGE,
+        };
+        let clog_page = self.get_page_at_lsn(tag, lsn)?;
+        let status = transaction_id_get_status(xid, &clog_page[..]);
+        Ok(status)
+	}
+
     /// Get vector of prepared twophase transactions
     fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>> {
         let key = RepositoryKey {
@@ -311,18 +333,7 @@ pub trait Timeline {
             }
             if key.lsn <= lsn {
                 let xid = key.tag.blknum;
-                let tag = BufferTag {
-                    rel: RelTag {
-                        forknum: pg_constants::PG_XACT_FORKNUM,
-                        spcnode: 0,
-                        dbnode: 0,
-                        relnode: 0,
-                    },
-                    blknum: xid / pg_constants::CLOG_XACTS_PER_PAGE,
-                };
-                let clog_page = self.get_page_at_lsn(tag, lsn)?;
-                let status = transaction_id_get_status(xid, &clog_page[..]);
-                if status == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
+				if self.get_tx_status(xid, lsn)? == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
                     gxacts.push(xid);
                 }
             }
@@ -567,11 +578,11 @@ mod tests {
         let tline = repo.create_empty_timeline(timelineid)?;
 
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"));
-        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"));
-        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"));
-        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"));
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"))?;
+        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"))?;
 
         tline.advance_last_valid_lsn(Lsn(5));
 
@@ -661,7 +672,7 @@ mod tests {
         for i in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", i, Lsn(lsn)));
             lsn += 1;
-            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img);
+            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img)?;
         }
         tline.advance_last_valid_lsn(Lsn(lsn));
 

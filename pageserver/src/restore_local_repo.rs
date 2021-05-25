@@ -279,7 +279,7 @@ fn restore_relfile(
                     },
                     blknum,
                 };
-                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
                     oldest_lsn = p.lsn;
@@ -335,7 +335,7 @@ fn restore_nonrel_file(
         },
         blknum,
     };
-    timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]));
+    timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]))?;
     Ok(())
 }
 
@@ -369,7 +369,7 @@ fn restore_slru_file(
                     },
                     blknum,
                 };
-                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
                     oldest_lsn = p.lsn;
@@ -478,6 +478,6 @@ fn restore_wal(timeline: &dyn Timeline, timelineid: ZTimelineId, startpoint: Lsn
     }
     info!("reached end of WAL at {}", last_lsn);
     let checkpoint_bytes = encode_checkpoint(checkpoint);
-    timeline.put_page_image(checkpoint_tag, Lsn(0), checkpoint_bytes);
+    timeline.put_page_image(checkpoint_tag, Lsn(0), checkpoint_bytes)?;
     Ok(())
 }

@@ -273,7 +273,8 @@ pub struct DecodedBkpBlock {
     /* Information on full-page image, if any */
     has_image: bool,       /* has image, even for consistency checking */
     pub apply_image: bool, /* has image that should be restored */
-    pub will_init: bool,
+    pub will_init: bool,   /* record intialize page content */
+    pub will_drop: bool,   /* record drops relation */
     //char	   *bkp_image;
     hole_offset: u16,
     hole_length: u16,
@@ -298,6 +299,7 @@ impl DecodedBkpBlock {
             has_image: false,
             apply_image: false,
             will_init: false,
+            will_drop: false,
             hole_offset: 0,
             hole_length: 0,
             bimg_len: 0,
@@ -795,7 +797,13 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         let mut blk = DecodedBkpBlock::new();
         blk.forknum = pg_constants::PG_XACT_FORKNUM;
         blk.blkno = buf.get_i32_le() as u32;
-        blk.will_init = true;
+        let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
+		if info == pg_constants::CLOG_ZEROPAGE {
+			blk.will_init = true;
+        } else {
+			assert!(info == pg_constants::CLOG_TRUNCATE);
+			blk.will_drop = true;
+		}
         trace!("RM_CLOG_ID updates block {}", blk.blkno);
         blocks.push(blk);
     } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
@@ -848,7 +856,13 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                     let spcnode = buf.get_u32_le();
                     let dbnode = buf.get_u32_le();
                     let relnode = buf.get_u32_le();
-                    //TODO handle this too?
+					let mut blk = DecodedBkpBlock::new();
+ 					blk.forknum = pg_constants::MAIN_FORKNUM;
+					blk.rnode_spcnode = spcnode;
+					blk.rnode_dbnode = dbnode;
+					blk.rnode_relnode = relnode;
+					blk.will_drop = true;
+					blocks.push(blk);
                     trace!(
                         "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
                         spcnode,
@@ -921,7 +935,13 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                     let spcnode = buf.get_u32_le();
                     let dbnode = buf.get_u32_le();
                     let relnode = buf.get_u32_le();
-                    //TODO save these too
+					let mut blk = DecodedBkpBlock::new();
+ 					blk.forknum = pg_constants::MAIN_FORKNUM;
+					blk.rnode_spcnode = spcnode;
+					blk.rnode_dbnode = dbnode;
+					blk.rnode_relnode = relnode;
+					blk.will_drop = true;
+					blocks.push(blk);
                     trace!(
                         "XLOG_XACT_ABORT relfilenode {}/{}/{}",
                         spcnode,
@@ -1111,7 +1131,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 let mut blk = DecodedBkpBlock::new();
                 blk.forknum = pg_constants::PG_MXACT_OFFSETS_FORKNUM;
                 blk.blkno = blkno;
-                blk.will_init = true;
+                blk.will_drop = true;
                 blocks.push(blk);
             }
             let first_mbr_blkno =
@@ -1122,7 +1142,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 let mut blk = DecodedBkpBlock::new();
                 blk.forknum = pg_constants::PG_MXACT_MEMBERS_FORKNUM;
                 blk.blkno = blkno;
-                blk.will_init = true;
+                blk.will_drop = true;
                 blocks.push(blk);
             }
         } else {
