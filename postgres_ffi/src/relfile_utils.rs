@@ -47,6 +47,7 @@ pub fn forknumber_to_name(forknum: u8) -> Option<&'static str> {
         pg_constants::PG_MXACT_OFFSETS_FORKNUM => Some("mxact_offsets"),
         pg_constants::PG_MXACT_MEMBERS_FORKNUM => Some("mxact_members"),
         pg_constants::PG_TWOPHASE_FORKNUM => Some("twophase"),
+        pg_constants::PG_CHECKPOINT_FORKNUM => Some("checkpoint"),
 
         _ => Some("UNKNOWN FORKNUM"),
     }
