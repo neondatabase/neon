@@ -193,10 +193,10 @@ pub trait Timeline {
                     rel.forknum = pg_constants::FSM_FORKNUM;
                     self.put_truncation(rel, lsn, truncate.blkno)?;
                 } else {
-                    // TODO: handle partial truncation of VM:
-                    // need to map heap block number to VM block number
-                    // and clear bits in tail block
-                    info!("Partial truncation of VM is not supported");
+                    // TODO: handle partial truncation of FSM:
+                    // need to map heap block number to FSM block number
+                    // and clear bits in the tail block
+                    info!("Partial truncation of FSM is not supported");
                 }
             }
             if (truncate.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
@@ -204,10 +204,10 @@ pub trait Timeline {
                     rel.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
                     self.put_truncation(rel, lsn, truncate.blkno)?;
                 } else {
-                    // TODO: handle partial truncation of FSM:
-                    // need to map heap block number to FSM block number
-                    // and clear bits in tail block
-                    info!("Partial truncation of FSM is not supported");
+                    // TODO: handle partial truncation of VM:
+                    // need to map heap block number to VM block number
+                    // and clear bits in the tail block
+                    info!("Partial truncation of VM is not supported");
                 }
             }
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
