@@ -286,11 +286,13 @@ impl PostgresRedoManagerInternal {
                 } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
                     let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
                     let mut status = 0;
-                    if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_COMMIT_PREPARED {
+                    if info == pg_constants::XLOG_XACT_COMMIT
+                        || info == pg_constants::XLOG_XACT_COMMIT_PREPARED
+                    {
                         status = pg_constants::TRANSACTION_STATUS_COMMITTED;
-						if info == pg_constants::XLOG_XACT_COMMIT {
-							transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
-						}
+                        if info == pg_constants::XLOG_XACT_COMMIT {
+                            transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
+                        }
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
                         let mut xinfo = 0;
@@ -314,38 +316,40 @@ impl PostgresRedoManagerInternal {
                                 }
                             }
                         }
-						if info == pg_constants::XLOG_XACT_COMMIT_PREPARED {
-							if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
-								let nrels = buf.get_i32_le();
-								for _i in 0..nrels {
-									let spcnode = buf.get_u32_le();
-									let dbnode = buf.get_u32_le();
-									let relnode = buf.get_u32_le();
-									//TODO handle this too?
-									trace!(
-										"XLOG_XACT_COMMIT relfilenode {}/{}/{}",
-										spcnode,
-										dbnode,
-										relnode
-									);
-								}
-							}
-							if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
-								let nmsgs = buf.get_i32_le();
-								for _i in 0..nmsgs {
-									let sizeof_shared_invalidation_message = 0;
-									buf.advance(sizeof_shared_invalidation_message);
-								}
-							}
-							assert!((xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE) != 0);
-							let xid = buf.get_u32_le();
-							transaction_id_set_status(xid, status, &mut page);
-						}
-                    } else if info == pg_constants::XLOG_XACT_ABORT || info == pg_constants::XLOG_XACT_ABORT_PREPARED {
+                        if info == pg_constants::XLOG_XACT_COMMIT_PREPARED {
+                            if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
+                                let nrels = buf.get_i32_le();
+                                for _i in 0..nrels {
+                                    let spcnode = buf.get_u32_le();
+                                    let dbnode = buf.get_u32_le();
+                                    let relnode = buf.get_u32_le();
+                                    //TODO handle this too?
+                                    trace!(
+                                        "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
+                                        spcnode,
+                                        dbnode,
+                                        relnode
+                                    );
+                                }
+                            }
+                            if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
+                                let nmsgs = buf.get_i32_le();
+                                for _i in 0..nmsgs {
+                                    let sizeof_shared_invalidation_message = 0;
+                                    buf.advance(sizeof_shared_invalidation_message);
+                                }
+                            }
+                            assert!((xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE) != 0);
+                            let xid = buf.get_u32_le();
+                            transaction_id_set_status(xid, status, &mut page);
+                        }
+                    } else if info == pg_constants::XLOG_XACT_ABORT
+                        || info == pg_constants::XLOG_XACT_ABORT_PREPARED
+                    {
                         status = pg_constants::TRANSACTION_STATUS_ABORTED;
-						if info == pg_constants::XLOG_XACT_ABORT {
-							transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
-						}
+                        if info == pg_constants::XLOG_XACT_ABORT {
+                            transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
+                        }
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
                         let mut xinfo = 0;
@@ -369,38 +373,38 @@ impl PostgresRedoManagerInternal {
                                 }
                             }
                         }
-						if info == pg_constants::XLOG_XACT_ABORT_PREPARED {
-							if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
-								let nrels = buf.get_i32_le();
-								for _i in 0..nrels {
-									let spcnode = buf.get_u32_le();
-									let dbnode = buf.get_u32_le();
-									let relnode = buf.get_u32_le();
-									//TODO handle this too?
-									trace!(
-										"XLOG_XACT_COMMIT relfilenode {}/{}/{}",
-										spcnode,
-										dbnode,
-										relnode
-									);
-								}
-							}
-							if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
-								let nmsgs = buf.get_i32_le();
-								for _i in 0..nmsgs {
-									let sizeof_shared_invalidation_message = 0;
-									buf.advance(sizeof_shared_invalidation_message);
-								}
-							}
-							assert!((xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE) != 0);
-							let xid = buf.get_u32_le();
-							transaction_id_set_status(xid, status, &mut page);
-						}
+                        if info == pg_constants::XLOG_XACT_ABORT_PREPARED {
+                            if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
+                                let nrels = buf.get_i32_le();
+                                for _i in 0..nrels {
+                                    let spcnode = buf.get_u32_le();
+                                    let dbnode = buf.get_u32_le();
+                                    let relnode = buf.get_u32_le();
+                                    //TODO handle this too?
+                                    trace!(
+                                        "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
+                                        spcnode,
+                                        dbnode,
+                                        relnode
+                                    );
+                                }
+                            }
+                            if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
+                                let nmsgs = buf.get_i32_le();
+                                for _i in 0..nmsgs {
+                                    let sizeof_shared_invalidation_message = 0;
+                                    buf.advance(sizeof_shared_invalidation_message);
+                                }
+                            }
+                            assert!((xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE) != 0);
+                            let xid = buf.get_u32_le();
+                            transaction_id_set_status(xid, status, &mut page);
+                        }
                     } else if info == pg_constants::XLOG_XACT_PREPARE {
-						info!("Apply prepare {} record", xlogrec.xl_xid);
-						page.clear();
-						page.extend_from_slice(&buf[..]);
-					} else {
+                        info!("Apply prepare {} record", xlogrec.xl_xid);
+                        page.clear();
+                        page.extend_from_slice(&buf[..]);
+                    } else {
                         error!("handle_apply_request for RM_XACT_ID-{} NOT SUPPORTED YET. RETURN. lsn {} main_data_offset {}, rec.len {}",
                                status,
                                record.lsn,

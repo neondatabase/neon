@@ -1,11 +1,11 @@
 use crate::ZTimelineId;
+use bytes::{BufMut, BytesMut};
 use log::*;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, Header};
 use walkdir::WalkDir;
-use bytes::{BufMut, BytesMut};
 
 use crate::repository::{BufferTag, RelTag, Timeline};
 use postgres_ffi::relfile_utils::*;
@@ -128,10 +128,10 @@ fn add_twophase_files(
             blknum: *xid,
         };
         let img = timeline.get_page_at_lsn(tag, lsn)?;
-		let mut buf = BytesMut::new();
-		buf.extend_from_slice(&img[..]);
-		let crc = crc32c::crc32c(&img[..]);
-		buf.put_u32_le(crc);
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&img[..]);
+        let crc = crc32c::crc32c(&img[..]);
+        buf.put_u32_le(crc);
         let path = format!("pg_twophase/{:>08X}", xid);
         let header = new_tar_header(&path, buf.len() as u64)?;
         ar.append(&header, &buf[..])?;

@@ -4,13 +4,13 @@ use crate::waldecoder::{DecodedWALRecord, Oid, TransactionId, XlCreateDatabase, 
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use log::*;
+use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use std::fmt;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
-use log::*;
-use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
@@ -159,18 +159,18 @@ pub trait Timeline {
                 blknum: blk.blkno,
             };
 
-			if blk.will_drop {
-				self.put_drop(tag, lsn)?;
-			} else {
-				let rec = WALRecord {
-					lsn,
-					will_init: blk.will_init || blk.apply_image,
-					rec: recdata.clone(),
-					main_data_offset: decoded.main_data_offset as u32,
-				};
+            if blk.will_drop {
+                self.put_drop(tag, lsn)?;
+            } else {
+                let rec = WALRecord {
+                    lsn,
+                    will_init: blk.will_init || blk.apply_image,
+                    rec: recdata.clone(),
+                    main_data_offset: decoded.main_data_offset as u32,
+                };
 
-				self.put_wal_record(tag, rec)?;
-			}
+                self.put_wal_record(tag, rec)?;
+            }
         }
 
         // Handle a few special record types
@@ -292,7 +292,7 @@ pub trait Timeline {
         return Ok(dbs);
     }
 
-	fn get_tx_status(&self, xid: TransactionId, lsn: Lsn) -> Result<u8> {
+    fn get_tx_status(&self, xid: TransactionId, lsn: Lsn) -> Result<u8> {
         let tag = BufferTag {
             rel: RelTag {
                 forknum: pg_constants::PG_XACT_FORKNUM,
@@ -305,7 +305,7 @@ pub trait Timeline {
         let clog_page = self.get_page_at_lsn(tag, lsn)?;
         let status = transaction_id_get_status(xid, &clog_page[..]);
         Ok(status)
-	}
+    }
 
     /// Get vector of prepared twophase transactions
     fn get_twophase(&self, lsn: Lsn) -> Result<Vec<TransactionId>> {
@@ -333,7 +333,7 @@ pub trait Timeline {
             }
             if key.lsn <= lsn {
                 let xid = key.tag.blknum;
-				if self.get_tx_status(xid, lsn)? == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
+                if self.get_tx_status(xid, lsn)? == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
                     gxacts.push(xid);
                 }
             }
@@ -590,7 +590,7 @@ mod tests {
         // though the relation was created only at a later LSN
         // rocksdb implementation erroneosly returns 'true' here
         assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(1))?, true); // CORRECT: false
-        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
+                                                                        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
         assert_eq!(tline.get_relsize(TESTREL_A, Lsn(1))?, 0); // CORRECT: throw error
 
         assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(2))?, true);

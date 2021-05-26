@@ -5,7 +5,9 @@
 // full page images, keyed by the RelFileNode, blocknumber, and the
 // LSN.
 
-use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord, RepositoryKey, RepositoryIterator};
+use crate::repository::{
+    BufferTag, RelTag, Repository, RepositoryIterator, RepositoryKey, Timeline, WALRecord,
+};
 use crate::restore_local_repo::restore_timeline;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
@@ -83,6 +85,7 @@ pub struct RocksTimeline {
 // routine to generate the page image.
 //
 
+#[derive(Debug)]
 enum CacheEntryContent {
     PageImage(Bytes),
     WALRecord(WALRecord),
@@ -98,9 +101,9 @@ enum CacheEntryContent {
 const CONTENT_PAGE_IMAGE: u8 = 0u8;
 const CONTENT_WAL_RECORD: u8 = 1u8;
 const CONTENT_TRUNCATION: u8 = 2u8;
-const CONTENT_DROP:       u8 = 3u8;
+const CONTENT_DROP: u8 = 3u8;
 
-const CONTENT_KIND_MASK: u8  = 3u8; // bitmask that covers the above
+const CONTENT_KIND_MASK: u8 = 3u8; // bitmask that covers the above
 
 const UNUSED_VERSION_FLAG: u8 = 4u8;
 
@@ -257,8 +260,9 @@ impl RocksTimeline {
         opts.create_if_missing(true);
         opts.set_use_fsync(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_compaction_filter("ttl", move |_level: u32, _key: &[u8], val: &[u8]| {
+        opts.set_compaction_filter("ttl", move |_level: u32, key: &[u8], val: &[u8]| {
             if (val[0] & UNUSED_VERSION_FLAG) != 0 {
+                trace!("Delete unused version {:?}", RepositoryKey::from_slice(key));
                 rocksdb::compaction_filter::Decision::Remove
             } else {
                 rocksdb::compaction_filter::Decision::Keep
@@ -384,49 +388,53 @@ impl RocksTimeline {
         Ok(0)
     }
 
-	///
-	/// Drop relations with all its forks or non-relational file
-	///
-	fn drop(&self, tag: BufferTag) -> Result<()> {
-		let mut iter = self.iterator();
-		let mut key = RepositoryKey { tag, lsn: Lsn(u64::MAX) };
-		if tag.rel.forknum == pg_constants::MAIN_FORKNUM {
-			// if it is relation then remove all its blocks in all forks
-			key.tag.blknum = u32::MAX;
-			key.tag.rel.forknum = pg_constants::INIT_FORKNUM;
-		} else {
-			assert!(tag.rel.forknum > pg_constants::INIT_FORKNUM);
-		}
-
-		iter.last(&key);
-		while iter.valid() {
-			let key = iter.key();
-			if key.tag.rel.relnode != tag.rel.relnode ||
-				key.tag.rel.spcnode != tag.rel.spcnode ||
-				key.tag.rel.dbnode != tag.rel.dbnode ||
-				(key.tag.rel.forknum != tag.rel.forknum &&
-				 tag.rel.forknum != pg_constants::MAIN_FORKNUM)
-			{
-				// no more entries belonging to this relation or file
-				break;
-			}
-			let v = iter.value();
-			if (v[0] & UNUSED_VERSION_FLAG) == 0 {
-				let mut v = v.to_owned();
-				v[0] |= UNUSED_VERSION_FLAG;
-				self.db.put(key.to_bytes(), &v[..])?;
-			} else {
-				// already marked for deletion
-				break;
-			}
-			iter.prev();
-		}
-		Ok(())
-	}
+    ///
+    /// Drop relations with all its forks or non-relational file
+    ///
+    fn drop(&self, tag: BufferTag) -> Result<()> {
+        let mut iter = self.iterator();
+        let mut key = RepositoryKey {
+            tag,
+            lsn: Lsn(u64::MAX),
+        };
+        if tag.rel.forknum == pg_constants::MAIN_FORKNUM {
+            // if it is relation then remove all its blocks in all forks
+            key.tag.blknum = u32::MAX;
+            key.tag.rel.forknum = pg_constants::INIT_FORKNUM;
+        } else {
+            assert!(tag.rel.forknum > pg_constants::INIT_FORKNUM);
+        }
+        debug!("Drop relation {:?}", tag);
+        iter.last(&key);
+        while iter.valid() {
+            let key = iter.key();
+            if key.tag.rel.relnode != tag.rel.relnode
+                || key.tag.rel.spcnode != tag.rel.spcnode
+                || key.tag.rel.dbnode != tag.rel.dbnode
+                || (key.tag.rel.forknum != tag.rel.forknum
+                    && tag.rel.forknum != pg_constants::MAIN_FORKNUM)
+            {
+                // no more entries belonging to this relation or file
+                break;
+            }
+            let v = iter.value();
+            if (v[0] & UNUSED_VERSION_FLAG) == 0 {
+                let mut v = v.to_owned();
+                v[0] |= UNUSED_VERSION_FLAG;
+                self.db.put(key.to_bytes(), &v[..])?;
+            } else {
+                // already marked for deletion
+                break;
+            }
+            iter.prev();
+        }
+        Ok(())
+    }
 
     fn do_gc(&self, conf: &'static PageServerConf) -> Result<Bytes> {
         loop {
             thread::sleep(conf.gc_period);
+            trace!("Start GC iteration");
             let last_lsn = self.get_last_valid_lsn();
 
             // checked_sub() returns None on overflow.
@@ -454,7 +462,7 @@ impl RocksTimeline {
                     if iter.valid() {
                         let key = iter.key();
                         let v = iter.value();
-						let flag = v[0];
+                        let flag = v[0];
                         let last_lsn = key.lsn;
 
                         inspected += 1;
@@ -466,12 +474,12 @@ impl RocksTimeline {
                         let mut minkey = maxkey.clone();
                         minkey.lsn = Lsn(0); // first version
 
-						if (flag & CONTENT_KIND_MASK) == CONTENT_DROP {
-							// If drop record in over the horizon then delete all entries from repository
-							if last_lsn < horizon {
-								self.drop(key.tag)?;
-							}
-							maxkey = minkey;
+                        if (flag & CONTENT_KIND_MASK) == CONTENT_DROP {
+                            // If drop record in over the horizon then delete all entries from repository
+                            if last_lsn < horizon {
+                                self.drop(key.tag)?;
+                            }
+                            maxkey = minkey;
                             continue;
                         }
 
@@ -479,20 +487,22 @@ impl RocksTimeline {
                         if last_lsn < horizon
                             && key.tag.rel.forknum == pg_constants::PG_TWOPHASE_FORKNUM
                         {
-							let xid = key.tag.blknum;
-							// We can not remove information about uncompleted prepared transaction
-							// even if it is over horizon
-							if self.get_tx_status(xid, horizon)? != pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
-								if (v[0] & UNUSED_VERSION_FLAG) == 0 {
-									let mut v = v.to_owned();
-									v[0] |= UNUSED_VERSION_FLAG;
-									self.db.put(key.to_bytes(), &v[..])?;
-									deleted += 1;
-								}
-							}
-							maxkey = minkey;
-							continue;
-						}
+                            let xid = key.tag.blknum;
+                            // We can not remove information about uncompleted prepared transaction
+                            // even if it is over horizon
+                            if self.get_tx_status(xid, horizon)?
+                                != pg_constants::TRANSACTION_STATUS_IN_PROGRESS
+                            {
+                                if (v[0] & UNUSED_VERSION_FLAG) == 0 {
+                                    let mut v = v.to_owned();
+                                    v[0] |= UNUSED_VERSION_FLAG;
+                                    self.db.put(key.to_bytes(), &v[..])?;
+                                    deleted += 1;
+                                }
+                            }
+                            maxkey = minkey;
+                            continue;
+                        }
                         // reconstruct most recent page version
                         if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
                             // force reconstruction of most recent page version
@@ -601,6 +611,7 @@ impl Timeline for RocksTimeline {
     ///
     fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: Lsn) -> Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
+        const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
 
         let lsn = self.wait_lsn(req_lsn)?;
 
@@ -624,14 +635,18 @@ impl Timeline for RocksTimeline {
                     page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
 
                     self.put_page_image(tag, lsn, page_img.clone())?;
+                } else if let CacheEntryContent::Truncation = content {
+                    // Because FSM pages may be not up-to-date we can request truncated page
+                    return Ok(Bytes::from_static(&ZERO_PAGE));
                 } else {
                     // No base image, and no WAL record. Huh?
                     bail!(
-                        "no page image or WAL record for requested page {} blk {} at lsn {}({})",
+                        "no page image or WAL record for requested page {} blk {} at lsn {}({}), content={:?}",
                         tag.rel,
                         tag.blknum,
                         req_lsn,
-                        lsn
+                        lsn,
+						content
                     );
                 }
                 // FIXME: assumes little-endian. Only used for the debugging log though
@@ -646,7 +661,6 @@ impl Timeline for RocksTimeline {
                 return Ok(page_img);
             }
         }
-        static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         debug!(
             "Page {} blk {} at {}({}) not found",
             tag.rel, tag.blknum, req_lsn, lsn
@@ -712,19 +726,19 @@ impl Timeline for RocksTimeline {
 
         self.num_entries.fetch_add(1, Ordering::Relaxed);
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
-		Ok(())
+        Ok(())
     }
 
-	///
-	/// Put drop record which should completely delete relation with all its forks
-	/// or non-relational file from repository
-	///
-	fn put_drop(&self, tag: BufferTag, lsn: Lsn) -> Result<()> {
+    ///
+    /// Put drop record which should completely delete relation with all its forks
+    /// or non-relational file from repository
+    ///
+    fn put_drop(&self, tag: BufferTag, lsn: Lsn) -> Result<()> {
         let key = RepositoryKey { tag, lsn };
         let content = CacheEntryContent::Drop;
-		let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
-		Ok(())
-	}
+        let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
+        Ok(())
+    }
 
     ///
     /// Adds a relation-wide WAL record (like truncate) to the repository,
@@ -746,6 +760,23 @@ impl Timeline for RocksTimeline {
             };
             trace!("put_wal_record lsn: {}", key.lsn);
             let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
+        }
+        if nblocks == 0 {
+            // TODO: update FSM not only when relational is completely truncated
+            let mut fsm_rel = rel;
+            fsm_rel.forknum = pg_constants::FSM_FORKNUM;
+            let fsm_rel_size = self.relsize_get_nowait(fsm_rel, last_lsn)?;
+            for blknum in 0..fsm_rel_size {
+                let key = RepositoryKey {
+                    tag: BufferTag {
+                        rel: fsm_rel,
+                        blknum,
+                    },
+                    lsn,
+                };
+                trace!("put_wal_record lsn: {}", key.lsn);
+                let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
+            }
         }
         let n = (old_rel_size - nblocks) as u64;
         self.num_entries.fetch_add(n, Ordering::Relaxed);
@@ -784,7 +815,7 @@ impl Timeline for RocksTimeline {
             lsn
         );
         self.num_page_images.fetch_add(1, Ordering::Relaxed);
-		Ok(())
+        Ok(())
     }
 
     fn iterator(&self) -> Box<dyn RepositoryIterator + '_> {
@@ -853,7 +884,7 @@ impl Timeline for RocksTimeline {
     // Wait until WAL has been received up to the given LSN.
     //
     fn wait_lsn(&self, lsn: Lsn) -> Result<Lsn> {
-		let mut lsn = lsn;
+        let mut lsn = lsn;
         // When invalid LSN is requested, it means "don't wait, return latest version of the page"
         // This is necessary for bootstrap.
         if lsn == Lsn(0) {
