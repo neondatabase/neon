@@ -27,6 +27,8 @@ pub const PG_CHECKPOINT_FORKNUM: u8 = 48;
 
 // From storage_xlog.h
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
+pub const SMGR_TRUNCATE_VM: u32 = 0x0002;
+pub const SMGR_TRUNCATE_FSM: u32 = 0x0004;
 
 // from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
 // --with-segsize=SEGSIZE, but assume the defaults for now.

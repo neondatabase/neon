@@ -179,14 +179,36 @@ pub trait Timeline {
                 == pg_constants::XLOG_SMGR_TRUNCATE
         {
             let truncate = XlSmgrTruncate::decode(&decoded);
+            let mut rel = RelTag {
+                spcnode: truncate.rnode.spcnode,
+                dbnode: truncate.rnode.dbnode,
+                relnode: truncate.rnode.relnode,
+                forknum: pg_constants::MAIN_FORKNUM,
+            };
             if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
-                let rel = RelTag {
-                    spcnode: truncate.rnode.spcnode,
-                    dbnode: truncate.rnode.dbnode,
-                    relnode: truncate.rnode.relnode,
-                    forknum: pg_constants::MAIN_FORKNUM,
-                };
                 self.put_truncation(rel, lsn, truncate.blkno)?;
+            }
+            if (truncate.flags & pg_constants::SMGR_TRUNCATE_FSM) != 0 {
+                if truncate.blkno == 0 {
+                    rel.forknum = pg_constants::FSM_FORKNUM;
+                    self.put_truncation(rel, lsn, truncate.blkno)?;
+                } else {
+                    // TODO: handle partial truncation of VM:
+                    // need to map heap block number to VM block number
+                    // and clear bits in tail block
+                    info!("Partial truncation of VM is not supported");
+                }
+            }
+            if (truncate.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
+                if truncate.blkno == 0 {
+                    rel.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
+                    self.put_truncation(rel, lsn, truncate.blkno)?;
+                } else {
+                    // TODO: handle partial truncation of FSM:
+                    // need to map heap block number to FSM block number
+                    // and clear bits in tail block
+                    info!("Partial truncation of FSM is not supported");
+                }
             }
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)

@@ -761,23 +761,6 @@ impl Timeline for RocksTimeline {
             trace!("put_wal_record lsn: {}", key.lsn);
             let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
         }
-        if nblocks == 0 {
-            // TODO: update FSM not only when relational is completely truncated
-            let mut fsm_rel = rel;
-            fsm_rel.forknum = pg_constants::FSM_FORKNUM;
-            let fsm_rel_size = self.relsize_get_nowait(fsm_rel, last_lsn)?;
-            for blknum in 0..fsm_rel_size {
-                let key = RepositoryKey {
-                    tag: BufferTag {
-                        rel: fsm_rel,
-                        blknum,
-                    },
-                    lsn,
-                };
-                trace!("put_wal_record lsn: {}", key.lsn);
-                let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
-            }
-        }
         let n = (old_rel_size - nblocks) as u64;
         self.num_entries.fetch_add(n, Ordering::Relaxed);
         self.num_wal_records.fetch_add(n, Ordering::Relaxed);
