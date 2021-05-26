@@ -109,4 +109,23 @@ impl CheckPoint {
             oldestActiveXid: pg_constants::INVALID_TRANSACTION_ID,
         }
     }
+
+    // Update next XID based on previded new_xid and stored epoch.
+    // Next XID should be greater than new_xid.
+    // Also take in account 32-bit wraparound.
+    pub fn update_next_xid(&mut self, xid: u32) {
+        let full_xid = self.nextXid.value;
+        let new_xid = xid + 1;
+        let old_xid = full_xid as u32;
+        if new_xid.wrapping_sub(old_xid) as i32 > 0 {
+            let mut epoch = full_xid >> 32;
+            if new_xid < old_xid {
+                // wraparound
+                epoch += 1;
+            }
+            self.nextXid = FullTransactionId {
+                value: (epoch << 32) | new_xid as u64,
+            };
+        }
+    }
 }

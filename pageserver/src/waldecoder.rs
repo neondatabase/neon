@@ -576,12 +576,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
         xlogrec.xl_rmid,
         xlogrec.xl_info
     );
-    if xlogrec.xl_xid >= checkpoint.nextXid.value as u32 {
-        // TODO: handle XID wraparound
-        checkpoint.nextXid = FullTransactionId {
-            value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | (xlogrec.xl_xid + 1) as u64,
-        };
-    }
+    checkpoint.update_next_xid(xlogrec.xl_xid);
     let remaining = xlogrec.xl_tot_len - SizeOfXLogRecord;
 
     if buf.remaining() != remaining as usize {
@@ -1115,19 +1110,18 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             if xlrec.moff + xlrec.nmembers > checkpoint.nextMultiOffset {
                 checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
             }
-            let max_xid = xlrec
-                .members
-                .iter()
-                .fold(checkpoint.nextXid.value as u32, |acc, mbr| {
-                    if mbr.xid >= acc {
-                        mbr.xid + 1
-                    } else {
-                        acc
-                    }
-                });
-            checkpoint.nextXid = FullTransactionId {
-                value: (checkpoint.nextXid.value & 0xFFFFFFFF00000000) | max_xid as u64,
-            };
+            let max_mbr_xid =
+                xlrec.members.iter().fold(
+                    0u32,
+                    |acc, mbr| {
+                        if mbr.xid > acc {
+                            mbr.xid
+                        } else {
+                            acc
+                        }
+                    },
+                );
+            checkpoint.update_next_xid(max_mbr_xid);
         } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
             let xlrec = XlMultiXactTruncate::decode(&mut buf);
             checkpoint.oldestMulti = xlrec.end_trunc_off;
