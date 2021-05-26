@@ -144,7 +144,7 @@ fn import_relfile(
                     },
                     blknum,
                 };
-                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
                     oldest_lsn = p.lsn;

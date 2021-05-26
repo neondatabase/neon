@@ -127,10 +127,12 @@ impl CacheKey {
 static LAST_VALID_LSN_KEY: CacheKey = CacheKey::special(0);
 static LAST_VALID_RECORD_LSN_KEY: CacheKey = CacheKey::special(1);
 
+#[derive(Debug)]
 enum CacheEntryContent {
     PageImage(Bytes),
     WALRecord(WALRecord),
     Truncation,
+    Drop,
 }
 
 // The serialized representation of a CacheEntryContent begins with
@@ -138,9 +140,10 @@ enum CacheEntryContent {
 // an UNUSED_VERSION_FLAG that is not represented in the CacheEntryContent
 // at all, you must peek into the first byte of the serialized representation
 // to read it.
-const CONTENT_PAGE_IMAGE: u8 = 1u8;
-const CONTENT_WAL_RECORD: u8 = 2u8;
-const CONTENT_TRUNCATION: u8 = 3u8;
+const CONTENT_PAGE_IMAGE: u8 = 0u8;
+const CONTENT_WAL_RECORD: u8 = 1u8;
+const CONTENT_TRUNCATION: u8 = 2u8;
+const CONTENT_DROP: u8 = 3u8;
 
 const CONTENT_KIND_MASK: u8 = 3u8; // bitmask that covers the above
 
@@ -161,6 +164,9 @@ impl CacheEntryContent {
             CacheEntryContent::Truncation => {
                 buf.put_u8(CONTENT_TRUNCATION);
             }
+            CacheEntryContent::Drop => {
+                buf.put_u8(CONTENT_DROP);
+            }
         }
     }
     pub fn unpack(buf: &mut Bytes) -> CacheEntryContent {
@@ -175,6 +181,7 @@ impl CacheEntryContent {
             }
             CONTENT_WAL_RECORD => CacheEntryContent::WALRecord(WALRecord::unpack(buf)),
             CONTENT_TRUNCATION => CacheEntryContent::Truncation,
+            CONTENT_DROP => CacheEntryContent::Drop,
             _ => unreachable!(),
         }
     }
@@ -296,8 +303,9 @@ impl RocksTimeline {
         let mut opts = rocksdb::Options::default();
         opts.set_use_fsync(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_compaction_filter("ttl", move |_level: u32, _key: &[u8], val: &[u8]| {
+        opts.set_compaction_filter("ttl", move |_level: u32, key: &[u8], val: &[u8]| {
             if (val[0] & UNUSED_VERSION_FLAG) != 0 {
+                trace!("Delete unused version {:?}", CacheKey::des(key));
                 rocksdb::compaction_filter::Decision::Remove
             } else {
                 rocksdb::compaction_filter::Decision::Keep
@@ -480,9 +488,53 @@ impl RocksTimeline {
         Ok(0)
     }
 
+    ///
+    /// Drop relations with all its forks or non-relational file
+    ///
+    fn drop(&self, tag: BufferTag) -> Result<()> {
+        let mut iter = self.db.raw_iterator();
+        let mut key = CacheKey {
+            tag,
+            lsn: Lsn(u64::MAX),
+        };
+        if tag.rel.forknum == pg_constants::MAIN_FORKNUM {
+            // if it is relation then remove all its blocks in all forks
+            key.tag.blknum = u32::MAX;
+            key.tag.rel.forknum = pg_constants::INIT_FORKNUM;
+        } else {
+            assert!(tag.rel.forknum > pg_constants::INIT_FORKNUM);
+        }
+        debug!("Drop relation {:?}", tag);
+        iter.seek_for_prev(key.ser()?);
+        while iter.valid() {
+            let key = CacheKey::des(iter.key().unwrap())?;
+            if key.tag.rel.relnode != tag.rel.relnode
+                || key.tag.rel.spcnode != tag.rel.spcnode
+                || key.tag.rel.dbnode != tag.rel.dbnode
+                || (key.tag.rel.forknum != tag.rel.forknum
+                    && tag.rel.forknum != pg_constants::MAIN_FORKNUM)
+            {
+                // no more entries belonging to this relation or file
+                break;
+            }
+            let v = iter.value().unwrap();
+            if (v[0] & UNUSED_VERSION_FLAG) == 0 {
+                let mut v = v.to_owned();
+                v[0] |= UNUSED_VERSION_FLAG;
+                self.db.put(key.ser()?, &v[..])?;
+            } else {
+                // already marked for deletion
+                break;
+            }
+            iter.prev();
+        }
+        Ok(())
+    }
+
     fn do_gc(&self, conf: &'static PageServerConf) -> Result<Bytes> {
         loop {
             thread::sleep(conf.gc_period);
+            trace!("Start GC iteration");
             let last_lsn = self.get_last_valid_lsn();
 
             // checked_sub() returns None on overflow.
@@ -510,16 +562,26 @@ impl RocksTimeline {
                     if iter.valid() {
                         let key = CacheKey::des(iter.key().unwrap())?;
                         let v = iter.value().unwrap();
+                        let flag = v[0];
+                        let last_lsn = key.lsn;
 
                         inspected += 1;
 
                         // Construct boundaries for old records cleanup
                         maxkey.tag = key.tag;
-                        let last_lsn = key.lsn;
                         maxkey.lsn = min(horizon, last_lsn); // do not remove last version
 
                         let mut minkey = maxkey.clone();
                         minkey.lsn = Lsn(0); // first version
+
+                        if (flag & CONTENT_KIND_MASK) == CONTENT_DROP {
+                            // If drop record in over the horizon then delete all entries from repository
+                            if last_lsn < horizon {
+                                self.drop(key.tag)?;
+                            }
+                            maxkey = minkey;
+                            continue;
+                        }
 
                         // reconstruct most recent page version
                         if (v[0] & CONTENT_KIND_MASK) == CONTENT_WAL_RECORD {
@@ -538,7 +600,7 @@ impl RocksTimeline {
                             let new_img = self
                                 .walredo_mgr
                                 .request_redo(key.tag, key.lsn, base_img, records)?;
-                            self.put_page_image(key.tag, key.lsn, new_img.clone());
+                            self.put_page_image(key.tag, key.lsn, new_img.clone())?;
 
                             reconstructed += 1;
                         }
@@ -559,7 +621,7 @@ impl RocksTimeline {
                                         let new_img = self
                                             .walredo_mgr
                                             .request_redo(key.tag, key.lsn, base_img, records)?;
-                                        self.put_page_image(key.tag, key.lsn, new_img.clone());
+                                        self.put_page_image(key.tag, key.lsn, new_img.clone())?;
 
                                         truncated += 1;
                                     } else {
@@ -663,6 +725,7 @@ impl Timeline for RocksTimeline {
     ///
     fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: Lsn) -> Result<Bytes> {
         self.num_getpage_requests.fetch_add(1, Ordering::Relaxed);
+        const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
 
         let lsn = self.wait_lsn(req_lsn)?;
 
@@ -685,7 +748,10 @@ impl Timeline for RocksTimeline {
                     let (base_img, records) = self.collect_records_for_apply(tag, lsn);
                     page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
 
-                    self.put_page_image(tag, lsn, page_img.clone());
+                    self.put_page_image(tag, lsn, page_img.clone())?;
+                } else if let CacheEntryContent::Truncation = content {
+                    // Because FSM pages may be not up-to-date we can request truncated page
+                    return Ok(Bytes::from_static(&ZERO_PAGE));
                 } else {
                     // No base image, and no WAL record. Huh?
                     bail!("no page image or WAL record for requested page");
@@ -702,7 +768,6 @@ impl Timeline for RocksTimeline {
                 return Ok(page_img);
             }
         }
-        static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         debug!(
             "Page {} blk {} at {}({}) not found",
             tag.rel, tag.blknum, req_lsn, lsn
@@ -752,14 +817,14 @@ impl Timeline for RocksTimeline {
     ///
     /// Adds a WAL record to the repository
     ///
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) {
+    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()> {
         let lsn = rec.lsn;
         let key = CacheKey { tag, lsn };
 
         let content = CacheEntryContent::WALRecord(rec);
 
         let serialized_key = key.ser().expect("serialize CacheKey should always succeed");
-        let _res = self.db.put(serialized_key, content.to_bytes());
+        let _res = self.db.put(serialized_key, content.to_bytes())?;
         trace!(
             "put_wal_record rel {} blk {} at {}",
             tag.rel,
@@ -769,6 +834,18 @@ impl Timeline for RocksTimeline {
 
         self.num_entries.fetch_add(1, Ordering::Relaxed);
         self.num_wal_records.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    ///
+    /// Put drop record which should completely delete relation with all its forks
+    /// or non-relational file from repository
+    ///
+    fn put_drop(&self, tag: BufferTag, lsn: Lsn) -> Result<()> {
+        let key = CacheKey { tag, lsn };
+        let content = CacheEntryContent::Drop;
+        let _res = self.db.put(key.ser()?, content.to_bytes())?;
+        Ok(())
     }
 
     ///
@@ -801,27 +878,13 @@ impl Timeline for RocksTimeline {
     ///
     /// Memorize a full image of a page version
     ///
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) {
-        let img_len = img.len();
+    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
         let key = CacheKey { tag, lsn };
         let content = CacheEntryContent::PageImage(img);
 
-        let mut val_buf = content.to_bytes();
-
-        // Zero size of page image indicates that page can be removed
-        if img_len == 0 {
-            if (val_buf[0] & UNUSED_VERSION_FLAG) != 0 {
-                // records already marked for deletion
-                return;
-            } else {
-                // delete truncated multixact page
-                val_buf[0] |= UNUSED_VERSION_FLAG;
-            }
-        }
-
         trace!("put_wal_record lsn: {}", key.lsn);
         let serialized_key = key.ser().expect("serialize CacheKey should always succeed");
-        let _res = self.db.put(serialized_key, content.to_bytes());
+        let _res = self.db.put(serialized_key, content.to_bytes())?;
 
         trace!(
             "put_page_image rel {} blk {} at {}",
@@ -830,6 +893,7 @@ impl Timeline for RocksTimeline {
             lsn
         );
         self.num_page_images.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn put_create_database(

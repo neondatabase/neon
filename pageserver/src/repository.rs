@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
+use log::*;
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
@@ -55,13 +56,16 @@ pub trait Timeline {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord);
+    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes);
+    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
+
+    /// Drop relation or file segment
+    fn put_drop(&self, tag: BufferTag, lsn: Lsn) -> Result<()>;
 
     /// Create a new database from a template database
     ///
@@ -100,14 +104,18 @@ pub trait Timeline {
                 blknum: blk.blkno,
             };
 
-            let rec = WALRecord {
-                lsn,
-                will_init: blk.will_init || blk.apply_image,
-                rec: recdata.clone(),
-                main_data_offset: decoded.main_data_offset as u32,
-            };
+            if blk.will_drop {
+                self.put_drop(tag, lsn)?;
+            } else {
+                let rec = WALRecord {
+                    lsn,
+                    will_init: blk.will_init || blk.apply_image,
+                    rec: recdata.clone(),
+                    main_data_offset: decoded.main_data_offset as u32,
+                };
 
-            self.put_wal_record(tag, rec);
+                self.put_wal_record(tag, rec)?;
+            }
         }
 
         // Handle a few special record types
@@ -116,14 +124,36 @@ pub trait Timeline {
                 == pg_constants::XLOG_SMGR_TRUNCATE
         {
             let truncate = XlSmgrTruncate::decode(&decoded);
+            let mut rel = RelTag {
+                spcnode: truncate.rnode.spcnode,
+                dbnode: truncate.rnode.dbnode,
+                relnode: truncate.rnode.relnode,
+                forknum: pg_constants::MAIN_FORKNUM,
+            };
             if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
-                let rel = RelTag {
-                    spcnode: truncate.rnode.spcnode,
-                    dbnode: truncate.rnode.dbnode,
-                    relnode: truncate.rnode.relnode,
-                    forknum: pg_constants::MAIN_FORKNUM,
-                };
                 self.put_truncation(rel, lsn, truncate.blkno)?;
+            }
+            if (truncate.flags & pg_constants::SMGR_TRUNCATE_FSM) != 0 {
+                if truncate.blkno == 0 {
+                    rel.forknum = pg_constants::FSM_FORKNUM;
+                    self.put_truncation(rel, lsn, truncate.blkno)?;
+                } else {
+                    // TODO: handle partial truncation of FSM:
+                    // need to map heap block number to FSM block number
+                    // and clear bits in the tail block
+                    info!("Partial truncation of FSM is not supported");
+                }
+            }
+            if (truncate.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
+                if truncate.blkno == 0 {
+                    rel.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
+                    self.put_truncation(rel, lsn, truncate.blkno)?;
+                } else {
+                    // TODO: handle partial truncation of VM:
+                    // need to map heap block number to VM block number
+                    // and clear bits in the tail block
+                    info!("Partial truncation of VM is not supported");
+                }
             }
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
@@ -348,11 +378,11 @@ mod tests {
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"));
-        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"));
-        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"));
-        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"));
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"))?;
+        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"))?;
 
         tline.advance_last_valid_lsn(Lsn(5));
 
@@ -442,7 +472,7 @@ mod tests {
         for i in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", i, Lsn(lsn)));
             lsn += 1;
-            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img);
+            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img)?;
         }
         tline.advance_last_valid_lsn(Lsn(lsn));
 

@@ -20,6 +20,8 @@ pub const ROCKSDB_SPECIAL_FORKNUM: u8 = 50;
 
 // From storage_xlog.h
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
+pub const SMGR_TRUNCATE_VM: u32 = 0x0002;
+pub const SMGR_TRUNCATE_FSM: u32 = 0x0004;
 
 //
 // Constants from visbilitymap.h
