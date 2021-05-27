@@ -4,3 +4,4 @@ test: zenith-cid
 test: zenith-rel-truncate
 test: zenith-clog
 test: zenith-vacuum-full
+test: zenith-truncate
