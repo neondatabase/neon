@@ -168,14 +168,18 @@ class Postgres:
         self.branch = None
         # path to conf is <repo_dir>/pgdatadirs/<branch_name>/postgresql.conf
 
-    def create_start(self, branch, config_lines=None):
-        """ create the pg data directory, and start the server """
+    def create(self, branch, config_lines=None):
+        """ create the pg data directory """
         self.zenith_cli.run(['pg', 'create', branch])
         self.branch = branch
         if config_lines is None:
             config_lines = []
         self.config(config_lines)
-        self.zenith_cli.run(['pg', 'start', branch])
+        return
+
+    def start(self):
+        """ start the server """
+        self.zenith_cli.run(['pg', 'start', self.branch])
         self.running = True
         return
 
@@ -189,8 +193,17 @@ class Postgres:
                 conf.write('\n')
 
     def stop(self):
+        """ stop the server """
         if self.running:
             self.zenith_cli.run(['pg', 'stop', self.branch])
+
+    def stop_and_destroy(self):
+        self.zenith_cli.run(['pg', 'stop', '--destroy', self.branch])
+
+    def create_start(self, branch, config_lines=None):
+        self.create(branch, config_lines);
+        self.start();
+        return
 
     # Return a libpq connection string to connect to the Postgres instance
     def connstr(self, dbname='postgres'):
