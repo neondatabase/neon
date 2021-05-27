@@ -12,7 +12,7 @@ use bytes::{Buf, Bytes, BytesMut};
 
 // sizeof(ControlFileData)
 const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
-const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
+pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
 const OFFSETOF_CRC: usize = PG_CONTROLFILEDATA_OFFSETOF_CRC as usize;
 
 impl ControlFileData {

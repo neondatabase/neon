@@ -1,11 +1,11 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
-use postgres_ffi::xlog_utils::XLogRecord;
 use postgres_ffi::*;
 use std::cmp::min;
 use std::str;
 use thiserror::Error;
 use zenith_utils::lsn::Lsn;
+use postgres_ffi::xlog_utils::*;
 
 pub type Oid = u32;
 pub type TransactionId = u32;
@@ -16,35 +16,6 @@ pub type MultiXactOffset = u32;
 pub type MultiXactStatus = u32;
 pub type TimeLineID = u32;
 pub type PgTime = i64;
-
-// From PostgreSQL headers
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogPageHeaderData {
-    xlp_magic: u16,      /* magic value for correctness checks */
-    xlp_info: u16,       /* flag bits, see below */
-    xlp_tli: TimeLineID, /* TimeLineID of first record on page */
-    xlp_pageaddr: u64,   /* XLOG address of this page */
-    xlp_rem_len: u32,    /* total len of remaining data for record */
-}
-
-// FIXME: this assumes MAXIMUM_ALIGNOF 8. There are 4 padding bytes at end
-#[allow(non_upper_case_globals)]
-const SizeOfXLogShortPHD: usize = 2 + 2 + 4 + 8 + 4 + 4;
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogLongPageHeaderData {
-    std: XLogPageHeaderData, /* standard header fields */
-    xlp_sysid: u64,          /* system identifier from pg_control */
-    xlp_seg_size: u32,       /* just as a cross-check */
-    xlp_xlog_blcksz: u32,    /* just as a cross-check */
-}
-
-// FIXME: this assumes MAXIMUM_ALIGNOF 8.
-#[allow(non_upper_case_globals)]
-const SizeOfXLogLongPHD: usize = (2 + 2 + 4 + 8 + 4) + 4 + 8 + 4 + 4;
 
 #[allow(dead_code)]
 pub struct WalStreamDecoder {
