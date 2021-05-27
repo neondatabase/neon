@@ -36,7 +36,7 @@ pub struct NodeId {
     uuid: [u8; 16],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerInfo {
     /// proxy-safekeeper protocol version
     pub protocol_version: u32,
@@ -220,7 +220,7 @@ impl ReceiveWalConn {
 
         /* Update information about server, but preserve locally stored node_id */
         let node_id = my_info.server.node_id;
-        my_info.server = server_info;
+        my_info.server = server_info.clone();
         my_info.server.node_id = node_id;
 
         /* Calculate WAL end based on local data */
