@@ -489,7 +489,7 @@ impl RocksTimeline {
     }
 
     ///
-    /// Drop relations with all its forks or non-relational file
+    /// Drop relations with all its forks
     ///
     fn delete_entries(&self, tag: BufferTag) -> Result<()> {
         let mut iter = self.db.raw_iterator();
@@ -508,14 +508,8 @@ impl RocksTimeline {
         iter.seek_for_prev(key.ser()?);
         while iter.valid() {
             let key = CacheKey::des(iter.key().unwrap())?;
-            // For relational data we should delete all block
-            if key.tag.rel.relnode != tag.rel.relnode
-                || key.tag.rel.spcnode != tag.rel.spcnode
-                || key.tag.rel.dbnode != tag.rel.dbnode
-                || (key.tag.rel.forknum != tag.rel.forknum
-                    && tag.rel.forknum != pg_constants::MAIN_FORKNUM)
-            {
-                // no more entries belonging to this relation or file
+            if key.tag.rel != tag.rel {
+                // no more entries belonging to this relation
                 break;
             }
             let v = iter.value().unwrap();
