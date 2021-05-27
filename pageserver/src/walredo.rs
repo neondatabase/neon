@@ -3,7 +3,7 @@
 //!
 //! We rely on Postgres to perform WAL redo for us. We launch a
 //! postgres process in special "wal redo" mode that's similar to
-//! single-user mode. We then pass the the previous page image, if any,
+//! single-user mode. We then pass the previous page image, if any,
 //! and all the WAL records we want to apply, to the postgres
 //! process. Then we get the page image back. Communication with the
 //! postgres process happens via stdin/stdout

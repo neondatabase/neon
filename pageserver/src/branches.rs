@@ -96,7 +96,7 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // and it kept running even after the "zenith init" had exited. In tests, we started the
     // page server immediately after that, so that initdb was still running in the background,
     // and we failed to run initdb again in the same directory. This has been solved for the
-    // rapid init+start case now, but the general race condition remains if you restart the the
+    // rapid init+start case now, but the general race condition remains if you restart the
     // server quickly.
     let repo = crate::repository::rocksdb::RocksRepository::new(
         conf,
