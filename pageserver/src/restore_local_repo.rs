@@ -221,7 +221,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
                 let decoded = decode_wal_record(recdata.clone());
-                save_decoded_record(timeline, decoded, recdata, lsn)?;
+                save_decoded_record(timeline, &decoded, recdata, lsn)?;
                 last_lsn = lsn;
             } else {
                 break;
@@ -249,12 +249,12 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
 ///
 pub fn save_decoded_record(
     timeline: &dyn Timeline,
-    decoded: DecodedWALRecord,
+    decoded: &DecodedWALRecord,
     recdata: Bytes,
     lsn: Lsn,
 ) -> Result<()> {
-    // Figure out which blocks the record applies to, and "put" a separate copy
-    // of the record for each block.
+    // Iterate through all the blocks that the record modifies, and
+    // "put" a separate copy of the record for each block.
     for blk in decoded.blocks.iter() {
         let tag = BufferTag {
             rel: RelTag {

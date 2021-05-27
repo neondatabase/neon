@@ -185,7 +185,7 @@ fn walreceiver_main(
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                     let decoded = decode_wal_record(recdata.clone());
-                    restore_local_repo::save_decoded_record(&*timeline, decoded, recdata, lsn)?;
+                    restore_local_repo::save_decoded_record(&*timeline, &decoded, recdata, lsn)?;
                     last_rec_lsn = lsn;
                 }
 
