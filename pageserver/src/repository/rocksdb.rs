@@ -7,7 +7,6 @@
 
 use crate::repository::{BufferTag, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
-use crate::waldecoder::Oid;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -18,6 +17,7 @@ use postgres_ffi::pg_constants;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
@@ -714,7 +714,7 @@ impl Timeline for RocksTimeline {
     ///
     /// Get size of relation at given LSN.
     ///
-    fn get_relsize(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
+    fn get_rel_size(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
         let lsn = self.wait_lsn(lsn)?;
         self.relsize_get_nowait(rel, lsn)
     }
@@ -723,7 +723,7 @@ impl Timeline for RocksTimeline {
     /// Does relation exist at given LSN?
     ///
     /// FIXME: this actually returns true, if the relation exists at *any* LSN
-    fn get_relsize_exists(&self, rel: RelTag, req_lsn: Lsn) -> Result<bool> {
+    fn get_rel_exists(&self, rel: RelTag, req_lsn: Lsn) -> Result<bool> {
         let lsn = self.wait_lsn(req_lsn)?;
 
         let key = CacheKey {
@@ -744,6 +744,46 @@ impl Timeline for RocksTimeline {
         }
         debug!("Relation {} doesn't exist at {}", rel, lsn);
         Ok(false)
+    }
+
+    /// Get a list of all distinct relations in given tablespace and database.
+    ///
+    /// TODO: This implementation is very inefficient, it scans
+    /// through all entries in the given database. In practice, this
+    /// is used for CREATE DATABASE, and usually the template database is small.
+    /// But if it's not, this will be slow.
+    fn list_rels<'a>(&'a self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
+        trace!("list_rels spcnode {} dbnode {} at {}", spcnode, dbnode, lsn);
+
+        let mut rels: HashSet<RelTag> = HashSet::new();
+
+        let searchkey = CacheKey {
+            tag: BufferTag {
+                rel: RelTag {
+                    spcnode: spcnode,
+                    dbnode: dbnode,
+                    relnode: 0,
+                    forknum: 0u8,
+                },
+                blknum: 0,
+            },
+            lsn: Lsn(0),
+        };
+        let mut iter = self.db.raw_iterator();
+        iter.seek(searchkey.ser()?);
+        while iter.valid() {
+            let key = CacheKey::des(iter.key().unwrap())?;
+            if key.tag.rel.spcnode != spcnode || key.tag.rel.dbnode != dbnode {
+                break;
+            }
+
+            if key.lsn < lsn {
+                rels.insert(key.tag.rel);
+            }
+            iter.next();
+        }
+
+        Ok(rels)
     }
 
     // Other public functions, for updating the repository.
@@ -830,51 +870,6 @@ impl Timeline for RocksTimeline {
             lsn
         );
         self.num_page_images.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn put_create_database(
-        &self,
-        lsn: Lsn,
-        db_id: Oid,
-        tablespace_id: Oid,
-        src_db_id: Oid,
-        src_tablespace_id: Oid,
-    ) -> Result<()> {
-        let key = CacheKey {
-            tag: BufferTag {
-                rel: RelTag {
-                    spcnode: src_tablespace_id,
-                    dbnode: src_db_id,
-                    relnode: 0,
-                    forknum: 0u8,
-                },
-                blknum: 0,
-            },
-            lsn: Lsn(0),
-        };
-        let mut iter = self.db.raw_iterator();
-        iter.seek(key.ser()?);
-        let mut n = 0;
-        while iter.valid() {
-            let mut key = CacheKey::des(iter.key().unwrap())?;
-            if key.tag.rel.spcnode != src_tablespace_id || key.tag.rel.dbnode != src_db_id {
-                break;
-            }
-
-            key.tag.rel.spcnode = tablespace_id;
-            key.tag.rel.dbnode = db_id;
-            key.lsn = lsn;
-
-            let v = iter.value().unwrap();
-            self.db.put(key.ser()?, v)?;
-            n += 1;
-            iter.next();
-        }
-        info!(
-            "Create database {}/{}, copy {} entries",
-            tablespace_id, db_id, n
-        );
-        Ok(())
     }
 
     /// Remember that WAL has been received and added to the timeline up to the given LSN

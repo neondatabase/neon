@@ -835,7 +835,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let exist = timeline.get_relsize_exists(tag, req.lsn).unwrap_or(false);
+                    let exist = timeline.get_rel_exists(tag, req.lsn).unwrap_or(false);
 
                     PagestreamBeMessage::Status(PagestreamStatusResponse {
                         ok: exist,
@@ -850,7 +850,7 @@ impl Connection {
                         forknum: req.forknum,
                     };
 
-                    let n_blocks = timeline.get_relsize(tag, req.lsn).unwrap_or(0);
+                    let n_blocks = timeline.get_rel_size(tag, req.lsn).unwrap_or(0);
 
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
                 }

@@ -7,6 +7,7 @@
 //!
 
 use crate::page_cache;
+use crate::restore_local_repo;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -184,7 +185,7 @@ fn walreceiver_main(
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                     let decoded = decode_wal_record(recdata.clone());
-                    timeline.save_decoded_record(decoded, recdata, lsn)?;
+                    restore_local_repo::save_decoded_record(&*timeline, decoded, recdata, lsn)?;
 
                     // Now that this record has been handled, let the page cache know that
                     // it is up-to-date to this LSN

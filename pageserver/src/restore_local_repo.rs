@@ -3,7 +3,7 @@
 //! zenith repository
 //!
 use log::*;
-use std::cmp::max;
+use std::cmp::{max, min};
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use bytes::Bytes;
 
-use crate::repository::{BufferTag, RelTag, Timeline};
-use crate::waldecoder::{decode_wal_record, Oid, WalStreamDecoder};
+use crate::repository::{BufferTag, RelTag, Timeline, WALRecord};
+use crate::waldecoder::{decode_wal_record, DecodedWALRecord, Oid, WalStreamDecoder};
+use crate::waldecoder::{XlCreateDatabase, XlSmgrTruncate};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
@@ -220,7 +221,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
                 let decoded = decode_wal_record(recdata.clone());
-                timeline.save_decoded_record(decoded, recdata, lsn)?;
+                save_decoded_record(timeline, decoded, recdata, lsn)?;
                 last_lsn = lsn;
             } else {
                 break;
@@ -239,5 +240,139 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
         offset = 0;
     }
     info!("reached end of WAL at {}", last_lsn);
+    Ok(())
+}
+
+///
+/// Helper function to parse a WAL record and call the Timeline's PUT functions for all the
+/// relations/pages that the record affects.
+///
+pub fn save_decoded_record(
+    timeline: &dyn Timeline,
+    decoded: DecodedWALRecord,
+    recdata: Bytes,
+    lsn: Lsn,
+) -> Result<()> {
+    // Figure out which blocks the record applies to, and "put" a separate copy
+    // of the record for each block.
+    for blk in decoded.blocks.iter() {
+        let tag = BufferTag {
+            rel: RelTag {
+                spcnode: blk.rnode_spcnode,
+                dbnode: blk.rnode_dbnode,
+                relnode: blk.rnode_relnode,
+                forknum: blk.forknum as u8,
+            },
+            blknum: blk.blkno,
+        };
+
+        let rec = WALRecord {
+            lsn,
+            will_init: blk.will_init || blk.apply_image,
+            rec: recdata.clone(),
+            main_data_offset: decoded.main_data_offset as u32,
+        };
+
+        timeline.put_wal_record(tag, rec);
+    }
+
+    // Handle a few special record types
+    if decoded.xl_rmid == pg_constants::RM_SMGR_ID
+        && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_SMGR_TRUNCATE
+    {
+        let truncate = XlSmgrTruncate::decode(&decoded);
+        if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
+            let rel = RelTag {
+                spcnode: truncate.rnode.spcnode,
+                dbnode: truncate.rnode.dbnode,
+                relnode: truncate.rnode.relnode,
+                forknum: pg_constants::MAIN_FORKNUM,
+            };
+            timeline.put_truncation(rel, lsn, truncate.blkno)?;
+        }
+    } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
+        && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_DBASE_CREATE
+    {
+        let createdb = XlCreateDatabase::decode(&decoded);
+        save_create_database(
+            timeline,
+            lsn,
+            createdb.db_id,
+            createdb.tablespace_id,
+            createdb.src_db_id,
+            createdb.src_tablespace_id,
+        )?;
+    }
+
+    // Now that this record has been handled, let the repository know that
+    // it is up-to-date to this LSN
+    timeline.advance_last_record_lsn(lsn);
+    Ok(())
+}
+
+/// Subroutine of save_decoded_record(), to handle an XLOG_DBASE_CREATE record.
+fn save_create_database(
+    timeline: &dyn Timeline,
+    lsn: Lsn,
+    db_id: Oid,
+    tablespace_id: Oid,
+    src_db_id: Oid,
+    src_tablespace_id: Oid,
+) -> Result<()> {
+    // Creating a database is implemented by copying the template (aka. source) database.
+    // To copy all the relations, we need to ask for the state as of the same LSN, but we
+    // cannot pass 'lsn' to the Timeline.get_* functions, or they will block waiting for
+    // the last valid LSN to advance up to it. So we use the previous record's LSN in the
+    // get calls instead.
+    let req_lsn = min(timeline.get_last_record_lsn(), lsn);
+
+    let rels = timeline.list_rels(src_tablespace_id, src_db_id, req_lsn)?;
+
+    info!("creatdb: {} rels", rels.len());
+
+    let mut num_rels_copied = 0;
+    let mut num_blocks_copied = 0;
+    for src_rel in rels {
+        assert_eq!(src_rel.spcnode, src_tablespace_id);
+        assert_eq!(src_rel.dbnode, src_db_id);
+
+        let nblocks = timeline.get_rel_size(src_rel, req_lsn)?;
+        let dst_rel = RelTag {
+            spcnode: tablespace_id,
+            dbnode: db_id,
+            relnode: src_rel.relnode,
+            forknum: src_rel.forknum,
+        };
+
+        // Copy content
+        for blknum in 0..nblocks {
+            let src_key = BufferTag {
+                rel: src_rel,
+                blknum,
+            };
+            let dst_key = BufferTag {
+                rel: dst_rel,
+                blknum,
+            };
+
+            let content = timeline.get_page_at_lsn(src_key, req_lsn)?;
+
+            info!("copying block {:?} to {:?}", src_key, dst_key);
+
+            timeline.put_page_image(dst_key, lsn, content);
+            num_blocks_copied += 1;
+        }
+
+        if nblocks == 0 {
+            // make sure we have some trace of the relation, even if it's empty
+            timeline.put_truncation(dst_rel, lsn, 0)?;
+        }
+
+        num_rels_copied += 1;
+    }
+    info!(
+        "Created database {}/{}, copied {} blocks in {} rels at {}",
+        tablespace_id, db_id, num_blocks_copied, num_rels_copied, lsn
+    );
     Ok(())
 }

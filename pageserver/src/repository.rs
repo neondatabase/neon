@@ -1,12 +1,11 @@
 pub mod rocksdb;
 
-use crate::waldecoder::{DecodedWALRecord, Oid, XlCreateDatabase, XlSmgrTruncate};
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
@@ -40,10 +39,13 @@ pub trait Timeline {
     fn get_page_at_lsn(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes>;
 
     /// Get size of relation
-    fn get_relsize(&self, tag: RelTag, lsn: Lsn) -> Result<u32>;
+    fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<u32>;
 
     /// Does relation exist?
-    fn get_relsize_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool>;
+    fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool>;
+
+    /// Get a list of all distinct relations in given tablespace and database.
+    fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>>;
 
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
@@ -62,87 +64,6 @@ pub trait Timeline {
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
-
-    /// Create a new database from a template database
-    ///
-    /// In PostgreSQL, CREATE DATABASE works by scanning the data directory and
-    /// copying all relation files from the template database. This is the equivalent
-    /// of that.
-    fn put_create_database(
-        &self,
-        lsn: Lsn,
-        db_id: Oid,
-        tablespace_id: Oid,
-        src_db_id: Oid,
-        src_tablespace_id: Oid,
-    ) -> Result<()>;
-
-    ///
-    /// Helper function to parse a WAL record and call the above functions for all the
-    /// relations/pages that the record affects.
-    ///
-    fn save_decoded_record(
-        &self,
-        decoded: DecodedWALRecord,
-        recdata: Bytes,
-        lsn: Lsn,
-    ) -> Result<()> {
-        // Figure out which blocks the record applies to, and "put" a separate copy
-        // of the record for each block.
-        for blk in decoded.blocks.iter() {
-            let tag = BufferTag {
-                rel: RelTag {
-                    spcnode: blk.rnode_spcnode,
-                    dbnode: blk.rnode_dbnode,
-                    relnode: blk.rnode_relnode,
-                    forknum: blk.forknum as u8,
-                },
-                blknum: blk.blkno,
-            };
-
-            let rec = WALRecord {
-                lsn,
-                will_init: blk.will_init || blk.apply_image,
-                rec: recdata.clone(),
-                main_data_offset: decoded.main_data_offset as u32,
-            };
-
-            self.put_wal_record(tag, rec);
-        }
-
-        // Handle a few special record types
-        if decoded.xl_rmid == pg_constants::RM_SMGR_ID
-            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_SMGR_TRUNCATE
-        {
-            let truncate = XlSmgrTruncate::decode(&decoded);
-            if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
-                let rel = RelTag {
-                    spcnode: truncate.rnode.spcnode,
-                    dbnode: truncate.rnode.dbnode,
-                    relnode: truncate.rnode.relnode,
-                    forknum: pg_constants::MAIN_FORKNUM,
-                };
-                self.put_truncation(rel, lsn, truncate.blkno)?;
-            }
-        } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
-            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_CREATE
-        {
-            let createdb = XlCreateDatabase::decode(&decoded);
-            self.put_create_database(
-                lsn,
-                createdb.db_id,
-                createdb.tablespace_id,
-                createdb.src_db_id,
-                createdb.src_tablespace_id,
-            )?;
-        }
-        // Now that this record has been handled, let the repository know that
-        // it is up-to-date to this LSN
-        self.advance_last_record_lsn(lsn);
-        Ok(())
-    }
 
     /// Remember the all WAL before the given LSN has been processed.
     ///
@@ -359,13 +280,14 @@ mod tests {
         // FIXME: The rocksdb implementation erroneously returns 'true' here, even
         // though the relation was created only at a later LSN
         // rocksdb implementation erroneosly returns 'true' here
-        assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(1))?, true); // CORRECT: false
-                                                                        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(1))?, 0); // CORRECT: throw error
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(1))?, true); // CORRECT: false
 
-        assert_eq!(tline.get_relsize_exists(TESTREL_A, Lsn(2))?, true);
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(2))?, 1);
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(5))?, 3);
+        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(1))?, 0); // CORRECT: throw error
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(2))?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(2))?, 1);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(5))?, 3);
 
         // Check page contents at each LSN
         assert_eq!(
@@ -405,7 +327,7 @@ mod tests {
         tline.advance_last_valid_lsn(Lsn(6));
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(6))?, 2);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(6))?, 2);
         assert_eq!(
             tline.get_page_at_lsn(TEST_BUF(0), Lsn(6))?,
             TEST_IMG("foo blk 0 at 3")
@@ -416,7 +338,7 @@ mod tests {
         );
 
         // should still see the truncated block with older LSN
-        assert_eq!(tline.get_relsize(TESTREL_A, Lsn(5))?, 3);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(5))?, 3);
         assert_eq!(
             tline.get_page_at_lsn(TEST_BUF(2), Lsn(5))?,
             TEST_IMG("foo blk 2 at 5")
@@ -447,7 +369,7 @@ mod tests {
         tline.advance_last_valid_lsn(Lsn(lsn));
 
         assert_eq!(
-            tline.get_relsize(TESTREL_A, Lsn(lsn))?,
+            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE + 1
         );
 
@@ -456,7 +378,7 @@ mod tests {
         tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
         tline.advance_last_valid_lsn(Lsn(lsn));
         assert_eq!(
-            tline.get_relsize(TESTREL_A, Lsn(lsn))?,
+            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE
         );
 
@@ -465,7 +387,7 @@ mod tests {
         tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE - 1)?;
         tline.advance_last_valid_lsn(Lsn(lsn));
         assert_eq!(
-            tline.get_relsize(TESTREL_A, Lsn(lsn))?,
+            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE - 1
         );
 
