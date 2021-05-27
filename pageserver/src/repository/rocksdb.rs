@@ -389,32 +389,63 @@ impl RocksTimeline {
     }
 
     ///
-    /// Drop relations with all its forks or non-relational file
+    /// Drop relation with all its forks
     ///
-    fn drop(&self, tag: BufferTag) -> Result<()> {
+    fn drop_relation(&self, tag: BufferTag) -> Result<()> {
         let mut iter = self.iterator();
-        let mut key = RepositoryKey {
-            tag,
-            lsn: Lsn(u64::MAX),
+        let key = RepositoryKey {
+            tag: BufferTag {
+				rel: RelTag {
+					spcnode: tag.rel.spcnode,
+					dbnode: tag.rel.dbnode,
+					relnode: tag.rel.relnode,
+					forknum: pg_constants::INIT_FORKNUM, // delete all forks
+				},
+				blknum: u32::MAX, // delete all blocks
+			},
+			lsn: Lsn(u64::MAX),
         };
-        if tag.rel.forknum == pg_constants::MAIN_FORKNUM {
-            // if it is relation then remove all its blocks in all forks
-            key.tag.blknum = u32::MAX;
-            key.tag.rel.forknum = pg_constants::INIT_FORKNUM;
-        } else {
-            assert!(tag.rel.forknum > pg_constants::INIT_FORKNUM);
-        }
         debug!("Drop relation {:?}", tag);
         iter.last(&key);
         while iter.valid() {
             let key = iter.key();
+			// ignore forknum in comparing tags
             if key.tag.rel.relnode != tag.rel.relnode
                 || key.tag.rel.spcnode != tag.rel.spcnode
                 || key.tag.rel.dbnode != tag.rel.dbnode
-                || (key.tag.rel.forknum != tag.rel.forknum
-                    && tag.rel.forknum != pg_constants::MAIN_FORKNUM)
             {
-                // no more entries belonging to this relation or file
+                // no more entries belonging to this relation
+                break;
+            }
+            let v = iter.value();
+            if (v[0] & UNUSED_VERSION_FLAG) == 0 {
+                let mut v = v.to_owned();
+                v[0] |= UNUSED_VERSION_FLAG;
+                self.db.put(key.to_bytes(), &v[..])?;
+            } else {
+                // already marked for deletion
+                break;
+            }
+            iter.prev();
+        }
+        Ok(())
+    }
+
+    ///
+    /// Drop non-relation file
+    ///
+    fn drop_nonrel_file(&self, tag: BufferTag) -> Result<()> {
+        let mut iter = self.iterator();
+        let key = RepositoryKey {
+            tag,
+            lsn: Lsn(u64::MAX),
+        };
+        debug!("Drop file {:?}", tag);
+        iter.last(&key);
+        while iter.valid() {
+            let key = iter.key();
+            if key.tag != tag {
+                // block number for non-relational data identifies concrete file which should be dropped
                 break;
             }
             let v = iter.value();
@@ -477,7 +508,12 @@ impl RocksTimeline {
                         if (flag & CONTENT_KIND_MASK) == CONTENT_DROP {
                             // If drop record in over the horizon then delete all entries from repository
                             if last_lsn < horizon {
-                                self.drop(key.tag)?;
+								if key.tag.rel.forknum > pg_constants::INIT_FORKNUM {
+									self.drop_nonrel_file(key.tag)?;
+								} else {
+									assert!(key.tag.rel.forknum == pg_constants::MAIN_FORKNUM);
+									self.drop_relation(key.tag)?;
+								}
                             }
                             maxkey = minkey;
                             continue;
@@ -716,7 +752,7 @@ impl Timeline for RocksTimeline {
 
         let content = CacheEntryContent::WALRecord(rec);
 
-        let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
+        self.db.put(key.to_bytes(), content.to_bytes())?;
         trace!(
             "put_wal_record rel {} blk {} at {}",
             tag.rel,
@@ -736,7 +772,7 @@ impl Timeline for RocksTimeline {
     fn put_drop(&self, tag: BufferTag, lsn: Lsn) -> Result<()> {
         let key = RepositoryKey { tag, lsn };
         let content = CacheEntryContent::Drop;
-        let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
+        self.db.put(key.to_bytes(), content.to_bytes())?;
         Ok(())
     }
 
@@ -759,7 +795,7 @@ impl Timeline for RocksTimeline {
                 lsn,
             };
             trace!("put_wal_record lsn: {}", key.lsn);
-            let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
+            self.db.put(key.to_bytes(), content.to_bytes())?;
         }
         let n = (old_rel_size - nblocks) as u64;
         self.num_entries.fetch_add(n, Ordering::Relaxed);
@@ -789,7 +825,7 @@ impl Timeline for RocksTimeline {
         let content = CacheEntryContent::PageImage(img);
 
         trace!("put_wal_record lsn: {}", key.lsn);
-        let _res = self.db.put(key.to_bytes(), content.to_bytes())?;
+        self.db.put(key.to_bytes(), content.to_bytes())?;
 
         trace!(
             "put_page_image rel {} blk {} at {}",
