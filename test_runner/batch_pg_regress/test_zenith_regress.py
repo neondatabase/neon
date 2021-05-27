@@ -6,11 +6,6 @@ import psycopg2
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
-# FIXME: put host + port in a fixture
-HOST = 'localhost'
-PORT = 55432
-
-
 def test_zenith_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir, base_dir, capsys):
 
     # Create a branch for us

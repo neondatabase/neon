@@ -1,6 +1,0 @@
-# src/test/regress/serial_schedule
-# This should probably be in an order similar to parallel_schedule.
-test: zenith-cid
-test: zenith-rel-truncate
-test: zenith-clog
-test: zenith-vacuum-full

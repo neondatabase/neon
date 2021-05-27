@@ -1,8 +1,7 @@
 # ----------
-# src/test/regress/parallel_schedule
-#
-# By convention, we put no more than twenty tests in any one parallel group;
-# this limits the number of connections needed to run the tests.
+# Like in PostgreSQL src/test/regress/parallel_schedule, we put no
+# more than twenty tests in any one parallel group; this limits the
+# number of connections needed to run the tests.
 # ----------
 
 test: zenith-cid
