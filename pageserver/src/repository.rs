@@ -4,13 +4,13 @@ use crate::waldecoder::{DecodedWALRecord, Oid, XlCreateDatabase, XlSmgrTruncate}
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use log::*;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
-use log::*;
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple

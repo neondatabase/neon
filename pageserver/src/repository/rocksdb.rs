@@ -491,7 +491,7 @@ impl RocksTimeline {
     ///
     /// Drop relations with all its forks or non-relational file
     ///
-    fn drop(&self, tag: BufferTag) -> Result<()> {
+    fn delete_entries(&self, tag: BufferTag) -> Result<()> {
         let mut iter = self.db.raw_iterator();
         let mut key = CacheKey {
             tag,
@@ -508,6 +508,7 @@ impl RocksTimeline {
         iter.seek_for_prev(key.ser()?);
         while iter.valid() {
             let key = CacheKey::des(iter.key().unwrap())?;
+            // For relational data we should delete all block
             if key.tag.rel.relnode != tag.rel.relnode
                 || key.tag.rel.spcnode != tag.rel.spcnode
                 || key.tag.rel.dbnode != tag.rel.dbnode
@@ -577,7 +578,7 @@ impl RocksTimeline {
                         if (flag & CONTENT_KIND_MASK) == CONTENT_DROP {
                             // If drop record in over the horizon then delete all entries from repository
                             if last_lsn < horizon {
-                                self.drop(key.tag)?;
+                                self.delete_entries(key.tag)?;
                             }
                             maxkey = minkey;
                             continue;
@@ -824,7 +825,7 @@ impl Timeline for RocksTimeline {
         let content = CacheEntryContent::WALRecord(rec);
 
         let serialized_key = key.ser().expect("serialize CacheKey should always succeed");
-        let _res = self.db.put(serialized_key, content.to_bytes())?;
+        self.db.put(serialized_key, content.to_bytes())?;
         trace!(
             "put_wal_record rel {} blk {} at {}",
             tag.rel,
@@ -844,7 +845,7 @@ impl Timeline for RocksTimeline {
     fn put_drop(&self, tag: BufferTag, lsn: Lsn) -> Result<()> {
         let key = CacheKey { tag, lsn };
         let content = CacheEntryContent::Drop;
-        let _res = self.db.put(key.ser()?, content.to_bytes())?;
+        self.db.put(key.ser()?, content.to_bytes())?;
         Ok(())
     }
 
@@ -867,7 +868,7 @@ impl Timeline for RocksTimeline {
                 lsn,
             };
             trace!("put_wal_record lsn: {}", key.lsn);
-            let _res = self.db.put(key.ser()?, content.to_bytes());
+            self.db.put(key.ser()?, content.to_bytes())?;
         }
         let n = (old_rel_size - nblocks) as u64;
         self.num_entries.fetch_add(n, Ordering::Relaxed);
@@ -884,7 +885,7 @@ impl Timeline for RocksTimeline {
 
         trace!("put_wal_record lsn: {}", key.lsn);
         let serialized_key = key.ser().expect("serialize CacheKey should always succeed");
-        let _res = self.db.put(serialized_key, content.to_bytes())?;
+        self.db.put(serialized_key, content.to_bytes())?;
 
         trace!(
             "put_page_image rel {} blk {} at {}",
