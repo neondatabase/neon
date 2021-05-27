@@ -1,7 +1,6 @@
 import pytest
 import os
 import psycopg2
-import multiprocessing
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -11,14 +10,6 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # it only checks next_multixact_id field in restored pg_control,
 # since we don't have functions to check multixact internals.
 #
-
-def runQuery(connstr):
-    con = psycopg2.connect(connstr) 
-    con.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-    cur = con.cursor()
-    cur.execute('select * from t1 for key share;') 
-
-
 def test_multixact(pageserver, postgres, pg_bin, zenith_cli, base_dir):
 
     # Create a branch for us
@@ -38,11 +29,16 @@ def test_multixact(pageserver, postgres, pg_bin, zenith_cli, base_dir):
 
     # Lock entries in parallel connections to set multixact
     nclients = 3
-    pool = multiprocessing.Pool(nclients)
-    args = [pg.connstr()] * nclients
-    pool.map(runQuery, args)
-    pool.close()
-    pool.join()
+    connections = []
+    for i in range(nclients):
+        con = psycopg2.connect(pg.connstr())
+        # Do not turn on autocommit. We want to hold the key-share locks.
+        con.cursor().execute('select * from t1 for key share;')
+        connections.append(con)
+
+    # We should have a multixact now. We can close the connections.
+    for c in connections:
+        c.close()
 
     # force wal flush
     cur.execute('checkpoint')
