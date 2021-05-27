@@ -145,7 +145,7 @@ fn import_relfile(
                     },
                     blknum,
                 };
-                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf));
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
                     oldest_lsn = p.lsn;
@@ -273,7 +273,7 @@ pub fn save_decoded_record(
             main_data_offset: decoded.main_data_offset as u32,
         };
 
-        timeline.put_wal_record(tag, rec);
+        timeline.put_wal_record(tag, rec)?;
     }
 
     // Handle a few special record types
@@ -359,7 +359,7 @@ fn save_create_database(
 
             info!("copying block {:?} to {:?}", src_key, dst_key);
 
-            timeline.put_page_image(dst_key, lsn, content);
+            timeline.put_page_image(dst_key, lsn, content)?;
             num_blocks_copied += 1;
         }
 

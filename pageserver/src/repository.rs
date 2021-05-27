@@ -1,5 +1,3 @@
-pub mod rocksdb;
-
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -13,7 +11,7 @@ use zenith_utils::lsn::Lsn;
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
-pub trait Repository {
+pub trait Repository: Send + Sync {
     /// Get Timeline handle for given zenith timeline ID.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
@@ -30,7 +28,7 @@ pub trait Repository {
     //fn get_stats(&self) -> RepositoryStats;
 }
 
-pub trait Timeline {
+pub trait Timeline: Send + Sync {
     //------------------------------------------------------------------------------
     // Public GET functions
     //------------------------------------------------------------------------------
@@ -57,10 +55,10 @@ pub trait Timeline {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord);
+    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes);
+    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
@@ -156,7 +154,7 @@ pub struct BufferTag {
     pub blknum: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WALRecord {
     pub lsn: Lsn, // LSN at the *end* of the record
     pub will_init: bool,
@@ -196,6 +194,8 @@ impl WALRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_repository::ObjectRepository;
+    use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
     use postgres_ffi::pg_constants;
@@ -250,9 +250,11 @@ mod tests {
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
+        let obj_store = RocksObjectStore::create(conf)?;
+
         let walredo_mgr = TestRedoManager {};
 
-        let repo = rocksdb::RocksRepository::new(conf, Arc::new(walredo_mgr));
+        let repo = ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr));
 
         Ok(Box::new(repo))
     }
@@ -269,21 +271,17 @@ mod tests {
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"));
-        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"));
-        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"));
-        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"));
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"))?;
+        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"))?;
 
         tline.advance_last_valid_lsn(Lsn(5));
 
-        // FIXME: The rocksdb implementation erroneously returns 'true' here, even
-        // though the relation was created only at a later LSN
-        // rocksdb implementation erroneosly returns 'true' here
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(1))?, true); // CORRECT: false
-
-        // And this probably should throw an error, becaue the relation doesn't exist at Lsn(1) yet
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(1))?, 0); // CORRECT: throw error
+        // The relation was created at LSN 2, not visible at LSN 1 yet.
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(1))?, false);
+        assert!(tline.get_rel_size(TESTREL_A, Lsn(1)).is_err());
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(2))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(2))?, 1);
@@ -364,7 +362,7 @@ mod tests {
         for i in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", i, Lsn(lsn)));
             lsn += 1;
-            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img);
+            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img)?;
         }
         tline.advance_last_valid_lsn(Lsn(lsn));
 

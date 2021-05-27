@@ -259,7 +259,7 @@ impl PostgresRedoManagerInternal {
 
         let result: Result<Bytes, WalRedoError>;
 
-        trace!(
+        debug!(
             "applied {} WAL records in {} ms to reconstruct page image at LSN {}",
             nrecords,
             duration.as_millis(),
