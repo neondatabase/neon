@@ -17,6 +17,19 @@ struct StorageKey {
     lsn: Lsn,
 }
 
+impl StorageKey {
+    /// The first key for a given timeline
+    fn timeline_start(timeline: ZTimelineId) -> Self {
+        Self {
+            obj_key: ObjectKey {
+                timeline,
+                buf_tag: BufferTag::ZEROED,
+            },
+            lsn: Lsn(0),
+        }
+    }
+}
+
 pub struct RocksObjectStore {
     _conf: &'static PageServerConf,
 
@@ -108,6 +121,29 @@ impl ObjectStore for RocksObjectStore {
         }
 
         Ok(rels)
+    }
+
+    /// Iterate through versions of all objects in a timeline.
+    ///
+    /// Returns objects in increasing key-version order.
+    /// Returns all versions up to and including the specified LSN.
+    fn objects<'a>(
+        &'a self,
+        timeline: ZTimelineId,
+        lsn: Lsn,
+    ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>> {
+        let start_key = StorageKey::timeline_start(timeline);
+        let start_key_bytes = StorageKey::ser(&start_key)?;
+        let iter = self.db.iterator(rocksdb::IteratorMode::From(
+            &start_key_bytes,
+            rocksdb::Direction::Forward,
+        ));
+
+        Ok(Box::new(RocksObjects {
+            timeline,
+            lsn,
+            iter,
+        }))
     }
 }
 
@@ -204,5 +240,41 @@ impl<'a> Iterator for RocksObjectVersionIter<'a> {
         let result = val.to_vec();
 
         Some((key.lsn, result))
+    }
+}
+
+struct RocksObjects<'r> {
+    iter: rocksdb::DBIterator<'r>,
+    timeline: ZTimelineId,
+    lsn: Lsn,
+}
+
+impl<'r> Iterator for RocksObjects<'r> {
+    // TODO consider returning Box<[u8]>
+    type Item = Result<(BufferTag, Lsn, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_result().transpose()
+    }
+}
+
+impl<'r> RocksObjects<'r> {
+    fn next_result(&mut self) -> Result<Option<(BufferTag, Lsn, Vec<u8>)>> {
+        for (key_bytes, v) in &mut self.iter {
+            let key = StorageKey::des(&key_bytes)?;
+
+            if key.obj_key.timeline != self.timeline {
+                return Ok(None);
+            }
+
+            if key.lsn > self.lsn {
+                // TODO can speed up by seeking iterator
+                continue;
+            }
+
+            return Ok(Some((key.obj_key.buf_tag, key.lsn, v.to_vec())));
+        }
+
+        Ok(None)
     }
 }

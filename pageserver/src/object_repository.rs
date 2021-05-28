@@ -473,6 +473,16 @@ impl Timeline for ObjectTimeline {
 
         Ok(())
     }
+
+    fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
+        let lsn = self.last_valid_lsn.load();
+        let iter = self.obj_store.objects(self.timelineid, lsn)?;
+        Ok(Box::new(ObjectHistory {
+            lsn,
+            iter,
+            last_relation_size: None,
+        }))
+    }
 }
 
 impl ObjectTimeline {
@@ -809,6 +819,89 @@ impl ObjectTimeline {
     }
 }
 
+struct ObjectHistory<'a> {
+    iter: Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>,
+    lsn: Lsn,
+    last_relation_size: Option<(BufferTag, u32)>,
+}
+
+impl<'a> Iterator for ObjectHistory<'a> {
+    type Item = Result<RelationUpdate>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_result().transpose()
+    }
+}
+
+impl<'a> History for ObjectHistory<'a> {
+    fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+}
+
+impl<'a> ObjectHistory<'a> {
+    fn handle_relation_size(
+        &mut self,
+        buf_tag: BufferTag,
+        entry: RelationSizeEntry,
+    ) -> Option<Update> {
+        match entry {
+            RelationSizeEntry::Size(size) => {
+                // we only want to output truncations, expansions are filtered out
+                let last_relation_size = self.last_relation_size.replace((buf_tag, size));
+
+                match last_relation_size {
+                    Some((last_buf, last_size)) if last_buf != buf_tag || size < last_size => {
+                        Some(Update::Truncate { n_blocks: size })
+                    }
+                    _ => None,
+                }
+            }
+            RelationSizeEntry::Unlink => Some(Update::Unlink),
+        }
+    }
+
+    fn handle_page(&mut self, buf_tag: BufferTag, entry: PageEntry) -> Update {
+        match entry {
+            PageEntry::Page(img) => Update::Page {
+                blknum: buf_tag.blknum,
+                img,
+            },
+            PageEntry::WALRecord(rec) => Update::WALRecord {
+                blknum: buf_tag.blknum,
+                rec,
+            },
+        }
+    }
+
+    fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
+        while let Some((buf_tag, lsn, value)) = self.iter.next().transpose()? {
+            if buf_tag.rel.forknum == pg_constants::ROCKSDB_SPECIAL_FORKNUM {
+                continue;
+            }
+
+            let update = if buf_tag.blknum == RELATION_SIZE_BLKNUM {
+                let entry = RelationSizeEntry::des(&value)?;
+                match self.handle_relation_size(buf_tag, entry) {
+                    Some(relation_update) => relation_update,
+                    None => continue,
+                }
+            } else {
+                let entry = PageEntry::des(&value)?;
+                self.handle_page(buf_tag, entry)
+            };
+
+            return Ok(Some(RelationUpdate {
+                rel: buf_tag.rel,
+                lsn,
+                update,
+            }));
+        }
+
+        Ok(None)
+    }
+}
+
 ///
 /// We store two kinds of page versions in the repository:
 ///
@@ -846,12 +939,16 @@ pub enum RelationSizeEntry {
     Unlink,
 }
 
+// No real block in PostgreSQL will have block number u32::MAX
+// See vendor/postgres/src/include/storage/block.h
+const RELATION_SIZE_BLKNUM: u32 = u32::MAX;
+
 const fn relation_size_key(timelineid: ZTimelineId, rel: RelTag) -> ObjectKey {
     ObjectKey {
         timeline: timelineid,
         buf_tag: BufferTag {
             rel,
-            blknum: u32::MAX,
+            blknum: RELATION_SIZE_BLKNUM,
         },
     }
 }
