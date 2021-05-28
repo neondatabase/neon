@@ -301,11 +301,13 @@ impl PostgresNode {
         ar.unpack(&pgdata)
             .with_context(|| "extracting page backup failed")?;
 
-        // listen for selected port
+        // wal_log_hints is mandatory when running against pageserver (see gh issue#192)
+        // TODO: is it possible to check wal_log_hints at pageserver side via XLOG_PARAMETER_CHANGE?
         self.append_conf(
             "postgresql.conf",
             &format!(
                 "max_wal_senders = 10\n\
+                 wal_log_hints = on\n\
                  max_replication_slots = 10\n\
                  hot_standby = on\n\
                  shared_buffers = 1MB\n\
