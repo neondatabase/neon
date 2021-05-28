@@ -1,5 +1,5 @@
 //! Low-level key-value storage abstraction.
-//! 
+//!
 use crate::repository::{BufferTag, RelTag};
 use crate::ZTimelineId;
 use anyhow::Result;
@@ -49,6 +49,16 @@ pub trait ObjectStore: Send + Sync {
         key: &ObjectKey,
         lsn: Lsn,
     ) -> Result<Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>>;
+
+    /// Iterate through versions of all objects in a timeline.
+    ///
+    /// Returns objects in increasing key-version order.
+    /// Returns all versions up to and including the specified LSN.
+    fn objects<'a>(
+        &'a self,
+        timeline: ZTimelineId,
+        lsn: Lsn,
+    ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>>;
 
     /// Iterate through all keys with given tablespace and database ID, and LSN <= 'lsn'.
     ///

@@ -86,6 +86,34 @@ pub trait Timeline: Send + Sync {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self) -> Result<()>;
+
+    /// Events for all relations in the timeline.
+    /// Contains updates from start up to the last valid LSN
+    /// at time of history() call. This lsn can be read via the lsn() function.
+    ///
+    /// Relation size is increased implicitly and decreased with Truncate updates.
+    // TODO ordering guarantee?
+    fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>>;
+}
+
+pub trait History: Iterator<Item = Result<RelationUpdate>> {
+    /// The last_valid_lsn at the time of history() call.
+    fn lsn(&self) -> Lsn;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct RelationUpdate {
+    pub rel: RelTag,
+    pub lsn: Lsn,
+    pub update: Update,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Update {
+    Page { blknum: u32, img: Bytes },
+    WALRecord { blknum: u32, rec: WALRecord },
+    Truncate { n_blocks: u32 },
+    Unlink,
 }
 
 #[derive(Clone)]
@@ -123,6 +151,15 @@ pub struct RelTag {
     pub relnode: u32,
 }
 
+impl RelTag {
+    pub const ZEROED: Self = Self {
+        forknum: 0,
+        spcnode: 0,
+        dbnode: 0,
+        relnode: 0,
+    };
+}
+
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:
 ///
 /// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]
@@ -154,7 +191,14 @@ pub struct BufferTag {
     pub blknum: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl BufferTag {
+    pub const ZEROED: Self = Self {
+        rel: RelTag::ZEROED,
+        blknum: 0,
+    };
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALRecord {
     pub lsn: Lsn, // LSN at the *end* of the record
     pub will_init: bool,
@@ -388,6 +432,57 @@ mod tests {
             tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE - 1
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_history() -> Result<()> {
+        let repo = get_test_repo("test_snapshot")?;
+
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
+
+        let mut snapshot = tline.history()?;
+        assert_eq!(snapshot.lsn(), Lsn(0));
+        assert_eq!(None, snapshot.next().transpose()?);
+
+        // add a page and advance the last valid LSN
+        let buf = TEST_BUF(1);
+        tline.put_page_image(buf, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
+        tline.advance_last_valid_lsn(Lsn(1));
+        let mut snapshot = tline.history()?;
+        assert_eq!(snapshot.lsn(), Lsn(1));
+        let expected_page = RelationUpdate {
+            rel: buf.rel,
+            lsn: Lsn(1),
+            update: Update::Page {
+                blknum: buf.blknum,
+                img: TEST_IMG("blk 1 @ lsn 1"),
+            },
+        };
+        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
+        assert_eq!(None, snapshot.next().transpose()?);
+
+        // truncate to zero, but don't advance the last valid LSN
+        tline.put_truncation(buf.rel, Lsn(2), 0)?;
+        let mut snapshot = tline.history()?;
+        assert_eq!(snapshot.lsn(), Lsn(1));
+        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
+        assert_eq!(None, snapshot.next().transpose()?);
+
+        // advance the last valid LSN and the truncation should be observable
+        tline.advance_last_valid_lsn(Lsn(2));
+        let mut snapshot = tline.history()?;
+        assert_eq!(snapshot.lsn(), Lsn(2));
+        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
+        let expected_truncate = RelationUpdate {
+            rel: buf.rel,
+            lsn: Lsn(2),
+            update: Update::Truncate { n_blocks: 0 },
+        };
+        assert_eq!(Some(expected_truncate), snapshot.next().transpose()?); // TODO ordering not guaranteed by API
+        assert_eq!(None, snapshot.next().transpose()?);
 
         Ok(())
     }
