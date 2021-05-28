@@ -312,6 +312,7 @@ impl PostgresNode {
                  max_connections = 100\n\
                  wal_sender_timeout = 0\n\
                  wal_level = replica\n\
+				 wal_log_hints = true\n\
                  listen_addresses = '{address}'\n\
                  port = {port}\n",
                 address = self.address.ip(),

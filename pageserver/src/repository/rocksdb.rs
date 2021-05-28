@@ -395,21 +395,21 @@ impl RocksTimeline {
         let mut iter = self.iterator();
         let key = RepositoryKey {
             tag: BufferTag {
-				rel: RelTag {
-					spcnode: tag.rel.spcnode,
-					dbnode: tag.rel.dbnode,
-					relnode: tag.rel.relnode,
-					forknum: pg_constants::INIT_FORKNUM, // delete all forks
-				},
-				blknum: u32::MAX, // delete all blocks
-			},
-			lsn: Lsn(u64::MAX),
+                rel: RelTag {
+                    spcnode: tag.rel.spcnode,
+                    dbnode: tag.rel.dbnode,
+                    relnode: tag.rel.relnode,
+                    forknum: pg_constants::INIT_FORKNUM, // delete all forks
+                },
+                blknum: u32::MAX, // delete all blocks
+            },
+            lsn: Lsn(u64::MAX),
         };
         debug!("Drop relation {:?}", tag);
         iter.last(&key);
         while iter.valid() {
             let key = iter.key();
-			// ignore forknum in comparing tags
+            // ignore forknum in comparing tags
             if key.tag.rel.relnode != tag.rel.relnode
                 || key.tag.rel.spcnode != tag.rel.spcnode
                 || key.tag.rel.dbnode != tag.rel.dbnode
@@ -508,12 +508,12 @@ impl RocksTimeline {
                         if (flag & CONTENT_KIND_MASK) == CONTENT_DROP {
                             // If drop record in over the horizon then delete all entries from repository
                             if last_lsn < horizon {
-								if key.tag.rel.forknum > pg_constants::INIT_FORKNUM {
-									self.drop_nonrel_file(key.tag)?;
-								} else {
-									assert!(key.tag.rel.forknum == pg_constants::MAIN_FORKNUM);
-									self.drop_relation(key.tag)?;
-								}
+                                if key.tag.rel.forknum > pg_constants::INIT_FORKNUM {
+                                    self.drop_nonrel_file(key.tag)?;
+                                } else {
+                                    assert!(key.tag.rel.forknum == pg_constants::MAIN_FORKNUM);
+                                    self.drop_relation(key.tag)?;
+                                }
                             }
                             maxkey = minkey;
                             continue;
