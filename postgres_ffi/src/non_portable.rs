@@ -127,59 +127,60 @@ pub struct ControlFileData {
     pub __padding7: [u8; 4],
 }
 
-// FIXME: compute this in a better way, or remove it entirely?
-const OFFSETOF_CRC: usize = 288;
+impl ControlFileData {
+    // FIXME: compute this in a better way, or remove it entirely?
+    const OFFSETOF_CRC: usize = 288;
 
-/// Decode a `ControlFileData` struct from a byte array.
-///
-/// This action is non-portable; it may fail to read data written by other
-/// CPU architectures.
-///
-pub fn decode_pg_control(buf: &[u8]) -> Result<ControlFileData> {
-    // Verify correct buffer alignment and size.
-    let (layout, _remaining) = LayoutVerified::<_, ControlFileData>::new_from_prefix(buf)
-        .ok_or(anyhow!("failed to get LayoutVerified ref"))?;
+    /// Decode a `ControlFileData` struct from a byte array.
+    ///
+    /// This action is non-portable; it may fail to read data written by other
+    /// CPU architectures.
+    ///
+    pub fn decode(buf: &[u8]) -> Result<ControlFileData> {
+        // Verify correct buffer alignment and size.
+        let (layout, _remaining) = LayoutVerified::<_, ControlFileData>::new_from_prefix(buf)
+            .ok_or(anyhow!("failed to get LayoutVerified ref"))?;
 
-    // Safely transmute into &ControlFileData, and then clone to get an owned copy.
-    let controlfile = layout.into_ref().clone();
+        // Safely transmute into &ControlFileData, and then clone to get an owned copy.
+        let controlfile = layout.into_ref().clone();
 
-    // Compute expected CRC.
-    // Note the buffer length was already checked by LayoutVerified, so
-    // accessing this offset should never panic.
-    let mut data_without_crc: [u8; OFFSETOF_CRC] = [0u8; OFFSETOF_CRC];
-    data_without_crc.copy_from_slice(&buf[0..OFFSETOF_CRC]);
-    let expectedcrc = crc32c::crc32c(&data_without_crc);
+        // Compute expected CRC.
+        // Note the buffer length was already checked by LayoutVerified, so
+        // accessing this offset should never panic.
+        let data_without_crc = &buf[0..Self::OFFSETOF_CRC];
+        let expectedcrc = crc32c::crc32c(&data_without_crc);
 
-    if expectedcrc != controlfile.crc {
-        anyhow::bail!(
-            "invalid CRC in control file: expected {:08X}, was {:08X}",
-            expectedcrc,
-            controlfile.crc
-        );
+        if expectedcrc != controlfile.crc {
+            anyhow::bail!(
+                "invalid CRC in control file: expected {:08X}, was {:08X}",
+                expectedcrc,
+                controlfile.crc
+            );
+        }
+
+        Ok(controlfile)
     }
 
-    Ok(controlfile)
-}
+    /// Encode a `ControlFileData` struct into a byte array.
+    ///
+    /// This action is non-portable; it may fail to read data written by other
+    /// CPU architectures.
+    ///
+    pub fn encode(mut self) -> Box<[u8]> {
+        let cf_bytes = self.as_bytes();
 
-/// Encode a `ControlFileData` struct into a byte array.
-///
-/// This action is non-portable; it may fail to read data written by other
-/// CPU architectures.
-///
-pub fn encode_pg_control(mut controlfile: ControlFileData) -> Box<[u8]> {
-    let cf_bytes = controlfile.as_bytes();
+        // Recompute the CRC
+        let data_without_crc = &cf_bytes[0..Self::OFFSETOF_CRC];
+        let newcrc = crc32c::crc32c(&data_without_crc);
 
-    // Recompute the CRC
-    let data_without_crc = &cf_bytes[0..OFFSETOF_CRC];
-    let newcrc = crc32c::crc32c(&data_without_crc);
+        // Drop the immutable reference so we can modify the struct
+        drop(cf_bytes);
+        self.crc = newcrc;
 
-    // Drop the immutable reference so we can modify the struct
-    drop(cf_bytes);
-    controlfile.crc = newcrc;
-
-    // Reacquire the reference so we can produce the output bytes
-    let cf_bytes = controlfile.as_bytes();
-    cf_bytes.into()
+        // Reacquire the reference so we can produce the output bytes
+        let cf_bytes = self.as_bytes();
+        cf_bytes.into()
+    }
 }
 
 #[cfg(test)]

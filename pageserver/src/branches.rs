@@ -23,6 +23,7 @@ use zenith_utils::lsn::Lsn;
 use crate::page_cache;
 use crate::restore_local_repo;
 use crate::{repository::Repository, PageServerConf, ZTimelineId};
+use postgres_ffi::non_portable::ControlFileData;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -79,7 +80,7 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
 
     // Read control file to extract the LSN and system id
     let controlfile_path = tmppath.join("global").join("pg_control");
-    let controlfile = postgres_ffi::non_portable::decode_pg_control(&fs::read(controlfile_path)?)?;
+    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
     // let systemid = controlfile.system_identifier;
     let lsn = controlfile.checkPoint;
     let lsnstr = format!("{:016X}", lsn);
@@ -212,7 +213,7 @@ pub(crate) fn get_system_id(conf: &PageServerConf) -> Result<u64> {
 
     let (_, main_snap_dir) = find_latest_snapshot(conf, *main_tli)?;
     let controlfile_path = main_snap_dir.join("global").join("pg_control");
-    let controlfile = postgres_ffi::non_portable::decode_pg_control(&fs::read(controlfile_path)?)?;
+    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
     Ok(controlfile.system_identifier)
 }
 
@@ -352,13 +353,12 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
 fn force_crash_recovery(datadir: &Path) -> Result<()> {
     // Read in the control file
     let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
-    let mut controlfile =
-        postgres_ffi::non_portable::decode_pg_control(&fs::read(controlfilepath.as_path())?)?;
+    let mut controlfile = ControlFileData::decode(&fs::read(controlfilepath.as_path())?)?;
 
     controlfile.state = postgres_ffi::non_portable::DBState_DB_IN_PRODUCTION;
 
     // Pad the buffer out to the expected file size.
-    let pg_control_buf = postgres_ffi::non_portable::encode_pg_control(controlfile);
+    let pg_control_buf = ControlFileData::encode(controlfile);
     let mut pg_control_buf = Vec::from(pg_control_buf);
     pg_control_buf.resize(postgres_ffi::non_portable::PG_CONTROL_FILE_SIZE, 0);
 
