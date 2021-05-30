@@ -148,6 +148,16 @@ impl ControlFileData {
         memoffset::offset_of!(ControlFileData, crc)
     }
 
+    /// Compute the CRC32C checksum for the current struct
+    ///
+    /// This does not modify the current struct, or verify that the existing
+    /// `crc` field is correct.
+    fn compute_crc(&self) -> u32 {
+        let cf_bytes = self.as_bytes();
+        let data_without_crc = &cf_bytes[0..Self::crc_offset()];
+        crc32c::crc32c(&data_without_crc)
+    }
+
     /// Decode a `ControlFileData` struct from a byte array.
     ///
     /// This action is non-portable; it may fail to read data written by other
@@ -161,12 +171,7 @@ impl ControlFileData {
         // Safely transmute into &ControlFileData, and then clone to get an owned copy.
         let controlfile = layout.into_ref().clone();
 
-        // Compute expected CRC.
-        // Note the buffer length was already checked by LayoutVerified, so
-        // accessing this offset should never panic.
-        let data_without_crc = &buf[0..Self::crc_offset()];
-        let expectedcrc = crc32c::crc32c(&data_without_crc);
-
+        let expectedcrc = controlfile.compute_crc();
         if expectedcrc != controlfile.crc {
             anyhow::bail!(
                 "invalid CRC in control file: expected {:08X}, was {:08X}",
@@ -184,17 +189,9 @@ impl ControlFileData {
     /// CPU architectures.
     ///
     pub fn encode(mut self) -> Box<[u8]> {
-        let cf_bytes = self.as_bytes();
+        // Compute a new CRC and write it into the crc field.
+        self.crc = self.compute_crc();
 
-        // Recompute the CRC
-        let data_without_crc = &cf_bytes[0..Self::crc_offset()];
-        let newcrc = crc32c::crc32c(&data_without_crc);
-
-        // Drop the immutable reference so we can modify the struct
-        drop(cf_bytes);
-        self.crc = newcrc;
-
-        // Reacquire the reference so we can produce the output bytes
         let cf_bytes = self.as_bytes();
         cf_bytes.into()
     }
@@ -226,5 +223,12 @@ mod tests {
         // should be well-defined behavior; the other way around is probably UB.
         let cfd_bindgen: &bindgen_bindings::ControlFileData = unsafe { std::mem::transmute(&cfd) };
         assert_eq!(cfd_bindgen.crc, 0x12345678);
+    }
+
+    #[test]
+    fn test_crc() {
+        // Verify that the CRC of the default ControlFileData always stays the same.
+        let cfd = ControlFileData::default();
+        assert_eq!(cfd.compute_crc(), 0x3fb4ab0e);
     }
 }
