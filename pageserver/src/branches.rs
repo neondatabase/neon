@@ -82,7 +82,7 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     let controlfile_path = tmppath.join("global").join("pg_control");
     let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
     // let systemid = controlfile.system_identifier;
-    let lsn = controlfile.checkPoint;
+    let lsn = controlfile.checkpoint;
     let lsnstr = format!("{:016X}", lsn);
 
     // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
@@ -355,7 +355,7 @@ fn force_crash_recovery(datadir: &Path) -> Result<()> {
     let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
     let mut controlfile = ControlFileData::decode(&fs::read(controlfilepath.as_path())?)?;
 
-    controlfile.state = postgres_ffi::non_portable::DBState_DB_IN_PRODUCTION;
+    controlfile.state = postgres_ffi::non_portable::DBSTATE_DB_IN_PRODUCTION;
 
     // Pad the buffer out to the expected file size.
     let pg_control_buf = ControlFileData::encode(controlfile);

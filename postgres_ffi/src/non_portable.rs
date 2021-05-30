@@ -21,18 +21,17 @@ pub type MultiXactId = TransactionId;
 pub type MultiXactOffset = u32;
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
-pub type pg_time_t = i64;
-pub type pg_crc32c = u32;
+type PgTimeT = i64;
+type PgCrc32c = u32;
 
-// FIXME: turn this into an enum
 pub type DBState = u32;
-pub const DBState_DB_STARTUP: DBState = 0;
-pub const DBState_DB_SHUTDOWNED: DBState = 1;
-pub const DBState_DB_SHUTDOWNED_IN_RECOVERY: DBState = 2;
-pub const DBState_DB_SHUTDOWNING: DBState = 3;
-pub const DBState_DB_IN_CRASH_RECOVERY: DBState = 4;
-pub const DBState_DB_IN_ARCHIVE_RECOVERY: DBState = 5;
-pub const DBState_DB_IN_PRODUCTION: DBState = 6;
+pub const DBSTATE_DB_STARTUP: DBState = 0;
+pub const DBSTATE_DB_SHUTDOWNED: DBState = 1;
+pub const DBSTATE_DB_SHUTDOWNED_IN_RECOVERY: DBState = 2;
+pub const DBSTATE_DB_SHUTDOWNING: DBState = 3;
+pub const DBSTATE_DB_IN_CRASH_RECOVERY: DBState = 4;
+pub const DBSTATE_DB_IN_ARCHIVE_RECOVERY: DBState = 5;
+pub const DBSTATE_DB_IN_PRODUCTION: DBState = 6;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, AsBytes, FromBytes)]
@@ -44,26 +43,26 @@ pub struct FullTransactionId {
 #[derive(Debug, Clone, Default, AsBytes, FromBytes)]
 pub struct CheckPoint {
     pub redo: XLogRecPtr,
-    pub ThisTimeLineID: TimeLineID,
-    pub PrevTimeLineID: TimeLineID,
+    pub this_timeline_id: TimeLineID,
+    pub prev_timeline_id: TimeLineID,
     /// Note this is `bool` in C; it is u8 to allow safe conversions.
-    pub fullPageWrites: u8,
+    pub full_page_writes: u8,
     /// Explicit padding to align the 64-bit field that follows.
     pub __padding1: [u8; 7],
-    pub nextXid: FullTransactionId,
-    pub nextOid: Oid,
-    pub nextMulti: MultiXactId,
-    pub nextMultiOffset: MultiXactOffset,
-    pub oldestXid: TransactionId,
-    pub oldestXidDB: Oid,
-    pub oldestMulti: MultiXactId,
-    pub oldestMultiDB: Oid,
+    pub next_xid: FullTransactionId,
+    pub next_oid: Oid,
+    pub next_multi: MultiXactId,
+    pub next_multi_offset: MultiXactOffset,
+    pub oldest_xid: TransactionId,
+    pub oldest_xid_db: Oid,
+    pub oldest_multi: MultiXactId,
+    pub oldest_multi_db: Oid,
     /// Explicit padding to align the 64-bit field that follows.
     pub __padding4: [u8; 4],
-    pub time: pg_time_t,
-    pub oldestCommitTsXid: TransactionId,
-    pub newestCommitTsXid: TransactionId,
-    pub oldestActiveXid: TransactionId,
+    pub time: PgTimeT,
+    pub oldest_commit_ts_xid: TransactionId,
+    pub newest_commit_ts_xid: TransactionId,
+    pub oldest_active_xid: TransactionId,
     /// Explicit padding to align the end of the struct, so this
     /// struct can be included inside other structs.
     pub __padding5: [u8; 4],
@@ -78,18 +77,18 @@ pub struct ControlFileData {
     pub state: DBState,
     /// Explicit padding to align the 64-bit field that follows.
     pub __padding1: [u8; 4],
-    pub time: pg_time_t,
-    pub checkPoint: XLogRecPtr,
-    pub checkPointCopy: CheckPoint,
-    pub unloggedLSN: XLogRecPtr,
-    pub minRecoveryPoint: XLogRecPtr,
-    pub minRecoveryPointTLI: TimeLineID,
+    pub time: PgTimeT,
+    pub checkpoint: XLogRecPtr,
+    pub checkpoint_copy: CheckPoint,
+    pub unlogged_lsn: XLogRecPtr,
+    pub min_recovery_point: XLogRecPtr,
+    pub min_recovery_point_tli: TimeLineID,
     /// Explicit padding to align the 64-bit field that follows.
     pub __padding2: [u8; 4],
-    pub backupStartPoint: XLogRecPtr,
-    pub backupEndPoint: XLogRecPtr,
+    pub backup_start_point: XLogRecPtr,
+    pub backup_end_point: XLogRecPtr,
     /// Note this is `bool` in C; it is u8 to allow safe conversions.
-    pub backupEndRequired: u8,
+    pub backup_end_required: u8,
     /// Explicit padding to align the 32-bit field that follows.
     pub __padding3: [u8; 3],
     pub wal_level: u32,
@@ -97,7 +96,7 @@ pub struct ControlFileData {
     pub wal_log_hints: u8,
     /// Explicit padding to align the 32-bit field that follows.
     pub __padding4: [u8; 3],
-    pub MaxConnections: u32,
+    pub max_connections: u32,
     pub max_worker_processes: u32,
     pub max_wal_senders: u32,
     pub max_prepared_xacts: u32,
@@ -106,23 +105,23 @@ pub struct ControlFileData {
     pub track_commit_timestamp: u8,
     /// Explicit padding to align the 32-bit field that follows.
     pub __padding5: [u8; 3],
-    pub maxAlign: u32,
-    pub floatFormat: f64,
+    pub max_align: u32,
+    pub float_format: f64,
     pub blcksz: u32,
     pub relseg_size: u32,
     pub xlog_blcksz: u32,
     pub xlog_seg_size: u32,
-    pub nameDataLen: u32,
-    pub indexMaxKeys: u32,
+    pub name_data_len: u32,
+    pub index_max_keys: u32,
     pub toast_max_chunk_size: u32,
     pub loblksize: u32,
     // /// Note this is `bool` in C; it is u8 to allow safe conversions.
-    pub float8ByVal: u8,
+    pub float8_by_val: u8,
     /// Explicit padding to align the 32-bit field that follows.
     pub __padding6: [u8; 3],
     pub data_checksum_version: u32,
     pub mock_authentication_nonce: [u8; 32],
-    pub crc: pg_crc32c,
+    pub crc: PgCrc32c,
     /// Explicit padding to align the end of the struct, to satisfy `zerocopy`
     pub __padding7: [u8; 4],
 }
