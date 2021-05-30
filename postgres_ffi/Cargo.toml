@@ -18,6 +18,7 @@ hex = "0.4.3"
 lazy_static = "1.4"
 log = "0.4.14"
 thiserror = "1.0"
+zerocopy = "0.5"
 workspace_hack = { path = "../workspace_hack" }
 
 [build-dependencies]
