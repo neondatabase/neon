@@ -15,12 +15,12 @@ use anyhow::{anyhow, Result};
 use zerocopy::{AsBytes, FromBytes, LayoutVerified};
 
 pub const PG_CONTROL_FILE_SIZE: usize = 8192;
-pub type Oid = u32;
-pub type TransactionId = u32;
-pub type MultiXactId = TransactionId;
-pub type MultiXactOffset = u32;
-pub type XLogRecPtr = u64;
-pub type TimeLineID = u32;
+type Oid = u32;
+type TransactionId = u32;
+type MultiXactId = TransactionId;
+type MultiXactOffset = u32;
+type XLogRecPtr = u64;
+type TimeLineID = u32;
 type PgTimeT = i64;
 type PgCrc32c = u32;
 
