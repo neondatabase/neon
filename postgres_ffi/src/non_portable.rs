@@ -33,12 +33,14 @@ pub const DBSTATE_DB_IN_CRASH_RECOVERY: DBState = 4;
 pub const DBSTATE_DB_IN_ARCHIVE_RECOVERY: DBState = 5;
 pub const DBSTATE_DB_IN_PRODUCTION: DBState = 6;
 
+/// FIXME: Please document me!
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, AsBytes, FromBytes)]
 pub struct FullTransactionId {
     pub value: u64,
 }
 
+/// FIXME: Please document me!
 #[repr(C)]
 #[derive(Debug, Clone, Default, AsBytes, FromBytes)]
 pub struct CheckPoint {
@@ -68,6 +70,7 @@ pub struct CheckPoint {
     pub __padding5: [u8; 4],
 }
 
+/// FIXME: Please document me!
 #[repr(C)]
 #[derive(Debug, Clone, Default, AsBytes, FromBytes)]
 pub struct ControlFileData {
