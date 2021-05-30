@@ -24,14 +24,26 @@ type TimeLineID = u32;
 type PgTimeT = i64;
 type PgCrc32c = u32;
 
-pub type DBState = u32;
-pub const DBSTATE_DB_STARTUP: DBState = 0;
-pub const DBSTATE_DB_SHUTDOWNED: DBState = 1;
-pub const DBSTATE_DB_SHUTDOWNED_IN_RECOVERY: DBState = 2;
-pub const DBSTATE_DB_SHUTDOWNING: DBState = 3;
-pub const DBSTATE_DB_IN_CRASH_RECOVERY: DBState = 4;
-pub const DBSTATE_DB_IN_ARCHIVE_RECOVERY: DBState = 5;
-pub const DBSTATE_DB_IN_PRODUCTION: DBState = 6;
+/// This is a placeholder for futre improvement; the `zerocopy` crate can't
+/// derive `FromBytes` for an enum that doesn't have a variant for each
+/// possible integer value (and won't even try for anything bigger than u16.)
+type DbStateRaw = u32;
+/// FIXME: Please document me!
+///
+/// To use this, do something like `DBState::DbInProduction as u32`.
+// If conversion in the other direction is required, please add an impl
+// of TryFrom<u32>.
+#[derive(Debug, Clone, Copy)]
+#[repr(u32)]
+pub enum DBState {
+    DbStartup = 0,
+    DbShutdowned = 1,
+    DbShutdownedInRecovery = 2,
+    DbShutdowning = 3,
+    DbInCrashRecovery = 4,
+    DbInArchiveRecovery = 5,
+    DbInProduction = 6,
+}
 
 /// FIXME: Please document me!
 #[repr(C)]
@@ -77,7 +89,7 @@ pub struct ControlFileData {
     pub system_identifier: u64,
     pub pg_control_version: u32,
     pub catalog_version_no: u32,
-    pub state: DBState,
+    pub state: DbStateRaw,
     /// Explicit padding to align the 64-bit field that follows.
     pub __padding1: [u8; 4],
     pub time: PgTimeT,

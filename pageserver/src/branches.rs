@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use fs::File;
+use postgres_ffi::non_portable::{ControlFileData, DBState};
 use postgres_ffi::{pg_constants, xlog_utils};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,6 @@ use zenith_utils::lsn::Lsn;
 use crate::page_cache;
 use crate::restore_local_repo;
 use crate::{repository::Repository, PageServerConf, ZTimelineId};
-use postgres_ffi::non_portable::ControlFileData;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -355,7 +355,7 @@ fn force_crash_recovery(datadir: &Path) -> Result<()> {
     let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
     let mut controlfile = ControlFileData::decode(&fs::read(controlfilepath.as_path())?)?;
 
-    controlfile.state = postgres_ffi::non_portable::DBSTATE_DB_IN_PRODUCTION;
+    controlfile.state = DBState::DbInProduction as u32;
 
     // Pad the buffer out to the expected file size.
     let pg_control_buf = ControlFileData::encode(controlfile);
