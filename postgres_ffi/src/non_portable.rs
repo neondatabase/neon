@@ -142,8 +142,11 @@ pub struct ControlFileData {
 }
 
 impl ControlFileData {
-    // FIXME: compute this in a better way, or remove it entirely?
-    const OFFSETOF_CRC: usize = 288;
+    /// Compute the offset of the `crc` field within the `ControlFileData` struct.
+    // Someday this can be const when the right compiler features land.
+    fn crc_offset() -> usize {
+        memoffset::offset_of!(ControlFileData, crc)
+    }
 
     /// Decode a `ControlFileData` struct from a byte array.
     ///
@@ -161,7 +164,7 @@ impl ControlFileData {
         // Compute expected CRC.
         // Note the buffer length was already checked by LayoutVerified, so
         // accessing this offset should never panic.
-        let data_without_crc = &buf[0..Self::OFFSETOF_CRC];
+        let data_without_crc = &buf[0..Self::crc_offset()];
         let expectedcrc = crc32c::crc32c(&data_without_crc);
 
         if expectedcrc != controlfile.crc {
@@ -184,7 +187,7 @@ impl ControlFileData {
         let cf_bytes = self.as_bytes();
 
         // Recompute the CRC
-        let data_without_crc = &cf_bytes[0..Self::OFFSETOF_CRC];
+        let data_without_crc = &cf_bytes[0..Self::crc_offset()];
         let newcrc = crc32c::crc32c(&data_without_crc);
 
         // Drop the immutable reference so we can modify the struct
