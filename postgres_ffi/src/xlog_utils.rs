@@ -8,6 +8,8 @@
 //
 
 use crate::pg_constants;
+use crate::XLogPageHeaderData;
+use crate::XLogLongPageHeaderData;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
 use crc32c::*;
@@ -298,34 +300,11 @@ impl XLogRecord {
 #[allow(non_upper_case_globals)]
 pub const SizeOfXLogRecord: usize = 24;
 
-// From PostgreSQL headers
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogPageHeaderData {
-    pub xlp_magic: u16,      /* magic value for correctness checks */
-    pub xlp_info: u16,       /* flag bits, see below */
-    pub xlp_tli: TimeLineID, /* TimeLineID of first record on page */
-    pub xlp_pageaddr: u64,   /* XLOG address of this page */
-    pub xlp_rem_len: u32,    /* total len of remaining data for record */
-}
-
-// FIXME: this assumes MAXIMUM_ALIGNOF 8. There are 4 padding bytes at end
 #[allow(non_upper_case_globals)]
-pub const SizeOfXLogShortPHD: usize = 2 + 2 + 4 + 8 + 4 + 4;
+pub const SizeOfXLogShortPHD: usize = std::mem::size_of::<XLogPageHeaderData>();
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogLongPageHeaderData {
-    pub std: XLogPageHeaderData, /* standard header fields */
-    pub xlp_sysid: u64,          /* system identifier from pg_control */
-    pub xlp_seg_size: u32,       /* just as a cross-check */
-    pub xlp_xlog_blcksz: u32,    /* just as a cross-check */
-}
-
-// FIXME: this assumes MAXIMUM_ALIGNOF 8.
 #[allow(non_upper_case_globals)]
-pub const SizeOfXLogLongPHD: usize = (2 + 2 + 4 + 8 + 4) + 4 + 8 + 4 + 4;
+pub const SizeOfXLogLongPHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
 
 pub fn encode_xlog_long_phd(hdr: XLogLongPageHeaderData) -> Bytes {
     let b: [u8; XLOG_SIZE_OF_XLOG_LONG_PHD];

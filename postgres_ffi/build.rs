@@ -14,12 +14,15 @@ fn main() {
         // The input header we would like to generate
         // bindings for.
         .header("pg_control_ffi.h")
+        .header("xlog_ffi.h")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
         .whitelist_type("ControlFileData")
         .whitelist_type("CheckPoint")
         .whitelist_type("FullTransactionId")
+        .whitelist_type("XLogPageHeaderData")
+        .whitelist_type("XLogLongPageHeaderData")
         .whitelist_var("PG_CONTROL_FILE_SIZE")
         .whitelist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
         .whitelist_type("DBState")
