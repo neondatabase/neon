@@ -1,0 +1,14 @@
+[[source]]
+url = "https://pypi.python.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+pytest = ">=6.0.0"
+psycopg2 = "*"
+
+[dev-packages]
+
+[requires]
+# we need at least 3.6, but pipenv doesn't allow to say this directly
+python_version = "3"
