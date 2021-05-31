@@ -8,7 +8,9 @@ use tar::{Builder, Header};
 use walkdir::WalkDir;
 
 use crate::repository::{BufferTag, RelTag, Timeline};
+use crc32c::*;
 use postgres_ffi::relfile_utils::*;
+use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
 
@@ -157,15 +159,106 @@ fn add_pgcontrol_file(
             let mut pg_control = postgres_ffi::decode_pg_control(pg_control_bytes)?;
             let mut checkpoint = postgres_ffi::decode_checkpoint(checkpoint_bytes)?;
 
-            checkpoint.redo = lsn.0;
+            const WAL_SEG_SIZE: usize = 16 * 1024 * 1024; //FIXME use segsize from pg_control
+
+            // Here starts pg_resetwal inspired magic
+            // Generate new pg_control and WAL needed for bootstrap
+            let new_segno = lsn.segment_number(WAL_SEG_SIZE) + 1;
+
+            let new_lsn =
+                XLogSegNoOffsetToRecPtr(new_segno, SizeOfXLogLongPHD as u32, WAL_SEG_SIZE);
+            checkpoint.redo = new_lsn;
+
+            //reset some fields we don't want to preserve
+            checkpoint.oldestActiveXid = 0;
+
+            //save new values in pg_control
+            pg_control.checkPoint = new_lsn;
             pg_control.checkPointCopy = checkpoint;
+
+            //send pg_control
             let pg_control_bytes = postgres_ffi::encode_pg_control(pg_control);
             let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
             ar.append(&header, &pg_control_bytes[..])?;
+
+            //send wal segment
+            let wal_file_name = XLogFileName(
+                1, // FIXME: always use Postgres timeline 1
+                new_segno,
+                WAL_SEG_SIZE,
+            );
+            let wal_file_path = format!("pg_wal/{}", wal_file_name);
+            let header = new_tar_header(&wal_file_path, WAL_SEG_SIZE as u64)?;
+
+            let mut seg_buf = BytesMut::with_capacity(WAL_SEG_SIZE as usize);
+
+            let hdr = XLogLongPageHeaderData {
+                std: {
+                    XLogPageHeaderData {
+                        xlp_magic: XLOG_PAGE_MAGIC,
+                        xlp_info: pg_constants::XLP_LONG_HEADER,
+                        xlp_tli: 1, // FIXME: always use Postgres timeline 1
+                        xlp_pageaddr: pg_control.checkPointCopy.redo - SizeOfXLogLongPHD as u64,
+                        xlp_rem_len: 0,
+                    }
+                },
+                xlp_sysid: pg_control.system_identifier,
+                xlp_seg_size: WAL_SEG_SIZE as u32,
+                xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
+            };
+
+            let hdr_bytes = encode_xlog_long_phd(hdr);
+            seg_buf.extend_from_slice(&hdr_bytes);
+
+            let rec_hdr = XLogRecord {
+                xl_tot_len: (XLOG_SIZE_OF_XLOG_RECORD
+                    + SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT
+                    + SIZEOF_CHECKPOINT) as u32,
+                xl_xid: 0, //0 is for InvalidTransactionId
+                xl_prev: 0,
+                xl_info: pg_constants::XLOG_CHECKPOINT_SHUTDOWN,
+                xl_rmid: pg_constants::RM_XLOG_ID,
+                xl_crc: 0,
+            };
+
+            let mut rec_shord_hdr_bytes = BytesMut::new();
+            rec_shord_hdr_bytes.put_u8(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
+            rec_shord_hdr_bytes.put_u8(SIZEOF_CHECKPOINT as u8);
+
+            let rec_bytes = encode_xlog_record(rec_hdr);
+            let checkpoint_bytes = encode_checkpoint(pg_control.checkPointCopy);
+
+            //calculate record checksum
+            let mut crc = 0;
+            crc = crc32c_append(crc, &rec_shord_hdr_bytes[..]);
+            crc = crc32c_append(crc, &checkpoint_bytes[..]);
+            crc = crc32c_append(crc, &rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
+
+            seg_buf.extend_from_slice(&rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
+            seg_buf.put_u32_le(crc);
+            seg_buf.extend_from_slice(&rec_shord_hdr_bytes);
+            seg_buf.extend_from_slice(&checkpoint_bytes);
+
+            //zero out remainig file
+            seg_buf.resize(WAL_SEG_SIZE as usize, 0);
+
+            ar.append(&header, &seg_buf[..])?;
         }
     }
     Ok(())
 }
+
+// //
+// // Add generated wal file needed to start postgres
+// //
+// fn add_bootstrap_wal_file(
+//     ar: &mut Builder<&mut dyn Write>,
+//     lsn: Lsn,
+//     pg_control: ControlFileData
+// ) -> anyhow::Result<()> {
+
+//     Ok(())
+// }
 
 ///
 /// Generate tarball with non-relational files from repository
