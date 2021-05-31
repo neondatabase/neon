@@ -35,7 +35,7 @@ jobs:
       - name: Install postgres dependencies
         run: |
           sudo apt update
-          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libcurl4-openssl-dev
+          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison
 
       - name: Set pg revision for caching
         id: pg_ver
