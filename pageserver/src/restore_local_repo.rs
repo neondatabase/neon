@@ -281,27 +281,12 @@ pub fn save_decoded_record(
         && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_SMGR_TRUNCATE
     {
         let truncate = XlSmgrTruncate::decode(&decoded);
-        if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
-            let rel = RelTag {
-                spcnode: truncate.rnode.spcnode,
-                dbnode: truncate.rnode.dbnode,
-                relnode: truncate.rnode.relnode,
-                forknum: pg_constants::MAIN_FORKNUM,
-            };
-            timeline.put_truncation(rel, lsn, truncate.blkno)?;
-        }
+        save_xlog_smgr_truncate(timeline, lsn, &truncate)?;
     } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
         && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_DBASE_CREATE
     {
         let createdb = XlCreateDatabase::decode(&decoded);
-        save_create_database(
-            timeline,
-            lsn,
-            createdb.db_id,
-            createdb.tablespace_id,
-            createdb.src_db_id,
-            createdb.src_tablespace_id,
-        )?;
+        save_xlog_dbase_create(timeline, lsn, &createdb)?;
     }
 
     // Now that this record has been handled, let the repository know that
@@ -311,14 +296,12 @@ pub fn save_decoded_record(
 }
 
 /// Subroutine of save_decoded_record(), to handle an XLOG_DBASE_CREATE record.
-fn save_create_database(
-    timeline: &dyn Timeline,
-    lsn: Lsn,
-    db_id: Oid,
-    tablespace_id: Oid,
-    src_db_id: Oid,
-    src_tablespace_id: Oid,
-) -> Result<()> {
+fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatabase) -> Result<()> {
+    let db_id = rec.db_id;
+    let tablespace_id = rec.tablespace_id;
+    let src_db_id = rec.src_db_id;
+    let src_tablespace_id = rec.src_tablespace_id;
+
     // Creating a database is implemented by copying the template (aka. source) database.
     // To copy all the relations, we need to ask for the state as of the same LSN, but we
     // cannot pass 'lsn' to the Timeline.get_* functions, or they will block waiting for
@@ -328,7 +311,7 @@ fn save_create_database(
 
     let rels = timeline.list_rels(src_tablespace_id, src_db_id, req_lsn)?;
 
-    info!("creatdb: {} rels", rels.len());
+    trace!("save_create_database: {} rels", rels.len());
 
     let mut num_rels_copied = 0;
     let mut num_blocks_copied = 0;
@@ -374,5 +357,67 @@ fn save_create_database(
         "Created database {}/{}, copied {} blocks in {} rels at {}",
         tablespace_id, db_id, num_blocks_copied, num_rels_copied, lsn
     );
+    Ok(())
+}
+
+/// Subroutine of save_decoded_record(), to handle an XLOG_SMGR_TRUNCATE record.
+///
+/// This is the same logic as in PostgreSQL's smgr_redo() function.
+fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTruncate) -> Result<()> {
+    let spcnode = rec.rnode.spcnode;
+    let dbnode = rec.rnode.dbnode;
+    let relnode = rec.rnode.relnode;
+
+    if (rec.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
+        let rel = RelTag {
+            spcnode,
+            dbnode,
+            relnode,
+            forknum: pg_constants::MAIN_FORKNUM,
+        };
+        timeline.put_truncation(rel, lsn, rec.blkno)?;
+    }
+    if (rec.flags & pg_constants::SMGR_TRUNCATE_FSM) != 0 {
+        let rel = RelTag {
+            spcnode,
+            dbnode,
+            relnode,
+            forknum: pg_constants::FSM_FORKNUM,
+        };
+
+        // FIXME: 'blkno' stored in the WAL record is the new size of the
+        // heap. The formula for calculating the new size of the FSM is
+        // pretty complicated (see FreeSpaceMapPrepareTruncateRel() in
+        // PostgreSQL), and we should also clear bits in the tail FSM block,
+        // and update the upper level FSM pages. None of that has been
+        // implemented. What we do instead, is always just truncate the FSM
+        // to zero blocks. That's bad for performance, but safe. (The FSM
+        // isn't needed for correctness, so we could also leave garbage in
+        // it. Seems more tidy to zap it away.)
+        if rec.blkno != 0 {
+            info!("Partial truncation of FSM is not supported");
+        }
+        let num_fsm_blocks = 0;
+        timeline.put_truncation(rel, lsn, num_fsm_blocks)?;
+    }
+    if (rec.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
+        let rel = RelTag {
+            spcnode,
+            dbnode,
+            relnode,
+            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+        };
+
+        // FIXME: Like with the FSM above, the logic to truncate the VM
+        // correctly has not been implemented. Just zap it away completely,
+        // always. Unlike the FSM, the VM must never have bits incorrectly
+        // set. From a correctness point of view, it's always OK to clear
+        // bits or remove it altogether, though.
+        if rec.blkno != 0 {
+            info!("Partial truncation of VM is not supported");
+        }
+        let num_vm_blocks = 0;
+        timeline.put_truncation(rel, lsn, num_vm_blocks)?;
+    }
     Ok(())
 }

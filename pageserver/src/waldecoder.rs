@@ -264,7 +264,7 @@ pub struct DecodedBkpBlock {
     /* Information on full-page image, if any */
     has_image: bool,       /* has image, even for consistency checking */
     pub apply_image: bool, /* has image that should be restored */
-    pub will_init: bool,
+    pub will_init: bool,   /* record doesn't need previous page version to apply */
     //char	   *bkp_image;
     hole_offset: u16,
     hole_length: u16,
@@ -850,7 +850,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     let spcnode = buf.get_u32_le();
                     let dbnode = buf.get_u32_le();
                     let relnode = buf.get_u32_le();
-                    //TODO save these too
+                    //TODO handle this too?
                     trace!(
                         "XLOG_XACT_ABORT relfilenode {}/{}/{}",
                         spcnode,
