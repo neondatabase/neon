@@ -343,7 +343,7 @@ impl WalAcceptorNode {
 
         let ps_arg = if self.pass_to_pageserver {
             // Tell page server it can receive WAL from this WAL safekeeper
-            ["--pageserver", "127.0.0.1:64000"].to_vec()
+            ["--pageserver", "127.0.0.1:64000", "--recall", "1 second"].to_vec()
         } else {
             [].to_vec()
         };

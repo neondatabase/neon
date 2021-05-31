@@ -22,4 +22,5 @@ pub struct WalAcceptorConf {
     pub listen_addr: SocketAddr,
     pub pageserver_addr: Option<SocketAddr>,
     pub ttl: Option<Duration>,
+    pub recall_period: Option<Duration>,
 }
