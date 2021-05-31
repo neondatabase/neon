@@ -54,6 +54,12 @@ fn main() -> Result<()> {
                 .help("interval for keeping WAL as walkeeper node, after which them will be uploaded to S3 and removed locally"),
         )
         .arg(
+            Arg::with_name("recall-period")
+                .long("recall")
+                .takes_value(true)
+                .help("Period for requestion pageserver to call for replication"),
+        )
+        .arg(
             Arg::with_name("daemonize")
                 .short("d")
                 .long("daemonize")
@@ -80,6 +86,7 @@ fn main() -> Result<()> {
         pageserver_addr: None,
         listen_addr: "127.0.0.1:5454".parse()?,
         ttl: None,
+        recall_period: None,
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
@@ -107,6 +114,10 @@ fn main() -> Result<()> {
 
     if let Some(ttl) = arg_matches.value_of("ttl") {
         conf.ttl = Some::<Duration>(parse(ttl)?);
+    }
+
+    if let Some(recall) = arg_matches.value_of("recall") {
+        conf.recall_period = Some::<Duration>(parse(recall)?);
     }
 
     start_wal_acceptor(conf)

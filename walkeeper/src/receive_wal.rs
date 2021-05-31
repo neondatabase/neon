@@ -12,6 +12,8 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::str;
 use std::sync::Arc;
+use std::thread;
+use std::thread::sleep;
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 
@@ -142,6 +144,48 @@ pub struct ReceiveWalConn {
     pub conf: WalAcceptorConf,
 }
 
+///
+/// Periodically request pageserver to call back.
+/// If pageserver already has replication channel, it will just ignore this request
+///
+fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId) {
+    let addr = conf.pageserver_addr.unwrap();
+    let ps_connstr = format!(
+        "host={} port={} dbname={} user={}",
+        addr.ip(),
+        addr.port(),
+        "no_db",
+        "no_user",
+    );
+    let callme = format!(
+        "callmemaybe {} host={} port={} options='-c ztimelineid={}'",
+        timelineid,
+        conf.listen_addr.ip(),
+        conf.listen_addr.port(),
+        timelineid
+    );
+    loop {
+        info!(
+            "requesting page server to connect to us: start {} {}",
+            ps_connstr, callme
+        );
+        match Client::connect(&ps_connstr, NoTls) {
+            Ok(mut client) => {
+                if let Err(e) = client.simple_query(&callme) {
+                    error!("Failed to send callme request to pageserver: {}", e);
+                }
+            }
+            Err(e) => error!("Failed to connect to pageserver {}: {}", &ps_connstr, e),
+        }
+
+        if let Some(period) = conf.recall_period {
+            sleep(period);
+        } else {
+            break;
+        }
+    }
+}
+
 impl ReceiveWalConn {
     pub fn new(socket: TcpStream, conf: WalAcceptorConf) -> Result<ReceiveWalConn> {
         let peer_addr = socket.peer_addr()?;
@@ -158,32 +202,6 @@ impl ReceiveWalConn {
     fn read_req<T: LeSer>(&mut self) -> Result<T> {
         // As the trait bound implies, this always encodes little-endian.
         Ok(T::des_from(&mut self.stream_in)?)
-    }
-
-    fn request_callback(&self) -> std::result::Result<(), postgres::error::Error> {
-        if let Some(addr) = self.conf.pageserver_addr {
-            let ps_connstr = format!(
-                "host={} port={} dbname={} user={}",
-                addr.ip(),
-                addr.port(),
-                "no_db",
-                "no_user",
-            );
-            let callme = format!(
-                "callmemaybe {} host={} port={} options='-c ztimelineid={}'",
-                self.timeline.get().timelineid,
-                self.conf.listen_addr.ip(),
-                self.conf.listen_addr.port(),
-                self.timeline.get().timelineid
-            );
-            info!(
-                "requesting page server to connect to us: start {} {}",
-                ps_connstr, callme
-            );
-            let mut client = Client::connect(&ps_connstr, NoTls)?;
-            client.simple_query(&callme)?;
-        }
-        Ok(())
     }
 
     /// Receive WAL from wal_proposer
@@ -254,12 +272,14 @@ impl ReceiveWalConn {
         /* Acknowledge the proposed candidate by returning it to the proxy */
         prop.node_id.ser_into(&mut self.stream_out)?;
 
-        // Need to establish replication channel with page server.
-        // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
-        if let Err(e) = self.request_callback() {
-            // Do not treate it as fatal error and continue work
-            // FIXME: we should retry after a while...
-            error!("Failed to send callme request to pageserver: {}", e);
+        if self.conf.pageserver_addr.is_some() {
+            // Need to establish replication channel with page server.
+            // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
+            let conf = self.conf.clone();
+            let timelineid = self.timeline.get().timelineid;
+            thread::spawn(move || {
+                request_callback(conf, timelineid);
+            });
         }
 
         info!(
