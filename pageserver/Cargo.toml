@@ -30,7 +30,8 @@ tokio-stream = { version = "0.1.4" }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
-rocksdb = "0.16.0"
+# by default rust-rocksdb tries to build a lot of compression algos. Use lz4 only for now as it is simplest dependency.
+rocksdb = { version = "0.16.0", features = ["lz4"], default-features = false }
 anyhow = "1.0"
 crc32c = "0.6.0"
 walkdir = "2"
