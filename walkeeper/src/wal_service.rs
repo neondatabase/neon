@@ -9,8 +9,9 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use crate::receive_wal::ReceiveWalConn;
-use crate::send_wal::SendWalConn;
+use crate::send_wal::SendWalHandler;
 use crate::WalAcceptorConf;
+use zenith_utils::postgres_backend::PostgresBackend;
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 pub fn thread_main(conf: WalAcceptorConf) -> Result<()> {
@@ -48,7 +49,10 @@ fn handle_socket(mut socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
         socket.read_exact(&mut [0u8; 4])?;
         ReceiveWalConn::new(socket, conf)?.run()?; // internal protocol between wal_proposer and wal_acceptor
     } else {
-        SendWalConn::new(socket, conf)?.run()?; // libpq replication protocol between wal_acceptor and replicas/pagers
+        let mut conn_handler = SendWalHandler::new(conf);
+        let mut pgbackend = PostgresBackend::new(socket)?;
+        // libpq replication protocol between wal_acceptor and replicas/pagers
+        pgbackend.run(&mut conn_handler)?;
     }
     Ok(())
 }

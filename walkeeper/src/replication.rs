@@ -1,20 +1,18 @@
-//! This module implements the replication protocol, starting with the
-//! "START REPLICATION" message.
+//! This module implements the streaming side of replication protocol, starting
+//! with the "START REPLICATION" message.
 
-use crate::pq_protocol::{BeMessage, FeMessage};
-use crate::send_wal::SendWalConn;
+use crate::send_wal::SendWalHandler;
 use crate::timeline::{Timeline, TimelineTools};
-use crate::WalAcceptorConf;
 use anyhow::{anyhow, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use log::*;
 use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-use std::net::{Shutdown, TcpStream};
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::sleep;
@@ -22,10 +20,9 @@ use std::time::Duration;
 use std::{str, thread};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::postgres_backend::PostgresBackend;
+use zenith_utils::pq_proto::{BeMessage, FeMessage, XLogDataBody};
 
-const XLOG_HDR_SIZE: usize = 1 + 8 * 3; /* 'w' + startPos + walEnd + timestamp */
-const LIBPQ_HDR_SIZE: usize = 5; /* 1 byte with message type + 4 bytes length */
-const LIBPQ_MSG_SIZE_OFFS: usize = 1;
 pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
 
 type FullTransactionId = u64;
@@ -40,37 +37,16 @@ pub struct HotStandbyFeedback {
 
 /// A network connection that's speaking the replication protocol.
 pub struct ReplicationConn {
-    timeline: Option<Arc<Timeline>>,
-    /// Postgres connection, buffered input
-    ///
     /// This is an `Option` because we will spawn a background thread that will
     /// `take` it from us.
     stream_in: Option<BufReader<TcpStream>>,
-    /// Postgres connection, output
-    stream_out: TcpStream,
-    /// wal acceptor configuration
-    conf: WalAcceptorConf,
-    /// assigned application name
-    appname: Option<String>,
-}
-
-// Separate thread is reading keepalives from the socket. When main one
-// finishes, tell it to get down by shutdowning the socket.
-impl Drop for ReplicationConn {
-    fn drop(&mut self) {
-        let _res = self.stream_out.shutdown(Shutdown::Both);
-    }
 }
 
 impl ReplicationConn {
-    /// Create a new `SendWal`, consuming the `Connection`.
-    pub fn new(conn: SendWalConn) -> Self {
+    /// Create a new `ReplicationConn`
+    pub fn new(pgb: &mut PostgresBackend) -> Self {
         Self {
-            timeline: conn.timeline,
-            stream_in: Some(conn.stream_in),
-            stream_out: conn.stream_out,
-            conf: conn.conf,
-            appname: None,
+            stream_in: pgb.take_stream_in(),
         }
     }
 
@@ -82,9 +58,9 @@ impl ReplicationConn {
         // Wait for replica's feedback.
         // We only handle `CopyData` messages. Anything else is ignored.
         loop {
-            match FeMessage::read_from(&mut stream_in)? {
-                FeMessage::CopyData(m) => {
-                    let feedback = HotStandbyFeedback::des(&m.body)?;
+            match FeMessage::read(&mut stream_in)? {
+                Some(FeMessage::CopyData(m)) => {
+                    let feedback = HotStandbyFeedback::des(&m)?;
                     timeline.add_hs_feedback(feedback)
                 }
                 msg => {
@@ -128,9 +104,14 @@ impl ReplicationConn {
     ///
     /// Handle START_REPLICATION replication command
     ///
-    pub fn run(&mut self, cmd: &Bytes) -> Result<()> {
+    pub fn run(
+        &mut self,
+        swh: &mut SendWalHandler,
+        pgb: &mut PostgresBackend,
+        cmd: &Bytes,
+    ) -> Result<()> {
         // spawn the background thread which receives HotStandbyFeedback messages.
-        let bg_timeline = Arc::clone(self.timeline.get());
+        let bg_timeline = Arc::clone(swh.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();
 
         thread::spawn(move || {
@@ -143,7 +124,7 @@ impl ReplicationConn {
 
         let mut wal_seg_size: usize;
         loop {
-            wal_seg_size = self.timeline.get().get_info().server.wal_seg_size as usize;
+            wal_seg_size = swh.timeline.get().get_info().server.wal_seg_size as usize;
             if wal_seg_size == 0 {
                 error!("Can not start replication before connecting to wal_proposer");
                 sleep(Duration::from_secs(1));
@@ -151,19 +132,17 @@ impl ReplicationConn {
                 break;
             }
         }
-        let (wal_end, timeline) = self.timeline.find_end_of_wal(&self.conf.data_dir, false);
+        let (wal_end, timeline) = swh.timeline.find_end_of_wal(&swh.conf.data_dir, false);
         if start_pos == Lsn(0) {
             start_pos = wal_end;
         }
-        if stop_pos == Lsn(0) && self.appname == Some("wal_proposer_recovery".to_string()) {
+        if stop_pos == Lsn(0) && swh.appname == Some("wal_proposer_recovery".to_string()) {
             stop_pos = wal_end;
         }
         info!("Start replication from {} till {}", start_pos, stop_pos);
 
-        let mut outbuf = BytesMut::new();
-        BeMessage::write(&mut outbuf, &BeMessage::Copy);
-        self.send(&outbuf)?;
-        outbuf.clear();
+        // switch to copy
+        pgb.write_message(&BeMessage::CopyBothResponse)?;
 
         let mut end_pos: Lsn;
         let mut wal_file: Option<File> = None;
@@ -179,7 +158,7 @@ impl ReplicationConn {
                 end_pos = stop_pos;
             } else {
                 /* normal mode */
-                let timeline = self.timeline.get();
+                let timeline = swh.timeline.get();
                 end_pos = timeline.wait_for_lsn(start_pos);
             }
             if end_pos == END_REPLICATION_MARKER {
@@ -193,8 +172,8 @@ impl ReplicationConn {
                     // Open a new file.
                     let segno = start_pos.segment_number(wal_seg_size);
                     let wal_file_name = XLogFileName(timeline, segno, wal_seg_size);
-                    let timeline_id = self.timeline.get().timelineid.to_string();
-                    let wal_file_path = self.conf.data_dir.join(timeline_id).join(wal_file_name);
+                    let timeline_id = swh.timeline.get().timelineid.to_string();
+                    let wal_file_path = swh.conf.data_dir.join(timeline_id).join(wal_file_name);
                     Self::open_wal_file(&wal_file_path)?
                 }
             };
@@ -207,32 +186,19 @@ impl ReplicationConn {
             let send_size = min(send_size, wal_seg_size - xlogoff);
             let send_size = min(send_size, MAX_SEND_SIZE);
 
-            let msg_size = LIBPQ_HDR_SIZE + XLOG_HDR_SIZE + send_size;
-
             // Read some data from the file.
             let mut file_buf = vec![0u8; send_size];
             file.seek(SeekFrom::Start(xlogoff as u64))?;
             file.read_exact(&mut file_buf)?;
 
             // Write some data to the network socket.
-            // FIXME: turn these into structs.
-            // 'd' is CopyData;
-            // 'w' is "WAL records"
-            // https://www.postgresql.org/docs/9.1/protocol-message-formats.html
-            // src/backend/replication/walreceiver.c
-            outbuf.clear();
-            outbuf.put_u8(b'd');
-            outbuf.put_u32((msg_size - LIBPQ_MSG_SIZE_OFFS) as u32);
-            outbuf.put_u8(b'w');
-            outbuf.put_u64(start_pos.0);
-            outbuf.put_u64(end_pos.0);
-            outbuf.put_u64(get_current_timestamp());
+            pgb.write_message(&BeMessage::XLogData(XLogDataBody {
+                wal_start: start_pos.0,
+                wal_end: end_pos.0,
+                timestamp: get_current_timestamp(),
+                data: &file_buf,
+            }))?;
 
-            assert!(outbuf.len() + file_buf.len() == msg_size);
-            // This thread has exclusive access to the TcpStream, so it's fine
-            // to do this as two separate calls.
-            self.send(&outbuf)?;
-            self.send(&file_buf)?;
             start_pos += send_size as u64;
 
             debug!("Sent WAL to page server up to {}", end_pos);
@@ -243,12 +209,6 @@ impl ReplicationConn {
                 wal_file = Some(file);
             }
         }
-        Ok(())
-    }
-
-    /// Send messages on the network.
-    fn send(&mut self, buf: &[u8]) -> Result<()> {
-        self.stream_out.write_all(buf.as_ref())?;
         Ok(())
     }
 }
