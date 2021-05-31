@@ -16,11 +16,8 @@ toml = "0.5"
 lazy_static = "1.4"
 regex = "1"
 anyhow = "1.0"
-# hex = "0.4.3"
 bytes = "1.0.1"
-# fs_extra = "1.2.0"
 nix = "0.20"
-# thiserror = "1"
 url = "2.2.2"
 
 pageserver = { path = "../pageserver" }
