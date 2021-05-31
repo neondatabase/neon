@@ -22,7 +22,7 @@ tmp_install/build/config.status:
 	mkdir -p tmp_install/build
 	(cd tmp_install/build && \
 	../../vendor/postgres/configure CFLAGS='-O0' --enable-debug --enable-cassert \
-	    --enable-depend --with-libxml --prefix=$(abspath tmp_install) > configure.log)
+	    --enable-depend --prefix=$(abspath tmp_install) > configure.log)
 
 # nicer alias for running 'configure'
 postgres-configure: tmp_install/build/config.status
