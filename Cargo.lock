@@ -2478,9 +2478,12 @@ dependencies = [
 name = "zenith_utils"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bincode",
+ "byteorder",
  "bytes",
  "hex-literal",
+ "log",
  "serde",
  "thiserror",
  "workspace_hack",

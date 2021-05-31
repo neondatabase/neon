@@ -10,3 +10,6 @@ pub mod seqwait;
 // pub mod seqwait_async;
 
 pub mod bin_ser;
+
+pub mod postgres_backend;
+pub mod pq_proto;
