@@ -101,14 +101,14 @@ pub trait History: Iterator<Item = Result<RelationUpdate>> {
     fn lsn(&self) -> Lsn;
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelationUpdate {
     pub rel: RelTag,
     pub lsn: Lsn,
     pub update: Update,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Update {
     Page { blknum: u32, img: Bytes },
     WALRecord { blknum: u32, rec: WALRecord },
