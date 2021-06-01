@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use zenith_utils::bin_ser::BeSer;
@@ -198,7 +198,7 @@ pub struct ObjectTimeline {
     ancestor_timeline: Option<ZTimelineId>,
     ancestor_lsn: Lsn,
 
-    rel_meta: Mutex<BTreeMap<RelTag, RelMetadata>>,
+    rel_meta: RwLock<BTreeMap<RelTag, RelMetadata>>,
 }
 
 impl ObjectTimeline {
@@ -224,7 +224,7 @@ impl ObjectTimeline {
             last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
             ancestor_timeline: metadata.ancestor_timeline,
             ancestor_lsn: metadata.ancestor_lsn,
-            rel_meta: Mutex::new(BTreeMap::new()),
+            rel_meta: RwLock::new(BTreeMap::new()),
         };
         Ok(timeline)
     }
@@ -256,7 +256,7 @@ impl Timeline for ObjectTimeline {
     fn get_rel_exists(&self, rel: RelTag, req_lsn: Lsn) -> Result<bool> {
         let lsn = self.wait_lsn(req_lsn)?;
         {
-            let rel_meta = self.rel_meta.lock().unwrap();
+            let rel_meta = self.rel_meta.read().unwrap();
             if let Some(entry) = rel_meta.range(..=rel).next_back() {
                 if *entry.0 == rel {
                     let meta = entry.1;
@@ -351,7 +351,7 @@ impl Timeline for ObjectTimeline {
 
             self.obj_store
                 .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
-            let mut rel_meta = self.rel_meta.lock().unwrap();
+            let mut rel_meta = self.rel_meta.write().unwrap();
             rel_meta.insert(
                 tag.rel,
                 RelMetadata {
@@ -399,7 +399,7 @@ impl Timeline for ObjectTimeline {
 
             self.obj_store
                 .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
-            let mut rel_meta = self.rel_meta.lock().unwrap();
+            let mut rel_meta = self.rel_meta.write().unwrap();
             rel_meta.insert(
                 tag.rel,
                 RelMetadata {
@@ -424,7 +424,7 @@ impl Timeline for ObjectTimeline {
 
         self.obj_store
             .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
-        let mut rel_meta = self.rel_meta.lock().unwrap();
+        let mut rel_meta = self.rel_meta.write().unwrap();
         rel_meta.insert(
             rel,
             RelMetadata {
@@ -580,7 +580,7 @@ impl ObjectTimeline {
     ///
     fn relsize_get_nowait(&self, rel: RelTag, lsn: Lsn) -> Result<Option<u32>> {
         {
-            let rel_meta = self.rel_meta.lock().unwrap();
+            let rel_meta = self.rel_meta.read().unwrap();
             if let Some(entry) = rel_meta.range(..=rel).next_back() {
                 if *entry.0 == rel {
                     let meta = entry.1;
@@ -603,14 +603,6 @@ impl ObjectTimeline {
                         version_lsn,
                         lsn
                     );
-                    let mut rel_meta = self.rel_meta.lock().unwrap();
-                    rel_meta.insert(
-                        rel,
-                        RelMetadata {
-                            size: Some(nblocks),
-                            last_updated: version_lsn,
-                        },
-                    );
                     Ok(Some(nblocks))
                 }
                 RelationSizeEntry::Unlink => {
@@ -618,14 +610,6 @@ impl ObjectTimeline {
                         "relation {} not found; it was dropped at lsn {}",
                         rel,
                         version_lsn
-                    );
-                    let mut rel_meta = self.rel_meta.lock().unwrap();
-                    rel_meta.insert(
-                        rel,
-                        RelMetadata {
-                            size: None,
-                            last_updated: version_lsn,
-                        },
                     );
                     Ok(None)
                 }
