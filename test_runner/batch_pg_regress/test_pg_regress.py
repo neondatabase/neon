@@ -1,15 +1,16 @@
-import pytest
-from fixtures.utils import mkdir_if_needed
-import getpass
 import os
 import psycopg2
 
+from fixtures.utils import mkdir_if_needed
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
-def test_pg_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir, base_dir, capsys):
+
+def test_pg_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir,
+                    base_dir, capsys):
 
     # Create a branch for us
-    zenith_cli.run(["branch", "test_pg_regress", "empty"]);
+    zenith_cli.run(["branch", "test_pg_regress", "empty"])
 
     # Connect to postgres and create a database called "regression".
     pg = postgres.create_start('test_pg_regress')
@@ -25,10 +26,8 @@ def test_pg_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, p
     mkdir_if_needed(os.path.join(runpath, 'testtablespace'))
 
     # Compute all the file locations that pg_regress will need.
-    build_path = os.path.join(
-        pg_distrib_dir, 'build/src/test/regress')
-    src_path = os.path.join(
-        base_dir, 'vendor/postgres/src/test/regress')
+    build_path = os.path.join(pg_distrib_dir, 'build/src/test/regress')
+    src_path = os.path.join(base_dir, 'vendor/postgres/src/test/regress')
     bindir = os.path.join(pg_distrib_dir, 'bin')
     schedule = os.path.join(src_path, 'parallel_schedule')
     pg_regress = os.path.join(build_path, 'pg_regress')

@@ -1,6 +1,6 @@
-
 import os
 import subprocess
+
 
 def get_self_dir():
     """ Get the path to the directory where this script lives. """
