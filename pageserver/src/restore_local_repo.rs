@@ -1,6 +1,6 @@
 //!
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
-//! zenith repository
+//! zenith Timeline.
 //!
 use log::*;
 use std::cmp::{max, min};

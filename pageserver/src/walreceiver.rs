@@ -1,10 +1,8 @@
 //!
-//! WAL receiver
+//! WAL receiver connects to the WAL safekeeper service,
+//! streams WAL, decodes records and saves them in page cache.
 //!
-//! The WAL receiver connects to the WAL safekeeper service, and streams WAL.
-//! For each WAL record, it decodes the record to figure out which data blocks
-//! the record affects, and adds the records to the page cache.
-//!
+//! We keep one WAL receiver active per timeline.
 
 use crate::page_cache;
 use crate::restore_local_repo;

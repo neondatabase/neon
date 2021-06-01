@@ -1,3 +1,9 @@
+//!
+//! Generate a tarball with files needed to bootstrap ComputeNode.
+//!
+//! TODO: this module has nothing to do with PostgreSQL pg_basebackup.
+//! It could use a better name.
+//!
 use crate::ZTimelineId;
 use log::*;
 use std::io::Write;

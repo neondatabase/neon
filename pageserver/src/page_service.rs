@@ -1,6 +1,6 @@
 //
-//   The Page Service listens for client connections and serves their GetPage@LSN
-// requests.
+//! The Page Service listens for client connections and serves their GetPage@LSN
+//! requests.
 //
 //   It is possible to connect here using usual psql/pgbench/libpq. Following
 // commands are supported now:

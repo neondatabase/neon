@@ -1,3 +1,5 @@
+//! Low-level key-value storage abstraction.
+//! 
 use crate::repository::{BufferTag, RelTag};
 use crate::ZTimelineId;
 use anyhow::Result;
