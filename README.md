@@ -105,11 +105,38 @@ cd test_runner
 pytest
 ```
 
+## Documentation
+
+Now we use README files to cover design ideas and overall architecture for each module.
+And rustdoc style documentation comments.
+
+To view your documentation in a browser, try running `cargo doc --no-deps --open`
+
 ## Source tree layout
+
+`/control_plane`:
+
+Local control plane.
+Functions to start, cofigure and stop pageserver and postgres instances running as a local processes.
+Intended to be used in integration tests and in CLI tools for local installations.
+
+`/zenith`
+
+Main entry point for the 'zenith' CLI utility.
+TODO: Doesn't it belong to control_plane?
+
+`/postgres_ffi`:
+
+Utility functions for interacting with PostgreSQL file formats.
+Misc constants, copied from PostgreSQL headers.
+
+`/zenith_utils`:
+
+Helpers that are shared between other crates in this repository.
 
 `/walkeeper`:
 
-WAL safekeeper. Written in Rust.
+WAL safekeeper (also known as WAL acceptor). Written in Rust.
 
 `/pageserver`:
 
@@ -121,9 +148,20 @@ Depends on the modified 'postgres' binary for WAL redo.
 
 PostgreSQL source tree, with the modifications needed for Zenith.
 
+`/vendor/postgres/contrib/zenith`:
+
+PostgreSQL extension that implements storage manager API and network communications with remote page server.
+
 `/test_runner`:
 
 Integration tests, written in Python using the `pytest` framework.
 
+`test_runner/zenith_regress`:
+
+Quick way to add new SQL regression test to integration tests set.
+
+`/integration_tests`:
+
+Another pack of integration tests. Written in Rust.
 
 [Rust]: https://www.rust-lang.org/learn/get-started
