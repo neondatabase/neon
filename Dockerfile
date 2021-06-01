@@ -5,11 +5,16 @@
 # tool for production servers.
 #
 # Dynamic linking is used for librocksdb and libstdc++ bacause librocksdb-sys calls
-# bindgen with 'dynamic' feature flag. This also prevents usage of dockerhub alpine-rust
+# bindgen with "dynamic" feature flag. This also prevents usage of dockerhub alpine-rust
 # images which are statically linked and have guards against any dlopen. I would rather
 # prefer all static binaries so we may change the way librocksdb-sys builds or wait until
 # we will have our own storage and drop rockdb dependency.
 #
+# Cargo-chef is used to separate dependencies building from main binaries building. This
+# way `docker build` will download and install dependencies only of there are changes to
+# out Cargo.toml files.
+#
+
 
 #
 # build postgres separately -- this layer will be rebuilt only if one of
@@ -70,7 +75,7 @@ RUN cargo build --release
 #
 # Copy binaries to resulting image.
 # build-base hare to provide libstdc++ (it will also bring gcc, but leave it this way until we figure
-# out how to statically link rocksdb or avoid at all).
+# out how to statically link rocksdb or avoid it at all).
 #
 FROM alpine:3.13
 RUN apk add --update openssl build-base
