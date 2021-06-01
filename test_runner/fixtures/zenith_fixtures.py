@@ -413,7 +413,7 @@ def zenith_binpath(base_dir):
 
 @zenfixture
 def pg_distrib_dir(base_dir):
-    """ Find the postgress install. """
+    """ Find the postgres install. """
 
     env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
     if env_postgres_bin:
