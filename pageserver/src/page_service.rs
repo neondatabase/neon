@@ -20,12 +20,12 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::thread;
-use zenith_utils::lsn::Lsn;
+use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 
 use crate::basebackup;
 use crate::branches;
 use crate::page_cache;
-use crate::repository::{BufferTag, RelTag};
+use crate::repository::{BufferTag, RelTag, RelationUpdate, Update};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
@@ -43,6 +43,7 @@ enum FeMessage {
     Sync,
     Terminate,
     CopyData(Bytes),
+    CopyDone,
 }
 
 #[derive(Debug)]
@@ -61,6 +62,7 @@ enum BeMessage {
     ControlFile,
     CopyData(Bytes),
     ErrorResponse(String),
+    CopyInResponse,
 }
 
 // Wrapped in libpq CopyData
@@ -354,6 +356,7 @@ impl FeMessage {
             b'S' => Ok(Some(FeMessage::Sync)),
             b'X' => Ok(Some(FeMessage::Terminate)),
             b'd' => Ok(Some(FeMessage::CopyData(body))),
+            b'c' => Ok(Some(FeMessage::CopyDone)),
             tag => Err(anyhow!("unknown message tag: {},'{:?}'", tag, body)),
         }
     }
@@ -604,6 +607,13 @@ impl Connection {
                 // Terminate fields
                 self.stream.write_u8(0)?;
             }
+
+            BeMessage::CopyInResponse => {
+                self.stream.write_u8(b'G')?;
+                self.stream.write_u32::<BE>(4 + 1 + 2)?;
+                self.stream.write_u8(1)?; // binary
+                self.stream.write_u16::<BE>(0)?; // no columns
+            }
         }
 
         Ok(())
@@ -758,6 +768,96 @@ impl Connection {
             self.write_message_noflush(&BeMessage::RowDescription)?;
             self.write_message_noflush(&BeMessage::DataRow(Bytes::from(branch)))?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
+        } else if query_string.starts_with(b"push ") {
+            let query_str = std::str::from_utf8(&query_string)?;
+            let mut it = query_str.split(' ');
+            it.next().unwrap();
+            let timeline_id: ZTimelineId = it
+                .next()
+                .ok_or_else(|| anyhow!("missing timeline id"))?
+                .parse()?;
+
+            let start_lsn = Lsn(0); // TODO this needs to come from the repo
+            let timeline =
+                page_cache::get_repository().create_empty_timeline(timeline_id, start_lsn)?;
+
+            self.write_message(&BeMessage::CopyInResponse)?;
+
+            let mut last_lsn = Lsn(0);
+
+            while let Some(msg) = self.read_message()? {
+                match msg {
+                    FeMessage::CopyData(bytes) => {
+                        let relation_update = RelationUpdate::des(&bytes)?;
+
+                        last_lsn = relation_update.lsn;
+
+                        match relation_update.update {
+                            Update::Page { blknum, img } => {
+                                let tag = BufferTag {
+                                    rel: relation_update.rel,
+                                    blknum,
+                                };
+
+                                timeline.put_page_image(tag, relation_update.lsn, img)?;
+                            }
+                            Update::WALRecord { blknum, rec } => {
+                                let tag = BufferTag {
+                                    rel: relation_update.rel,
+                                    blknum,
+                                };
+
+                                timeline.put_wal_record(tag, rec)?;
+                            }
+                            Update::Truncate { n_blocks } => {
+                                timeline.put_truncation(
+                                    relation_update.rel,
+                                    relation_update.lsn,
+                                    n_blocks,
+                                )?;
+                            }
+                            Update::Unlink => {
+                                todo!()
+                            }
+                        }
+                    }
+                    FeMessage::CopyDone => {
+                        timeline.advance_last_valid_lsn(last_lsn);
+                        break;
+                    }
+                    FeMessage::Sync => {}
+                    _ => bail!("unexpected message {:?}", msg),
+                }
+            }
+
+            self.write_message(&BeMessage::CommandComplete)?;
+        } else if query_string.starts_with(b"request_push ") {
+            let query_str = std::str::from_utf8(&query_string)?;
+            let mut it = query_str.split(' ');
+            it.next().unwrap();
+
+            let timeline_id: ZTimelineId = it
+                .next()
+                .ok_or_else(|| anyhow!("missing timeline id"))?
+                .parse()?;
+            let timeline = page_cache::get_repository().get_timeline(timeline_id)?;
+
+            let postgres_connection_uri = it.next().ok_or(anyhow!("missing postgres uri"))?;
+
+            let mut conn = postgres::Client::connect(postgres_connection_uri, postgres::NoTls)?;
+            let mut copy_in = conn.copy_in(format!("push {}", timeline_id.to_string()).as_str())?;
+
+            let history = timeline.history()?;
+            for update_res in history {
+                let update = update_res?;
+                let update_bytes = update.ser()?;
+                copy_in.write_all(&update_bytes)?;
+                copy_in.flush()?; // ensure that messages are sent inside individual CopyData packets
+            }
+
+            copy_in.finish()?;
+
+            self.write_message(&BeMessage::CommandComplete)?;
         } else if query_string.starts_with(b"branch_list") {
             let branches = crate::branches::get_branches(&self.conf)?;
             let branches_buf = serde_json::to_vec(&branches)?;
