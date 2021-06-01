@@ -90,7 +90,7 @@ impl WalStreamDecoder {
     /// decoder so far.
     ///
     /// Returns one of the following:
-    ///     Ok((u64, Bytes)): a tuple containing the LSN of next record, and the record itself
+    ///     Ok((Lsn, Bytes)): a tuple containing the LSN of next record, and the record itself
     ///     Ok(None): there is not enough data in the input buffer. Feed more by calling the `feed_bytes` function
     ///     Err(WalDecodeError): an error occured while decoding, meaning the input was invalid.
     ///
