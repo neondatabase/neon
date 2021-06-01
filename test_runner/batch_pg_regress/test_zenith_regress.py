@@ -1,15 +1,16 @@
-import pytest
-from fixtures.utils import mkdir_if_needed
-import getpass
 import os
 import psycopg2
 
+from fixtures.utils import mkdir_if_needed
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
-def test_zenith_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir, base_dir, capsys):
+
+def test_zenith_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir,
+                        base_dir, capsys):
 
     # Create a branch for us
-    zenith_cli.run(["branch", "test_zenith_regress", "empty"]);
+    zenith_cli.run(["branch", "test_zenith_regress", "empty"])
 
     # Connect to postgres and create a database called "regression".
     pg = postgres.create_start('test_zenith_regress')

@@ -1,12 +1,11 @@
 import getpass
 import os
-import psycopg2
 import pytest
 import shutil
 import subprocess
-import sys
+
 from .utils import (get_self_dir, mkdir_if_needed,
-                    subprocess_capture, global_counter)
+                    subprocess_capture)
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -20,7 +19,7 @@ ZENITH_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
 
 To use fixtures in a test file, add this line of code:
 
-    pytest_plugins = ("fixtures.zenith_fixtures")
+>>> pytest_plugins = ("fixtures.zenith_fixtures")
 
 Don't import functions from this file, or pytest will emit warnings. Instead
 put directly-importable functions into utils.py or another separate file.
@@ -35,7 +34,8 @@ def determine_scope(fixture_name, config):
 
 
 def zenfixture(func):
-    """ This is a python decorator for fixtures with a flexible scope.
+    """
+    This is a python decorator for fixtures with a flexible scope.
 
     By default every test function will set up and tear down a new
     database. In pytest, this is called fixtures "function" scope.
@@ -43,8 +43,8 @@ def zenfixture(func):
     If the environment variable TEST_SHARED_FIXTURES is set, then all
     tests will share the same database. State, logs, etc. will be
     stored in a directory called "shared".
-
     """
+
     if os.environ.get('TEST_SHARED_FIXTURES') is None:
         scope = 'function'
     else:
@@ -55,6 +55,7 @@ def zenfixture(func):
 @pytest.fixture(autouse=True, scope='session')
 def safety_check():
     """ Ensure that no unwanted daemons are running before we start testing. """
+
     # does not use -c as it is not supported on macOS
     cmd = ['pgrep', 'pageserver|postgres|wal_acceptor']
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
@@ -66,7 +67,8 @@ def safety_check():
 
 
 class ZenithCli:
-    """ An object representing the CLI binary named "zenith".
+    """
+    An object representing the CLI binary named "zenith".
 
     We also store an environment that will tell the CLI to operate
     on a particular ZENITH_REPO_DIR.
@@ -81,21 +83,25 @@ class ZenithCli:
         self.env['POSTGRES_DISTRIB_DIR'] = pg_distrib_dir
 
     def run(self, arguments):
-        """ Run "zenith" with the specified arguments.
+        """
+        Run "zenith" with the specified arguments.
 
-        arguments must be in list form, e.g. ['pg', 'create']
+        Arguments must be in list form, e.g. ['pg', 'create']
 
         Return both stdout and stderr, which can be accessed as
 
-        result = zenith_cli.run(...)
-        assert(result.stderr == "")
-        print(result.stdout)
-
+        >>> result = zenith_cli.run(...)
+        >>> assert result.stderr == ""
+        >>> print(result.stdout)
         """
+
         assert type(arguments) == list
         args = [self.bin_zenith] + arguments
         print('Running command "{}"'.format(' '.join(args)))
-        return subprocess.run(args, env=self.env, check=True, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return subprocess.run(args, env=self.env, check=True,
+                              universal_newlines=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
 
 
 @zenfixture
@@ -133,26 +139,31 @@ class ZenithPageserver:
             'localhost', 64000, username)
         return conn_str
 
-# The 'pageserver' fixture provides a Page Server that's up and running.
-#
-# If TEST_SHARED_FIXTURES is set, the Page Server instance is shared by all
-# the tests. To avoid clashing with other tests, don't use the 'main' branch in
-# the tests directly. Instead, create a branch off the 'empty' branch and use
-# that.
-#
-# By convention, the test branches are named after the tests. For example,
-# test called 'test_foo' would create and use branches with the 'test_foo' prefix.
+
 @zenfixture
 def pageserver(zenith_cli):
+    """
+    The 'pageserver' fixture provides a Page Server that's up and running.
+
+    If TEST_SHARED_FIXTURES is set, the Page Server instance is shared by all
+    the tests. To avoid clashing with other tests, don't use the 'main' branch in
+    the tests directly. Instead, create a branch off the 'empty' branch and use
+    that.
+
+    By convention, the test branches are named after the tests. For example,
+    test called 'test_foo' would create and use branches with the 'test_foo' prefix.
+    """
+
     ps = ZenithPageserver(zenith_cli)
     ps.init()
     ps.start()
     # For convenience in tests, create a branch from the freshly-initialized cluster.
-    zenith_cli.run(["branch", "empty", "main"]);
+    zenith_cli.run(["branch", "empty", "main"])
     yield ps
     # After the yield comes any cleanup code we need.
     print('Starting pageserver cleanup')
     ps.stop()
+
 
 class Postgres:
     """ An object representing a running postgres daemon. """
@@ -169,22 +180,37 @@ class Postgres:
         # path to conf is <repo_dir>/pgdatadirs/<branch_name>/postgresql.conf
 
     def create(self, branch, config_lines=None):
-        """ create the pg data directory """
+        """
+        Create the pg data directory.
+        Returns self.
+        """
+
         self.zenith_cli.run(['pg', 'create', branch])
         self.branch = branch
         if config_lines is None:
             config_lines = []
         self.config(config_lines)
-        return
+
+        return self
 
     def start(self):
-        """ start the server """
+        """
+        Start the Postgres instance.
+        Returns self.
+        """
+
         self.zenith_cli.run(['pg', 'start', self.branch])
         self.running = True
-        return
 
-    #lines should be an array of valid postgresql.conf rows
+        return self
+
     def config(self, lines):
+        """
+        Add lines to postgresql.conf.
+        Lines should be an array of valid postgresql.conf rows.
+        Returns self.
+        """
+
         filename = 'pgdatadirs/{}/postgresql.conf'.format(self.branch)
         config_name = os.path.join(self.repo_dir, filename)
         with open(config_name, 'a') as conf:
@@ -192,27 +218,53 @@ class Postgres:
                 conf.write(line)
                 conf.write('\n')
 
+        return self
+
     def stop(self):
-        """ stop the server """
+        """
+        Stop the Postgres instance if it's running.
+        Returns self.
+        """
+
         if self.running:
             self.zenith_cli.run(['pg', 'stop', self.branch])
 
+        return self
+
     def stop_and_destroy(self):
+        """
+        Stop the Postgres instance, then destroy it.
+        Returns self.
+        """
+
         self.zenith_cli.run(['pg', 'stop', '--destroy', self.branch])
 
-    def create_start(self, branch, config_lines=None):
-        self.create(branch, config_lines);
-        self.start();
-        return
+        return self
 
-    # Return a libpq connection string to connect to the Postgres instance
+    def create_start(self, branch, config_lines=None):
+        """
+        Create a Postgres instance, then start it.
+        Returns self.
+        """
+
+        self.create(branch, config_lines).start()
+
+        return self
+
     def connstr(self, dbname='postgres'):
+        """
+        Build a libpq connection string for the Postgres instance.
+        """
+
         conn_str = 'host={} port={} dbname={} user={}'.format(
             self.host, self.port, dbname, self.username)
+
         return conn_str
+
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
+
     def __init__(self, zenith_cli, repo_dir):
         self.zenith_cli = zenith_cli
         self.host = 'localhost'
@@ -224,12 +276,12 @@ class PostgresFactory:
         pg = Postgres(self.zenith_cli, self.repo_dir, self.num_instances + 1)
         self.num_instances += 1
         self.instances.append(pg)
-        pg.create_start(branch, config_lines)
-        return pg
+        return pg.create_start(branch, config_lines)
 
     def stop_all(self):
         for pg in self.instances:
             pg.stop()
+
 
 @zenfixture
 def postgres(zenith_cli, repo_dir):
@@ -251,7 +303,7 @@ class PgBin:
         self.env['LD_LIBRARY_PATH'] = os.path.join(self.pg_install_path, 'lib')
 
     def _fixpath(self, command):
-        if not '/' in command[0]:
+        if '/' not in command[0]:
             command[0] = os.path.join(self.pg_bin_path, command[0])
 
     def _build_env(self, env_add):
@@ -272,18 +324,20 @@ class PgBin:
         characters present), then it will be edited to include the correct path.
 
         If you want stdout/stderr captured to files, use `run_capture` instead.
-
         """
+
         self._fixpath(command)
         print('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
         subprocess.run(command, env=env, cwd=cwd, check=True)
 
     def run_capture(self, command, env=None, cwd=None):
-        """ Run one of the postgres binaries, with stderr and stdout redirected to a file.
+        """
+        Run one of the postgres binaries, with stderr and stdout redirected to a file.
 
         This is just like `run`, but for chatty programs.
         """
+
         self._fixpath(command)
         print('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
@@ -298,6 +352,7 @@ def pg_bin(test_output_dir, pg_distrib_dir):
 @zenfixture
 def base_dir():
     """ find the base directory (currently this is the git root) """
+
     base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
     print('base_dir is', base_dir)
     return base_dir
@@ -306,6 +361,7 @@ def base_dir():
 @zenfixture
 def top_output_dir(base_dir):
     """ Compute the top-level directory for all tests. """
+
     env_test_output = os.environ.get('TEST_OUTPUT')
     if env_test_output is not None:
         output_dir = env_test_output
@@ -318,6 +374,7 @@ def top_output_dir(base_dir):
 @zenfixture
 def test_output_dir(request, top_output_dir):
     """ Compute the working directory for an individual test. """
+
     if os.environ.get('TEST_SHARED_FIXTURES') is None:
         # one directory per test
         test_name = request.node.name
@@ -334,18 +391,21 @@ def test_output_dir(request, top_output_dir):
 
 @zenfixture
 def repo_dir(request, test_output_dir):
-    """ Compute the test repo_dir
+    """
+    Compute the test repo_dir.
 
     "repo_dir" is the place where all of the pageserver files will go.
     It doesn't have anything to do with the git repo.
     """
+
     repo_dir = os.path.join(test_output_dir, 'repo')
     return repo_dir
 
 
 @zenfixture
 def zenith_binpath(base_dir):
-    """ find the zenith binaries """
+    """ Find the zenith binaries. """
+
     env_zenith_bin = os.environ.get('ZENITH_BIN')
     if env_zenith_bin:
         zenith_dir = env_zenith_bin
@@ -358,7 +418,8 @@ def zenith_binpath(base_dir):
 
 @zenfixture
 def pg_distrib_dir(base_dir):
-    """ find the postgress install """
+    """ Find the postgress install. """
+
     env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
     if env_postgres_bin:
         pg_dir = env_postgres_bin
