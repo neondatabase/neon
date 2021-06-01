@@ -69,7 +69,8 @@ The tests make heavy use of pytest fixtures. You can read about how they work he
 Essentially, this means that each time you see a fixture named as an input parameter, the function with that name will be run and passed as a parameter to the function.
 
 So this code:
-```
+
+```python
 def test_something(zenith_cli, pg_bin):
     pass
 ```
@@ -77,9 +78,11 @@ def test_something(zenith_cli, pg_bin):
 ... will run the fixtures called `zenith_cli` and `pg_bin` and deliver those results to the test function.
 
 Fixtures can't be imported using the normal python syntax. Instead, use this:
-```
+
+```python
 pytest_plugins = ("fixtures.something")
 ```
+
 That will make all the fixtures in the `fixtures/something.py` file available.
 
 Anything that's likely to be used in multiple tests should be built into a fixture.
@@ -87,3 +90,14 @@ Anything that's likely to be used in multiple tests should be built into a fixtu
 Note that fixtures can clean up after themselves if they use the `yield` syntax.
 Cleanup will happen even if the test fails (raises an unhandled exception).
 Python destructors, e.g. `__del__()` aren't recommended for cleanup.
+
+
+### Code quality
+
+Before submitting a patch, please consider:
+
+* Writing a couple of docstrings to clarify the reasoning behind a new test.
+* Running `flake8` (or a linter of your choice, e.g. `pycodestyle`) and fixing possible defects, if any.
+* Formatting the code with `yapf -r -i .` (TODO: implement an opt-in pre-commit hook for that).
+
+The tools can be installed with `pipenv install --dev`.

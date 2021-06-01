@@ -9,6 +9,7 @@ psycopg2 = "*"
 
 [dev-packages]
 yapf = "*"
+flake8 = "*"
 
 [requires]
 # we need at least 3.6, but pipenv doesn't allow to say this directly
