@@ -1,3 +1,7 @@
+//!
+//! WAL decoder. For each WAL record, it decodes the record to figure out which data blocks
+//! the record affects, to add the records to the page cache.
+//!
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use postgres_ffi::pg_constants;
@@ -528,8 +532,8 @@ impl XlMultiXactTruncate {
     }
 }
 
-//
-// Routines to decode a WAL record and figure out which blocks are modified
+
+/// Main routine to decode a WAL record and figure out which blocks are modified
 //
 // See xlogrecord.h for details
 // The overall layout of an XLOG record is:

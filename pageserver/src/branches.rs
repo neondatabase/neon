@@ -1,6 +1,6 @@
-//
-// Branch management code
-//
+//!
+//! Branch management code
+//!
 // TODO: move all paths construction to conf impl
 //
 

@@ -1,5 +1,6 @@
 //!
-//! WAL redo
+//! WAL redo. This service runs PostgreSQL in a special wal_redo mode
+//! to apply given WAL records over an old page image and return new page image.
 //!
 //! We rely on Postgres to perform WAL redo for us. We launch a
 //! postgres process in special "wal redo" mode that's similar to

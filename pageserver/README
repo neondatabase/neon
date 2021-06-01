@@ -1,82 +1,4 @@
-Page Server
-===========
-
-
-How to test
------------
-
-
-1. Compile and install Postgres from this repository (there are
-   modifications, so vanilla Postgres won't do)
-
-    ./configure --prefix=/home/heikki/zenith-install
-
-2. Compile the page server
-
-    cd pageserver
-    cargo build
-
-3. Create another "dummy" cluster that will be used by the page server when it applies
-   the WAL records. (shouldn't really need this, getting rid of it is a TODO):
-
-    /home/heikki/zenith-install/bin/initdb -D /data/zenith-dummy
-
-
-4. Initialize and start a new postgres cluster
-
-    /home/heikki/zenith-install/bin/initdb -D /data/zenith-test-db --username=postgres
-    /home/heikki/zenith-install/bin/postgres -D /data/zenith-test-db
-
-5. In another terminal, start the page server.
-
-    PGDATA=/data/zenith-dummy PATH=/home/heikki/zenith-install/bin:$PATH ./target/debug/pageserver
-
-   It should connect to the postgres instance using streaming replication, and print something
-   like this:
-
-    $ PGDATA=/data/zenith-dummy PATH=/home/heikki/zenith-install/bin:$PATH ./target/debug/pageserver
-    Starting WAL receiver
-    connecting...
-    Starting page server on 127.0.0.1:5430
-    connected!
-    page cache is empty
-
-6. You can now open another terminal and issue DDL commands. Generated WAL records will
-   be streamed to the page servers, and attached to blocks that they apply to in its
-   page cache
-
-    $ psql postgres -U postgres
-    psql (14devel)
-    Type "help" for help.
-    
-    postgres=# create table mydata (i int4);
-    CREATE TABLE
-    postgres=# insert into mydata select g from generate_series(1,100) g;
-    INSERT 0 100
-    postgres=# 
-
-7. The GetPage@LSN interface to the compute nodes isn't working yet, but to simulate
-   that, the page server generates a test GetPage@LSN call every 5 seconds on a random
-   block that's in the page cache. In a few seconds, you should see output from that:
-
-    testing GetPage@LSN for block 0
-    WAL record at LSN 23584576 initializes the page
-    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167DF40
-    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167DF80
-    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167DFC0
-    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E018
-    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E058
-    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E098
-    2021-03-19 11:03:13.791 EET [11439] LOG:  applied WAL record at 0/167E0D8
-    2021-03-19 11:03:13.792 EET [11439] LOG:  applied WAL record at 0/167E118
-    2021-03-19 11:03:13.792 EET [11439] LOG:  applied WAL record at 0/167E158
-    2021-03-19 11:03:13.792 EET [11439] LOG:  applied WAL record at 0/167E198
-    applied 10 WAL records to produce page image at LSN 18446744073709547246
-
-
-
-Architecture
-============
+## Page server architecture
 
 The Page Server is responsible for all operations on a number of
 "chunks" of relation data. A chunk corresponds to a PostgreSQL
@@ -84,8 +6,10 @@ relation segment (i.e. one max. 1 GB file in the data directory), but
 it holds all the different versions of every page in the segment that
 are still needed by the system.
 
-Determining which chunk each Page Server holds is handled elsewhere. (TODO:
-currently, there is only one Page Server which holds all chunks)
+Currently we do not specifically organize data in chunks.
+All page images and corresponding WAL records are stored as entries in a key-value storage,
+where StorageKey is a zenith_timeline_id + BufferTag + LSN.
+
 
 The Page Server has a few different duties:
 
@@ -154,11 +78,33 @@ and stores them to the page cache.
 Page Cache
 ----------
 
-The Page Cache is a data structure, to hold all the different page versions.
-It is accessed by all the other threads, to perform their duties.
+The Page Cache is a switchboard to access different Repositories.
 
-Currently, the page cache is implemented fully in-memory. TODO: Store it
-on disk. Define a file format.
+#### Repository
+Repository corresponds to one .zenith directory.
+Repository is needed to manage Timelines.
+
+#### Timeline
+Timeline is a page cache workhorse that accepts page changes
+and serves get_page_at_lsn() and get_rel_size() requests.
+Note: this has nothing to do with PostgreSQL WAL timeline.
+
+#### Branch
+We can create branch at certain LSN.
+Each Branch lives in a corresponding timeline and has an ancestor.
+
+To get full snapshot of data at certain moment we need to traverse timeline and its ancestors.
+
+#### ObjectRepository
+ObjectRepository implements Repository and has associated ObjectStore and WAL redo service.
+
+#### ObjectStore
+ObjectStore is an interface for key-value store for page images and wal records.
+Currently it has one implementation - RocksDB.
+
+#### WAL redo service
+WAL redo service - service that runs PostgreSQL in a special wal_redo mode
+to apply given WAL records over an old page image and return new page image.
 
 
 TODO: Garbage Collection / Compaction
@@ -177,3 +123,7 @@ The backup service is responsible for periodically pushing the chunks to S3.
 TODO: How/when do restore from S3? Whenever we get a GetPage@LSN request for
 a chunk we don't currently have? Or when an external Control Plane tells us?
 
+TODO: Sharding
+--------------------
+
+We should be able to run multiple Page Servers that handle sharded data.
