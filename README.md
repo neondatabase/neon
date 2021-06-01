@@ -121,11 +121,6 @@ Depends on the modified 'postgres' binary for WAL redo.
 
 PostgreSQL source tree, with the modifications needed for Zenith.
 
-`/vendor/postgres/src/bin/safekeeper`:
-
-Extension (safekeeper_proxy) that runs in the compute node, and connects to the WAL safekeepers
-and streams the WAL
-
 `/test_runner`:
 
 Integration tests, written in Python using the `pytest` framework.

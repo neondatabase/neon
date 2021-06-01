@@ -40,7 +40,7 @@ pub struct NodeId {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerInfo {
-    /// proxy-safekeeper protocol version
+    /// proposer-safekeeper protocol version
     pub protocol_version: u32,
     /// Postgres server version
     pub pg_version: u32,
@@ -53,7 +53,7 @@ pub struct ServerInfo {
     pub wal_seg_size: u32,
 }
 
-/// Vote request sent from proxy to safekeepers
+/// Vote request sent from proposer to safekeepers
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct RequestVote {
     node_id: NodeId,
@@ -89,7 +89,7 @@ impl SafeKeeperInfo {
             format_version: SK_FORMAT_VERSION,
             epoch: 0,
             server: ServerInfo {
-                protocol_version: SK_PROTOCOL_VERSION, /* proxy-safekeeper protocol version */
+                protocol_version: SK_PROTOCOL_VERSION, /* proposer-safekeeper protocol version */
                 pg_version: UNKNOWN_SERVER_VERSION,    /* Postgres server version */
                 node_id: NodeId {
                     term: 0,
@@ -108,7 +108,7 @@ impl SafeKeeperInfo {
     }
 }
 
-/// Request with WAL message sent from proxy to safekeeper.
+/// Request with WAL message sent from proposer to safekeeper.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct SafeKeeperRequest {
     /// Sender's node identifier (looks like we do not need it for TCP streaming connection)
@@ -117,13 +117,13 @@ struct SafeKeeperRequest {
     begin_lsn: Lsn,
     /// end position of message in WAL
     end_lsn: Lsn,
-    /// restart LSN position  (minimal LSN which may be needed by proxy to perform recovery)
+    /// restart LSN position  (minimal LSN which may be needed by proposer to perform recovery)
     restart_lsn: Lsn,
     /// LSN committed by quorum of safekeepers
     commit_lsn: Lsn,
 }
 
-/// Report safekeeper state to proxy
+/// Report safekeeper state to proposer
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct SafeKeeperResponse {
     epoch: u64,
@@ -246,14 +246,14 @@ impl ReceiveWalConn {
         my_info.flush_lsn = flush_lsn;
         my_info.server.timeline = timeline;
 
-        /* Report my identifier to proxy */
+        /* Report my identifier to proposer */
         my_info.ser_into(&mut self.stream_out)?;
 
         /* Wait for vote request */
         let prop = self.read_req::<RequestVote>()?;
         /* This is Paxos check which should ensure that only one master can perform commits */
         if prop.node_id < my_info.server.node_id {
-            /* Send my node-id to inform proxy that it's candidate was rejected */
+            /* Send my node-id to inform proposer that it's candidate was rejected */
             my_info.server.node_id.ser_into(&mut self.stream_out)?;
             bail!(
                 "Reject connection attempt with term {} because my term is {}",
@@ -269,7 +269,7 @@ impl ReceiveWalConn {
         let mut flushed_restart_lsn = Lsn(0);
         let wal_seg_size = server_info.wal_seg_size as usize;
 
-        /* Acknowledge the proposed candidate by returning it to the proxy */
+        /* Acknowledge the proposed candidate by returning it to the proposer */
         prop.node_id.ser_into(&mut self.stream_out)?;
 
         if self.conf.pageserver_addr.is_some() {
@@ -323,7 +323,7 @@ impl ReceiveWalConn {
             /*
              * Epoch switch happen when written WAL record cross the boundary.
              * The boundary is maximum of last WAL position at this node (FlushLSN) and global
-             * maximum (vcl) determined by safekeeper_proxy during handshake.
+             * maximum (vcl) determined by WAL proposer during handshake.
              * Switching epoch means that node completes recovery and start writing in the WAL new data.
              */
             if my_info.epoch < prop.epoch && end_pos > max(my_info.flush_lsn, prop.vcl) {

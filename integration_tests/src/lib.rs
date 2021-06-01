@@ -3,7 +3,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -164,7 +164,6 @@ impl Drop for TestStorageControlPlane {
 pub trait PostgresNodeExt {
     fn pg_regress(&self) -> ExitStatus;
     fn pg_bench(&self, clients: u32, seconds: u32) -> ExitStatus;
-    fn start_proxy(&self, wal_acceptors: &str) -> WalProposerNode;
     fn open_psql(&self, db: &str) -> postgres::Client;
     fn dump_log_file(&self);
     fn safe_psql(&self, db: &str, sql: &str) -> Vec<postgres::Row>;
@@ -245,28 +244,6 @@ impl PostgresNodeExt for PostgresNode {
             .status()
             .expect("pgbench run");
         pg_bench_run
-    }
-
-    fn start_proxy(&self, wal_acceptors: &str) -> WalProposerNode {
-        let proxy_path = self.env.pg_bin_dir().join("safekeeper_proxy");
-        match Command::new(proxy_path.as_path())
-            .args(&["--ztimelineid", &self.timelineid.to_string()])
-            .args(&["-s", wal_acceptors])
-            .args(&["-h", &self.address.ip().to_string()])
-            .args(&["-p", &self.address.port().to_string()])
-            .arg("-v")
-            .stderr(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(self.pgdata().join("safekeeper_proxy.log"))
-                    .unwrap(),
-            )
-            .spawn()
-        {
-            Ok(child) => WalProposerNode { pid: child.id() },
-            Err(e) => panic!("Failed to launch {:?}: {}", proxy_path, e),
-        }
     }
 
     fn dump_log_file(&self) {

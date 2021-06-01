@@ -12,13 +12,13 @@ safekeeper yet.
 The primary connects to the WAL safekeeper, so it works in a "push"
 fashion.  That's different from how streaming replication usually
 works, where the replica initiates the connection. To do that, there
-is a component called "safekeeper_proxy". The safekeeper_proxy runs on
-the same host as the primary Postgres server and connects to it to do
-streaming replication.  It also connects to the WAL safekeeper, and
-forwards all the WAL. (PostgreSQL's archive_commands works in the
+is a component called the "WAL proposer". The WAL proposer is a
+background worker that runs in the primary Postgres server. It
+connects to the WAL safekeeper, and
+sends all the WAL. (PostgreSQL's archive_commands works in the
 "push" style, but it operates on a WAL segment granularity. If
-PostgreSQL had a push style API for streaming, we wouldn't need the
-proxy).
+PostgreSQL had a push style API for streaming, WAL propose could be
+implemented using it.)
 
 The Page Server connects to the WAL safekeeper, using the same
 streaming replication protocol that's used between Postgres primary

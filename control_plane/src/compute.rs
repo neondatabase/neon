@@ -135,7 +135,7 @@ impl ComputeControlPlane {
 
         node.append_conf(
             "postgresql.conf",
-            "synchronous_standby_names = 'safekeeper_proxy'\n",
+            "synchronous_standby_names = 'walproposer'\n",
         )
         .unwrap();
 
