@@ -28,4 +28,4 @@ def test_config(zenith_cli, pageserver, postgres, pg_bin):
             ''')
 
             # check that config change was applied
-            assert cur.fetchone() == ('debug1',)
+            assert cur.fetchone() == ('debug1', )

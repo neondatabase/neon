@@ -4,9 +4,7 @@ import pytest
 import shutil
 import subprocess
 
-from .utils import (get_self_dir, mkdir_if_needed,
-                    subprocess_capture)
-
+from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
@@ -73,7 +71,6 @@ class ZenithCli:
     We also store an environment that will tell the CLI to operate
     on a particular ZENITH_REPO_DIR.
     """
-
     def __init__(self, binpath, repo_dir, pg_distrib_dir):
         assert os.path.isdir(binpath)
         self.binpath = binpath
@@ -98,7 +95,9 @@ class ZenithCli:
         assert type(arguments) == list
         args = [self.bin_zenith] + arguments
         print('Running command "{}"'.format(' '.join(args)))
-        return subprocess.run(args, env=self.env, check=True,
+        return subprocess.run(args,
+                              env=self.env,
+                              check=True,
                               universal_newlines=True,
                               stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE)
@@ -111,7 +110,6 @@ def zenith_cli(zenith_binpath, repo_dir, pg_distrib_dir):
 
 class ZenithPageserver:
     """ An object representing a running pageserver. """
-
     def __init__(self, zenith_cli):
         self.zenith_cli = zenith_cli
         self.running = False
@@ -135,8 +133,7 @@ class ZenithPageserver:
     # returns a libpq connection string for connecting to it.
     def connstr(self):
         username = getpass.getuser()
-        conn_str = 'host={} port={} dbname=postgres user={}'.format(
-            'localhost', 64000, username)
+        conn_str = 'host={} port={} dbname=postgres user={}'.format('localhost', 64000, username)
         return conn_str
 
 
@@ -167,7 +164,6 @@ def pageserver(zenith_cli):
 
 class Postgres:
     """ An object representing a running postgres daemon. """
-
     def __init__(self, zenith_cli, repo_dir, instance_num):
         self.zenith_cli = zenith_cli
         self.instance_num = instance_num
@@ -256,15 +252,14 @@ class Postgres:
         Build a libpq connection string for the Postgres instance.
         """
 
-        conn_str = 'host={} port={} dbname={} user={}'.format(
-            self.host, self.port, dbname, self.username)
+        conn_str = 'host={} port={} dbname={} user={}'.format(self.host, self.port, dbname,
+                                                              self.username)
 
         return conn_str
 
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-
     def __init__(self, zenith_cli, repo_dir):
         self.zenith_cli = zenith_cli
         self.host = 'localhost'
@@ -294,7 +289,6 @@ def postgres(zenith_cli, repo_dir):
 
 class PgBin:
     """ A helper class for executing postgres binaries """
-
     def __init__(self, log_dir, pg_distrib_dir):
         self.log_dir = log_dir
         self.pg_install_path = pg_distrib_dir
@@ -314,7 +308,8 @@ class PgBin:
         return env
 
     def run(self, command, env=None, cwd=None):
-        """ Run one of the postgres binaries.
+        """
+        Run one of the postgres binaries.
 
         The command should be in list form, e.g. ['pgbench', '-p', '55432']
 

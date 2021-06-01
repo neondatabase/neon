@@ -41,7 +41,7 @@ def test_twophase(zenith_cli, pageserver, postgres, pg_bin):
     cur2.execute("ROLLBACK PREPARED 'insert_two'")
 
     cur2.execute('SELECT * FROM foo')
-    assert cur2.fetchall() == [('one',)]
+    assert cur2.fetchall() == [('one', )]
 
     # Neither insert is visible on the original branch, the transactions are still
     # in prepared state there.

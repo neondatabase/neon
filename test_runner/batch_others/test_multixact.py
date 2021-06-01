@@ -52,7 +52,7 @@ def test_multixact(pageserver, postgres, pg_bin, zenith_cli, base_dir):
     assert int(next_multixact_id) > int(next_multixact_id_old)
 
     # Branch at this point
-    zenith_cli.run(["branch", "test_multixact_new", "test_multixact@"+lsn])
+    zenith_cli.run(["branch", "test_multixact_new", "test_multixact@" + lsn])
     pg_new = postgres.create_start('test_multixact_new')
 
     print("postgres is running on 'test_multixact_new' branch")

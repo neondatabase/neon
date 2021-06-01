@@ -2,7 +2,6 @@ import pytest
 import os
 
 pytest_plugins = ("fixtures.zenith_fixtures")
-
 """
 Use this test to see what happens when tests fail.
 
@@ -13,11 +12,8 @@ Set the environment variable RUN_BROKEN to see this test run (and fail,
 and hopefully not leave any server processes behind).
 """
 
-
-run_broken = pytest.mark.skipif(
-    os.environ.get('RUN_BROKEN') is None,
-    reason="only used for testing the fixtures"
-)
+run_broken = pytest.mark.skipif(os.environ.get('RUN_BROKEN') is None,
+                                reason="only used for testing the fixtures")
 
 
 @run_broken

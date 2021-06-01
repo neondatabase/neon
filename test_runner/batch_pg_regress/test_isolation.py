@@ -27,10 +27,8 @@ def test_isolation(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg
     mkdir_if_needed(os.path.join(runpath, 'testtablespace'))
 
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = os.path.join(
-        pg_distrib_dir, 'build/src/test/isolation')
-    src_path = os.path.join(
-        base_dir, 'vendor/postgres/src/test/isolation')
+    build_path = os.path.join(pg_distrib_dir, 'build/src/test/isolation')
+    src_path = os.path.join(base_dir, 'vendor/postgres/src/test/isolation')
     bindir = os.path.join(pg_distrib_dir, 'bin')
     schedule = os.path.join(src_path, 'isolation_schedule')
     pg_isolation_regress = os.path.join(build_path, 'pg_isolation_regress')
@@ -41,7 +39,7 @@ def test_isolation(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg
         '--bindir={}'.format(bindir),
         '--dlpath={}'.format(build_path),
         '--inputdir={}'.format(src_path),
-        '--schedule={}'.format(schedule)
+        '--schedule={}'.format(schedule),
     ]
 
     env = {

@@ -9,7 +9,7 @@ def test_status(pageserver):
     pg_conn.autocommit = True
     cur = pg_conn.cursor()
     cur.execute('status')
-    assert cur.fetchone() == ('hello world',)
+    assert cur.fetchone() == ('hello world', )
     pg_conn.close()
 
 

@@ -25,7 +25,7 @@ def test_createdb(zenith_cli, pageserver, postgres, pg_bin):
             lsn = cur.fetchone()[0]
 
     # Create a branch
-    zenith_cli.run(["branch", "test_createdb2", "test_createdb@"+lsn])
+    zenith_cli.run(["branch", "test_createdb2", "test_createdb@" + lsn])
 
     pg2 = postgres.create_start('test_createdb2')
 

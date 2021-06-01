@@ -27,10 +27,8 @@ def test_zenith_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_di
 
     # Compute all the file locations that pg_regress will need.
     # This test runs zenith specific tests
-    build_path = os.path.join(
-        pg_distrib_dir, 'build/src/test/regress')
-    src_path = os.path.join(
-        base_dir, 'test_runner/zenith_regress')
+    build_path = os.path.join(pg_distrib_dir, 'build/src/test/regress')
+    src_path = os.path.join(base_dir, 'test_runner/zenith_regress')
     bindir = os.path.join(pg_distrib_dir, 'bin')
     schedule = os.path.join(src_path, 'parallel_schedule')
     pg_regress = os.path.join(build_path, 'pg_regress')

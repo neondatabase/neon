@@ -8,6 +8,7 @@ pytest = ">=6.0.0"
 psycopg2 = "*"
 
 [dev-packages]
+yapf = "*"
 
 [requires]
 # we need at least 3.6, but pipenv doesn't allow to say this directly

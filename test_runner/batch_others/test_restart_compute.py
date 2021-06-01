@@ -31,12 +31,12 @@ def test_restart_compute(zenith_cli, pageserver, postgres, pg_bin):
 
     # We can still see the row
     cur.execute('SELECT count(*) FROM foo')
-    assert cur.fetchone() == (1,)
+    assert cur.fetchone() == (1, )
 
     # Insert another row
     cur.execute("INSERT INTO foo VALUES ('bar2')")
     cur.execute('SELECT count(*) FROM foo')
-    assert cur.fetchone() == (2,)
+    assert cur.fetchone() == (2, )
 
     # FIXME: Currently, there is no guarantee that by the time the INSERT commits, the WAL
     # has been streamed safely to the WAL safekeeper or page server. It is merely stored
@@ -55,4 +55,4 @@ def test_restart_compute(zenith_cli, pageserver, postgres, pg_bin):
 
     # We can still see the rows
     cur.execute('SELECT count(*) FROM foo')
-    assert cur.fetchone() == (2,)
+    assert cur.fetchone() == (2, )
