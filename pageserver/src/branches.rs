@@ -142,10 +142,9 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn get_branches(
-    conf: &PageServerConf,
-    repository: &dyn Repository,
-) -> Result<Vec<BranchInfo>> {
+pub(crate) fn get_branches(conf: &PageServerConf) -> Result<Vec<BranchInfo>> {
+    let repo = page_cache::get_repository();
+
     // Each branch has a corresponding record (text file) in the refs/branches
     // with timeline_id.
     let branches_dir = std::path::Path::new("refs").join("branches");
@@ -156,7 +155,7 @@ pub(crate) fn get_branches(
             let name = dir_entry.file_name().to_str().unwrap().to_string();
             let timeline_id = std::fs::read_to_string(dir_entry.path())?.parse::<ZTimelineId>()?;
 
-            let latest_valid_lsn = repository
+            let latest_valid_lsn = repo
                 .get_timeline(timeline_id)
                 .map(|timeline| timeline.get_last_valid_lsn())
                 .ok();
@@ -222,6 +221,8 @@ pub(crate) fn create_branch(
     branchname: &str,
     startpoint_str: &str,
 ) -> Result<BranchInfo> {
+    let repo = page_cache::get_repository();
+
     if conf.branch_path(&branchname).exists() {
         anyhow::bail!("branch {} already exists", branchname);
     }
@@ -230,7 +231,9 @@ pub(crate) fn create_branch(
 
     if startpoint.lsn == Lsn(0) {
         // Find end of WAL on the old timeline
-        let end_of_wal = find_end_of_wal(conf, startpoint.timelineid)?;
+        let end_of_wal = repo
+            .get_timeline(startpoint.timelineid)?
+            .get_last_record_lsn();
         println!("branching at end of WAL: {}", end_of_wal);
         startpoint.lsn = end_of_wal;
     }
@@ -240,7 +243,6 @@ pub(crate) fn create_branch(
     let newtimelinedir = conf.timeline_path(newtli);
 
     // Let the Repository backend do its initialization
-    let repo = page_cache::get_repository();
     repo.branch_timeline(startpoint.timelineid, newtli, startpoint.lsn)?;
 
     // Copy the latest snapshot (TODO: before the startpoint) and all WAL
@@ -431,13 +433,6 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: usize) -> R
         }
     }
     Ok(())
-}
-
-// Find the end of valid WAL in a wal directory
-pub fn find_end_of_wal(conf: &PageServerConf, timeline: ZTimelineId) -> Result<Lsn> {
-    let waldir = conf.timeline_path(timeline).join("wal");
-    let (lsn, _tli) = xlog_utils::find_end_of_wal(&waldir, pg_constants::WAL_SEGMENT_SIZE, true);
-    Ok(Lsn(lsn))
 }
 
 // Find the latest snapshot for a timeline

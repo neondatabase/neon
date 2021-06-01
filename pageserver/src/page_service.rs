@@ -759,8 +759,7 @@ impl Connection {
             self.write_message_noflush(&BeMessage::DataRow(Bytes::from(branch)))?;
             self.write_message_noflush(&BeMessage::CommandComplete)?;
         } else if query_string.starts_with(b"branch_list") {
-            let branches =
-                crate::branches::get_branches(&self.conf, &*page_cache::get_repository())?;
+            let branches = crate::branches::get_branches(&self.conf)?;
             let branches_buf = serde_json::to_vec(&branches)?;
 
             self.write_message_noflush(&BeMessage::RowDescription)?;
