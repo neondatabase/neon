@@ -15,6 +15,7 @@ fn main() {
         // All the needed PostgreSQL headers are included from 'pg_control_ffi.h'
         //
         .header("pg_control_ffi.h")
+        .header("xlog_ffi.h")
         //
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.

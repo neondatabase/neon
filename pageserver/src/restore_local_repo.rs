@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use bytes::Bytes;
 
-use crate::repository::{BufferTag, RelTag, Timeline, WALRecord};
+use crate::repository::{
+    BufferTag, DatabaseTag, ObjectTag, PrepareTag, RelTag, SlruBufferTag, Timeline, WALRecord,
+};
 use crate::waldecoder::{decode_wal_record, DecodedWALRecord, Oid, WalStreamDecoder};
 use crate::waldecoder::{XlCreateDatabase, XlSmgrTruncate};
 use crate::PageServerConf;
@@ -22,6 +24,7 @@ use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -63,8 +66,21 @@ pub fn import_timeline_from_postgres_datadir(
             None => continue,
 
             // These special files appear in the snapshot, but are not needed by the page server
-            Some("pg_control") => continue,
-            Some("pg_filenode.map") => continue,
+            Some("pg_control") => import_nonrel_file(
+                timeline,
+                Lsn(0), // control file is not versioned
+                ObjectTag::ControlFile,
+                &direntry.path(),
+            )?,
+            Some("pg_filenode.map") => import_nonrel_file(
+                timeline,
+                lsn,
+                ObjectTag::FileNodeMap(DatabaseTag {
+                    spcnode: pg_constants::GLOBALTABLESPACE_OID,
+                    dbnode: 0,
+                }),
+                &direntry.path(),
+            )?,
 
             // Load any relation files into the page server
             _ => import_relfile(
@@ -91,7 +107,15 @@ pub fn import_timeline_from_postgres_datadir(
 
                 // These special files appear in the snapshot, but are not needed by the page server
                 Some("PG_VERSION") => continue,
-                Some("pg_filenode.map") => continue,
+                Some("pg_filenode.map") => import_nonrel_file(
+                    timeline,
+                    lsn,
+                    ObjectTag::FileNodeMap(DatabaseTag {
+                        spcnode: pg_constants::DEFAULTTABLESPACE_OID,
+                        dbnode: dboid,
+                    }),
+                    &direntry.path(),
+                )?,
 
                 // Load any relation files into the page server
                 _ => import_relfile(
@@ -103,6 +127,43 @@ pub fn import_timeline_from_postgres_datadir(
                 )?,
             }
         }
+    }
+    for entry in fs::read_dir(path.join("pg_xact"))? {
+        let entry = entry?;
+        import_slru_file(
+            timeline,
+            lsn,
+            |blknum| ObjectTag::Clog(SlruBufferTag { blknum }),
+            &entry.path(),
+        )?;
+    }
+    for entry in fs::read_dir(path.join("pg_multixact").join("members"))? {
+        let entry = entry?;
+        import_slru_file(
+            timeline,
+            lsn,
+            |blknum| ObjectTag::MultiXactMembers(SlruBufferTag { blknum }),
+            &entry.path(),
+        )?;
+    }
+    for entry in fs::read_dir(path.join("pg_multixact").join("offsets"))? {
+        let entry = entry?;
+        import_slru_file(
+            timeline,
+            lsn,
+            |blknum| ObjectTag::MultiXactOffsets(SlruBufferTag { blknum }),
+            &entry.path(),
+        )?;
+    }
+    for entry in fs::read_dir(path.join("pg_twophase"))? {
+        let entry = entry?;
+        let xid = u32::from_str_radix(&entry.path().to_str().unwrap(), 16)?;
+        import_nonrel_file(
+            timeline,
+            lsn,
+            ObjectTag::TwoPhase(PrepareTag { xid }),
+            &entry.path(),
+        )?;
     }
     // TODO: Scan pg_tblspc
 
@@ -136,7 +197,7 @@ fn import_relfile(
         let r = file.read_exact(&mut buf);
         match r {
             Ok(_) => {
-                let tag = BufferTag {
+                let tag = ObjectTag::RelationBuffer(BufferTag {
                     rel: RelTag {
                         spcnode: spcoid,
                         dbnode: dboid,
@@ -144,13 +205,62 @@ fn import_relfile(
                         forknum,
                     },
                     blknum,
-                };
+                });
                 timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
-                /*
-                if oldest_lsn == 0 || p.lsn < oldest_lsn {
-                    oldest_lsn = p.lsn;
+            }
+
+            // TODO: UnexpectedEof is expected
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::UnexpectedEof => {
+                    // reached EOF. That's expected.
+                    // FIXME: maybe check that we read the full length of the file?
+                    break;
                 }
-                 */
+                _ => {
+                    error!("error reading file: {:?} ({})", path, e);
+                    break;
+                }
+            },
+        };
+        blknum += 1;
+    }
+
+    Ok(())
+}
+
+fn import_nonrel_file(
+    timeline: &dyn Timeline,
+    lsn: Lsn,
+    tag: ObjectTag,
+    path: &Path,
+) -> Result<()> {
+    let mut file = File::open(path)?;
+    let mut buffer = Vec::new();
+    // read the whole file
+    file.read_to_end(&mut buffer)?;
+
+    timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]))?;
+    Ok(())
+}
+
+fn import_slru_file(
+    timeline: &dyn Timeline,
+    lsn: Lsn,
+    gen_tag: fn(blknum: u32) -> ObjectTag,
+    path: &Path,
+) -> Result<()> {
+    // Does it look like a relation file?
+
+    let mut file = File::open(path)?;
+    let mut buf: [u8; 8192] = [0u8; 8192];
+    let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
+
+    let mut blknum: u32 = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
+    loop {
+        let r = file.read_exact(&mut buf);
+        match r {
+            Ok(_) => {
+                timeline.put_page_image(gen_tag(blknum), lsn, Bytes::copy_from_slice(&buf))?;
             }
 
             // TODO: UnexpectedEof is expected
@@ -180,6 +290,11 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
+
+    let pg_control_bytes = timeline.get_page_at_lsn(ObjectTag::ControlFile, Lsn(0))?;
+    let pg_control = decode_pg_control(pg_control_bytes)?;
+    let mut checkpoint = pg_control.checkPointCopy.clone();
+
     loop {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
@@ -217,10 +332,12 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
             if rec.is_err() {
                 // Assume that an error means we've reached the end of
                 // a partial WAL record. So that's ok.
+                trace!("WAL decoder error {:?}", rec);
+                waldecoder.set_position(Lsn((segno + 1) * pg_constants::WAL_SEGMENT_SIZE as u64));
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
-                let decoded = decode_wal_record(recdata.clone());
+                let decoded = decode_wal_record(&mut checkpoint, recdata.clone());
                 save_decoded_record(timeline, &decoded, recdata, lsn)?;
                 last_lsn = lsn;
             } else {
@@ -240,6 +357,8 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
         offset = 0;
     }
     info!("reached end of WAL at {}", last_lsn);
+    let checkpoint_bytes = encode_checkpoint(checkpoint);
+    timeline.put_page_image(ObjectTag::Checkpoint, Lsn(0), checkpoint_bytes)?;
     Ok(())
 }
 
@@ -256,16 +375,6 @@ pub fn save_decoded_record(
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
     for blk in decoded.blocks.iter() {
-        let tag = BufferTag {
-            rel: RelTag {
-                spcnode: blk.rnode_spcnode,
-                dbnode: blk.rnode_dbnode,
-                relnode: blk.rnode_relnode,
-                forknum: blk.forknum as u8,
-            },
-            blknum: blk.blkno,
-        };
-
         let rec = WALRecord {
             lsn,
             will_init: blk.will_init || blk.apply_image,
@@ -273,7 +382,7 @@ pub fn save_decoded_record(
             main_data_offset: decoded.main_data_offset as u32,
         };
 
-        timeline.put_wal_record(tag, rec)?;
+        timeline.put_wal_record(blk.tag, rec)?;
     }
 
     // Handle a few special record types
@@ -329,14 +438,14 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
         // Copy content
         for blknum in 0..nblocks {
-            let src_key = BufferTag {
+            let src_key = ObjectTag::RelationBuffer(BufferTag {
                 rel: src_rel,
                 blknum,
-            };
-            let dst_key = BufferTag {
+            });
+            let dst_key = ObjectTag::RelationBuffer(BufferTag {
                 rel: dst_rel,
                 blknum,
-            };
+            });
 
             let content = timeline.get_page_at_lsn(src_key, req_lsn)?;
 

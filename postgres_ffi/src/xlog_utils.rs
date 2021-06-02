@@ -13,8 +13,8 @@ use crate::FullTransactionId;
 use crate::XLogLongPageHeaderData;
 use crate::XLogPageHeaderData;
 use crate::XLogRecord;
-
 use crate::XLOG_PAGE_MAGIC;
+
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
 use crc32c::*;

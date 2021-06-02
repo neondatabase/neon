@@ -27,7 +27,7 @@ use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 use crate::basebackup;
 use crate::branches;
 use crate::page_cache;
-use crate::repository::{BufferTag, RelTag, RelationUpdate, Update};
+use crate::repository::{BufferTag, ObjectTag, RelTag, RelationUpdate, Update};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
@@ -410,18 +410,18 @@ impl postgres_backend::Handler for PageServerHandler {
 
                         match relation_update.update {
                             Update::Page { blknum, img } => {
-                                let tag = BufferTag {
+                                let tag = ObjectTag::RelationBuffer(BufferTag {
                                     rel: relation_update.rel,
                                     blknum,
-                                };
+                                });
 
                                 timeline.put_page_image(tag, relation_update.lsn, img)?;
                             }
                             Update::WALRecord { blknum, rec } => {
-                                let tag = BufferTag {
+                                let tag = ObjectTag::RelationBuffer(BufferTag {
                                     rel: relation_update.rel,
                                     blknum,
-                                };
+                                });
 
                                 timeline.put_wal_record(tag, rec)?;
                             }
@@ -505,6 +505,155 @@ impl postgres_backend::Handler for PageServerHandler {
         }
 
         pgb.flush()?;
+        Ok(())
+    }
+
+    fn handle_controlfile(&mut self) -> io::Result<()> {
+        self.write_message_noflush(&BeMessage::RowDescription)?;
+        self.write_message_noflush(&BeMessage::ControlFile)?;
+        self.write_message(&BeMessage::CommandComplete)?;
+
+        Ok(())
+    }
+
+    fn handle_pagerequests(&mut self, timelineid: ZTimelineId) -> anyhow::Result<()> {
+        // Check that the timeline exists
+        let repository = page_cache::get_repository();
+        let timeline = repository.get_timeline(timelineid).map_err(|_| {
+            anyhow!(
+                "client requested pagestream on timeline {} which does not exist in page server",
+                timelineid
+            )
+        })?;
+
+        /* switch client to COPYBOTH */
+        self.stream.write_u8(b'W')?;
+        self.stream.write_i32::<BE>(4 + 1 + 2)?;
+        self.stream.write_u8(0)?; /* copy_is_binary */
+        self.stream.write_i16::<BE>(0)?; /* numAttributes */
+        self.stream.flush()?;
+
+        while let Some(message) = self.read_message()? {
+            trace!("query({:?}): {:?}", timelineid, message);
+
+            let copy_data_bytes = match message {
+                FeMessage::CopyData(bytes) => bytes,
+                _ => continue,
+            };
+
+            let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+
+            let response = match zenith_fe_msg {
+                PagestreamFeMessage::Exists(req) => {
+                    let tag = RelTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                    };
+
+                    let exist = timeline.get_rel_exists(tag, req.lsn).unwrap_or(false);
+
+                    PagestreamBeMessage::Status(PagestreamStatusResponse {
+                        ok: exist,
+                        n_blocks: 0,
+                    })
+                }
+                PagestreamFeMessage::Nblocks(req) => {
+                    let tag = RelTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                    };
+
+                    let n_blocks = timeline.get_rel_size(tag, req.lsn).unwrap_or(0);
+
+                    PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
+                }
+                PagestreamFeMessage::Read(req) => {
+                    let buf_tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            spcnode: req.spcnode,
+                            dbnode: req.dbnode,
+                            relnode: req.relnode,
+                            forknum: req.forknum,
+                        },
+                        blknum: req.blkno,
+                    });
+
+                    let read_response = match timeline.get_page_at_lsn(buf_tag, req.lsn) {
+                        Ok(p) => PagestreamReadResponse {
+                            ok: true,
+                            n_blocks: 0,
+                            page: p,
+                        },
+                        Err(e) => {
+                            const ZERO_PAGE: [u8; 8192] = [0; 8192];
+                            error!("get_page_at_lsn: {}", e);
+                            PagestreamReadResponse {
+                                ok: false,
+                                n_blocks: 0,
+                                page: Bytes::from_static(&ZERO_PAGE),
+                            }
+                        }
+                    };
+
+                    PagestreamBeMessage::Read(read_response)
+                }
+            };
+
+            self.write_message(&BeMessage::CopyData(response.serialize()))?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_basebackup_request(
+        &mut self,
+        timelineid: ZTimelineId,
+        lsn: Option<Lsn>,
+    ) -> anyhow::Result<()> {
+        // check that the timeline exists
+        let repository = page_cache::get_repository();
+        let timeline = repository.get_timeline(timelineid).map_err(|e| {
+            error!("error fetching timeline: {:?}", e);
+            anyhow!(
+                "client requested basebackup on timeline {} which does not exist in page server",
+                timelineid
+            )
+        })?;
+        /* switch client to COPYOUT */
+        let stream = &mut self.stream;
+        stream.write_u8(b'H')?;
+        stream.write_i32::<BE>(4 + 1 + 2)?;
+        stream.write_u8(0)?; /* copy_is_binary */
+        stream.write_i16::<BE>(0)?; /* numAttributes */
+        stream.flush()?;
+        info!("sent CopyOut");
+
+        /* Send a tarball of the latest snapshot on the timeline */
+
+        // find latest snapshot
+        let snapshot_lsn =
+            restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
+        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
+        {
+            let mut writer = CopyDataSink { stream };
+            let mut basebackup = basebackup::Basebackup::new(
+                &mut writer,
+                timelineid,
+                &timeline,
+                req_lsn,
+                snapshot_lsn,
+            );
+            basebackup.send_tarball()?;
+        }
+        // CopyDone
+        self.stream.write_u8(b'c')?;
+        self.stream.write_u32::<BE>(4)?;
+        self.stream.flush()?;
+        debug!("CopyDone sent!");
 
         Ok(())
     }

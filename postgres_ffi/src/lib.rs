@@ -5,5 +5,6 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 pub mod controlfile_utils;
 pub mod pg_constants;
+pub mod nonrelfile_utils;
 pub mod relfile_utils;
 pub mod xlog_utils;
