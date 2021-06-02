@@ -254,11 +254,11 @@ mod tests {
     /// Convenience function to create a BufferTag for testing.
     /// Helps to keeps the tests shorter.
     #[allow(non_snake_case)]
-    fn TEST_BUF(blknum: u32) -> BufferTag {
-        BufferTag {
+    fn TEST_BUF(blknum: u32) -> ObjectTag {
+		ObjectTag::RelationBuffer(BufferTag {
             rel: TESTREL_A,
             blknum,
-        }
+        })
     }
 
     /// Convenience function to create a page image with given string as the only content
@@ -437,15 +437,14 @@ mod tests {
     impl WalRedoManager for TestRedoManager {
         fn request_redo(
             &self,
-            tag: BufferTag,
+            tag: ObjectTag,
             lsn: Lsn,
             base_img: Option<Bytes>,
             records: Vec<WALRecord>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
-                "redo for rel {} blk {} to get to {}, with {} and {} records",
-                tag.rel,
-                tag.blknum,
+                "redo for {:?} to get to {}, with {} and {} records",
+                tag,
                 lsn,
                 if base_img.is_some() {
                     "base image"
