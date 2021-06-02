@@ -257,7 +257,7 @@ impl Timeline for ObjectTimeline {
         let lsn = self.wait_lsn(req_lsn)?;
         {
             let rel_meta = self.rel_meta.read().unwrap();
-            if let Some(meta) = rel_meta.get(rel) {
+            if let Some(meta) = rel_meta.get(&rel) {
                 if meta.last_updated <= lsn {
                     return Ok(meta.size.is_some());
                 }
@@ -578,7 +578,7 @@ impl ObjectTimeline {
     fn relsize_get_nowait(&self, rel: RelTag, lsn: Lsn) -> Result<Option<u32>> {
         {
             let rel_meta = self.rel_meta.read().unwrap();
-            if let Some(meta) = rel_meta.get(rel) {
+            if let Some(meta) = rel_meta.get(&rel) {
                 if meta.last_updated <= lsn {
                     return Ok(meta.size);
                 }
