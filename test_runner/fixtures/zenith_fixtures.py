@@ -4,6 +4,8 @@ import pytest
 import shutil
 import subprocess
 
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, Literal
+
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -23,15 +25,18 @@ Don't import functions from this file, or pytest will emit warnings. Instead
 put directly-importable functions into utils.py or another separate file.
 """
 
+Env = Dict[str, str]
+Fn = TypeVar('Fn', bound=Callable[..., Any])
+
 DEFAULT_OUTPUT_DIR = 'test_output'
 DEFAULT_POSTGRES_DIR = 'tmp_install'
 
 
-def determine_scope(fixture_name, config):
+def determine_scope(fixture_name: str, config: Any) -> str:
     return 'session'
 
 
-def zenfixture(func):
+def zenfixture(func: Fn) -> Fn:
     """
     This is a python decorator for fixtures with a flexible scope.
 
@@ -43,15 +48,14 @@ def zenfixture(func):
     stored in a directory called "shared".
     """
 
-    if os.environ.get('TEST_SHARED_FIXTURES') is None:
-        scope = 'function'
-    else:
-        scope = 'session'
+    scope: Literal['session', 'function'] = \
+        'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
+
     return pytest.fixture(func, scope=scope)
 
 
 @pytest.fixture(autouse=True, scope='session')
-def safety_check():
+def safety_check() -> None:
     """ Ensure that no unwanted daemons are running before we start testing. """
 
     # does not use -c as it is not supported on macOS
@@ -71,7 +75,7 @@ class ZenithCli:
     We also store an environment that will tell the CLI to operate
     on a particular ZENITH_REPO_DIR.
     """
-    def __init__(self, binpath, repo_dir, pg_distrib_dir):
+    def __init__(self, binpath: str, repo_dir: str, pg_distrib_dir: str):
         assert os.path.isdir(binpath)
         self.binpath = binpath
         self.bin_zenith = os.path.join(binpath, 'zenith')
@@ -79,7 +83,7 @@ class ZenithCli:
         self.env['ZENITH_REPO_DIR'] = repo_dir
         self.env['POSTGRES_DISTRIB_DIR'] = pg_distrib_dir
 
-    def run(self, arguments):
+    def run(self, arguments: List[str]) -> Any:
         """
         Run "zenith" with the specified arguments.
 
@@ -93,6 +97,7 @@ class ZenithCli:
         """
 
         assert type(arguments) == list
+
         args = [self.bin_zenith] + arguments
         print('Running command "{}"'.format(' '.join(args)))
         return subprocess.run(args,
@@ -104,41 +109,58 @@ class ZenithCli:
 
 
 @zenfixture
-def zenith_cli(zenith_binpath, repo_dir, pg_distrib_dir):
+def zenith_cli(zenith_binpath: str, repo_dir: str, pg_distrib_dir: str) -> ZenithCli:
     return ZenithCli(zenith_binpath, repo_dir, pg_distrib_dir)
 
 
 class ZenithPageserver:
     """ An object representing a running pageserver. """
-    def __init__(self, zenith_cli):
+    def __init__(self, zenith_cli: ZenithCli):
         self.zenith_cli = zenith_cli
         self.running = False
 
-    # Initialize the repository, i.e. run "zenith init"
-    def init(self):
-        self.zenith_cli.run(['init'])
+    def init(self) -> 'ZenithPageserver':
+        """
+        Initialize the repository, i.e. run "zenith init".
+        Returns self.
+        """
 
-    # Start the page server
-    def start(self):
+        self.zenith_cli.run(['init'])
+        return self
+
+    def start(self) -> 'ZenithPageserver':
+        """
+        Start the page server.
+        Returns self.
+        """
+
         self.zenith_cli.run(['start'])
         self.running = True
+        return self
 
-    # Stop the page server
-    def stop(self):
-        self.zenith_cli.run(['stop'])
-        self.running = True
+    def stop(self) -> 'ZenithPageserver':
+        """
+        Stop the page server.
+        Returns self.
+        """
+
+        if self.running:
+            self.zenith_cli.run(['stop'])
+            self.running = False
+
+        return self
 
     # The page server speaks the Postgres FE/BE protocol, so you can connect
     # to it with any Postgres client, and run special commands. This function
     # returns a libpq connection string for connecting to it.
-    def connstr(self):
+    def connstr(self) -> str:
         username = getpass.getuser()
         conn_str = 'host={} port={} dbname=postgres user={}'.format('localhost', 64000, username)
         return conn_str
 
 
 @zenfixture
-def pageserver(zenith_cli):
+def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
     """
     The 'pageserver' fixture provides a Page Server that's up and running.
 
@@ -151,12 +173,12 @@ def pageserver(zenith_cli):
     test called 'test_foo' would create and use branches with the 'test_foo' prefix.
     """
 
-    ps = ZenithPageserver(zenith_cli)
-    ps.init()
-    ps.start()
+    ps = ZenithPageserver(zenith_cli).init().start()
     # For convenience in tests, create a branch from the freshly-initialized cluster.
     zenith_cli.run(["branch", "empty", "main"])
+
     yield ps
+
     # After the yield comes any cleanup code we need.
     print('Starting pageserver cleanup')
     ps.stop()
@@ -164,43 +186,45 @@ def pageserver(zenith_cli):
 
 class Postgres:
     """ An object representing a running postgres daemon. """
-    def __init__(self, zenith_cli, repo_dir, instance_num):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, instance_num: int):
         self.zenith_cli = zenith_cli
         self.instance_num = instance_num
         self.running = False
         self.username = getpass.getuser()
         self.host = 'localhost'
-        self.port = 55431 + instance_num
+        self.port = 55431 + instance_num  # TODO: find a better way
         self.repo_dir = repo_dir
-        self.branch = None
+        self.branch: Optional[str] = None  # dubious, see asserts below
         # path to conf is <repo_dir>/pgdatadirs/<branch_name>/postgresql.conf
 
-    def create(self, branch, config_lines=None):
+    def create(self, branch: str, config_lines: Optional[List[str]] = None) -> 'Postgres':
         """
         Create the pg data directory.
         Returns self.
         """
 
+        if not config_lines:
+            config_lines = []
+
         self.zenith_cli.run(['pg', 'create', branch])
         self.branch = branch
-        if config_lines is None:
-            config_lines = []
         self.config(config_lines)
 
         return self
 
-    def start(self):
+    def start(self) -> 'Postgres':
         """
         Start the Postgres instance.
         Returns self.
         """
 
+        assert self.branch is not None
         self.zenith_cli.run(['pg', 'start', self.branch])
         self.running = True
 
         return self
 
-    def config(self, lines):
+    def config(self, lines: List[str]) -> 'Postgres':
         """
         Add lines to postgresql.conf.
         Lines should be an array of valid postgresql.conf rows.
@@ -216,28 +240,31 @@ class Postgres:
 
         return self
 
-    def stop(self):
+    def stop(self) -> 'Postgres':
         """
         Stop the Postgres instance if it's running.
         Returns self.
         """
 
         if self.running:
+            assert self.branch is not None
             self.zenith_cli.run(['pg', 'stop', self.branch])
+            self.running = False
 
         return self
 
-    def stop_and_destroy(self):
+    def stop_and_destroy(self) -> 'Postgres':
         """
         Stop the Postgres instance, then destroy it.
         Returns self.
         """
 
+        assert self.branch is not None
         self.zenith_cli.run(['pg', 'stop', '--destroy', self.branch])
 
         return self
 
-    def create_start(self, branch, config_lines=None):
+    def create_start(self, branch: str, config_lines: Optional[List[str]] = None) -> 'Postgres':
         """
         Create a Postgres instance, then start it.
         Returns self.
@@ -247,41 +274,49 @@ class Postgres:
 
         return self
 
-    def connstr(self, dbname='postgres', username=None):
+    def connstr(self, dbname: str = 'postgres', username: Optional[str] = None) -> str:
         """
         Build a libpq connection string for the Postgres instance.
         """
 
         conn_str = 'host={} port={} dbname={} user={}'.format(self.host, self.port, dbname,
-                                                              username or self.username)
+                                                              (username or self.username))
 
         return conn_str
 
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-    def __init__(self, zenith_cli, repo_dir):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str):
         self.zenith_cli = zenith_cli
         self.host = 'localhost'
         self.repo_dir = repo_dir
         self.num_instances = 0
-        self.instances = []
+        self.instances: List[Postgres] = []
 
-    def create_start(self, branch="main", config_lines=None):
+    def create_start(self,
+                     branch: str = "main",
+                     config_lines: Optional[List[str]] = None) -> Postgres:
+
         pg = Postgres(self.zenith_cli, self.repo_dir, self.num_instances + 1)
         self.num_instances += 1
         self.instances.append(pg)
+
         return pg.create_start(branch, config_lines)
 
-    def stop_all(self):
+    def stop_all(self) -> 'PostgresFactory':
         for pg in self.instances:
             pg.stop()
 
+        return self
+
 
 @zenfixture
-def postgres(zenith_cli, repo_dir):
+def postgres(zenith_cli: ZenithCli, repo_dir: str) -> Iterator[PostgresFactory]:
     pgfactory = PostgresFactory(zenith_cli, repo_dir)
+
     yield pgfactory
+
     # After the yield comes any cleanup code we need.
     print('Starting postgres cleanup')
     pgfactory.stop_all()
@@ -289,25 +324,25 @@ def postgres(zenith_cli, repo_dir):
 
 class PgBin:
     """ A helper class for executing postgres binaries """
-    def __init__(self, log_dir, pg_distrib_dir):
+    def __init__(self, log_dir: str, pg_distrib_dir: str):
         self.log_dir = log_dir
         self.pg_install_path = pg_distrib_dir
         self.pg_bin_path = os.path.join(self.pg_install_path, 'bin')
         self.env = os.environ.copy()
         self.env['LD_LIBRARY_PATH'] = os.path.join(self.pg_install_path, 'lib')
 
-    def _fixpath(self, command):
+    def _fixpath(self, command: List[str]) -> None:
         if '/' not in command[0]:
             command[0] = os.path.join(self.pg_bin_path, command[0])
 
-    def _build_env(self, env_add):
+    def _build_env(self, env_add: Optional[Env]) -> Env:
         if env_add is None:
             return self.env
         env = self.env.copy()
         env.update(env_add)
         return env
 
-    def run(self, command, env=None, cwd=None):
+    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None) -> None:
         """
         Run one of the postgres binaries.
 
@@ -326,7 +361,10 @@ class PgBin:
         env = self._build_env(env)
         subprocess.run(command, env=env, cwd=cwd, check=True)
 
-    def run_capture(self, command, env=None, cwd=None):
+    def run_capture(self,
+                    command: List[str],
+                    env: Optional[Env] = None,
+                    cwd: Optional[str] = None) -> None:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
 
@@ -340,12 +378,12 @@ class PgBin:
 
 
 @zenfixture
-def pg_bin(test_output_dir, pg_distrib_dir):
+def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir)
 
 
 @zenfixture
-def base_dir():
+def base_dir() -> str:
     """ find the base directory (currently this is the git root) """
 
     base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
@@ -354,7 +392,7 @@ def base_dir():
 
 
 @zenfixture
-def top_output_dir(base_dir):
+def top_output_dir(base_dir: str) -> str:
     """ Compute the top-level directory for all tests. """
 
     env_test_output = os.environ.get('TEST_OUTPUT')
@@ -367,7 +405,7 @@ def top_output_dir(base_dir):
 
 
 @zenfixture
-def test_output_dir(request, top_output_dir):
+def test_output_dir(request: Any, top_output_dir: str) -> str:
     """ Compute the working directory for an individual test. """
 
     if os.environ.get('TEST_SHARED_FIXTURES') is None:
@@ -385,7 +423,7 @@ def test_output_dir(request, top_output_dir):
 
 
 @zenfixture
-def repo_dir(request, test_output_dir):
+def repo_dir(request: Any, test_output_dir: str) -> str:
     """
     Compute the test repo_dir.
 
@@ -398,7 +436,7 @@ def repo_dir(request, test_output_dir):
 
 
 @zenfixture
-def zenith_binpath(base_dir):
+def zenith_binpath(base_dir: str) -> str:
     """ Find the zenith binaries. """
 
     env_zenith_bin = os.environ.get('ZENITH_BIN')
@@ -412,7 +450,7 @@ def zenith_binpath(base_dir):
 
 
 @zenfixture
-def pg_distrib_dir(base_dir):
+def pg_distrib_dir(base_dir: str) -> str:
     """ Find the postgres install. """
 
     env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')

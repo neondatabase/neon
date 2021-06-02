@@ -1,13 +1,15 @@
 import os
 import subprocess
 
+from typing import Any, List
 
-def get_self_dir():
+
+def get_self_dir() -> str:
     """ Get the path to the directory where this script lives. """
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def mkdir_if_needed(path):
+def mkdir_if_needed(path: str) -> None:
     """ Create a directory if it doesn't already exist
 
     Note this won't try to create intermediate directories.
@@ -18,7 +20,7 @@ def mkdir_if_needed(path):
     os.mkdir(path)
 
 
-def subprocess_capture(capture_dir, cmd, **kwargs):
+def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
     """ Run a process and capture its output
 
     Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
@@ -42,7 +44,7 @@ def subprocess_capture(capture_dir, cmd, **kwargs):
 _global_counter = 0
 
 
-def global_counter():
+def global_counter() -> int:
     """ A really dumb global counter.
 
     This is useful for giving output files a unique number, so if we run the

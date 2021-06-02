@@ -17,7 +17,7 @@ def test_createuser(zenith_cli, pageserver, postgres, pg_bin):
 
         with conn.cursor() as cur:
             # Cause a 'relmapper' change in the original branch
-            cur.execute('CREATE USER testuser with password %s', ('testpwd',))
+            cur.execute('CREATE USER testuser with password %s', ('testpwd', ))
 
             cur.execute('CHECKPOINT')
 
