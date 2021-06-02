@@ -1,3 +1,4 @@
+use crate::waldecoder::TransactionId;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -5,6 +6,7 @@ use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
+use std::iter::Iterator;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 
@@ -34,7 +36,7 @@ pub trait Timeline: Send + Sync {
     //------------------------------------------------------------------------------
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes>;
+    fn get_page_at_lsn(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
 
     /// Get size of relation
     fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<u32>;
@@ -42,8 +44,11 @@ pub trait Timeline: Send + Sync {
     /// Does relation exist?
     fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool>;
 
-    /// Get a list of all distinct relations in given tablespace and database.
+    /// Get a list of all relations in given tablespace and database.
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>>;
+
+    /// Get a list of non-relational objects
+    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>>;
 
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
@@ -55,13 +60,16 @@ pub trait Timeline: Send + Sync {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()>;
+    fn put_wal_record(&self, tag: ObjectTag, rec: WALRecord) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()>;
+    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
+
+    /// Unlink object
+    fn put_unlink(&self, tag: ObjectTag, lsn: Lsn) -> Result<()>;
 
     /// Remember the all WAL before the given LSN has been processed.
     ///
@@ -152,6 +160,37 @@ impl fmt::Display for RelTag {
 pub struct BufferTag {
     pub rel: RelTag,
     pub blknum: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SlruBufferKey {
+    pub blknum: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FileNodeMapKey {
+    pub blknum: u32,
+    pub spcnode: u32,
+    pub dbnode: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TwoPhaseKey {
+    pub xid: TransactionId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ObjectTag {
+    FirstKey, // dummy key preceeding all other keys
+    TimelineMetadataKey,
+    Checkpoint,
+    Clog(SlruBufferKey),
+    MultiXactMembers(SlruBufferKey),
+    MultiXactOffsets(SlruBufferKey),
+    FileNodeMap(FileNodeMapKey),
+    TwoPhase(TwoPhaseKey),
+    RelationMetadata(RelTag), // put relations at the end of enum to allow efficient iterations through non-rel objects
+    RelationBuffer(BufferTag),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

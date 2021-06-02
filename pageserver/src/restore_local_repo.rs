@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use bytes::Bytes;
 
-use crate::repository::{BufferTag, RelTag, Timeline, WALRecord};
+use crate::repository::{BufferTag, ObjectTag, RelTag, Timeline, WALRecord};
 use crate::waldecoder::{decode_wal_record, DecodedWALRecord, Oid, WalStreamDecoder};
 use crate::waldecoder::{XlCreateDatabase, XlSmgrTruncate};
 use crate::PageServerConf;
@@ -136,7 +136,7 @@ fn import_relfile(
         let r = file.read_exact(&mut buf);
         match r {
             Ok(_) => {
-                let tag = BufferTag {
+                let tag = ObjectTag::RelationBuffer(BufferTag {
                     rel: RelTag {
                         spcnode: spcoid,
                         dbnode: dboid,
@@ -144,7 +144,7 @@ fn import_relfile(
                         forknum,
                     },
                     blknum,
-                };
+                });
                 timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
@@ -256,7 +256,7 @@ pub fn save_decoded_record(
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
     for blk in decoded.blocks.iter() {
-        let tag = BufferTag {
+        let tag = ObjectTag::RelationBuffer(BufferTag {
             rel: RelTag {
                 spcnode: blk.rnode_spcnode,
                 dbnode: blk.rnode_dbnode,
@@ -264,7 +264,7 @@ pub fn save_decoded_record(
                 forknum: blk.forknum as u8,
             },
             blknum: blk.blkno,
-        };
+        });
 
         let rec = WALRecord {
             lsn,
@@ -329,14 +329,14 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
         // Copy content
         for blknum in 0..nblocks {
-            let src_key = BufferTag {
+            let src_key = ObjectTag::RelationBuffer(BufferTag {
                 rel: src_rel,
                 blknum,
-            };
-            let dst_key = BufferTag {
+            });
+            let dst_key = ObjectTag::RelationBuffer(BufferTag {
                 rel: dst_rel,
                 blknum,
-            };
+            });
 
             let content = timeline.get_page_at_lsn(src_key, req_lsn)?;
 

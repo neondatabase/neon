@@ -25,7 +25,7 @@ use zenith_utils::lsn::Lsn;
 use crate::basebackup;
 use crate::branches;
 use crate::page_cache;
-use crate::repository::{BufferTag, RelTag};
+use crate::repository::{BufferTag, ObjectTag, RelTag};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
@@ -854,7 +854,7 @@ impl Connection {
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
                 }
                 PagestreamFeMessage::Read(req) => {
-                    let buf_tag = BufferTag {
+                    let buf_tag = ObjectTag::RelationBuffer(BufferTag {
                         rel: RelTag {
                             spcnode: req.spcnode,
                             dbnode: req.dbnode,
@@ -862,7 +862,7 @@ impl Connection {
                             forknum: req.forknum,
                         },
                         blknum: req.blkno,
-                    };
+                    });
 
                     let read_response = match timeline.get_page_at_lsn(buf_tag, req.lsn) {
                         Ok(p) => PagestreamReadResponse {

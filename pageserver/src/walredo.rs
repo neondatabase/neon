@@ -35,8 +35,8 @@ use tokio::time::timeout;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-use crate::repository::BufferTag;
 use crate::repository::WALRecord;
+use crate::repository::{BufferTag, ObjectTag};
 use crate::PageServerConf;
 
 ///
@@ -52,7 +52,7 @@ pub trait WalRedoManager: Send + Sync {
     /// the reords.
     fn request_redo(
         &self,
-        tag: BufferTag,
+        tag: ObjectTag,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
@@ -68,7 +68,7 @@ pub struct DummyRedoManager {}
 impl crate::walredo::WalRedoManager for DummyRedoManager {
     fn request_redo(
         &self,
-        _tag: BufferTag,
+        _tag: ObjectTag,
         _lsn: Lsn,
         _base_img: Option<Bytes>,
         _records: Vec<WALRecord>,
@@ -159,30 +159,33 @@ impl WalRedoManager for PostgresRedoManager {
     ///
     fn request_redo(
         &self,
-        tag: BufferTag,
+        tag: ObjectTag,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
     ) -> Result<Bytes, WalRedoError> {
         // Create a channel where to receive the response
         let (tx, rx) = mpsc::channel::<Result<Bytes, WalRedoError>>();
+        if let ObjectTag::RelationBuffer(tag) = tag {
+            let request = WalRedoRequest {
+                tag,
+                lsn,
+                base_img,
+                records,
+                response_channel: tx,
+            };
 
-        let request = WalRedoRequest {
-            tag,
-            lsn,
-            base_img,
-            records,
-            response_channel: tx,
-        };
+            self.request_tx
+                .lock()
+                .unwrap()
+                .send(request)
+                .expect("could not send WAL redo request");
 
-        self.request_tx
-            .lock()
-            .unwrap()
-            .send(request)
-            .expect("could not send WAL redo request");
-
-        rx.recv()
-            .expect("could not receive response to WAL redo request")
+            rx.recv()
+                .expect("could not receive response to WAL redo request")
+        } else {
+            panic!("Can not perform redo request for {:?}", tag);
+        }
     }
 }
 

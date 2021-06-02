@@ -1,6 +1,6 @@
 //! Low-level key-value storage abstraction.
 //! 
-use crate::repository::{BufferTag, RelTag};
+use crate::repository::{ObjectTag, RelTag};
 use crate::ZTimelineId;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use zenith_utils::lsn::Lsn;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectKey {
     pub timeline: ZTimelineId,
-    pub buf_tag: BufferTag,
+    pub tag: ObjectTag,
 }
 
 ///
@@ -60,4 +60,17 @@ pub trait ObjectStore: Send + Sync {
         dbnode: u32,
         lsn: Lsn,
     ) -> Result<HashSet<RelTag>>;
+
+    /// Iterate through all objects
+    ///
+    /// This is used to implement GC and preparing tarball for new node startup
+    fn list_objects<'a>(
+        &'a self,
+        timelineid: ZTimelineId,
+        nonrel_only: bool,
+        lsn: Lsn,
+    ) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>>;
+
+    /// Delete object or mark it for deletion
+    fn unlink(&self, key: &ObjectKey, lsn: Lsn) -> Result<()>;
 }
