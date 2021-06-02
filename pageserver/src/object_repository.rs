@@ -783,23 +783,26 @@ impl ObjectTimeline {
 }
 
 ///
-/// We store two kinds of page versions in the repository:
-///
-/// 1. Ready-made images of the block
-/// 2. WAL records, to be applied on top of the "previous" entry
-///
-/// Some WAL records will initialize the page from scratch. For such records,
-/// the 'will_init' flag is set. They don't need the previous page image before
-/// applying. The 'will_init' flag is set for records containing a full-page image,
-/// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
-/// stored directly in the cache entry in that you still need to run the WAL redo
-/// routine to generate the page image.
+/// We store several kinds of objects in the repository.
+/// We have per-page, per-relation(or non-rel file) and per-timeline entries.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ObjectValue {
+    /// Ready-made images of the block
     Page(Bytes),
+    /// WAL records, to be applied on top of the "previous" entry
+    ///
+    /// Some WAL records will initialize the page from scratch. For such records,
+    /// the 'will_init' flag is set. They don't need the previous page image before
+    /// applying. The 'will_init' flag is set for records containing a full-page image,
+    /// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
+    /// stored directly in the cache entry in that you still need to run the WAL redo
+    /// routine to generate the page image.
     WALRecord(WALRecord),
+    /// RelationSize. We store it separately not only to ansver nblocks requests faster.
+    /// We also need it to support relation truncation.
     RelationSize(u32),
+    /// TODO Add a comment
     Unlink,
     TimelineMetadata(MetadataEntry),
 }
@@ -813,8 +816,7 @@ const fn relation_size_key(timelineid: ZTimelineId, rel: RelTag) -> ObjectKey {
 
 ///
 /// In addition to those per-page and per-relation entries, we also
-/// store a little metadata blob for each timeline. It is stored using
-/// STORAGE_SPECIAL_FORKNUM.
+/// store a little metadata blob for each timeline.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataEntry {
