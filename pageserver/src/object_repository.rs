@@ -633,11 +633,6 @@ impl ObjectTimeline {
             .unwrap();
     }
 
-    fn get_tx_status(&self, _xid: TransactionId, _lsn: Lsn) -> Result<u8> {
-        // TODO: not implemented yet
-        Ok(0)
-    }
-
     fn do_gc(&self, conf: &'static PageServerConf) -> Result<()> {
         loop {
             thread::sleep(conf.gc_period);
@@ -659,25 +654,7 @@ impl ObjectTimeline {
                 {
                     inspected += 1;
                     match obj {
-                        ObjectTag::TwoPhase(prepare) => {
-                            // Special handling for prepare 2PC
-                            let key = ObjectKey {
-                                timeline: self.timelineid,
-                                tag: obj,
-                            };
-                            for vers in self.obj_store.object_versions(&key, horizon)? {
-                                if self.get_tx_status(prepare.xid, horizon)?
-                                    != pg_constants::TRANSACTION_STATUS_IN_PROGRESS
-                                {
-                                    let lsn = vers.0;
-                                    self.obj_store.unlink(&key, lsn)?;
-                                    deleted += 1;
-                                }
-                            }
-                        }
-                        ObjectTag::FileNodeMap(_) => (), // do nothing
-                        ObjectTag::Checkpoint => (),     // do nothing
-                        ObjectTag::FirstKey => (),       // do nothing
+                        ObjectTag::FirstKey => (),            // do nothing
                         ObjectTag::TimelineMetadataKey => (), // do nothing
                         _ => {
                             // Materialize last version

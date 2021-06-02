@@ -164,49 +164,6 @@ pub struct BufferTag {
     pub blknum: u32,
 }
 
-///
-/// Non-relation transaction status files (clog (a.k.a. pg_xact) and pg_multixact)
-/// in Postgres are handled by SLRU (Simple LRU) buffer, hence the name.
-///
-/// These files are global for a postgres instance.
-///
-/// These files are divided into segments, which are divided into pages
-/// of the same BLCKSZ as used for relation files.
-///
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SlruBufferKey {
-    pub blknum: u32,
-}
-
-///
-/// Special type of Postgres files: pg_filenode.map is needed to map
-/// catalog table OIDs to filenode numbers, which define filename.
-///
-/// Each database has a map file for its local mapped catalogs,
-/// and there is a separate map file for shared catalogs.
-///
-/// These files have untypical size of 512 bytes.
-///
-/// See PostgreSQL relmapper.c for details.
-///
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FileNodeMapKey {
-    pub blknum: u32, //TODO Why do we need it?
-    pub spcnode: u32,
-    pub dbnode: u32,
-}
-
-///
-/// Non-relation files that keep state for prepared transactions.
-/// Unlike other files these are not divided into pages.
-///
-/// See PostgreSQL twophase.c for details.
-///
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TwoPhaseKey {
-    pub xid: TransactionId,
-}
-
 /// ObjectTag is a part of ObjectKey that is specific
 /// to the type of the stored object.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -214,16 +171,6 @@ pub enum ObjectTag {
     // dummy key preceeding all other keys
     FirstKey,
     TimelineMetadataKey,
-    // Special entry that represents PostgreSQL checkpoint.
-    // We use it to track fields needed to restore controlfile checkpoint.
-    Checkpoint,
-    // Various types of non-relation files.
-    // We need them to bootstrap compute node.
-    Clog(SlruBufferKey),
-    MultiXactMembers(SlruBufferKey),
-    MultiXactOffsets(SlruBufferKey),
-    FileNodeMap(FileNodeMapKey),
-    TwoPhase(TwoPhaseKey),
     // put relations at the end of enum to allow efficient iterations through non-rel objects
     RelationMetadata(RelTag),
     RelationBuffer(BufferTag),
