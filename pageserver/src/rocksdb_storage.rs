@@ -2,7 +2,7 @@
 //! An implementation of the ObjectStore interface, backed by RocksDB
 //!
 use crate::object_store::{ObjectKey, ObjectStore};
-use crate::repository::{BufferTag, RelTag};
+use crate::repository::{BufferTag, ObjectTag, RelTag};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use anyhow::{bail, Result};
@@ -24,7 +24,7 @@ impl StorageKey {
         Self {
             obj_key: ObjectKey {
                 timeline,
-                buf_tag: BufferTag::ZEROED,
+                tag: ObjectTag::FirstTag,
             },
             lsn: Lsn(0),
         }
@@ -123,6 +123,17 @@ impl ObjectStore for RocksObjectStore {
         Ok(Box::new(iter))
     }
 
+    /// Iterate through all timeline objects
+    fn list_objects<'a>(
+        &'a self,
+        timeline: ZTimelineId,
+        nonrel_only: bool,
+        lsn: Lsn,
+    ) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>> {
+        let iter = RocksObjectIter::new(&self.db, timeline, nonrel_only, lsn)?;
+        Ok(Box::new(iter))
+    }
+
     /// Get a list of all distinct relations in given tablespace and database.
     ///
     /// TODO: This implementation is very inefficient, it scans
@@ -143,7 +154,7 @@ impl ObjectStore for RocksObjectStore {
         let mut search_key = StorageKey {
             obj_key: ObjectKey {
                 timeline: timelineid,
-                buf_tag: BufferTag {
+                tag: ObjectTag::RelationBuffer(BufferTag {
                     rel: RelTag {
                         spcnode,
                         dbnode,
@@ -151,7 +162,7 @@ impl ObjectStore for RocksObjectStore {
                         forknum: 0u8,
                     },
                     blknum: 0,
-                },
+                }),
             },
             lsn: Lsn(0),
         };
@@ -162,20 +173,23 @@ impl ObjectStore for RocksObjectStore {
                 break;
             }
             let key = StorageKey::des(iter.key().unwrap())?;
-            if (spcnode != 0 && key.obj_key.buf_tag.rel.spcnode != spcnode)
-                || (dbnode != 0 && key.obj_key.buf_tag.rel.dbnode != dbnode)
-            {
+            if let ObjectTag::RelationBuffer(buf_tag) = key.obj_key.tag {
+                if buf_tag.rel.spcnode != spcnode || buf_tag.rel.dbnode != dbnode {
+                    break;
+                }
+                if key.lsn < lsn {
+                    rels.insert(buf_tag.rel);
+                }
+            } else {
                 break;
             }
 
-            if key.obj_key.buf_tag.rel.relnode != 0 // skip non-relational records (like timeline metadata)
-                && key.lsn < lsn
-            // visible in this snapshot
-            {
-                rels.insert(key.obj_key.buf_tag.rel);
-            }
+            //FIXME Here was a merge conflict. Needs proper review and way more comments.
             search_key = key.clone();
-            search_key.obj_key.buf_tag.rel.relnode += 1; // skip to next relation
+
+            if let ObjectTag::RelationBuffer(mut buf_tag) = search_key.obj_key.tag {
+                buf_tag.rel.relnode += 1; // skip to next relation
+            }
         }
 
         Ok(rels)
@@ -189,7 +203,7 @@ impl ObjectStore for RocksObjectStore {
         &'a self,
         timeline: ZTimelineId,
         lsn: Lsn,
-    ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>> {
         let start_key = StorageKey::timeline_start(timeline);
         let start_key_bytes = StorageKey::ser(&start_key)?;
         let iter = self.db.iterator(rocksdb::IteratorMode::From(
@@ -296,7 +310,7 @@ impl<'a> Iterator for RocksObjectVersionIter<'a> {
             return None;
         }
         let key = StorageKey::des(self.dbiter.key().unwrap()).unwrap();
-        if key.obj_key.buf_tag != self.obj_key.buf_tag {
+        if key.obj_key.tag != self.obj_key.tag {
             return None;
         }
         let val = self.dbiter.value().unwrap();
@@ -314,7 +328,7 @@ struct RocksObjects<'r> {
 
 impl<'r> Iterator for RocksObjects<'r> {
     // TODO consider returning Box<[u8]>
-    type Item = Result<(BufferTag, Lsn, Vec<u8>)>;
+    type Item = Result<(ObjectTag, Lsn, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_result().transpose()
@@ -322,7 +336,7 @@ impl<'r> Iterator for RocksObjects<'r> {
 }
 
 impl<'r> RocksObjects<'r> {
-    fn next_result(&mut self) -> Result<Option<(BufferTag, Lsn, Vec<u8>)>> {
+    fn next_result(&mut self) -> Result<Option<(ObjectTag, Lsn, Vec<u8>)>> {
         for (key_bytes, v) in &mut self.iter {
             let key = StorageKey::des(&key_bytes)?;
 
@@ -335,9 +349,75 @@ impl<'r> RocksObjects<'r> {
                 continue;
             }
 
-            return Ok(Some((key.obj_key.buf_tag, key.lsn, v.to_vec())));
+            return Ok(Some((key.obj_key.tag, key.lsn, v.to_vec())));
         }
 
         Ok(None)
+    }
+}
+
+///
+/// Iterator for `list_objects`. Returns all objects preceeding specified LSN
+///
+struct RocksObjectIter<'a> {
+    timeline: ZTimelineId,
+    key: StorageKey,
+    nonrel_only: bool,
+    lsn: Lsn,
+    dbiter: rocksdb::DBRawIterator<'a>,
+}
+impl<'a> RocksObjectIter<'a> {
+    fn new(
+        db: &'a rocksdb::DB,
+        timeline: ZTimelineId,
+        nonrel_only: bool,
+        lsn: Lsn,
+    ) -> Result<RocksObjectIter<'a>> {
+        let key = StorageKey {
+            obj_key: ObjectKey {
+                timeline,
+                tag: ObjectTag::FirstTag,
+            },
+            lsn: Lsn(0),
+        };
+        let dbiter = db.raw_iterator();
+        Ok(RocksObjectIter {
+            key,
+            timeline,
+            nonrel_only,
+            lsn,
+            dbiter,
+        })
+    }
+}
+impl<'a> Iterator for RocksObjectIter<'a> {
+    type Item = ObjectTag;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        loop {
+            self.dbiter.seek(StorageKey::ser(&self.key).unwrap());
+            if !self.dbiter.valid() {
+                return None;
+            }
+            let key = StorageKey::des(self.dbiter.key().unwrap()).unwrap();
+            if key.obj_key.timeline != self.timeline {
+                // End of this timeline
+                return None;
+            }
+            self.key = key.clone();
+            self.key.lsn = Lsn(u64::MAX); // next seek should skip all versions
+            if key.lsn <= self.lsn {
+                // visible in this snapshot
+                if self.nonrel_only {
+                    match key.obj_key.tag {
+                        ObjectTag::RelationMetadata(_) => return None,
+                        ObjectTag::RelationBuffer(_) => return None,
+                        _ => return Some(key.obj_key.tag),
+                    }
+                } else {
+                    return Some(key.obj_key.tag);
+                }
+            }
+        }
     }
 }

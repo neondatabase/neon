@@ -124,9 +124,6 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // Remove pg_wal
     fs::remove_dir_all(tmppath.join("pg_wal"))?;
 
-    force_crash_recovery(&tmppath)?;
-    println!("updated pg_control");
-
     // Move the data directory as an initial base backup.
     // FIXME: It would be enough to only copy the non-relation files here, the relation
     // data was already loaded into the repository.
@@ -340,27 +337,6 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
     }
 
     bail!("could not parse point-in-time {}", s);
-}
-
-// If control file says the cluster was shut down cleanly, modify it, to mark
-// it as crashed. That forces crash recovery when you start the cluster.
-//
-// FIXME:
-// We currently do this to the initial snapshot in "zenith init". It would
-// be more natural to do this when the snapshot is restored instead, but we
-// currently don't have any code to create new snapshots, so it doesn't matter
-// Or better yet, use a less hacky way of putting the cluster into recovery.
-// Perhaps create a backup label file in the data directory when it's restored.
-fn force_crash_recovery(datadir: &Path) -> Result<()> {
-    // Read in the control file
-    let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
-    let mut controlfile = ControlFileData::decode(&fs::read(controlfilepath.as_path())?)?;
-
-    controlfile.state = postgres_ffi::DBState_DB_IN_PRODUCTION;
-
-    fs::write(controlfilepath.as_path(), controlfile.encode())?;
-
-    Ok(())
 }
 
 fn create_timeline(conf: &PageServerConf, ancestor: Option<PointInTime>) -> Result<ZTimelineId> {
