@@ -682,7 +682,7 @@ impl ObjectTimeline {
                             // Reconstruct last page
                             self.get_page_at_lsn_nowait(obj, last_lsn)?;
 
-                            // Reconstruct page at hirizon unless relation was dropped
+                            // Reconstruct page at horizon unless relation was dropped
                             // and delete all older versions over horizon
                             let mut last_version = true;
                             let key = ObjectKey {
@@ -691,15 +691,25 @@ impl ObjectTimeline {
                             };
                             for vers in self.obj_store.object_versions(&key, horizon)? {
                                 let lsn = vers.0;
+                                assert!(lsn <= horizon);
                                 if last_version {
                                     truncated += 1;
                                     last_version = false;
                                     if let Some(rel_size) = self.relsize_get_nowait(tag.rel, lsn)? {
                                         if rel_size > tag.blknum {
-                                            // preserve and materialized last version before deleting all preceeding
+                                            // preserve and materialize last version before deleting all preceeding
                                             self.get_page_at_lsn_nowait(obj, lsn)?;
                                             continue;
                                         }
+                                        debug!("Drop last block {} of relation {:?} at {} because it is beyond relation size {}", tag.blknum, tag.rel, lsn, rel_size);
+                                    } else {
+                                        if let Some(rel_size) =
+                                            self.relsize_get_nowait(tag.rel, last_lsn)?
+                                        {
+                                            debug!("Preserve block {} of relation {:?} at {} because relation has size {} at {}", tag.rel, tag, lsn, rel_size, last_lsn);
+                                            continue;
+                                        }
+                                        debug!("Relation {:?} was dropped at {}", tag.rel, lsn);
                                     }
                                     // relation was dropped or truncated so this block can be removed
                                 }
