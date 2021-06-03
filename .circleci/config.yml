@@ -222,7 +222,7 @@ jobs:
             du -sh /tmp/test_output/*
             for DIR in /tmp/test_output/*; do
               mv $DIR/repo/pageserver.log $DIR/ || true # ignore errors
-              for PGDIR in $DIR/repo/pgdatadirs/pg?; do
+              for PGDIR in $DIR/repo/pgdatadirs/*; do
                 echo "PGDIR: $PGDIR"
                 NEW_LOG="${PGDIR##*/}_log"
                 mv $PGDIR/log "$DIR/$NEW_LOG" || true # ignore errors
