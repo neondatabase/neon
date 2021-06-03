@@ -174,7 +174,7 @@ pub struct BufferTag {
 /// of the same BLCKSZ as used for relation files.
 ///
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SlruBufferKey {
+pub struct SlruBufferTag {
     pub blknum: u32,
 }
 
@@ -190,8 +190,7 @@ pub struct SlruBufferKey {
 /// See PostgreSQL relmapper.c for details.
 ///
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FileNodeMapKey {
-    pub blknum: u32, //TODO Why do we need it?
+pub struct DatabaseTag {
     pub spcnode: u32,
     pub dbnode: u32,
 }
@@ -203,7 +202,7 @@ pub struct FileNodeMapKey {
 /// See PostgreSQL twophase.c for details.
 ///
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TwoPhaseKey {
+pub struct PrepareTag {
     pub xid: TransactionId,
 }
 
@@ -211,19 +210,20 @@ pub struct TwoPhaseKey {
 /// to the type of the stored object.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ObjectTag {
-    // dummy key preceeding all other keys
-    FirstKey,
-    TimelineMetadataKey,
+    // dummy tag preceeding all other keys
+    FirstTag,
+    TimelineMetadataTag,
     // Special entry that represents PostgreSQL checkpoint.
     // We use it to track fields needed to restore controlfile checkpoint.
     Checkpoint,
     // Various types of non-relation files.
     // We need them to bootstrap compute node.
-    Clog(SlruBufferKey),
-    MultiXactMembers(SlruBufferKey),
-    MultiXactOffsets(SlruBufferKey),
-    FileNodeMap(FileNodeMapKey),
-    TwoPhase(TwoPhaseKey),
+    ControlFile,
+    Clog(SlruBufferTag),
+    MultiXactMembers(SlruBufferTag),
+    MultiXactOffsets(SlruBufferTag),
+    FileNodeMap(DatabaseTag),
+    TwoPhase(PrepareTag),
     // put relations at the end of enum to allow efficient iterations through non-rel objects
     RelationMetadata(RelTag),
     RelationBuffer(BufferTag),

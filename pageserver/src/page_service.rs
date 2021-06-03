@@ -919,14 +919,18 @@ impl Connection {
         // find latest snapshot
         let snapshot_lsn =
             restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
-        let req_lsn = lsn.unwrap_or(snapshot_lsn);
-        basebackup::send_tarball_at_lsn(
-            &mut CopyDataSink { stream },
-            timelineid,
-            &timeline,
-            req_lsn,
-            snapshot_lsn,
-        )?;
+        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
+        {
+            let mut writer = CopyDataSink { stream };
+            let mut basebackup = basebackup::Basebackup::new(
+                &mut writer,
+                timelineid,
+                &timeline,
+                req_lsn,
+                snapshot_lsn,
+            );
+            basebackup.send_tarball()?;
+        }
         // CopyDone
         self.stream.write_u8(b'c')?;
         self.stream.write_u32::<BE>(4)?;

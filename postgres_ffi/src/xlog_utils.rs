@@ -8,6 +8,8 @@
 //
 
 use crate::pg_constants;
+use crate::XLogLongPageHeaderData;
+use crate::XLogPageHeaderData;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
 use crc32c::*;
@@ -27,6 +29,8 @@ pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = XLP_REM_LEN_OFFS + 4 + 4;
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = XLOG_SIZE_OF_XLOG_SHORT_PHD + 8 + 4 + 4;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = XLOG_RECORD_CRC_OFFS + 4;
+pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
+
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 pub type XLogRecPtr = u64;
@@ -291,4 +295,27 @@ impl XLogRecord {
     pub fn is_xlog_switch_record(&self) -> bool {
         self.xl_info == pg_constants::XLOG_SWITCH && self.xl_rmid == pg_constants::RM_XLOG_ID
     }
+}
+
+#[allow(non_upper_case_globals)]
+pub const SizeOfXLogRecord: usize = 24;
+
+#[allow(non_upper_case_globals)]
+pub const SizeOfXLogShortPHD: usize = std::mem::size_of::<XLogPageHeaderData>();
+
+#[allow(non_upper_case_globals)]
+pub const SizeOfXLogLongPHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
+
+pub fn encode_xlog_long_phd(hdr: XLogLongPageHeaderData) -> Bytes {
+    let b: [u8; XLOG_SIZE_OF_XLOG_LONG_PHD];
+    b = unsafe {
+        std::mem::transmute::<XLogLongPageHeaderData, [u8; XLOG_SIZE_OF_XLOG_LONG_PHD]>(hdr)
+    };
+    Bytes::copy_from_slice(&b[..])
+}
+
+pub fn encode_xlog_record(rec: XLogRecord) -> Bytes {
+    let b: [u8; XLOG_SIZE_OF_XLOG_RECORD];
+    b = unsafe { std::mem::transmute::<XLogRecord, [u8; XLOG_SIZE_OF_XLOG_RECORD]>(rec) };
+    Bytes::copy_from_slice(&b[..])
 }

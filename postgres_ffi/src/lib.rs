@@ -3,6 +3,7 @@
 #![allow(non_snake_case)]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+pub mod nonrelfile_utils;
 pub mod pg_constants;
 pub mod relfile_utils;
 pub mod xlog_utils;
@@ -11,6 +12,7 @@ use bytes::{Buf, Bytes, BytesMut};
 
 // sizeof(ControlFileData)
 const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
+pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
 const OFFSETOF_CRC: usize = PG_CONTROLFILEDATA_OFFSETOF_CRC as usize;
 
 impl ControlFileData {
@@ -68,4 +70,62 @@ pub fn encode_pg_control(controlfile: ControlFileData) -> Bytes {
     buf.resize(PG_CONTROL_FILE_SIZE as usize, 0);
 
     buf.into()
+}
+
+pub fn encode_checkpoint(checkpoint: CheckPoint) -> Bytes {
+    let b: [u8; SIZEOF_CHECKPOINT];
+    b = unsafe { std::mem::transmute::<CheckPoint, [u8; SIZEOF_CHECKPOINT]>(checkpoint) };
+    Bytes::copy_from_slice(&b[..])
+}
+
+pub fn decode_checkpoint(mut buf: Bytes) -> Result<CheckPoint, anyhow::Error> {
+    let mut b = [0u8; SIZEOF_CHECKPOINT];
+    buf.copy_to_slice(&mut b);
+    let checkpoint: CheckPoint;
+    checkpoint = unsafe { std::mem::transmute::<[u8; SIZEOF_CHECKPOINT], CheckPoint>(b) };
+    Ok(checkpoint)
+}
+
+impl CheckPoint {
+    pub fn new(lsn: u64, timeline: u32) -> CheckPoint {
+        CheckPoint {
+            redo: lsn,
+            ThisTimeLineID: timeline,
+            PrevTimeLineID: timeline,
+            fullPageWrites: true, // TODO: get actual value of full_page_writes
+            nextXid: FullTransactionId {
+                value: pg_constants::FIRST_NORMAL_TRANSACTION_ID as u64,
+            }, // TODO: handle epoch?
+            nextOid: pg_constants::FIRST_BOOTSTRAP_OBJECT_ID,
+            nextMulti: 1,
+            nextMultiOffset: 0,
+            oldestXid: pg_constants::FIRST_NORMAL_TRANSACTION_ID,
+            oldestXidDB: 0,
+            oldestMulti: 1,
+            oldestMultiDB: 0,
+            time: 0,
+            oldestCommitTsXid: 0,
+            newestCommitTsXid: 0,
+            oldestActiveXid: pg_constants::INVALID_TRANSACTION_ID,
+        }
+    }
+
+    // Update next XID based on provided new_xid and stored epoch.
+    // Next XID should be greater than new_xid.
+    // Also take in account 32-bit wrap-around.
+    pub fn update_next_xid(&mut self, xid: u32) {
+        let full_xid = self.nextXid.value;
+        let new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
+        let old_xid = full_xid as u32;
+        if new_xid.wrapping_sub(old_xid) as i32 > 0 {
+            let mut epoch = full_xid >> 32;
+            if new_xid < old_xid {
+                // wrap-around
+                epoch += 1;
+            }
+            self.nextXid = FullTransactionId {
+                value: (epoch << 32) | new_xid as u64,
+            };
+        }
+    }
 }

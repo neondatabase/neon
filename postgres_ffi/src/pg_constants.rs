@@ -21,6 +21,19 @@ pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 pub const SMGR_TRUNCATE_VM: u32 = 0x0002;
 pub const SMGR_TRUNCATE_FSM: u32 = 0x0004;
 
+// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
+// --with-segsize=SEGSIZE, but assume the defaults for now.
+pub const BLCKSZ: u16 = 8192;
+pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
+
+//
+// constants from clog.h
+//
+pub const CLOG_XACTS_PER_BYTE: u32 = 4;
+pub const CLOG_XACTS_PER_PAGE: u32 = BLCKSZ as u32 * CLOG_XACTS_PER_BYTE;
+pub const CLOG_BITS_PER_XACT: u8 = 2;
+pub const CLOG_XACT_BITMASK: u8 = (1 << CLOG_BITS_PER_XACT) - 1;
+
 //
 // Constants from visbilitymap.h
 //
@@ -33,10 +46,19 @@ pub const TRANSACTION_STATUS_COMMITTED: u8 = 0x01;
 pub const TRANSACTION_STATUS_ABORTED: u8 = 0x02;
 pub const TRANSACTION_STATUS_SUB_COMMITTED: u8 = 0x03;
 
+pub const CLOG_ZEROPAGE: u8 = 0x00;
+pub const CLOG_TRUNCATE: u8 = 0x10;
+
 // From xact.h
 pub const XLOG_XACT_COMMIT: u8 = 0x00;
 pub const XLOG_XACT_PREPARE: u8 = 0x10;
 pub const XLOG_XACT_ABORT: u8 = 0x20;
+pub const XLOG_XACT_COMMIT_PREPARED: u8 = 0x30;
+pub const XLOG_XACT_ABORT_PREPARED: u8 = 0x40;
+
+// From srlu.h
+pub const SLRU_PAGES_PER_SEGMENT: u32 = 32;
+pub const SLRU_SEG_SIZE: usize = BLCKSZ as usize * SLRU_PAGES_PER_SEGMENT as usize;
 
 /* mask for filtering opcodes out of xl_info */
 pub const XLOG_XACT_OPMASK: u8 = 0x70;
@@ -57,8 +79,28 @@ pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 // pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
 
 // From pg_control.h and rmgrlist.h
+pub const XLOG_NEXTOID: u8 = 0x30;
 pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
+
+// From multixact.h
+pub const XLOG_MULTIXACT_ZERO_OFF_PAGE: u8 = 0x00;
+pub const XLOG_MULTIXACT_ZERO_MEM_PAGE: u8 = 0x10;
+pub const XLOG_MULTIXACT_CREATE_ID: u8 = 0x20;
+pub const XLOG_MULTIXACT_TRUNCATE_ID: u8 = 0x30;
+
+pub const MULTIXACT_OFFSETS_PER_PAGE: u16 = BLCKSZ / 4;
+pub const MXACT_MEMBER_BITS_PER_XACT: u16 = 8;
+pub const MXACT_MEMBER_FLAGS_PER_BYTE: u16 = 1;
+pub const MULTIXACT_FLAGBYTES_PER_GROUP: u16 = 4;
+pub const MULTIXACT_MEMBERS_PER_MEMBERGROUP: u16 =
+    MULTIXACT_FLAGBYTES_PER_GROUP * MXACT_MEMBER_FLAGS_PER_BYTE;
+/* size in bytes of a complete group */
+pub const MULTIXACT_MEMBERGROUP_SIZE: u16 =
+    4 * MULTIXACT_MEMBERS_PER_MEMBERGROUP + MULTIXACT_FLAGBYTES_PER_GROUP;
+pub const MULTIXACT_MEMBERGROUPS_PER_PAGE: u16 = BLCKSZ / MULTIXACT_MEMBERGROUP_SIZE;
+pub const MULTIXACT_MEMBERS_PER_PAGE: u16 =
+    MULTIXACT_MEMBERGROUPS_PER_PAGE * MULTIXACT_MEMBERS_PER_MEMBERGROUP;
 
 // From heapam_xlog.h
 pub const XLOG_HEAP_INSERT: u8 = 0x00;
@@ -98,11 +140,6 @@ pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
 pub const SIZEOF_XLOGRECORD: u32 = 24;
 
-// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
-// --with-segsize=SEGSIZE, but assume the defaults for now.
-pub const BLCKSZ: u16 = 8192;
-pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
-
 //
 // from xlogrecord.h
 //
@@ -125,5 +162,15 @@ pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
 pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
 
+/* From transam.h */
+pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
+pub const INVALID_TRANSACTION_ID: u32 = 0;
+pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
+pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
+
 /* FIXME: pageserver should request wal_seg_size from compute node */
 pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
+
+pub const XLOG_BLCKSZ: usize = 8192;
+pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
+pub const XLP_LONG_HEADER: u16 = 0x0002;

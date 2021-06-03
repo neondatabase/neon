@@ -277,7 +277,7 @@ impl<'a> RocksObjectIter<'a> {
         let key = StorageKey {
             obj_key: ObjectKey {
                 timeline,
-                tag: ObjectTag::FirstKey,
+                tag: ObjectTag::FirstTag,
             },
             lsn: Lsn(0),
         };

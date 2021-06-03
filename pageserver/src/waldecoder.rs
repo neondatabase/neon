@@ -2,10 +2,11 @@
 //! WAL decoder. For each WAL record, it decodes the record to figure out which data blocks
 //! the record affects, to add the records to the page cache.
 //!
+use crate::repository::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
-use postgres_ffi::pg_constants;
-use postgres_ffi::xlog_utils::XLogRecord;
+use postgres_ffi::xlog_utils::*;
+use postgres_ffi::*;
 use std::cmp::min;
 use std::str;
 use thiserror::Error;
@@ -18,35 +19,8 @@ pub type OffsetNumber = u16;
 pub type MultiXactId = TransactionId;
 pub type MultiXactOffset = u32;
 pub type MultiXactStatus = u32;
-
-// From PostgreSQL headers
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogPageHeaderData {
-    xlp_magic: u16,    /* magic value for correctness checks */
-    xlp_info: u16,     /* flag bits, see below */
-    xlp_tli: u32,      /* TimeLineID of first record on page */
-    xlp_pageaddr: u64, /* XLOG address of this page */
-    xlp_rem_len: u32,  /* total len of remaining data for record */
-}
-
-// FIXME: this assumes MAXIMUM_ALIGNOF 8. There are 4 padding bytes at end
-#[allow(non_upper_case_globals)]
-const SizeOfXLogShortPHD: usize = 2 + 2 + 4 + 8 + 4 + 4;
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogLongPageHeaderData {
-    std: XLogPageHeaderData, /* standard header fields */
-    xlp_sysid: u64,          /* system identifier from pg_control */
-    xlp_seg_size: u32,       /* just as a cross-check */
-    xlp_xlog_blcksz: u32,    /* just as a cross-check */
-}
-
-// FIXME: this assumes MAXIMUM_ALIGNOF 8.
-#[allow(non_upper_case_globals)]
-const SizeOfXLogLongPHD: usize = (2 + 2 + 4 + 8 + 4) + 4 + 8 + 4 + 4;
+pub type TimeLineID = u32;
+pub type PgTime = i64;
 
 #[allow(dead_code)]
 pub struct WalStreamDecoder {
@@ -84,6 +58,13 @@ impl WalStreamDecoder {
             inputbuf: BytesMut::new(),
             recordbuf: BytesMut::new(),
         }
+    }
+
+    pub fn set_position(&mut self, lsn: Lsn) {
+        self.lsn = lsn;
+        self.contlen = 0;
+        self.padlen = 0;
+        self.inputbuf.clear();
     }
 
     pub fn feed_bytes(&mut self, buf: &[u8]) {
@@ -255,12 +236,7 @@ pub struct DecodedBkpBlock {
     //in_use: bool,
 
     /* Identify the block this refers to */
-    pub rnode_spcnode: u32,
-    pub rnode_dbnode: u32,
-    pub rnode_relnode: u32,
-    // Note that we have a few special forknum values for non-rel files.
-    pub forknum: u8,
-    pub blkno: u32,
+    pub tag: ObjectTag,
 
     /* copy of the fork_flags field from the XLogRecordBlockHeader */
     flags: u8,
@@ -269,6 +245,7 @@ pub struct DecodedBkpBlock {
     has_image: bool,       /* has image, even for consistency checking */
     pub apply_image: bool, /* has image that should be restored */
     pub will_init: bool,   /* record doesn't need previous page version to apply */
+    pub will_drop: bool,   /* record drops relation */
     //char	   *bkp_image;
     hole_offset: u16,
     hole_length: u16,
@@ -283,16 +260,13 @@ pub struct DecodedBkpBlock {
 impl DecodedBkpBlock {
     pub fn new() -> DecodedBkpBlock {
         DecodedBkpBlock {
-            rnode_spcnode: 0,
-            rnode_dbnode: 0,
-            rnode_relnode: 0,
-            forknum: 0,
-            blkno: 0,
+            tag: ObjectTag::FirstTag,
 
             flags: 0,
             has_image: false,
             apply_image: false,
             will_init: false,
+            will_drop: false,
             hole_offset: 0,
             hole_length: 0,
             bimg_len: 0,
@@ -532,7 +506,6 @@ impl XlMultiXactTruncate {
     }
 }
 
-
 /// Main routine to decode a WAL record and figure out which blocks are modified
 //
 // See xlogrecord.h for details
@@ -551,10 +524,11 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
-    let mut rnode_spcnode: u32 = 0;
-    let mut rnode_dbnode: u32 = 0;
-    let mut rnode_relnode: u32 = 0;
+pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedWALRecord {
+    let mut spcnode: u32 = 0;
+    let mut dbnode: u32 = 0;
+    let mut relnode: u32 = 0;
+    let mut forknum: u8;
     let mut got_rnode = false;
 
     let mut buf = record.clone();
@@ -569,7 +543,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         xlogrec.xl_rmid,
         xlogrec.xl_info
     );
-
+    checkpoint.update_next_xid(xlogrec.xl_xid);
     let remaining = xlogrec.xl_tot_len - SizeOfXLogRecord;
 
     if buf.remaining() != remaining as usize {
@@ -628,7 +602,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 max_block_id = block_id;
 
                 fork_flags = buf.get_u8();
-                blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
+                forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
                 blk.flags = fork_flags;
                 blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;
                 blk.has_data = (fork_flags & pg_constants::BKPBLOCK_HAS_DATA) != 0;
@@ -734,9 +708,9 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     }
                 }
                 if fork_flags & pg_constants::BKPBLOCK_SAME_REL == 0 {
-                    rnode_spcnode = buf.get_u32_le();
-                    rnode_dbnode = buf.get_u32_le();
-                    rnode_relnode = buf.get_u32_le();
+                    spcnode = buf.get_u32_le();
+                    dbnode = buf.get_u32_le();
+                    relnode = buf.get_u32_le();
                     got_rnode = true;
                 } else if !got_rnode {
                     // TODO
@@ -747,18 +721,16 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     goto err;           */
                 }
 
-                blk.rnode_spcnode = rnode_spcnode;
-                blk.rnode_dbnode = rnode_dbnode;
-                blk.rnode_relnode = rnode_relnode;
-
-                blk.blkno = buf.get_u32_le();
-                trace!(
-                    "this record affects {}/{}/{} blk {}",
-                    rnode_spcnode,
-                    rnode_dbnode,
-                    rnode_relnode,
-                    blk.blkno
-                );
+                blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                    rel: RelTag {
+                        forknum,
+                        spcnode,
+                        dbnode,
+                        relnode,
+                    },
+                    blknum: buf.get_u32_le(),
+                });
+                trace!("this record affects {:?}", blk.tag);
 
                 blocks.push(blk);
             }
@@ -780,10 +752,44 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         assert_eq!(buf.remaining(), main_data_len as usize);
     }
 
-    //5. Handle special XACT records
-    if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
+    //5. Handle special CLOG and XACT records
+    if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
+        let mut blk = DecodedBkpBlock::new();
+        let blknum = buf.get_i32_le() as u32;
+        blk.tag = ObjectTag::Clog(SlruBufferTag { blknum });
+        let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
+        if info == pg_constants::CLOG_ZEROPAGE {
+            blk.will_init = true;
+        } else {
+            assert!(info == pg_constants::CLOG_TRUNCATE);
+            blk.will_drop = true;
+            checkpoint.oldestXid = buf.get_u32_le();
+            checkpoint.oldestXidDB = buf.get_u32_le();
+            info!(
+                "RM_CLOG_ID truncate blkno {} oldestXid {} oldestXidDB {}",
+                blknum, checkpoint.oldestXid, checkpoint.oldestXidDB
+            );
+        }
+        trace!("RM_CLOG_ID updates block {}", blknum);
+        blocks.push(blk);
+    } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
         let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
-        if info == pg_constants::XLOG_XACT_COMMIT {
+        if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_COMMIT_PREPARED
+        {
+            if info == pg_constants::XLOG_XACT_COMMIT {
+                let mut blk = DecodedBkpBlock::new();
+                let blknum = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
+                blk.tag = ObjectTag::Clog(SlruBufferTag { blknum });
+                trace!(
+					"XLOG_XACT_COMMIT xl_info {} xl_prev {:X}/{:X}  xid {} updates block {} main_data_len {}",
+					xlogrec.xl_info, (xlogrec.xl_prev >> 32),
+					xlogrec.xl_prev & 0xffffffff,
+					xlogrec.xl_xid,
+					blknum,
+					main_data_len
+				);
+                blocks.push(blk);
+            }
             //parse commit record to extract subtrans entries
             // xl_xact_commit starts with time of commit
             let _xact_time = buf.get_i64_le();
@@ -798,8 +804,16 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
                 let nsubxacts = buf.get_i32_le();
+                let mut prev_blknum = u32::MAX;
                 for _i in 0..nsubxacts {
-                    let _subxact = buf.get_u32_le();
+                    let subxact = buf.get_u32_le();
+                    let blknum = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
+                    if prev_blknum != blknum {
+                        prev_blknum = blknum;
+                        let mut blk = DecodedBkpBlock::new();
+                        blk.tag = ObjectTag::Clog(SlruBufferTag { blknum });
+                        blocks.push(blk);
+                    }
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
@@ -808,7 +822,15 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     let spcnode = buf.get_u32_le();
                     let dbnode = buf.get_u32_le();
                     let relnode = buf.get_u32_le();
-                    //TODO handle this too?
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationMetadata(RelTag {
+                        forknum: pg_constants::MAIN_FORKNUM,
+                        spcnode,
+                        dbnode,
+                        relnode,
+                    });
+                    blk.will_drop = true;
+                    blocks.push(blk);
                     trace!(
                         "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
                         spcnode,
@@ -825,11 +847,31 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
-                let _xid = buf.get_u32_le();
+                let xid = buf.get_u32_le();
+                let mut blk = DecodedBkpBlock::new();
+                let blknum = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+                blk.tag = ObjectTag::Clog(SlruBufferTag { blknum });
+                blocks.push(blk);
                 trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
                 //TODO handle this to be able to restore pg_twophase on node start
             }
-        } else if info == pg_constants::XLOG_XACT_ABORT {
+        } else if info == pg_constants::XLOG_XACT_ABORT
+            || info == pg_constants::XLOG_XACT_ABORT_PREPARED
+        {
+            if info == pg_constants::XLOG_XACT_ABORT {
+                let mut blk = DecodedBkpBlock::new();
+                let blknum = xlogrec.xl_xid / pg_constants::CLOG_XACTS_PER_PAGE;
+                blk.tag = ObjectTag::Clog(SlruBufferTag { blknum });
+                trace!(
+					"XLOG_XACT_ABORT xl_info {} xl_prev {:X}/{:X} xid {} updates block {} main_data_len {}",
+					xlogrec.xl_info, (xlogrec.xl_prev >> 32),
+					xlogrec.xl_prev & 0xffffffff,
+					xlogrec.xl_xid,
+					blknum,
+					main_data_len
+				);
+                blocks.push(blk);
+            }
             //parse abort record to extract subtrans entries
             // xl_xact_abort starts with time of commit
             let _xact_time = buf.get_i64_le();
@@ -844,8 +886,16 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
                 let nsubxacts = buf.get_i32_le();
+                let mut prev_blknum = u32::MAX;
                 for _i in 0..nsubxacts {
-                    let _subxact = buf.get_u32_le();
+                    let subxact = buf.get_u32_le();
+                    let blknum = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
+                    if prev_blknum != blknum {
+                        prev_blknum = blknum;
+                        let mut blk = DecodedBkpBlock::new();
+                        blk.tag = ObjectTag::Clog(SlruBufferTag { blknum });
+                        blocks.push(blk);
+                    }
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
@@ -854,7 +904,15 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     let spcnode = buf.get_u32_le();
                     let dbnode = buf.get_u32_le();
                     let relnode = buf.get_u32_le();
-                    //TODO handle this too?
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationMetadata(RelTag {
+                        forknum: pg_constants::MAIN_FORKNUM,
+                        spcnode,
+                        dbnode,
+                        relnode,
+                    });
+                    blk.will_drop = true;
+                    blocks.push(blk);
                     trace!(
                         "XLOG_XACT_ABORT relfilenode {}/{}/{}",
                         spcnode,
@@ -864,9 +922,21 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 }
             }
             if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
-                let _xid = buf.get_u32_le();
+                let xid = buf.get_u32_le();
+                let mut blk = DecodedBkpBlock::new();
+                let blknum = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+                blk.tag = ObjectTag::Clog(SlruBufferTag { blknum });
+                blocks.push(blk);
                 trace!("XLOG_XACT_ABORT-XACT_XINFO_HAS_TWOPHASE");
             }
+        } else if info == pg_constants::XLOG_XACT_PREPARE {
+            let mut blk = DecodedBkpBlock::new();
+            blk.tag = ObjectTag::TwoPhase(PrepareTag {
+                xid: xlogrec.xl_xid,
+            });
+            blk.will_init = true;
+            blocks.push(blk);
+            info!("Prepare transaction {}", xlogrec.xl_xid);
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_DBASE_ID {
         let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
@@ -899,8 +969,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             trace!("XLOG_TBLSPC_DROP is not handled yet");
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
-        let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_HEAP_INSERT {
             let xlrec = XlHeapInsert::decode(&mut buf);
             if (xlrec.flags
@@ -908,52 +977,76 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
                 != 0
             {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                }
             }
         } else if info == pg_constants::XLOG_HEAP_DELETE {
             let xlrec = XlHeapDelete::decode(&mut buf);
             if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                }
             }
         } else if info == pg_constants::XLOG_HEAP_UPDATE
             || info == pg_constants::XLOG_HEAP_HOT_UPDATE
         {
             let xlrec = XlHeapUpdate::decode(&mut buf);
             if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                }
             }
             if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0
                 && blocks.len() > 1
             {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blocks[1].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
-                blk.rnode_spcnode = blocks[1].rnode_spcnode;
-                blk.rnode_dbnode = blocks[1].rnode_dbnode;
-                blk.rnode_relnode = blocks[1].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag1) = blocks[1].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag1.rel.spcnode,
+                            dbnode: tag1.rel.dbnode,
+                            relnode: tag1.rel.relnode,
+                        },
+                        blknum: tag1.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                }
             }
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
             let xlrec = XlHeapMultiInsert::decode(&mut buf);
             if (xlrec.flags
@@ -961,14 +1054,113 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
                 != 0
             {
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                }
+            }
+        }
+    } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+        if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
+            let mut blk = DecodedBkpBlock::new();
+            blk.tag = ObjectTag::MultiXactOffsets(SlruBufferTag {
+                blknum: buf.get_u32_le(),
+            });
+            blk.will_init = true;
+            blocks.push(blk);
+        } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
+            let mut blk = DecodedBkpBlock::new();
+            blk.tag = ObjectTag::MultiXactMembers(SlruBufferTag {
+                blknum: buf.get_u32_le(),
+            });
+            blk.will_init = true;
+            blocks.push(blk);
+        } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
+            let xlrec = XlMultiXactCreate::decode(&mut buf);
+            // Update offset page
+            let mut blk = DecodedBkpBlock::new();
+            let blknum = xlrec.mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            blk.tag = ObjectTag::MultiXactOffsets(SlruBufferTag { blknum });
+            blocks.push(blk);
+            let first_mbr_blkno = xlrec.moff / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            let last_mbr_blkno =
+                (xlrec.moff + xlrec.nmembers - 1) / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            for blknum in first_mbr_blkno..=last_mbr_blkno {
+                // Update members page
                 let mut blk = DecodedBkpBlock::new();
-                let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
+                blk.tag = ObjectTag::MultiXactMembers(SlruBufferTag { blknum });
                 blocks.push(blk);
+            }
+            if xlrec.mid >= checkpoint.nextMulti {
+                checkpoint.nextMulti = xlrec.mid + 1;
+            }
+            if xlrec.moff + xlrec.nmembers > checkpoint.nextMultiOffset {
+                checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
+            }
+            let max_mbr_xid =
+                xlrec.members.iter().fold(
+                    0u32,
+                    |acc, mbr| {
+                        if mbr.xid > acc {
+                            mbr.xid
+                        } else {
+                            acc
+                        }
+                    },
+                );
+            checkpoint.update_next_xid(max_mbr_xid);
+        } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
+            let xlrec = XlMultiXactTruncate::decode(&mut buf);
+            checkpoint.oldestMulti = xlrec.end_trunc_off;
+            checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
+            let first_off_blkno =
+                xlrec.start_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            let last_off_blkno =
+                xlrec.end_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            for blknum in first_off_blkno..last_off_blkno {
+                let mut blk = DecodedBkpBlock::new();
+                blk.tag = ObjectTag::MultiXactOffsets(SlruBufferTag { blknum });
+                blk.will_drop = true;
+                blocks.push(blk);
+            }
+            let first_mbr_blkno =
+                xlrec.start_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            let last_mbr_blkno =
+                xlrec.end_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+            for blknum in first_mbr_blkno..last_mbr_blkno {
+                let mut blk = DecodedBkpBlock::new();
+                blk.tag = ObjectTag::MultiXactMembers(SlruBufferTag { blknum });
+                blk.will_drop = true;
+                blocks.push(blk);
+            }
+        } else {
+            panic!()
+        }
+    } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
+        let xlrec = XlRelmapUpdate::decode(&mut buf);
+        let mut blk = DecodedBkpBlock::new();
+        blk.tag = ObjectTag::FileNodeMap(DatabaseTag {
+            spcnode: xlrec.tsid,
+            dbnode: xlrec.dbid,
+        });
+        blk.will_init = true;
+        blocks.push(blk);
+    } else if xlogrec.xl_rmid == pg_constants::RM_XLOG_ID {
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+        if info == pg_constants::XLOG_NEXTOID {
+            let next_oid = buf.get_u32_le();
+            if next_oid > checkpoint.nextOid {
+                checkpoint.nextOid = next_oid;
             }
         }
     }
