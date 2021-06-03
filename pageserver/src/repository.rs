@@ -1,4 +1,3 @@
-use crate::waldecoder::TransactionId;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
