@@ -15,7 +15,7 @@ use log::*;
 use std::cmp::min;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use std::time::SystemTime;
 
 pub const XLOG_FNAME_LEN: usize = 24;
@@ -244,19 +244,6 @@ pub fn find_end_of_wal(
     (0, 0)
 }
 
-pub fn main() {
-    let mut data_dir = PathBuf::new();
-    data_dir.push(".");
-    let wal_seg_size = 16 * 1024 * 1024;
-    let (wal_end, tli) = find_end_of_wal(&data_dir, wal_seg_size, true);
-    println!(
-        "wal_end={:>08X}{:>08X}, tli={}",
-        (wal_end >> 32) as u32,
-        wal_end as u32,
-        tli
-    );
-}
-
 //
 // Xlog record parsing routines
 // TODO move here other related code from waldecoder.rs
@@ -290,5 +277,31 @@ impl XLogRecord {
     // Is this record an XLOG_SWITCH record? They need some special processing,
     pub fn is_xlog_switch_record(&self) -> bool {
         self.xl_info == pg_constants::XLOG_SWITCH && self.xl_rmid == pg_constants::RM_XLOG_ID
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{PathBuf};
+
+    // Run find_end_of_wal against file in test_wal dir
+    // Ensure that it finds last record correctly
+    #[test]
+    pub fn test_find_end_of_wal() {
+        let mut data_dir = PathBuf::new();
+        data_dir.push("./test_wal");
+        let wal_seg_size = 16 * 1024 * 1024;
+        let (wal_end, tli) = find_end_of_wal(&data_dir, wal_seg_size, true);
+        println!(
+            "wal_end {}, wal_end={:>08X}{:>08X}, tli={}",
+            wal_end,
+            (wal_end >> 32) as u32,
+            wal_end as u32,
+            tli
+        );
+
+        assert_eq!(wal_end, 35986832)
     }
 }
