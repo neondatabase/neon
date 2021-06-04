@@ -8,6 +8,7 @@ use crate::ZTimelineId;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
@@ -30,11 +31,35 @@ impl StorageKey {
     }
 }
 
+struct GarbageCollector {
+    garbage: Mutex<HashSet<Vec<u8>>>,
+}
+
+impl GarbageCollector {
+    fn new() -> GarbageCollector {
+        GarbageCollector {
+            garbage: Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn mark_for_deletion(&self, key: &[u8]) {
+        let mut garbage = self.garbage.lock().unwrap();
+        garbage.insert(key.to_vec());
+    }
+
+    fn was_deleted(&self, key: &[u8]) -> bool {
+        let key = key.to_vec();
+        let mut garbage = self.garbage.lock().unwrap();
+        return garbage.remove(&key);
+    }
+}
+
 pub struct RocksObjectStore {
     _conf: &'static PageServerConf,
 
     // RocksDB handle
     db: rocksdb::DB,
+    gc: Arc<GarbageCollector>,
 }
 
 impl ObjectStore for RocksObjectStore {
@@ -58,6 +83,14 @@ impl ObjectStore for RocksObjectStore {
             })?,
             value,
         )?;
+        Ok(())
+    }
+
+    fn unlink(&self, key: &ObjectKey, lsn: Lsn) -> Result<()> {
+        self.gc.mark_for_deletion(&StorageKey::ser(&StorageKey {
+            obj_key: key.clone(),
+            lsn,
+        })?);
         Ok(())
     }
 
@@ -89,7 +122,7 @@ impl ObjectStore for RocksObjectStore {
 
         let mut rels: HashSet<RelTag> = HashSet::new();
 
-        let searchkey = StorageKey {
+        let mut search_key = StorageKey {
             obj_key: ObjectKey {
                 timeline: timelineid,
                 buf_tag: BufferTag {
@@ -105,19 +138,26 @@ impl ObjectStore for RocksObjectStore {
             lsn: Lsn(0),
         };
         let mut iter = self.db.raw_iterator();
-        iter.seek(searchkey.ser()?);
-        while iter.valid() {
+        loop {
+            iter.seek(search_key.ser()?);
+            if !iter.valid() {
+                break;
+            }
             let key = StorageKey::des(iter.key().unwrap())?;
-            if key.obj_key.buf_tag.rel.spcnode != spcnode
-                || key.obj_key.buf_tag.rel.dbnode != dbnode
+            if (spcnode != 0 && key.obj_key.buf_tag.rel.spcnode != spcnode)
+                || (dbnode != 0 && key.obj_key.buf_tag.rel.dbnode != dbnode)
             {
                 break;
             }
 
-            if key.lsn < lsn {
+            if key.obj_key.buf_tag.rel.relnode != 0 // skip non-relational records (like timeline metadata)
+                && key.lsn < lsn
+            // visible in this snapshot
+            {
                 rels.insert(key.obj_key.buf_tag.rel);
             }
-            iter.next();
+            search_key = key.clone();
+            search_key.obj_key.buf_tag.rel.relnode += 1; // skip to next relation
         }
 
         Ok(rels)
@@ -150,11 +190,9 @@ impl ObjectStore for RocksObjectStore {
 impl RocksObjectStore {
     /// Open a RocksDB database.
     pub fn open(conf: &'static PageServerConf) -> Result<RocksObjectStore> {
-        let path = conf.workdir.join("rocksdb-storage");
-        let db = rocksdb::DB::open(&Self::get_rocksdb_opts(), path)?;
-
-        let storage = RocksObjectStore { _conf: conf, db };
-        Ok(storage)
+        let opts = Self::get_rocksdb_opts();
+        let obj_store = Self::new(conf, opts)?;
+        Ok(obj_store)
     }
 
     /// Create a new, empty RocksDB database.
@@ -165,9 +203,27 @@ impl RocksObjectStore {
         let mut opts = Self::get_rocksdb_opts();
         opts.create_if_missing(true);
         opts.set_error_if_exists(true);
-        let db = rocksdb::DB::open(&opts, &path)?;
+        let obj_store = Self::new(conf, opts)?;
+        Ok(obj_store)
+    }
 
-        let obj_store = RocksObjectStore { _conf: conf, db };
+    fn new(conf: &'static PageServerConf, mut opts: rocksdb::Options) -> Result<RocksObjectStore> {
+        let path = conf.workdir.join("rocksdb-storage");
+        let gc = Arc::new(GarbageCollector::new());
+        let gc_ref = gc.clone();
+        opts.set_compaction_filter("ttl", move |_level: u32, _key: &[u8], _val: &[u8]| {
+            if gc_ref.was_deleted(_key) {
+                rocksdb::compaction_filter::Decision::Remove
+            } else {
+                rocksdb::compaction_filter::Decision::Keep
+            }
+        });
+        let db = rocksdb::DB::open(&opts, &path)?;
+        let obj_store = RocksObjectStore {
+            _conf: conf,
+            db,
+            gc,
+        };
         Ok(obj_store)
     }
 
@@ -176,17 +232,6 @@ impl RocksObjectStore {
         let mut opts = rocksdb::Options::default();
         opts.set_use_fsync(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-
-        // FIXME
-        /*
-                opts.set_compaction_filter("ttl", move |_level: u32, _key: &[u8], val: &[u8]| {
-                    if (val[0] & UNUSED_VERSION_FLAG) != 0 {
-                        rocksdb::compaction_filter::Decision::Remove
-                    } else {
-                        rocksdb::compaction_filter::Decision::Keep
-                    }
-                });
-        */
         opts
     }
 }

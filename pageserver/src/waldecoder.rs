@@ -532,7 +532,6 @@ impl XlMultiXactTruncate {
     }
 }
 
-
 /// Main routine to decode a WAL record and figure out which blocks are modified
 //
 // See xlogrecord.h for details
