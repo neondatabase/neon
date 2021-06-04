@@ -301,7 +301,22 @@ pub struct XLogPageHeaderData {
     pub xlp_tli: u32,      /* TimeLineID of first record on page */
     pub xlp_pageaddr: u64, /* XLOG address of this page */
     pub xlp_rem_len: u32,  /* total len of remaining data for record */
+    padding: u32,          /* Add explicit padding */
 }
+
+impl XLogPageHeaderData {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogPageHeaderData {
+        XLogPageHeaderData {
+            xlp_magic: buf.get_u16_le(),
+            xlp_info: buf.get_u16_le(),
+            xlp_tli: buf.get_u32_le(),
+            xlp_pageaddr: buf.get_u64_le(),
+            xlp_rem_len: buf.get_u32_le(),
+            padding: buf.get_u32_le(),
+        }
+    }
+}
+
 
 #[repr(C)]
 #[derive(Debug)]
@@ -310,4 +325,15 @@ pub struct XLogLongPageHeaderData {
     pub xlp_sysid: u64,          /* system identifier from pg_control */
     pub xlp_seg_size: u32,       /* just as a cross-check */
     pub xlp_xlog_blcksz: u32,    /* just as a cross-check */
+}
+
+impl XLogLongPageHeaderData {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogLongPageHeaderData {
+        XLogLongPageHeaderData {
+            std: XLogPageHeaderData::from_bytes(buf),
+            xlp_sysid: buf.get_u64_le(),
+            xlp_seg_size: buf.get_u32_le(),
+            xlp_xlog_blcksz: buf.get_u32_le(),
+        }
+    }
 }
