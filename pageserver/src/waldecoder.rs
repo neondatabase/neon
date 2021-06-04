@@ -19,27 +19,6 @@ pub type MultiXactId = TransactionId;
 pub type MultiXactOffset = u32;
 pub type MultiXactStatus = u32;
 
-// From PostgreSQL headers
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogPageHeaderData {
-    xlp_magic: u16,    /* magic value for correctness checks */
-    xlp_info: u16,     /* flag bits, see below */
-    xlp_tli: u32,      /* TimeLineID of first record on page */
-    xlp_pageaddr: u64, /* XLOG address of this page */
-    xlp_rem_len: u32,  /* total len of remaining data for record */
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XLogLongPageHeaderData {
-    std: XLogPageHeaderData, /* standard header fields */
-    xlp_sysid: u64,          /* system identifier from pg_control */
-    xlp_seg_size: u32,       /* just as a cross-check */
-    xlp_xlog_blcksz: u32,    /* just as a cross-check */
-}
-
 #[allow(dead_code)]
 pub struct WalStreamDecoder {
     lsn: Lsn,

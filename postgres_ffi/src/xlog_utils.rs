@@ -292,3 +292,22 @@ impl XLogRecord {
         self.xl_info == pg_constants::XLOG_SWITCH && self.xl_rmid == pg_constants::RM_XLOG_ID
     }
 }
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XLogPageHeaderData {
+    pub xlp_magic: u16,    /* magic value for correctness checks */
+    pub xlp_info: u16,     /* flag bits, see below */
+    pub xlp_tli: u32,      /* TimeLineID of first record on page */
+    pub xlp_pageaddr: u64, /* XLOG address of this page */
+    pub xlp_rem_len: u32,  /* total len of remaining data for record */
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XLogLongPageHeaderData {
+    pub std: XLogPageHeaderData, /* standard header fields */
+    pub xlp_sysid: u64,          /* system identifier from pg_control */
+    pub xlp_seg_size: u32,       /* just as a cross-check */
+    pub xlp_xlog_blcksz: u32,    /* just as a cross-check */
+}
