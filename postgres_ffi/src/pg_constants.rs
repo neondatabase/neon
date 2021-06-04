@@ -1,6 +1,11 @@
 //!
 //! Misc constants, copied from PostgreSQL headers.
 //!
+//! TODO: These probably should be auto-generated using bindgen,
+//! rather than copied by hand. Although on the other hand, it's nice
+//! to have them all here in one place, and have the ability to add
+//! comments on them.
+//!
 
 //
 // From pg_tablespace_d.h

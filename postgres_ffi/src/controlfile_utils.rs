@@ -1,3 +1,28 @@
+//!
+//! Utilities for reading and writing the PostgreSQL control file.
+//!
+//! The PostgreSQL control file is one the first things that the PostgreSQL
+//! server reads when it starts up. It indicates whether the server was shut
+//! down cleanly, or if it crashed or was restored from online backup so that
+//! WAL recovery needs to be performed. It also contains a copy of the latest
+//! checkpoint record and its location in the WAL.
+//!
+//! The control file also contains fields for detecting whether the
+//! data directory is compatible with a postgres binary. That includes
+//! a version number, configuration options that can be set at
+//! compilation time like the block size, and the platform's alignment
+//! and endianess information. (The PostgreSQL on-disk file format is
+//! not portable across platforms.)
+//!
+//! The control file is stored in the PostgreSQL data directory, as
+//! `global/pg_control`. The data stored in it is designed to be smaller than
+//! 512 bytes, on the assumption that it can be updated atomically. The actual
+//! file is larger, 8192 bytes, but the rest of it is just filled with zeros.
+//!
+//! See src/include/catalog/pg_control.h in the PostgreSQL sources for more
+//! information. You can use PostgreSQL's pg_controldata utility to view its
+//! contents.
+//!
 use crate::{ControlFileData, PG_CONTROLFILEDATA_OFFSETOF_CRC, PG_CONTROL_FILE_SIZE};
 
 use bytes::{Buf, Bytes, BytesMut};
