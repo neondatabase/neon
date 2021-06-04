@@ -61,6 +61,7 @@ pub trait ObjectStore: Send + Sync {
     ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>>;
 
     /// Iterate through all keys with given tablespace and database ID, and LSN <= 'lsn'.
+    /// Both dbnode and spcnode can be InvalidId (0) which means get all relations in tablespace/cluster
     ///
     /// This is used to implement 'create database'
     fn list_rels(
@@ -70,4 +71,7 @@ pub trait ObjectStore: Send + Sync {
         dbnode: u32,
         lsn: Lsn,
     ) -> Result<HashSet<RelTag>>;
+
+    /// Unlink object (used by GC). This mehod may actually delete object or just mark it for deletion.
+    fn unlink(&self, key: &ObjectKey, lsn: Lsn) -> Result<()>;
 }

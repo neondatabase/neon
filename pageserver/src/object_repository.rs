@@ -23,12 +23,13 @@ use bytes::Bytes;
 use log::*;
 use postgres_ffi::pg_constants;
 use serde::{Deserialize, Serialize};
+use std::cmp::max;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
@@ -622,141 +623,70 @@ impl ObjectTimeline {
     fn do_gc(&self, conf: &'static PageServerConf) -> Result<()> {
         loop {
             thread::sleep(conf.gc_period);
-
-            // FIXME: broken
-            /*
             let last_lsn = self.get_last_valid_lsn();
 
             // checked_sub() returns None on overflow.
             if let Some(horizon) = last_lsn.checked_sub(conf.gc_horizon) {
-                let mut maxkey = StorageKey {
-                    tag: BufferTag {
-                        rel: RelTag {
-                            spcnode: u32::MAX,
-                            dbnode: u32::MAX,
-                            relnode: u32::MAX,
-                            forknum: u8::MAX,
-                        },
-                        blknum: u32::MAX,
-                    },
-                    lsn: Lsn::MAX,
-                };
+                // WAL is large enough to perform GC
                 let now = Instant::now();
-                let mut reconstructed = 0u64;
                 let mut truncated = 0u64;
-                let mut inspected = 0u64;
                 let mut deleted = 0u64;
-                loop {
-                    let mut iter = self.db.raw_iterator();
-                    iter.seek_for_prev(maxkey.to_bytes());
-                    if iter.valid() {
-                        let key = StorageKey::des(iter.key().unwrap());
-                        let val = StorageValue::des(iter.value().unwrap());
 
-                        inspected += 1;
+                // Iterate through all relations
+                for rels in &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)? {
+                    let mut last_version = true;
+                    let mut key = relation_size_key(self.timelineid, *rels);
+                    let mut max_size = 0u32;
+                    let mut relation_dropped = false;
 
-                        // Construct boundaries for old records cleanup
-                        maxkey.tag = key.tag;
-                        let last_lsn = key.lsn;
-                        maxkey.lsn = min(horizon, last_lsn); // do not remove last version
-
-                        let mut minkey = maxkey.clone();
-                        minkey.lsn = Lsn(0); // first version
-
-                        // reconstruct most recent page version
-                        if let StorageValueContent::Image(_) = val.content {
-                            // force reconstruction of most recent page version
-                            let (base_img, records) =
-                                self.collect_records_for_apply(key.tag, key.lsn);
-
-                            trace!(
-                                "Reconstruct most recent page {} blk {} at {} from {} records",
-                                key.tag.rel,
-                                key.tag.blknum,
-                                key.lsn,
-                                records.len()
-                            );
-
-                            let new_img = self
-                                .walredo_mgr
-                                .request_redo(key.tag, key.lsn, base_img, records)?;
-                            self.put_page_image(key.tag, key.lsn, new_img.clone());
-
-                            reconstructed += 1;
-                        }
-
-                        iter.seek_for_prev(maxkey.to_bytes());
-                        if iter.valid() {
-                            // do not remove last version
-                            if last_lsn > horizon {
-                                // locate most recent record before horizon
-                                let key = StorageKey::des(iter.key().unwrap());
-                                if key.tag == maxkey.tag {
-                                    let val = StorageValue::des(iter.value().unwrap());
-                                    if let StorageValueContent::Image(_) = val.content {
-                                        let (base_img, records) =
-                                            self.collect_records_for_apply(key.tag, key.lsn);
-                                        trace!("Reconstruct horizon page {} blk {} at {} from {} records",
-                                              key.tag.rel, key.tag.blknum, key.lsn, records.len());
-                                        let new_img = self
-                                            .walredo_mgr
-                                            .request_redo(key.tag, key.lsn, base_img, records)?;
-                                        self.put_page_image(key.tag, key.lsn, new_img.clone());
-
-                                        truncated += 1;
-                                    } else {
-                                        trace!(
-                                            "Keeping horizon page {} blk {} at {}",
-                                            key.tag.rel,
-                                            key.tag.blknum,
-                                            key.lsn
-                                        );
-                                    }
-                                }
-                            } else {
-                                trace!(
-                                    "Last page {} blk {} at {}, horizon {}",
-                                    key.tag.rel,
-                                    key.tag.blknum,
-                                    key.lsn,
-                                    horizon
-                                );
-                            }
-                            // remove records prior to horizon
-                            loop {
-                                iter.prev();
-                                if !iter.valid() {
-                                    break;
-                                }
-                                let key = StorageKey::des(iter.key().unwrap());
-                                if key.tag != maxkey.tag {
-                                    break;
-                                }
-                                let mut val = StorageValue::des(iter.value().unwrap());
-                                if val.alive {
-                                    val.alive = false;
-                                    self.storage.put(key, val)?;
-                                    deleted += 1;
-                                    trace!(
-                                        "deleted: {} blk {} at {}",
-                                        key.tag.rel,
-                                        key.tag.blknum,
-                                        key.lsn
-                                    );
-                                } else {
-                                    break;
+                    // Process relation metadata versions
+                    for vers in self.obj_store.object_versions(&key, horizon)? {
+                        let lsn = vers.0;
+                        let rel_meta = RelationSizeEntry::des(&vers.1)?;
+                        // If relation is dropped at the horizon,
+                        // we can remove all its versions including last (Unlink)
+                        match rel_meta {
+                            RelationSizeEntry::Size(size) => max_size = max(max_size, size),
+                            RelationSizeEntry::Unlink => {
+                                if last_version {
+                                    relation_dropped = true;
+                                    info!("Relation {:?} dropped", rels);
                                 }
                             }
                         }
-                        maxkey = minkey;
-                    } else {
-                        break;
+                        if last_version {
+                            last_version = false;
+                            if !relation_dropped {
+                                // preserve last version
+                                continue;
+                            }
+                        }
+                        self.obj_store.unlink(&key, lsn)?;
+                        deleted += 1;
+                    }
+                    // Now process all relation blocks
+                    for blknum in 0..max_size {
+                        key.buf_tag.blknum = blknum;
+                        last_version = true;
+                        for vers in self.obj_store.object_versions(&key, horizon)? {
+                            let lsn = vers.0;
+                            if last_version {
+                                last_version = false;
+                                truncated += 1;
+                                if !relation_dropped {
+                                    // preserve and materialize last version before deleting all preceeding
+                                    self.get_page_at_lsn_nowait(key.buf_tag, lsn)?;
+                                    continue;
+                                }
+                            }
+                            self.obj_store.unlink(&key, lsn)?;
+                            deleted += 1;
+                        }
                     }
                 }
-                info!("Garbage collection completed in {:?}:\n{} version chains inspected, {} pages reconstructed, {} version histories truncated, {} versions deleted",
-                      now.elapsed(), inspected, reconstructed, truncated, deleted);
+                info!("Garbage collection completed in {:?}: {} version histories truncated, {} versions deleted",
+					  now.elapsed(), truncated, deleted);
             }
-             */
         }
     }
 
