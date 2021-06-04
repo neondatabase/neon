@@ -25,28 +25,36 @@
 //!
 use crate::{ControlFileData, PG_CONTROLFILEDATA_OFFSETOF_CRC, PG_CONTROL_FILE_SIZE};
 
-use bytes::{Buf, Bytes, BytesMut};
+use anyhow::{bail, Result};
+use bytes::{Bytes, BytesMut};
 
 // sizeof(ControlFileData)
 const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
 // offsetof(ControlFileData, crc)
 const OFFSETOF_CRC: usize = PG_CONTROLFILEDATA_OFFSETOF_CRC as usize;
 
-pub fn decode_pg_control(mut buf: Bytes) -> Result<ControlFileData, anyhow::Error> {
-    let mut b: [u8; SIZEOF_CONTROLDATA] = [0u8; SIZEOF_CONTROLDATA];
-    buf.copy_to_slice(&mut b);
 
+///
+/// Interpret a slice of bytes as a Postgres control file.
+///
+pub fn decode_pg_control(buf: &[u8]) -> Result<ControlFileData> {
+    // Check that the slice has the expected size. The control file is
+    // padded with zeros up to a 512 byte sector size, so accept a
+    // larger size too, so that the caller can just the whole file
+    // contents without knowing the exact size of the struct.
+    if buf.len() < SIZEOF_CONTROLDATA {
+        bail!("control file is too short");
+    }
     let controlfile: ControlFileData;
 
-    // TODO: verify CRC
-    let mut data_without_crc: [u8; OFFSETOF_CRC] = [0u8; OFFSETOF_CRC];
-    data_without_crc.copy_from_slice(&b[0..OFFSETOF_CRC]);
-    let expectedcrc = crc32c::crc32c(&data_without_crc);
+    let mut b: [u8; SIZEOF_CONTROLDATA] = [0u8; SIZEOF_CONTROLDATA];
+    b.copy_from_slice(&buf[0..SIZEOF_CONTROLDATA]);
+    let expectedcrc = crc32c::crc32c(&b[0..OFFSETOF_CRC]);
 
     controlfile = unsafe { std::mem::transmute::<[u8; SIZEOF_CONTROLDATA], ControlFileData>(b) };
 
     if expectedcrc != controlfile.crc {
-        anyhow::bail!(
+        bail!(
             "invalid CRC in control file: expected {:08X}, was {:08X}",
             expectedcrc,
             controlfile.crc
@@ -56,10 +64,14 @@ pub fn decode_pg_control(mut buf: Bytes) -> Result<ControlFileData, anyhow::Erro
     Ok(controlfile)
 }
 
-pub fn encode_pg_control(controlfile: ControlFileData) -> Bytes {
+///
+/// Convert a struct representing a Postgres control file into raw bytes.
+///
+/// The CRC is recomputed to match the contents of the fields.
+pub fn encode_pg_control(controlfile: &ControlFileData) -> Bytes {
     let b: [u8; SIZEOF_CONTROLDATA];
 
-    b = unsafe { std::mem::transmute::<ControlFileData, [u8; SIZEOF_CONTROLDATA]>(controlfile) };
+    b = unsafe { std::mem::transmute::<ControlFileData, [u8; SIZEOF_CONTROLDATA]>(*controlfile) };
 
     // Recompute the CRC
     let mut data_without_crc: [u8; OFFSETOF_CRC] = [0u8; OFFSETOF_CRC];
