@@ -13,19 +13,6 @@ use bytes::{Buf, Bytes, BytesMut};
 const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
 const OFFSETOF_CRC: usize = PG_CONTROLFILEDATA_OFFSETOF_CRC as usize;
 
-impl ControlFileData {
-    // Initialize an all-zeros ControlFileData struct
-    pub fn new() -> ControlFileData {
-        let controlfile: ControlFileData;
-
-        let b = [0u8; SIZEOF_CONTROLDATA];
-        controlfile =
-            unsafe { std::mem::transmute::<[u8; SIZEOF_CONTROLDATA], ControlFileData>(b) };
-
-        controlfile
-    }
-}
-
 pub fn decode_pg_control(mut buf: Bytes) -> Result<ControlFileData, anyhow::Error> {
     let mut b: [u8; SIZEOF_CONTROLDATA] = [0u8; SIZEOF_CONTROLDATA];
     buf.copy_to_slice(&mut b);
