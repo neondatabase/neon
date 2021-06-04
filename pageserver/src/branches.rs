@@ -6,7 +6,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use fs::File;
-use postgres_ffi::{controlfile_utils, pg_constants, xlog_utils};
+use postgres_ffi::{pg_constants, xlog_utils, ControlFileData};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -79,7 +79,7 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
 
     // Read control file to extract the LSN and system id
     let controlfile_path = tmppath.join("global").join("pg_control");
-    let controlfile = controlfile_utils::decode_pg_control(&fs::read(controlfile_path)?)?;
+    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
     // let systemid = controlfile.system_identifier;
     let lsn = controlfile.checkPoint;
     let lsnstr = format!("{:016X}", lsn);
@@ -211,7 +211,7 @@ pub(crate) fn get_system_id(conf: &PageServerConf) -> Result<u64> {
 
     let (_, main_snap_dir) = find_latest_snapshot(conf, *main_tli)?;
     let controlfile_path = main_snap_dir.join("global").join("pg_control");
-    let controlfile = controlfile_utils::decode_pg_control(&fs::read(controlfile_path)?)?;
+    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
     Ok(controlfile.system_identifier)
 }
 
@@ -354,15 +354,11 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
 fn force_crash_recovery(datadir: &Path) -> Result<()> {
     // Read in the control file
     let controlfilepath = datadir.to_path_buf().join("global").join("pg_control");
-    let mut controlfile =
-        controlfile_utils::decode_pg_control(&fs::read(controlfilepath.as_path())?)?;
+    let mut controlfile = ControlFileData::decode(&fs::read(controlfilepath.as_path())?)?;
 
     controlfile.state = postgres_ffi::DBState_DB_IN_PRODUCTION;
 
-    fs::write(
-        controlfilepath.as_path(),
-        controlfile_utils::encode_pg_control(&controlfile),
-    )?;
+    fs::write(controlfilepath.as_path(), controlfile.encode())?;
 
     Ok(())
 }
