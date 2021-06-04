@@ -79,7 +79,8 @@ impl WalStreamDecoder {
                     return Ok(None);
                 }
 
-                let hdr = self.decode_XLogLongPageHeaderData();
+                let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf);
+
                 if hdr.std.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
                         msg: "invalid xlog segment header".into(),
@@ -95,7 +96,8 @@ impl WalStreamDecoder {
                     return Ok(None);
                 }
 
-                let hdr = self.decode_XLogPageHeaderData();
+                let hdr = XLogPageHeaderData::from_bytes(&mut self.inputbuf);
+
                 if hdr.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
                         msg: "invalid xlog page header".into(),
@@ -183,40 +185,6 @@ impl WalStreamDecoder {
         // deal with continuation records
 
         // deal with xlog_switch records
-    }
-
-    #[allow(non_snake_case)]
-    fn decode_XLogPageHeaderData(&mut self) -> XLogPageHeaderData {
-        let buf = &mut self.inputbuf;
-
-        // FIXME: Assume little-endian
-
-        let hdr: XLogPageHeaderData = XLogPageHeaderData {
-            xlp_magic: buf.get_u16_le(),
-            xlp_info: buf.get_u16_le(),
-            xlp_tli: buf.get_u32_le(),
-            xlp_pageaddr: buf.get_u64_le(),
-            xlp_rem_len: buf.get_u32_le(),
-        };
-        // 4 bytes of padding, on 64-bit systems
-        buf.advance(4);
-
-        // FIXME: check that hdr.xlp_rem_len matches self.contlen
-        //println!("next xlog page (xlp_rem_len: {})", hdr.xlp_rem_len);
-
-        hdr
-    }
-
-    #[allow(non_snake_case)]
-    fn decode_XLogLongPageHeaderData(&mut self) -> XLogLongPageHeaderData {
-        let hdr: XLogLongPageHeaderData = XLogLongPageHeaderData {
-            std: self.decode_XLogPageHeaderData(),
-            xlp_sysid: self.inputbuf.get_u64_le(),
-            xlp_seg_size: self.inputbuf.get_u32_le(),
-            xlp_xlog_blcksz: self.inputbuf.get_u32_le(),
-        };
-
-        hdr
     }
 }
 
