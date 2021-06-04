@@ -123,13 +123,12 @@ impl<'a> Basebackup<'a> {
         tag: &ObjectTag,
         page: u32,
     ) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn(*tag, self.lsn)?;
+        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
         // Zero length image indicates truncated segment: just skip it
         if !img.is_empty() {
             assert!(img.len() == pg_constants::BLCKSZ as usize);
-
             let segno = page / pg_constants::SLRU_PAGES_PER_SEGMENT;
-            if self.slru_segno != segno || self.slru_path != path {
+            if self.slru_path != "" && (self.slru_segno != segno || self.slru_path != path) {
                 let segname = format!("{}/{:>04X}", self.slru_path, self.slru_segno);
                 let header = new_tar_header(&segname, pg_constants::SLRU_SEG_SIZE as u64)?;
                 self.ar.append(&header, &self.slru_buf[..])?;
@@ -158,7 +157,8 @@ impl<'a> Basebackup<'a> {
     // Extract pg_filenode.map files from repository
     //
     fn add_relmap_file(&mut self, tag: &ObjectTag, db: &DatabaseTag) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn(*tag, self.lsn)?;
+        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
+        info!("add_relmap_file {:?}", db);
         let path = if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
             String::from("global/pg_filenode.map")
         } else {
@@ -179,7 +179,7 @@ impl<'a> Basebackup<'a> {
     // Extract twophase state files
     //
     fn add_twophase_file(&mut self, tag: &ObjectTag, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn(*tag, self.lsn)?;
+        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
         let crc = crc32c::crc32c(&img[..]);
@@ -197,13 +197,12 @@ impl<'a> Basebackup<'a> {
         let most_recent_lsn = Lsn(0);
         let checkpoint_bytes = self
             .timeline
-            .get_page_at_lsn(ObjectTag::Checkpoint, most_recent_lsn)?;
+            .get_page_at_lsn_nowait(ObjectTag::Checkpoint, most_recent_lsn)?;
         let pg_control_bytes = self
             .timeline
-            .get_page_at_lsn(ObjectTag::ControlFile, most_recent_lsn)?;
+            .get_page_at_lsn_nowait(ObjectTag::ControlFile, most_recent_lsn)?;
         let mut pg_control = postgres_ffi::decode_pg_control(pg_control_bytes)?;
         let mut checkpoint = postgres_ffi::decode_checkpoint(checkpoint_bytes)?;
-
         // Here starts pg_resetwal inspired magic
         // Generate new pg_control and WAL needed for bootstrap
         let new_segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE) + 1;
@@ -241,7 +240,7 @@ impl<'a> Basebackup<'a> {
         let hdr = XLogLongPageHeaderData {
             std: {
                 XLogPageHeaderData {
-                    xlp_magic: XLOG_PAGE_MAGIC,
+                    xlp_magic: XLOG_PAGE_MAGIC as u16,
                     xlp_info: pg_constants::XLP_LONG_HEADER,
                     xlp_tli: 1, // FIXME: always use Postgres timeline 1
                     xlp_pageaddr: pg_control.checkPointCopy.redo - SizeOfXLogLongPHD as u64,

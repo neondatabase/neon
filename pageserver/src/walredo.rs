@@ -305,7 +305,11 @@ impl PostgresRedoManagerInternal {
                     let mut status = 0;
                     let tag_blknum = match tag {
                         ObjectTag::Clog(slru) => slru.blknum,
-                        _ => panic!("Not CLOG object tag"),
+                        ObjectTag::TwoPhase(_) => {
+                            assert!(info == pg_constants::XLOG_XACT_PREPARE);
+                            0 // not used by XLOG_XACT_PREPARE
+                        }
+                        _ => panic!("Not valid XACT object tag {:?}", tag),
                     };
                     if info == pg_constants::XLOG_XACT_COMMIT
                         || info == pg_constants::XLOG_XACT_COMMIT_PREPARED

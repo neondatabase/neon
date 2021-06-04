@@ -138,8 +138,7 @@ impl Repository for ObjectRepository {
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, at_lsn: Lsn) -> Result<()> {
-        // just to check the source timeline exists
-        let _ = self.get_timeline(src)?;
+        let src_timeline = self.get_timeline(src)?;
 
         // Write a metadata key, noting the ancestor of th new timeline. There is initially
         // no data in it, but all the read-calls know to look into the ancestor.
@@ -156,6 +155,19 @@ impl Repository for ObjectRepository {
             &ObjectValue::ser(&val)?,
         )?;
 
+        // Copy non-rel objects
+        for tag in src_timeline.list_nonrels(at_lsn)? {
+            match tag {
+                ObjectTag::TimelineMetadataTag => {} // skip it
+                _ => {
+                    let img = src_timeline.get_page_at_lsn_nowait(tag, at_lsn)?;
+                    let val = ObjectValue::Page(img);
+                    let key = ObjectKey { timeline: dst, tag };
+                    let lsn = if tag.is_versioned() { at_lsn } else { Lsn(0) };
+                    self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -253,6 +265,50 @@ impl Timeline for ObjectTimeline {
         let lsn = self.wait_lsn(req_lsn)?;
 
         self.get_page_at_lsn_nowait(tag, lsn)
+    }
+
+    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes> {
+        // Look up the page entry. If it's a page image, return that. If it's a WAL record,
+        // ask the WAL redo service to reconstruct the page image from the WAL records.
+        let searchkey = ObjectKey {
+            timeline: self.timelineid,
+            tag,
+        };
+        let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
+
+        if let Some((version_lsn, value)) = iter.next().transpose()? {
+            let page_img: Bytes;
+
+            match ObjectValue::des(&value)? {
+                ObjectValue::Page(img) => {
+                    page_img = img;
+                }
+                ObjectValue::WALRecord(_rec) => {
+                    // Request the WAL redo manager to apply the WAL records for us.
+                    let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
+                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
+
+                    self.put_page_image(tag, lsn, page_img.clone())?;
+                }
+                x => bail!("Unexpected object value: {:?}", x),
+            }
+            // FIXME: assumes little-endian. Only used for the debugging log though
+            let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
+            let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
+            trace!(
+                "Returning page with LSN {:X}/{:X} for {:?} from {} (request {})",
+                page_lsn_hi,
+                page_lsn_lo,
+                tag,
+                version_lsn,
+                lsn
+            );
+            return Ok(page_img);
+        }
+        static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+        trace!("page {:?} at {} not found", tag, lsn);
+        Ok(Bytes::from_static(&ZERO_PAGE))
+        /* return Err("could not find page image")?; */
     }
 
     /// Get size of relation
@@ -553,50 +609,6 @@ impl Timeline for ObjectTimeline {
 }
 
 impl ObjectTimeline {
-    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes> {
-        // Look up the page entry. If it's a page image, return that. If it's a WAL record,
-        // ask the WAL redo service to reconstruct the page image from the WAL records.
-        let searchkey = ObjectKey {
-            timeline: self.timelineid,
-            tag,
-        };
-        let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
-
-        if let Some((version_lsn, value)) = iter.next().transpose()? {
-            let page_img: Bytes;
-
-            match ObjectValue::des(&value)? {
-                ObjectValue::Page(img) => {
-                    page_img = img;
-                }
-                ObjectValue::WALRecord(_rec) => {
-                    // Request the WAL redo manager to apply the WAL records for us.
-                    let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
-                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
-
-                    self.put_page_image(tag, lsn, page_img.clone())?;
-                }
-                x => bail!("Unexpected object value: {:?}", x),
-            }
-            // FIXME: assumes little-endian. Only used for the debugging log though
-            let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
-            let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
-            trace!(
-                "Returning page with LSN {:X}/{:X} for {:?} from {} (request {})",
-                page_lsn_hi,
-                page_lsn_lo,
-                tag,
-                version_lsn,
-                lsn
-            );
-            return Ok(page_img);
-        }
-        static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-        trace!("page {:?} at {} not found", tag, lsn);
-        Ok(Bytes::from_static(&ZERO_PAGE))
-        /* return Err("could not find page image")?; */
-    }
-
     ///
     /// Internal function to get relation size at given LSN.
     ///

@@ -127,9 +127,6 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // Remove pg_wal
     fs::remove_dir_all(tmppath.join("pg_wal"))?;
 
-    force_crash_recovery(&tmppath)?;
-    println!("updated pg_control");
-
     // Move the data directory as an initial base backup.
     // FIXME: It would be enough to only copy the non-relation files here, the relation
     // data was already loaded into the repository.
@@ -345,6 +342,7 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
     bail!("could not parse point-in-time {}", s);
 }
 
+<<<<<<< HEAD
 // If control file says the cluster was shut down cleanly, modify it, to mark
 // it as crashed. That forces crash recovery when you start the cluster.
 //
@@ -366,6 +364,8 @@ fn force_crash_recovery(datadir: &Path) -> Result<()> {
     Ok(())
 }
 
+=======
+>>>>>>> Fix various bugs caused by switch to new storage model
 fn create_timeline(conf: &PageServerConf, ancestor: Option<PointInTime>) -> Result<ZTimelineId> {
     // Create initial timeline
     let mut tli_buf = [0u8; 16];

@@ -903,7 +903,7 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             });
             blk.will_init = true;
             blocks.push(blk);
-            info!("Prepare transaction {}", xlogrec.xl_xid);
+            debug!("Prepare transaction {}", xlogrec.xl_xid);
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_DBASE_ID {
         let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;

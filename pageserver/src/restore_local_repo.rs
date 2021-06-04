@@ -254,7 +254,6 @@ fn import_slru_file(
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
     let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
-
     let mut blknum: u32 = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
     loop {
         let r = file.read_exact(&mut buf);
@@ -291,9 +290,13 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let pg_control_bytes = timeline.get_page_at_lsn(ObjectTag::ControlFile, Lsn(0))?;
-    let pg_control = decode_pg_control(pg_control_bytes)?;
-    let mut checkpoint = pg_control.checkPointCopy.clone();
+    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, Lsn(0))?;
+    let mut checkpoint = decode_checkpoint(checkpoint_bytes)?;
+    if checkpoint.nextXid.value == 0 {
+        let pg_control_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, Lsn(0))?;
+        let pg_control = decode_pg_control(pg_control_bytes)?;
+        checkpoint = pg_control.checkPointCopy;
+    }
 
     loop {
         // FIXME: assume postgresql tli 1 for now
@@ -375,14 +378,17 @@ pub fn save_decoded_record(
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
     for blk in decoded.blocks.iter() {
-        let rec = WALRecord {
-            lsn,
-            will_init: blk.will_init || blk.apply_image,
-            rec: recdata.clone(),
-            main_data_offset: decoded.main_data_offset as u32,
-        };
-
-        timeline.put_wal_record(blk.tag, rec)?;
+        if blk.will_drop {
+            timeline.put_unlink(blk.tag, lsn)?;
+        } else {
+            let rec = WALRecord {
+                lsn,
+                will_init: blk.will_init || blk.apply_image,
+                rec: recdata.clone(),
+                main_data_offset: decoded.main_data_offset as u32,
+            };
+            timeline.put_wal_record(blk.tag, rec)?;
+        }
     }
 
     // Handle a few special record types
@@ -447,9 +453,9 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
                 blknum,
             });
 
-            let content = timeline.get_page_at_lsn(src_key, req_lsn)?;
+            let content = timeline.get_page_at_lsn_nowait(src_key, req_lsn)?;
 
-            info!("copying block {:?} to {:?}", src_key, dst_key);
+            debug!("copying block {:?} to {:?}", src_key, dst_key);
 
             timeline.put_page_image(dst_key, lsn, content)?;
             num_blocks_copied += 1;
@@ -461,6 +467,23 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
         }
 
         num_rels_copied += 1;
+    }
+    // Copy relfilemap
+    for tag in timeline.list_nonrels(req_lsn)? {
+        match tag {
+            ObjectTag::FileNodeMap(db) => {
+                if db.spcnode == src_tablespace_id && db.dbnode == src_db_id {
+                    let img = timeline.get_page_at_lsn_nowait(tag, req_lsn)?;
+                    let new_tag = ObjectTag::FileNodeMap(DatabaseTag {
+                        spcnode: tablespace_id,
+                        dbnode: db_id,
+                    });
+                    timeline.put_page_image(new_tag, lsn, img)?;
+                    break;
+                }
+            }
+            _ => {} // do nothing
+        }
     }
     info!(
         "Created database {}/{}, copied {} blocks in {} rels at {}",
