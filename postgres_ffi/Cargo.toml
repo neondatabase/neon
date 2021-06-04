@@ -20,6 +20,7 @@ log = "0.4.14"
 memoffset = "0.6.2"
 thiserror = "1.0"
 workspace_hack = { path = "../workspace_hack" }
+zenith_utils = { path = "../zenith_utils" }
 
 [build-dependencies]
 bindgen = "0.57"

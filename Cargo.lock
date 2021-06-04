@@ -1309,6 +1309,7 @@ dependencies = [
  "regex",
  "thiserror",
  "workspace_hack",
+ "zenith_utils",
 ]
 
 [[package]]
