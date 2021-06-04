@@ -537,16 +537,17 @@ mod tests {
         assert_eq!(None, snapshot.next().transpose()?);
 
         // add a page and advance the last valid LSN
+		let rel = TESTREL_A;
         let buf = TEST_BUF(1);
         tline.put_page_image(buf, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
         tline.advance_last_valid_lsn(Lsn(1));
         let mut snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
         let expected_page = RelationUpdate {
-            rel: buf.rel,
+            rel,
             lsn: Lsn(1),
             update: Update::Page {
-                blknum: buf.blknum,
+                blknum: 1,
                 img: TEST_IMG("blk 1 @ lsn 1"),
             },
         };
@@ -554,7 +555,7 @@ mod tests {
         assert_eq!(None, snapshot.next().transpose()?);
 
         // truncate to zero, but don't advance the last valid LSN
-        tline.put_truncation(buf.rel, Lsn(2), 0)?;
+        tline.put_truncation(rel, Lsn(2), 0)?;
         let mut snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
@@ -566,7 +567,7 @@ mod tests {
         assert_eq!(snapshot.lsn(), Lsn(2));
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         let expected_truncate = RelationUpdate {
-            rel: buf.rel,
+            rel,
             lsn: Lsn(2),
             update: Update::Truncate { n_blocks: 0 },
         };
