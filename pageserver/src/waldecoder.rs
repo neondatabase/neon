@@ -5,7 +5,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use postgres_ffi::pg_constants;
-use postgres_ffi::xlog_utils::XLogRecord;
+use postgres_ffi::xlog_utils::*;
 use std::cmp::min;
 use std::str;
 use thiserror::Error;
@@ -31,10 +31,6 @@ pub struct XLogPageHeaderData {
     xlp_rem_len: u32,  /* total len of remaining data for record */
 }
 
-// FIXME: this assumes MAXIMUM_ALIGNOF 8. There are 4 padding bytes at end
-#[allow(non_upper_case_globals)]
-const SizeOfXLogShortPHD: usize = 2 + 2 + 4 + 8 + 4 + 4;
-
 #[repr(C)]
 #[derive(Debug)]
 pub struct XLogLongPageHeaderData {
@@ -43,10 +39,6 @@ pub struct XLogLongPageHeaderData {
     xlp_seg_size: u32,       /* just as a cross-check */
     xlp_xlog_blcksz: u32,    /* just as a cross-check */
 }
-
-// FIXME: this assumes MAXIMUM_ALIGNOF 8.
-#[allow(non_upper_case_globals)]
-const SizeOfXLogLongPHD: usize = (2 + 2 + 4 + 8 + 4) + 4 + 8 + 4 + 4;
 
 #[allow(dead_code)]
 pub struct WalStreamDecoder {
@@ -104,7 +96,7 @@ impl WalStreamDecoder {
             if self.lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE) == 0 {
                 // parse long header
 
-                if self.inputbuf.remaining() < SizeOfXLogLongPHD {
+                if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_LONG_PHD {
                     return Ok(None);
                 }
 
@@ -117,10 +109,10 @@ impl WalStreamDecoder {
                 }
                 // TODO: verify the remaining fields in the header
 
-                self.lsn += SizeOfXLogLongPHD as u64;
+                self.lsn += XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
                 continue;
             } else if self.lsn.block_offset() == 0 {
-                if self.inputbuf.remaining() < SizeOfXLogShortPHD {
+                if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_SHORT_PHD {
                     return Ok(None);
                 }
 
@@ -133,7 +125,7 @@ impl WalStreamDecoder {
                 }
                 // TODO: verify the remaining fields in the header
 
-                self.lsn += SizeOfXLogShortPHD as u64;
+                self.lsn += XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
                 continue;
             } else if self.padlen > 0 {
                 if self.inputbuf.remaining() < self.padlen as usize {
@@ -154,7 +146,7 @@ impl WalStreamDecoder {
                 // read xl_tot_len FIXME: assumes little-endian
                 self.startlsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
-                if xl_tot_len < SizeOfXLogRecord {
+                if (xl_tot_len as usize) < XLOG_SIZE_OF_XLOG_RECORD {
                     return Err(WalDecodeError {
                         msg: format!("invalid xl_tot_len {}", xl_tot_len),
                         lsn: self.lsn,
@@ -304,9 +296,6 @@ impl DecodedBkpBlock {
     }
 }
 
-#[allow(non_upper_case_globals)]
-const SizeOfXLogRecord: u32 = 24;
-
 pub struct DecodedWALRecord {
     pub xl_info: u8,
     pub xl_rmid: u8,
@@ -353,7 +342,7 @@ pub struct XlSmgrTruncate {
 impl XlSmgrTruncate {
     pub fn decode(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
         let mut buf = decoded.record.clone();
-        buf.advance((SizeOfXLogRecord + 2) as usize);
+        buf.advance((XLOG_SIZE_OF_XLOG_RECORD + 2) as usize);
         XlSmgrTruncate {
             blkno: buf.get_u32_le(),
             rnode: RelFileNode {
@@ -378,7 +367,7 @@ pub struct XlCreateDatabase {
 impl XlCreateDatabase {
     pub fn decode(decoded: &DecodedWALRecord) -> XlCreateDatabase {
         let mut buf = decoded.record.clone();
-        buf.advance((SizeOfXLogRecord + 2) as usize);
+        buf.advance((XLOG_SIZE_OF_XLOG_RECORD + 2) as usize);
         XlCreateDatabase {
             db_id: buf.get_u32_le(),
             tablespace_id: buf.get_u32_le(),
@@ -569,9 +558,9 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         xlogrec.xl_info
     );
 
-    let remaining = xlogrec.xl_tot_len - SizeOfXLogRecord;
+    let remaining: usize = xlogrec.xl_tot_len as usize - XLOG_SIZE_OF_XLOG_RECORD;
 
-    if buf.remaining() != remaining as usize {
+    if buf.remaining() != remaining {
         //TODO error
     }
 
