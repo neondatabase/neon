@@ -643,11 +643,16 @@ impl ObjectTimeline {
                     for vers in self.obj_store.object_versions(&key, horizon)? {
                         let lsn = vers.0;
                         let rel_meta = RelationSizeEntry::des(&vers.1)?;
-                        if let RelationSizeEntry::Size(size) = rel_meta {
-                            max_size = max(max_size, size);
-                        } else if last_version {
-                            relation_dropped = true;
-                            info!("Relation {:?} dropped", rels);
+                        // If relation is dropped at the horizon,
+                        // we can remove all its versions including last (Unlink)
+                        match rel_meta {
+                            RelationSizeEntry::Size(size) => max_size = max(max_size, size),
+                            RelationSizeEntry::Unlink => {
+                                if last_version {
+                                    relation_dropped = true;
+                                    info!("Relation {:?} dropped", rels);
+                                }
+                            }
                         }
                         if last_version {
                             last_version = false;

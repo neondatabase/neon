@@ -31,6 +31,21 @@ impl StorageKey {
     }
 }
 
+///
+/// RocksDB very inefficiently delete random record. Instead of it we have to use merge
+/// filter, which allows to throw away records at LSM merge phase.
+/// Unfortunately, it is hard (if ever possible)  to determine whether version can be removed
+/// at merge time. Version ca be removed if:
+/// 1. It is above PITR horizon (we need to get current LSN and gc_horizon from config)
+/// 2. Page is reconstructed at horizon (all WAL records above horizon are applied and can be removed)
+///
+/// So we have GC process which reconstructs pages at horizon and mark deteriorated WAL record
+/// for deletion. To mark object for deletion we can either set some flag in object itself.
+/// But it is complicated with new object value format, because RocksDB storage knows nothing about
+/// this format. Also updating whole record just to set one bit seems to be inefficient in any case.
+/// This is why we keep keys of marked for deletion versions in HashSet in memory.
+/// When LSM merge filter found key in this map, it removes it from the set preventing memory overflow.
+///
 struct GarbageCollector {
     garbage: Mutex<HashSet<Vec<u8>>>,
 }
@@ -42,11 +57,14 @@ impl GarbageCollector {
         }
     }
 
+    /// Called by GC to mark version as delete
     fn mark_for_deletion(&self, key: &[u8]) {
         let mut garbage = self.garbage.lock().unwrap();
         garbage.insert(key.to_vec());
     }
 
+    /// Called by LSM merge filter. If it finds key in the set, then
+    /// it doesn't merge it and removes from this set.
     fn was_deleted(&self, key: &[u8]) -> bool {
         let key = key.to_vec();
         let mut garbage = self.garbage.lock().unwrap();
@@ -211,8 +229,8 @@ impl RocksObjectStore {
         let path = conf.workdir.join("rocksdb-storage");
         let gc = Arc::new(GarbageCollector::new());
         let gc_ref = gc.clone();
-        opts.set_compaction_filter("ttl", move |_level: u32, _key: &[u8], _val: &[u8]| {
-            if gc_ref.was_deleted(_key) {
+        opts.set_compaction_filter("ttl", move |_level: u32, key: &[u8], _val: &[u8]| {
+            if gc_ref.was_deleted(key) {
                 rocksdb::compaction_filter::Decision::Remove
             } else {
                 rocksdb::compaction_filter::Decision::Keep
