@@ -25,7 +25,6 @@ fn main() {
         //
         .whitelist_type("ControlFileData")
         .whitelist_var("PG_CONTROL_FILE_SIZE")
-        .whitelist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
         .whitelist_type("DBState")
         //
         // Path the server include dir. It is in tmp_install/include/server, if you did

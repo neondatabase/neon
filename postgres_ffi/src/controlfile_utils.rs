@@ -23,15 +23,20 @@
 //! information. You can use PostgreSQL's pg_controldata utility to view its
 //! contents.
 //!
-use crate::{ControlFileData, PG_CONTROLFILEDATA_OFFSETOF_CRC, PG_CONTROL_FILE_SIZE};
+use crate::{ControlFileData, PG_CONTROL_FILE_SIZE};
 
 use anyhow::{bail, Result};
 use bytes::{Bytes, BytesMut};
 
-// sizeof(ControlFileData)
+/// Equivalent to sizeof(ControlFileData) in C
 const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
-// offsetof(ControlFileData, crc)
-const OFFSETOF_CRC: usize = PG_CONTROLFILEDATA_OFFSETOF_CRC as usize;
+
+/// Compute the offset of the `crc` field within the `ControlFileData` struct.
+/// Equivalent to offsetof(ControlFileData, crc) in C.
+// Someday this can be const when the right compiler features land.
+fn pg_control_crc_offset() -> usize {
+    memoffset::offset_of!(ControlFileData, crc)
+}
 
 
 ///
@@ -47,6 +52,7 @@ pub fn decode_pg_control(buf: &[u8]) -> Result<ControlFileData> {
     }
 
     // Compute the expected CRC of the content.
+    let OFFSETOF_CRC = pg_control_crc_offset();
     let expectedcrc = crc32c::crc32c(&buf[0..OFFSETOF_CRC]);
 
     // Convert the slice into an array of the right size, and use `transmute` to
@@ -104,9 +110,8 @@ pub fn encode_pg_control(controlfile: &ControlFileData) -> Bytes {
         unsafe { std::mem::transmute::<ControlFileData, [u8; SIZEOF_CONTROLDATA]>(*controlfile) };
 
     // Recompute the CRC
-    let mut data_without_crc: [u8; OFFSETOF_CRC] = [0u8; OFFSETOF_CRC];
-    data_without_crc.copy_from_slice(&b[0..OFFSETOF_CRC]);
-    let newcrc = crc32c::crc32c(&data_without_crc);
+    let OFFSETOF_CRC = pg_control_crc_offset();
+    let newcrc = crc32c::crc32c(&b[0..OFFSETOF_CRC]);
 
     let mut buf = BytesMut::with_capacity(PG_CONTROL_FILE_SIZE as usize);
     buf.extend_from_slice(&b[0..OFFSETOF_CRC]);
