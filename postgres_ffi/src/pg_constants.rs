@@ -89,6 +89,9 @@ pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
 
 // From multixact.h
+pub const FIRST_MULTIXACT_ID: u32 = 1;
+pub const MAX_MULTIXACT_ID: u32 = 0xFFFFFFFF;
+
 pub const XLOG_MULTIXACT_ZERO_OFF_PAGE: u8 = 0x00;
 pub const XLOG_MULTIXACT_ZERO_MEM_PAGE: u8 = 0x10;
 pub const XLOG_MULTIXACT_CREATE_ID: u8 = 0x20;

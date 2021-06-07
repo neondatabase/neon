@@ -23,6 +23,9 @@ pub type MultiXactId = TransactionId;
 pub type MultiXactOffset = u32;
 pub type MultiXactStatus = u32;
 
+const MAX_MBR_BLKNO: u32 =
+    pg_constants::MAX_MULTIXACT_ID / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+
 #[allow(dead_code)]
 pub struct WalStreamDecoder {
     lsn: Lsn,
@@ -732,9 +735,11 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             blk.will_drop = true;
             checkpoint.oldestXid = buf.get_u32_le();
             checkpoint.oldestXidDB = buf.get_u32_le();
-            info!(
+            trace!(
                 "RM_CLOG_ID truncate blkno {} oldestXid {} oldestXidDB {}",
-                blknum, checkpoint.oldestXid, checkpoint.oldestXidDB
+                blknum,
+                checkpoint.oldestXid,
+                checkpoint.oldestXidDB
             );
         }
         trace!("RM_CLOG_ID updates block {}", blknum);
@@ -956,6 +961,11 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                         blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
                     });
                     blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
                 }
             }
         } else if info == pg_constants::XLOG_HEAP_DELETE {
@@ -973,6 +983,11 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                         blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
                     });
                     blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
                 }
             }
         } else if info == pg_constants::XLOG_HEAP_UPDATE
@@ -992,6 +1007,11 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                         blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
                     });
                     blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
                 }
             }
             if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0
@@ -1009,6 +1029,11 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                         blknum: tag1.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
                     });
                     blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 1 is expected to be relation buffer tag but it is {:?}",
+                        blocks[1].tag
+                    );
                 }
             }
         }
@@ -1033,6 +1058,11 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                         blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
                     });
                     blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
                 }
             }
         }
@@ -1062,11 +1092,26 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             let first_mbr_blkno = xlrec.moff / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
             let last_mbr_blkno =
                 (xlrec.moff + xlrec.nmembers - 1) / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-            for blknum in first_mbr_blkno..=last_mbr_blkno {
+            // The members SLRU can, in contrast to the offsets one, be filled to almost
+            // the full range at once. So we need to handle wraparound.
+            let mut blknum = first_mbr_blkno;
+            loop {
                 // Update members page
                 let mut blk = DecodedBkpBlock::new();
                 blk.tag = ObjectTag::MultiXactMembers(SlruBufferTag { blknum });
                 blocks.push(blk);
+
+                if blknum == last_mbr_blkno {
+                    // last block inclusive
+                    break;
+                }
+
+                // handle wraparound
+                if blknum == MAX_MBR_BLKNO {
+                    blknum = 0;
+                } else {
+                    blknum += 1;
+                }
             }
             if xlrec.mid >= checkpoint.nextMulti {
                 checkpoint.nextMulti = xlrec.mid + 1;
@@ -1094,6 +1139,8 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 xlrec.start_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
             let last_off_blkno =
                 xlrec.end_trunc_off / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            // Delete all the segments but the last one. The last segment can still
+            // contain, possibly partially, valid data.
             for blknum in first_off_blkno..last_off_blkno {
                 let mut blk = DecodedBkpBlock::new();
                 blk.tag = ObjectTag::MultiXactOffsets(SlruBufferTag { blknum });
@@ -1104,11 +1151,22 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
                 xlrec.start_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
             let last_mbr_blkno =
                 xlrec.end_trunc_memb / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-            for blknum in first_mbr_blkno..last_mbr_blkno {
+            // The members SLRU can, in contrast to the offsets one, be filled to almost
+            // the full range at once. So we need to handle wraparound.
+            let mut blknum = first_mbr_blkno;
+            // Delete all the segments but the last one. The last segment can still
+            // contain, possibly partially, valid data.
+            while blknum != last_mbr_blkno {
                 let mut blk = DecodedBkpBlock::new();
                 blk.tag = ObjectTag::MultiXactMembers(SlruBufferTag { blknum });
                 blk.will_drop = true;
                 blocks.push(blk);
+                // handle wraparound
+                if blknum == MAX_MBR_BLKNO {
+                    blknum = 0;
+                } else {
+                    blknum += 1;
+                }
             }
         } else {
             panic!()

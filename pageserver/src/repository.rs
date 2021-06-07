@@ -71,7 +71,8 @@ pub trait Timeline: Send + Sync {
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
 
-    /// Unlink object
+    /// Unlink object. This method is used for marking dropped relations
+    /// and removed segments of SLRUs.
     fn put_unlink(&self, tag: ObjectTag, lsn: Lsn) -> Result<()>;
 
     /// Remember the all WAL before the given LSN has been processed.

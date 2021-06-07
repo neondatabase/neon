@@ -17,8 +17,8 @@ use std::time::SystemTime;
 use tar::{Builder, Header};
 use walkdir::WalkDir;
 
-use crate::repository::{DatabaseTag, ObjectTag, Timeline};
-use crc32c::*;
+use crate::repository::{DatabaseTag, ObjectTag, SlruBufferTag, Timeline};
+use postgres_ffi::nonrelfile_utils::*;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
@@ -99,6 +99,9 @@ impl<'a> Basebackup<'a> {
         }
 
         // Generate non-relational files.
+		// Iteration is sorted order: all objects of the same time are grouped and traversed
+		// in key ascending order. For example all pg_xact records precede pg_multixact records and are sorted by block number.
+		// It allows to easily construct SLRU segments (32 blocks).
         for obj in self.timeline.list_nonrels(self.lsn)? {
             match obj {
                 ObjectTag::Clog(slru) =>
@@ -114,7 +117,7 @@ impl<'a> Basebackup<'a> {
                 _ => {}
             }
         }
-        self.finish_slru_segment()?; // write last non-completed Slru segment (if any)
+        self.finish_slru_segment()?; // write last non-completed SLRU segment (if any)
 		self.add_pgcontrol_file()?;
         self.ar.finish()?;
         debug!("all tarred up!");
@@ -122,7 +125,8 @@ impl<'a> Basebackup<'a> {
     }
 
     //
-    // Generate SRLU segment files from repository
+    // Generate SRLU segment files from repository. Path identifiers SLRU kind (pg_xact, pg_multixact/members, ...).
+    // Intiallly pass is empty string.
     //
     fn add_slru_segment(
         &mut self,
@@ -136,10 +140,11 @@ impl<'a> Basebackup<'a> {
             assert!(img.len() == pg_constants::BLCKSZ as usize);
             let segno = page / pg_constants::SLRU_PAGES_PER_SEGMENT;
             if self.slru_path != "" && (self.slru_segno != segno || self.slru_path != path) {
+                // Switch to new segment: save old one
                 let segname = format!("{}/{:>04X}", self.slru_path, self.slru_segno);
                 let header = new_tar_header(&segname, pg_constants::SLRU_SEG_SIZE as u64)?;
                 self.ar.append(&header, &self.slru_buf[..])?;
-                self.slru_buf = [0u8; pg_constants::SLRU_SEG_SIZE];
+                self.slru_buf = [0u8; pg_constants::SLRU_SEG_SIZE]; // reinitialize segment buffer
             }
             self.slru_segno = segno;
             self.slru_path = path;
@@ -151,8 +156,13 @@ impl<'a> Basebackup<'a> {
         Ok(())
     }
 
+    //
+    // We flush SLRU segments to the tarball once them are completed.
+    // This method is used to flush last (may be incompleted) segment.
+    //
     fn finish_slru_segment(&mut self) -> anyhow::Result<()> {
         if self.slru_path != "" {
+            // is there is some incompleted segment
             let segname = format!("{}/{:>04X}", self.slru_path, self.slru_segno);
             let header = new_tar_header(&segname, pg_constants::SLRU_SEG_SIZE as u64)?;
             self.ar.append(&header, &self.slru_buf[..])?;
@@ -167,7 +177,7 @@ impl<'a> Basebackup<'a> {
         let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
         info!("add_relmap_file {:?}", db);
         let path = if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
-            String::from("global/pg_filenode.map")
+            String::from("global/pg_filenode.map") // filenode map for global tablespace
         } else {
             // User defined tablespaces are not supported
             assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
@@ -182,18 +192,30 @@ impl<'a> Basebackup<'a> {
         Ok(())
     }
 
+    // Check transaction status
+    fn get_tx_status(&self, xid: TransactionId) -> anyhow::Result<u8> {
+        let blknum = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+        let tag = ObjectTag::Clog(SlruBufferTag { blknum });
+        let clog_page = self.timeline.get_page_at_lsn(tag, self.lsn)?;
+        let status = transaction_id_get_status(xid, &clog_page[..]);
+        Ok(status)
+    }
+
     //
     // Extract twophase state files
     //
     fn add_twophase_file(&mut self, tag: &ObjectTag, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
-        let mut buf = BytesMut::new();
-        buf.extend_from_slice(&img[..]);
-        let crc = crc32c::crc32c(&img[..]);
-        buf.put_u32_le(crc);
-        let path = format!("pg_twophase/{:>08X}", xid);
-        let header = new_tar_header(&path, buf.len() as u64)?;
-        self.ar.append(&header, &buf[..])?;
+        // Include in tarball two-phase files only of in-progress transactions
+        if self.get_tx_status(xid)? == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
+            let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
+            let mut buf = BytesMut::new();
+            buf.extend_from_slice(&img[..]);
+            let crc = crc32c::crc32c(&img[..]);
+            buf.put_u32_le(crc);
+            let path = format!("pg_twophase/{:>08X}", xid);
+            let header = new_tar_header(&path, buf.len() as u64)?;
+            self.ar.append(&header, &buf[..])?;
+        }
         Ok(())
     }
 
@@ -209,6 +231,7 @@ impl<'a> Basebackup<'a> {
             .get_page_at_lsn_nowait(ObjectTag::ControlFile, self.lsn)?;
         let mut pg_control = postgres_ffi::decode_pg_control(pg_control_bytes)?;
         let mut checkpoint = postgres_ffi::decode_checkpoint(checkpoint_bytes)?;
+
         // Here starts pg_resetwal inspired magic
         // Generate new pg_control and WAL needed for bootstrap
         let new_segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE) + 1;
@@ -240,60 +263,8 @@ impl<'a> Basebackup<'a> {
         );
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
-
-        let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
-
-        let hdr = XLogLongPageHeaderData {
-            std: {
-                XLogPageHeaderData {
-                    xlp_magic: XLOG_PAGE_MAGIC as u16,
-                    xlp_info: pg_constants::XLP_LONG_HEADER,
-                    xlp_tli: 1, // FIXME: always use Postgres timeline 1
-                    xlp_pageaddr: pg_control.checkPointCopy.redo - SizeOfXLogLongPHD as u64,
-                    xlp_rem_len: 0,
-                }
-            },
-            xlp_sysid: pg_control.system_identifier,
-            xlp_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32,
-            xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
-        };
-
-        let hdr_bytes = encode_xlog_long_phd(hdr);
-        seg_buf.extend_from_slice(&hdr_bytes);
-
-        let rec_hdr = XLogRecord {
-            xl_tot_len: (XLOG_SIZE_OF_XLOG_RECORD
-                + SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT
-                + SIZEOF_CHECKPOINT) as u32,
-            xl_xid: 0, //0 is for InvalidTransactionId
-            xl_prev: 0,
-            xl_info: pg_constants::XLOG_CHECKPOINT_SHUTDOWN,
-            xl_rmid: pg_constants::RM_XLOG_ID,
-            xl_crc: 0,
-        };
-
-        let mut rec_shord_hdr_bytes = BytesMut::new();
-        rec_shord_hdr_bytes.put_u8(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
-        rec_shord_hdr_bytes.put_u8(SIZEOF_CHECKPOINT as u8);
-
-        let rec_bytes = encode_xlog_record(rec_hdr);
-        let checkpoint_bytes = encode_checkpoint(pg_control.checkPointCopy);
-
-        //calculate record checksum
-        let mut crc = 0;
-        crc = crc32c_append(crc, &rec_shord_hdr_bytes[..]);
-        crc = crc32c_append(crc, &checkpoint_bytes[..]);
-        crc = crc32c_append(crc, &rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
-
-        seg_buf.extend_from_slice(&rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
-        seg_buf.put_u32_le(crc);
-        seg_buf.extend_from_slice(&rec_shord_hdr_bytes);
-        seg_buf.extend_from_slice(&checkpoint_bytes);
-
-        //zero out remainig file
-        seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
-
-        self.ar.append(&header, &seg_buf[..])?;
+        let wal_seg = generate_wal_segment(&pg_control);
+        self.ar.append(&header, &wal_seg[..])?;
         Ok(())
     }
 }
@@ -345,16 +316,23 @@ fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
     }
 }
 
+//
+// Check if it is relational file
+//
 fn is_rel_file_path(path: &str) -> bool {
     parse_rel_file_path(path).is_ok()
 }
 
+//
+// Create new tarball entry header
+//
 fn new_tar_header(path: &str, size: u64) -> anyhow::Result<Header> {
     let mut header = Header::new_gnu();
     header.set_size(size);
     header.set_path(path)?;
-    header.set_mode(0b110000000);
+    header.set_mode(0b110000000); // -rw-------
     header.set_mtime(
+        // use currenttime as last modified time
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()

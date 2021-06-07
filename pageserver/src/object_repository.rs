@@ -434,6 +434,8 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
+    /// Unlink object. This method is used for marking dropped relations
+    /// and removed segments of SLRUs.
     fn put_unlink(&self, tag: ObjectTag, lsn: Lsn) -> Result<()> {
         let key = ObjectKey {
             timeline: self.timelineid,

@@ -7,6 +7,7 @@
 // have been named the same as the corresponding PostgreSQL functions instead.
 //
 
+use crate::encode_checkpoint;
 use crate::pg_constants;
 use crate::CheckPoint;
 use crate::FullTransactionId;
@@ -17,6 +18,7 @@ use crate::XLOG_PAGE_MAGIC;
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
+use bytes::{BufMut, BytesMut};
 use crc32c::*;
 use log::*;
 use std::cmp::min;
@@ -382,4 +384,59 @@ impl CheckPoint {
             };
         }
     }
+}
+
+pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
+    let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
+
+    let hdr = XLogLongPageHeaderData {
+        std: {
+            XLogPageHeaderData {
+                xlp_magic: XLOG_PAGE_MAGIC as u16,
+                xlp_info: pg_constants::XLP_LONG_HEADER,
+                xlp_tli: 1, // FIXME: always use Postgres timeline 1
+                xlp_pageaddr: pg_control.checkPointCopy.redo - SizeOfXLogLongPHD as u64,
+                xlp_rem_len: 0,
+            }
+        },
+        xlp_sysid: pg_control.system_identifier,
+        xlp_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32,
+        xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
+    };
+
+    let hdr_bytes = encode_xlog_long_phd(hdr);
+    seg_buf.extend_from_slice(&hdr_bytes);
+
+    let rec_hdr = XLogRecord {
+        xl_tot_len: (XLOG_SIZE_OF_XLOG_RECORD
+            + SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT
+            + SIZEOF_CHECKPOINT) as u32,
+        xl_xid: 0, //0 is for InvalidTransactionId
+        xl_prev: 0,
+        xl_info: pg_constants::XLOG_CHECKPOINT_SHUTDOWN,
+        xl_rmid: pg_constants::RM_XLOG_ID,
+        xl_crc: 0,
+    };
+
+    let mut rec_shord_hdr_bytes = BytesMut::new();
+    rec_shord_hdr_bytes.put_u8(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
+    rec_shord_hdr_bytes.put_u8(SIZEOF_CHECKPOINT as u8);
+
+    let rec_bytes = encode_xlog_record(rec_hdr);
+    let checkpoint_bytes = encode_checkpoint(pg_control.checkPointCopy);
+
+    //calculate record checksum
+    let mut crc = 0;
+    crc = crc32c_append(crc, &rec_shord_hdr_bytes[..]);
+    crc = crc32c_append(crc, &checkpoint_bytes[..]);
+    crc = crc32c_append(crc, &rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
+
+    seg_buf.extend_from_slice(&rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
+    seg_buf.put_u32_le(crc);
+    seg_buf.extend_from_slice(&rec_shord_hdr_bytes);
+    seg_buf.extend_from_slice(&checkpoint_bytes);
+
+    //zero out remainig file
+    seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
+    seg_buf.freeze()
 }

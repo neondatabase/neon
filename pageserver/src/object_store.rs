@@ -72,9 +72,10 @@ pub trait ObjectStore: Send + Sync {
         lsn: Lsn,
     ) -> Result<HashSet<RelTag>>;
 
-    /// Iterate through all objects
+    /// Iterate through objects tags. If nonrel_only, then only non-relationa data is iterated.
     ///
     /// This is used to implement GC and preparing tarball for new node startup
+    /// Returns objects in increasing key-version order.
     fn list_objects<'a>(
         &'a self,
         timelineid: ZTimelineId,

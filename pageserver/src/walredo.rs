@@ -271,15 +271,20 @@ impl PostgresRedoManagerInternal {
 
         let apply_result: Result<Bytes, Error>;
         if let ObjectTag::RelationBuffer(buf_tag) = tag {
+            // Relational WAL records are applied using wal-redo-postgres
             apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
         } else {
+            // Non-relational WAL records we will aply ourselves.
             const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
             let mut page = BytesMut::new();
             if let Some(fpi) = base_img {
+                // If full-page image is provided, then use it...
                 page.extend_from_slice(&fpi[..]);
             } else {
+                //  otherwise initialize page with zeros
                 page.extend_from_slice(&ZERO_PAGE);
             }
+            // Apply all callected WAL records
             for record in records {
                 let mut buf = record.rec.clone();
 
@@ -298,9 +303,11 @@ impl PostgresRedoManagerInternal {
                 if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
                     let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
                     if info == pg_constants::CLOG_ZEROPAGE {
+                        // The only operation we need to implement is CLOG_ZEROPAGE
                         page.copy_from_slice(&ZERO_PAGE);
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
+                    // Transaction manager stuff
                     let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
                     let mut status = 0;
                     let tag_blknum = match tag {
@@ -316,10 +323,11 @@ impl PostgresRedoManagerInternal {
                     {
                         status = pg_constants::TRANSACTION_STATUS_COMMITTED;
                         if info == pg_constants::XLOG_XACT_COMMIT {
+                            // status of 2PC transaction will be set later
                             transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
                         }
-                        //handle subtrans
                         let _xact_time = buf.get_i64_le();
+                        // decode xinfo
                         let mut xinfo = 0;
                         if xlogrec.xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
                             xinfo = buf.get_u32_le();
@@ -329,6 +337,7 @@ impl PostgresRedoManagerInternal {
                             }
                         }
 
+                        // handle subtrans
                         if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
                             let nsubxacts = buf.get_i32_le();
                             for _i in 0..nsubxacts {
@@ -343,6 +352,7 @@ impl PostgresRedoManagerInternal {
                             }
                         }
                         if info == pg_constants::XLOG_XACT_COMMIT_PREPARED {
+                            // Do not need to handle dropped relations here, just need to skip them
                             if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
                                 let nrels = buf.get_i32_le();
                                 for _i in 0..nrels {
@@ -358,6 +368,7 @@ impl PostgresRedoManagerInternal {
                                     );
                                 }
                             }
+                            // Skip invalidations
                             if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
                                 let nmsgs = buf.get_i32_le();
                                 for _i in 0..nmsgs {
@@ -365,6 +376,7 @@ impl PostgresRedoManagerInternal {
                                     buf.advance(sizeof_shared_invalidation_message);
                                 }
                             }
+                            // Set status of 2PC transaction
                             assert!((xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE) != 0);
                             let xid = buf.get_u32_le();
                             transaction_id_set_status(xid, status, &mut page);
@@ -374,10 +386,12 @@ impl PostgresRedoManagerInternal {
                     {
                         status = pg_constants::TRANSACTION_STATUS_ABORTED;
                         if info == pg_constants::XLOG_XACT_ABORT {
+                            // status of 2PC transaction will be set later
                             transaction_id_set_status(xlogrec.xl_xid, status, &mut page);
                         }
                         //handle subtrans
                         let _xact_time = buf.get_i64_le();
+                        // decode xinfo
                         let mut xinfo = 0;
                         if xlogrec.xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
                             xinfo = buf.get_u32_le();
@@ -387,6 +401,7 @@ impl PostgresRedoManagerInternal {
                             }
                         }
 
+                        // handle subtrans
                         if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
                             let nsubxacts = buf.get_i32_le();
                             for _i in 0..nsubxacts {
@@ -400,6 +415,7 @@ impl PostgresRedoManagerInternal {
                             }
                         }
                         if info == pg_constants::XLOG_XACT_ABORT_PREPARED {
+                            // Do not need to handle dropped relations here, just need to skip them
                             if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
                                 let nrels = buf.get_i32_le();
                                 for _i in 0..nrels {
@@ -415,6 +431,7 @@ impl PostgresRedoManagerInternal {
                                     );
                                 }
                             }
+                            // Skip invalidations
                             if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
                                 let nmsgs = buf.get_i32_le();
                                 for _i in 0..nmsgs {
@@ -422,6 +439,7 @@ impl PostgresRedoManagerInternal {
                                     buf.advance(sizeof_shared_invalidation_message);
                                 }
                             }
+                            // Set status of 2PC transaction
                             assert!((xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE) != 0);
                             let xid = buf.get_u32_le();
                             transaction_id_set_status(xid, status, &mut page);
@@ -437,10 +455,12 @@ impl PostgresRedoManagerInternal {
                                record.main_data_offset, record.rec.len());
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
+                    // Multiexact operations
                     let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
                     if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE
                         || info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE
                     {
+                        // Just need to ero page
                         page.copy_from_slice(&ZERO_PAGE);
                     } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                         let xlrec = XlMultiXactCreate::decode(&mut buf);
@@ -470,6 +490,7 @@ impl PostgresRedoManagerInternal {
                                 }
                             }
                         } else {
+                            // Multixact offsets SLRU
                             let offs = (xlrec.mid % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32
                                 * 4) as usize;
                             LittleEndian::write_u32(&mut page[offs..offs + 4], xlrec.moff);
@@ -478,6 +499,7 @@ impl PostgresRedoManagerInternal {
                         panic!();
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
+                    // Ralation map file has size 512 bytes
                     page.clear();
                     page.extend_from_slice(&buf[12..]); // skip xl_relmap_update
                     assert!(page.len() == 512); // size of pg_filenode.map
