@@ -4,6 +4,10 @@
 //! TODO: this module has nothing to do with PostgreSQL pg_basebackup.
 //! It could use a better name.
 //!
+//! Stateless Postgres compute node is lauched by sending taball which contains on-relational data (multixacts, clog, filenodemaps, twophase files)
+//! and generate pg_control and dummy segment of WAL. This module is responsible for creation of such tarball from snapshot directry and
+//! data stored in object storage.
+//!
 use crate::ZTimelineId;
 use bytes::{BufMut, BytesMut};
 use log::*;
@@ -20,6 +24,9 @@ use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
 
+/// This is shorliving object only for the time of tarball creation,
+/// created mostly to avoid passing a lot of parameters between varyouds functions
+/// used for constructing tarball.
 pub struct Basebackup<'a> {
     ar: Builder<&'a mut dyn Write>,
     timeline: &'a Arc<dyn Timeline>,
@@ -49,7 +56,7 @@ impl<'a> Basebackup<'a> {
         }
     }
 
-	#[rustfmt::skip]
+    #[rustfmt::skip] // otherwise "cargo fmt" produce very strange formatting for macch arms of self.timeline.list_nonrels
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
         debug!("sending tarball of snapshot in {}", self.snappath);
         for entry in WalkDir::new(&self.snappath) {
@@ -76,15 +83,14 @@ impl<'a> Basebackup<'a> {
                     trace!("sending shared catalog {}", relpath.display());
                     self.ar.append_path_with_name(fullpath, relpath)?;
                 } else if !is_rel_file_path(relpath.to_str().unwrap()) {
-                    if entry.file_name() != "pg_filenode.map"
-                        && entry.file_name() != "pg_control"
+                    if entry.file_name() != "pg_filenode.map" // this files will be generated from object storage
                         && !relpath.starts_with("pg_xact/")
                         && !relpath.starts_with("pg_multixact/")
                     {
                         trace!("sending {}", relpath.display());
                         self.ar.append_path_with_name(fullpath, relpath)?;
                     }
-                } else {
+                } else {  // relation pages are loaded on demand and should not be included in tarball
                     trace!("not sending {}", relpath.display());
                 }
             } else {
@@ -92,6 +98,7 @@ impl<'a> Basebackup<'a> {
             }
         }
 
+        // Generate non-relational files.
         for obj in self.timeline.list_nonrels(self.lsn)? {
             match obj {
                 ObjectTag::Clog(slru) =>
@@ -107,7 +114,7 @@ impl<'a> Basebackup<'a> {
                 _ => {}
             }
         }
-        self.finish_slru_segment()?;
+        self.finish_slru_segment()?; // write last non-completed Slru segment (if any)
 		self.add_pgcontrol_file()?;
         self.ar.finish()?;
         debug!("all tarred up!");
@@ -194,13 +201,12 @@ impl<'a> Basebackup<'a> {
     // Add generated pg_control file
     //
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
-        let most_recent_lsn = Lsn(0);
         let checkpoint_bytes = self
             .timeline
-            .get_page_at_lsn_nowait(ObjectTag::Checkpoint, most_recent_lsn)?;
+            .get_page_at_lsn_nowait(ObjectTag::Checkpoint, self.lsn)?;
         let pg_control_bytes = self
             .timeline
-            .get_page_at_lsn_nowait(ObjectTag::ControlFile, most_recent_lsn)?;
+            .get_page_at_lsn_nowait(ObjectTag::ControlFile, self.lsn)?;
         let mut pg_control = postgres_ffi::decode_pg_control(pg_control_bytes)?;
         let mut checkpoint = postgres_ffi::decode_checkpoint(checkpoint_bytes)?;
         // Here starts pg_resetwal inspired magic

@@ -174,7 +174,7 @@ fn walreceiver_main(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
-    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, Lsn(0))?;
+    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
     let mut checkpoint = decode_checkpoint(checkpoint_bytes)?;
     trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
@@ -204,7 +204,7 @@ fn walreceiver_main(
                     if new_checkpoint_bytes != old_checkpoint_bytes {
                         timeline.put_page_image(
                             ObjectTag::Checkpoint,
-                            Lsn(0),
+                            lsn,
                             new_checkpoint_bytes,
                         )?;
                     }

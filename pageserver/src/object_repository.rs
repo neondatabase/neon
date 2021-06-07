@@ -163,8 +163,7 @@ impl Repository for ObjectRepository {
                     let img = src_timeline.get_page_at_lsn_nowait(tag, at_lsn)?;
                     let val = ObjectValue::Page(img);
                     let key = ObjectKey { timeline: dst, tag };
-                    let lsn = if tag.is_versioned() { at_lsn } else { Lsn(0) };
-                    self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
+                    self.obj_store.put(&key, at_lsn, &ObjectValue::ser(&val)?)?;
                 }
             }
         }
@@ -935,7 +934,7 @@ enum ObjectValue {
     /// RelationSize. We store it separately not only to ansver nblocks requests faster.
     /// We also need it to support relation truncation.
     RelationSize(u32),
-    /// TODO Add a comment
+    /// Tombstone for a dropped relation.
     Unlink,
     TimelineMetadata(MetadataEntry),
 }

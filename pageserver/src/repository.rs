@@ -276,17 +276,6 @@ pub enum ObjectTag {
     RelationBuffer(BufferTag),
 }
 
-impl ObjectTag {
-    pub fn is_versioned(&self) -> bool {
-        match self {
-            ObjectTag::Checkpoint => false,
-            ObjectTag::ControlFile => false,
-            ObjectTag::TimelineMetadataTag => false,
-            _ => true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALRecord {
     pub lsn: Lsn, // LSN at the *end* of the record
@@ -537,7 +526,7 @@ mod tests {
         assert_eq!(None, snapshot.next().transpose()?);
 
         // add a page and advance the last valid LSN
-		let rel = TESTREL_A;
+        let rel = TESTREL_A;
         let buf = TEST_BUF(1);
         tline.put_page_image(buf, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
         tline.advance_last_valid_lsn(Lsn(1));

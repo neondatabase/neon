@@ -66,12 +66,9 @@ pub fn import_timeline_from_postgres_datadir(
             None => continue,
 
             // These special files appear in the snapshot, but are not needed by the page server
-            Some("pg_control") => import_nonrel_file(
-                timeline,
-                Lsn(0), // control file is not versioned
-                ObjectTag::ControlFile,
-                &direntry.path(),
-            )?,
+            Some("pg_control") => {
+                import_nonrel_file(timeline, lsn, ObjectTag::ControlFile, &direntry.path())?
+            }
             Some("pg_filenode.map") => import_nonrel_file(
                 timeline,
                 lsn,
@@ -290,10 +287,11 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, Lsn(0))?;
+    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
     let mut checkpoint = decode_checkpoint(checkpoint_bytes)?;
     if checkpoint.nextXid.value == 0 {
-        let pg_control_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, Lsn(0))?;
+        let pg_control_bytes =
+            timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, startpoint)?;
         let pg_control = decode_pg_control(pg_control_bytes)?;
         checkpoint = pg_control.checkPointCopy;
     }
@@ -361,7 +359,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     }
     info!("reached end of WAL at {}", last_lsn);
     let checkpoint_bytes = encode_checkpoint(checkpoint);
-    timeline.put_page_image(ObjectTag::Checkpoint, Lsn(0), checkpoint_bytes)?;
+    timeline.put_page_image(ObjectTag::Checkpoint, last_lsn, checkpoint_bytes)?;
     Ok(())
 }
 
