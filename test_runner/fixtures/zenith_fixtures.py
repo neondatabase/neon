@@ -247,13 +247,13 @@ class Postgres:
 
         return self
 
-    def connstr(self, dbname='postgres'):
+    def connstr(self, dbname='postgres', username=None):
         """
         Build a libpq connection string for the Postgres instance.
         """
 
         conn_str = 'host={} port={} dbname={} user={}'.format(self.host, self.port, dbname,
-                                                              self.username)
+                                                              username or self.username)
 
         return conn_str
 
