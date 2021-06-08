@@ -78,11 +78,7 @@ impl<'a> Basebackup<'a> {
             } else if entry.file_type().is_symlink() {
                 error!("ignoring symlink in snapshot dir");
             } else if entry.file_type().is_file() {
-                // Shared catalogs are exempt
-                if relpath.starts_with("global/") {
-                    trace!("sending shared catalog {}", relpath.display());
-                    self.ar.append_path_with_name(fullpath, relpath)?;
-                } else if !is_rel_file_path(relpath.to_str().unwrap()) {
+                if !is_rel_file_path(relpath.to_str().unwrap()) {
                     if entry.file_name() != "pg_filenode.map" // this files will be generated from object storage
                         && !relpath.starts_with("pg_xact/")
                         && !relpath.starts_with("pg_multixact/")
