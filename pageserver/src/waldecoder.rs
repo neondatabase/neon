@@ -6,6 +6,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::XLogLongPageHeaderData;
+use postgres_ffi::XLogPageHeaderData;
+use postgres_ffi::XLogRecord;
+
 use std::cmp::min;
 use std::str;
 use thiserror::Error;

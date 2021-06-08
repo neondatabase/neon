@@ -131,5 +131,11 @@ pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
 pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
 
+/* From transam.h */
+pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
+pub const INVALID_TRANSACTION_ID: u32 = 0;
+pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
+pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
+
 /* FIXME: pageserver should request wal_seg_size from compute node */
 pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
