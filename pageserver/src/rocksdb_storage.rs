@@ -1,7 +1,9 @@
 //!
 //! An implementation of the ObjectStore interface, backed by RocksDB
 //!
-use crate::object_store::{ObjectKey, ObjectStore};
+use crate::object_store::{
+    AllObjectsIter, ObjectAny, ObjectKey, ObjectStore, ObjectVersion, ObjectsIter,
+};
 use crate::repository::{BufferTag, RelTag};
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -114,11 +116,7 @@ impl ObjectStore for RocksObjectStore {
 
     /// Iterate through page versions of given page, starting from the given LSN.
     /// The versions are walked in descending LSN order.
-    fn object_versions<'a>(
-        &'a self,
-        key: &ObjectKey,
-        lsn: Lsn,
-    ) -> Result<Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>> {
+    fn object_versions<'a>(&'a self, key: &ObjectKey, lsn: Lsn) -> Result<Box<ObjectsIter<'a>>> {
         let iter = RocksObjectVersionIter::new(&self.db, key, lsn)?;
         Ok(Box::new(iter))
     }
@@ -185,11 +183,7 @@ impl ObjectStore for RocksObjectStore {
     ///
     /// Returns objects in increasing key-version order.
     /// Returns all versions up to and including the specified LSN.
-    fn objects<'a>(
-        &'a self,
-        timeline: ZTimelineId,
-        lsn: Lsn,
-    ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>> {
+    fn objects<'a>(&'a self, timeline: ZTimelineId, lsn: Lsn) -> Result<Box<AllObjectsIter<'a>>> {
         let start_key = StorageKey::timeline_start(timeline);
         let start_key_bytes = StorageKey::ser(&start_key)?;
         let iter = self.db.iterator(rocksdb::IteratorMode::From(
@@ -283,7 +277,7 @@ impl<'a> RocksObjectVersionIter<'a> {
     }
 }
 impl<'a> Iterator for RocksObjectVersionIter<'a> {
-    type Item = (Lsn, Vec<u8>);
+    type Item = ObjectVersion;
 
     fn next(&mut self) -> std::option::Option<Self::Item> {
         if self.first_call {
@@ -300,9 +294,11 @@ impl<'a> Iterator for RocksObjectVersionIter<'a> {
             return None;
         }
         let val = self.dbiter.value().unwrap();
-        let result = val.to_vec();
 
-        Some((key.lsn, result))
+        Some(ObjectVersion {
+            lsn: key.lsn,
+            value: Box::from(val),
+        })
     }
 }
 
@@ -314,7 +310,7 @@ struct RocksObjects<'r> {
 
 impl<'r> Iterator for RocksObjects<'r> {
     // TODO consider returning Box<[u8]>
-    type Item = Result<(BufferTag, Lsn, Vec<u8>)>;
+    type Item = Result<ObjectAny>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_result().transpose()
@@ -322,8 +318,8 @@ impl<'r> Iterator for RocksObjects<'r> {
 }
 
 impl<'r> RocksObjects<'r> {
-    fn next_result(&mut self) -> Result<Option<(BufferTag, Lsn, Vec<u8>)>> {
-        for (key_bytes, v) in &mut self.iter {
+    fn next_result(&mut self) -> Result<Option<ObjectAny>> {
+        for (key_bytes, value) in &mut self.iter {
             let key = StorageKey::des(&key_bytes)?;
 
             if key.obj_key.timeline != self.timeline {
@@ -335,7 +331,11 @@ impl<'r> RocksObjects<'r> {
                 continue;
             }
 
-            return Ok(Some((key.obj_key.buf_tag, key.lsn, v.to_vec())));
+            return Ok(Some(ObjectAny {
+                buf_tag: key.obj_key.buf_tag,
+                lsn: key.lsn,
+                value,
+            }));
         }
 
         Ok(None)

@@ -14,6 +14,27 @@ pub struct ObjectKey {
     pub buf_tag: BufferTag,
 }
 
+/// A single version of an Object.
+pub struct ObjectVersion {
+    pub lsn: Lsn,
+    pub value: Box<[u8]>,
+}
+
+/// An iterator over `ObjectVersion`
+pub type ObjectsIter<'a> = dyn Iterator<Item = ObjectVersion> + 'a;
+
+/// A single version of an Object, and its tag.
+///
+/// This is basically a flattened form of `(BufferTag, ObjectVersion)`.
+pub struct ObjectAny {
+    pub buf_tag: BufferTag,
+    pub lsn: Lsn,
+    pub value: Box<[u8]>,
+}
+
+/// An iterator over `ObjectAny`
+pub type AllObjectsIter<'a> = dyn Iterator<Item = Result<ObjectAny>> + 'a;
+
 ///
 /// Low-level storage abstraction.
 ///
@@ -44,21 +65,13 @@ pub trait ObjectStore: Send + Sync {
     ///
     /// Returns all page versions in descending LSN order, along with the LSN
     /// of each page version.
-    fn object_versions<'a>(
-        &'a self,
-        key: &ObjectKey,
-        lsn: Lsn,
-    ) -> Result<Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>>;
+    fn object_versions<'a>(&'a self, key: &ObjectKey, lsn: Lsn) -> Result<Box<ObjectsIter<'a>>>;
 
     /// Iterate through versions of all objects in a timeline.
     ///
     /// Returns objects in increasing key-version order.
     /// Returns all versions up to and including the specified LSN.
-    fn objects<'a>(
-        &'a self,
-        timeline: ZTimelineId,
-        lsn: Lsn,
-    ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>>;
+    fn objects<'a>(&'a self, timeline: ZTimelineId, lsn: Lsn) -> Result<Box<AllObjectsIter<'a>>>;
 
     /// Iterate through all keys with given tablespace and database ID, and LSN <= 'lsn'.
     /// Both dbnode and spcnode can be InvalidId (0) which means get all relations in tablespace/cluster

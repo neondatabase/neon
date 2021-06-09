@@ -13,7 +13,9 @@
 //! until we find the page we're looking for, making a separate lookup into the
 //! key-value store for each timeline.
 
-use crate::object_store::{ObjectKey, ObjectStore};
+use crate::object_store::{
+    AllObjectsIter, ObjectAny, ObjectKey, ObjectStore, ObjectVersion, ObjectsIter,
+};
 use crate::repository::*;
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
@@ -250,7 +252,7 @@ impl Timeline for ObjectTimeline {
         let lsn = self.wait_lsn(req_lsn)?;
         let key = relation_size_key(self.timelineid, rel);
         let mut iter = self.object_versions(&*self.obj_store, &key, lsn)?;
-        if let Some((_key, _val)) = iter.next().transpose()? {
+        if iter.next().transpose()?.is_some() {
             debug!("Relation {} exists at {}", rel, lsn);
             return Ok(true);
         }
@@ -496,10 +498,10 @@ impl ObjectTimeline {
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
 
-        if let Some((version_lsn, value)) = iter.next().transpose()? {
+        if let Some(vers) = iter.next().transpose()? {
             let page_img: Bytes;
 
-            match PageEntry::des(&value)? {
+            match PageEntry::des(&vers.value)? {
                 PageEntry::Page(img) => {
                     page_img = img;
                 }
@@ -520,7 +522,7 @@ impl ObjectTimeline {
                 page_lsn_lo,
                 tag.rel,
                 tag.blknum,
-                version_lsn,
+                vers.lsn,
                 lsn
             );
             return Ok(page_img);
@@ -540,14 +542,14 @@ impl ObjectTimeline {
         let key = relation_size_key(self.timelineid, rel);
         let mut iter = self.object_versions(&*self.obj_store, &key, lsn)?;
 
-        if let Some((version_lsn, value)) = iter.next().transpose()? {
-            match RelationSizeEntry::des(&value)? {
+        if let Some(vers) = iter.next().transpose()? {
+            match RelationSizeEntry::des(&vers.value)? {
                 RelationSizeEntry::Size(nblocks) => {
                     trace!(
                         "relation {} has size {} at {} (request {})",
                         rel,
                         nblocks,
-                        version_lsn,
+                        vers.lsn,
                         lsn
                     );
                     Ok(Some(nblocks))
@@ -556,7 +558,7 @@ impl ObjectTimeline {
                     trace!(
                         "relation {} not found; it was dropped at lsn {}",
                         rel,
-                        version_lsn
+                        vers.lsn
                     );
                     Ok(None)
                 }
@@ -589,8 +591,8 @@ impl ObjectTimeline {
             buf_tag: tag,
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
-        while let Some((_key, value)) = iter.next().transpose()? {
-            match PageEntry::des(&value)? {
+        while let Some(vers) = iter.next().transpose()? {
+            match PageEntry::des(&vers.value)? {
                 PageEntry::Page(img) => {
                     // We have a base image. No need to dig deeper into the list of
                     // records
@@ -641,8 +643,8 @@ impl ObjectTimeline {
 
                     // Process relation metadata versions
                     for vers in self.obj_store.object_versions(&key, horizon)? {
-                        let lsn = vers.0;
-                        let rel_meta = RelationSizeEntry::des(&vers.1)?;
+                        let lsn = vers.lsn;
+                        let rel_meta = RelationSizeEntry::des(&vers.value)?;
                         // If relation is dropped at the horizon,
                         // we can remove all its versions including last (Unlink)
                         match rel_meta {
@@ -669,7 +671,7 @@ impl ObjectTimeline {
                         key.buf_tag.blknum = blknum;
                         last_version = true;
                         for vers in self.obj_store.object_versions(&key, horizon)? {
-                            let lsn = vers.0;
+                            let lsn = vers.lsn;
                             if last_version {
                                 last_version = false;
                                 truncated += 1;
@@ -750,7 +752,7 @@ impl ObjectTimeline {
 }
 
 struct ObjectHistory<'a> {
-    iter: Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>,
+    iter: Box<AllObjectsIter<'a>>,
     lsn: Lsn,
     last_relation_size: Option<(BufferTag, u32)>,
 }
@@ -805,7 +807,12 @@ impl<'a> ObjectHistory<'a> {
     }
 
     fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
-        while let Some((buf_tag, lsn, value)) = self.iter.next().transpose()? {
+        while let Some(ObjectAny {
+            buf_tag,
+            lsn,
+            value,
+        }) = self.iter.next().transpose()?
+        {
             if buf_tag.rel.forknum == pg_constants::ROCKSDB_SPECIAL_FORKNUM {
                 continue;
             }
@@ -923,7 +930,7 @@ struct ObjectVersionIter<'a> {
     buf_tag: BufferTag,
 
     /// Iterator on the current timeline.
-    current_iter: Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>,
+    current_iter: Box<ObjectsIter<'a>>,
 
     /// Ancestor of the current timeline being iterated.
     ancestor_timeline: Option<ZTimelineId>,
@@ -931,7 +938,7 @@ struct ObjectVersionIter<'a> {
 }
 
 impl<'a> Iterator for ObjectVersionIter<'a> {
-    type Item = Result<(Lsn, Vec<u8>)>;
+    type Item = Result<ObjectVersion>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_result().transpose()
@@ -946,7 +953,7 @@ impl<'a> ObjectVersionIter<'a> {
     /// Option of a Result, but it's more convenient to work with
     /// Result of a Option so that you can use ? to check for errors.
     ///
-    fn next_result(&mut self) -> Result<Option<(Lsn, Vec<u8>)>> {
+    fn next_result(&mut self) -> Result<Option<ObjectVersion>> {
         loop {
             // If there is another entry on the current timeline, return it.
             if let Some(result) = self.current_iter.next() {
