@@ -7,9 +7,9 @@
 // have been named the same as the corresponding PostgreSQL functions instead.
 //
 
-use crate::encode_checkpoint;
 use crate::pg_constants;
 use crate::CheckPoint;
+use crate::ControlFileData;
 use crate::FullTransactionId;
 use crate::XLogLongPageHeaderData;
 use crate::XLogPageHeaderData;
@@ -37,6 +37,7 @@ pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = std::mem::size_of::<XLogPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
+pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
@@ -398,7 +399,7 @@ pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
                 xlp_magic: XLOG_PAGE_MAGIC as u16,
                 xlp_info: pg_constants::XLP_LONG_HEADER,
                 xlp_tli: 1, // FIXME: always use Postgres timeline 1
-                xlp_pageaddr: pg_control.checkPointCopy.redo - SizeOfXLogLongPHD as u64,
+                xlp_pageaddr: pg_control.checkPointCopy.redo - XLOG_SIZE_OF_XLOG_LONG_PHD as u64,
                 xlp_rem_len: 0,
             }
         },
@@ -407,7 +408,7 @@ pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
         xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
     };
 
-    let hdr_bytes = encode_xlog_long_phd(hdr);
+    let hdr_bytes = hdr.encode();
     seg_buf.extend_from_slice(&hdr_bytes);
 
     let rec_hdr = XLogRecord {
@@ -425,8 +426,8 @@ pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
     rec_shord_hdr_bytes.put_u8(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
     rec_shord_hdr_bytes.put_u8(SIZEOF_CHECKPOINT as u8);
 
-    let rec_bytes = encode_xlog_record(rec_hdr);
-    let checkpoint_bytes = encode_checkpoint(pg_control.checkPointCopy);
+    let rec_bytes = rec_hdr.encode();
+    let checkpoint_bytes = pg_control.checkPointCopy.encode();
 
     //calculate record checksum
     let mut crc = 0;

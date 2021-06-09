@@ -42,7 +42,7 @@ use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
-use postgres_ffi::xlog_utils::XLogRecord;
+use postgres_ffi::XLogRecord;
 
 ///
 /// WAL Redo Manager is responsible for replaying WAL records.

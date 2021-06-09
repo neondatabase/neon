@@ -21,8 +21,8 @@ use crate::{PageServerConf, ZTimelineId};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use log::*;
+use postgres_ffi::pg_constants;
 use serde::{Deserialize, Serialize};
-use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex, RwLock};
@@ -725,62 +725,160 @@ impl ObjectTimeline {
                 // WAL is large enough to perform GC
                 let now = Instant::now();
                 let mut truncated = 0u64;
+                let mut inspected = 0u64;
                 let mut deleted = 0u64;
 
-                // Iterate through all relations
-                for rels in &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)? {
-                    let mut last_version = true;
-                    let mut key = relation_size_key(self.timelineid, *rels);
-                    let mut max_size = 0u32;
-                    let mut relation_dropped = false;
-
-                    // Process relation metadata versions
-                    for vers in self.obj_store.object_versions(&key, horizon)? {
-                        let lsn = vers.0;
-                        let rel_meta = RelationSizeEntry::des(&vers.1)?;
-                        // If relation is dropped at the horizon,
-                        // we can remove all its versions including last (Unlink)
-                        match rel_meta {
-                            RelationSizeEntry::Size(size) => max_size = max(max_size, size),
-                            RelationSizeEntry::Unlink => {
+                // Iterate through all objects in timeline
+                for obj in self
+                    .obj_store
+                    .list_objects(self.timelineid, false, last_lsn)?
+                {
+                    inspected += 1;
+                    match obj {
+                        // Prepared transactions
+                        ObjectTag::TwoPhase(prepare) => {
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                if self.get_tx_status(prepare.xid, horizon)?
+                                    != pg_constants::TRANSACTION_STATUS_IN_PROGRESS
+                                {
+                                    let lsn = vers.0;
+                                    self.obj_store.unlink(&key, lsn)?;
+                                    deleted += 1;
+                                }
+                            }
+                        }
+                        ObjectTag::RelationMetadata(_) => {
+                            // Do not need to reconstruct page images,
+                            // just delete all old versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
                                 if last_version {
-                                    relation_dropped = true;
-                                    info!("Relation {:?} dropped", rels);
+                                    let content = vers.1;
+                                    match ObjectValue::des(&content[..])? {
+                                        ObjectValue::Unlink => {
+                                            self.obj_store.unlink(&key, lsn)?;
+                                            deleted += 1;
+                                        }
+                                        _ => (), // preserve last version
+                                    }
+                                    last_version = false;
+                                    truncated += 1;
+                                } else {
+                                    self.obj_store.unlink(&key, lsn)?;
+                                    deleted += 1;
                                 }
                             }
                         }
-                        if last_version {
-                            last_version = false;
-                            if !relation_dropped {
-                                // preserve last version
-                                continue;
+                        ObjectTag::RelationBuffer(tag) => {
+                            // Reconstruct last page
+                            self.get_page_at_lsn_nowait(obj, last_lsn)?;
+
+                            // Reconstruct page at horizon unless relation was dropped
+                            // and delete all older versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
+                                if last_version {
+                                    truncated += 1;
+                                    last_version = false;
+                                    if let Some(rel_size) = self.relsize_get_nowait(tag.rel, lsn)? {
+                                        if rel_size > tag.blknum {
+                                            // preserve and materialize last version before deleting all preceeding
+                                            self.get_page_at_lsn_nowait(obj, lsn)?;
+                                            continue;
+                                        }
+                                        debug!("Drop last block {} of relation {:?} at {} because it is beyond relation size {}", tag.blknum, tag.rel, lsn, rel_size);
+                                    } else {
+                                        if let Some(rel_size) =
+                                            self.relsize_get_nowait(tag.rel, last_lsn)?
+                                        {
+                                            debug!("Preserve block {} of relation {:?} at {} because relation has size {} at {}", tag.rel, tag, lsn, rel_size, last_lsn);
+                                            continue;
+                                        }
+                                        debug!("Relation {:?} was dropped at {}", tag.rel, lsn);
+                                    }
+                                    // relation was dropped or truncated so this block can be removed
+                                }
+                                self.obj_store.unlink(&key, lsn)?;
+                                deleted += 1;
                             }
                         }
-                        self.obj_store.unlink(&key, lsn)?;
-                        deleted += 1;
-                    }
-                    // Now process all relation blocks
-                    for blknum in 0..max_size {
-                        key.buf_tag.blknum = blknum;
-                        last_version = true;
-                        for vers in self.obj_store.object_versions(&key, horizon)? {
-                            let lsn = vers.0;
-                            if last_version {
-                                last_version = false;
-                                truncated += 1;
-                                if !relation_dropped {
-                                    // preserve and materialize last version before deleting all preceeding
-                                    self.get_page_at_lsn_nowait(key.buf_tag, lsn)?;
-                                    continue;
+                        // SLRU-s
+                        ObjectTag::Clog(_)
+                        | ObjectTag::MultiXactOffsets(_)
+                        | ObjectTag::MultiXactMembers(_) => {
+                            // Materialize last version
+                            self.get_page_at_lsn_nowait(obj, last_lsn)?;
+
+                            // Remove old versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
+                                if last_version {
+                                    let content = vers.1;
+                                    match ObjectValue::des(&content[..])? {
+                                        ObjectValue::Unlink => {
+                                            self.obj_store.unlink(&key, lsn)?;
+                                            deleted += 1;
+                                        }
+                                        ObjectValue::WALRecord(_) => {
+                                            // preserve and materialize last version before deleting all preceeding
+                                            self.get_page_at_lsn_nowait(obj, lsn)?;
+                                        }
+                                        _ => {} // do nothing if already materialized
+                                    }
+                                    last_version = false;
+                                    truncated += 1;
+                                } else {
+                                    // delete deteriorated version
+                                    self.obj_store.unlink(&key, lsn)?;
+                                    deleted += 1;
                                 }
                             }
-                            self.obj_store.unlink(&key, lsn)?;
-                            deleted += 1;
                         }
+                        // versioned alwaysmaterialized objects: no need to reconstruct pages
+                        ObjectTag::Checkpoint | ObjectTag::ControlFile => {
+                            // Remove old versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
+                                if last_version {
+                                    // presrve last version
+                                    last_version = false;
+                                    truncated += 1;
+                                } else {
+                                    // delete deteriorated version
+                                    self.obj_store.unlink(&key, lsn)?;
+                                    deleted += 1;
+                                }
+                            }
+                        }
+                        _ => (), // do nothing
                     }
                 }
-                info!("Garbage collection completed in {:?}: {} version histories truncated, {} versions deleted",
-					  now.elapsed(), truncated, deleted);
+                info!("Garbage collection completed in {:?}:\n{} version chains inspected,  {} version histories truncated, {} versions deleted",
+					  now.elapsed(), inspected, truncated, deleted);
             }
         }
     }

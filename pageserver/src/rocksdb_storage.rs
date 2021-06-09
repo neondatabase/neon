@@ -175,16 +175,16 @@ impl ObjectStore for RocksObjectStore {
             let key = StorageKey::des(iter.key().unwrap())?;
             if let ObjectTag::RelationBuffer(buf_tag) = key.obj_key.tag {
                 if (spcnode != 0 && buf_tag.rel.spcnode != spcnode)
-					|| (dbnode != 0 && buf_tag.rel.dbnode != dbnode)
-				{
+                    || (dbnode != 0 && buf_tag.rel.dbnode != dbnode)
+                {
                     break;
                 }
                 if key.lsn < lsn {
                     rels.insert(buf_tag.rel);
                 }
-				let mut next_tag = buf_tag.clone();
-				next_tag.rel.relnode += 1; // skip to next relation
-				search_key = ObjectTag::RelationBuffernext_tag);
+                let mut next_tag = buf_tag.clone();
+                next_tag.rel.relnode += 1; // skip to next relation
+                search_key.obj_key.tag = ObjectTag::RelationBuffer(next_tag);
             } else {
                 break;
             }

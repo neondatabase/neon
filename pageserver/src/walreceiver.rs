@@ -176,7 +176,7 @@ fn walreceiver_main(
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
-    let mut checkpoint = decode_checkpoint(checkpoint_bytes)?;
+    let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
     trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
     while let Some(replication_message) = physical_stream.next()? {
@@ -196,12 +196,12 @@ fn walreceiver_main(
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    let old_checkpoint_bytes = encode_checkpoint(checkpoint);
+                    let old_checkpoint_bytes = checkpoint.encode();
                     let decoded = decode_wal_record(&mut checkpoint, recdata.clone());
                     restore_local_repo::save_decoded_record(&*timeline, &decoded, recdata, lsn)?;
                     last_rec_lsn = lsn;
 
-                    let new_checkpoint_bytes = encode_checkpoint(checkpoint);
+                    let new_checkpoint_bytes = checkpoint.encode();
                     if new_checkpoint_bytes != old_checkpoint_bytes {
                         timeline.put_page_image(
                             ObjectTag::Checkpoint,

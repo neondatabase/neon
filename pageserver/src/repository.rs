@@ -2,6 +2,8 @@ use crate::waldecoder::TransactionId;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
+use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -106,6 +108,15 @@ pub trait Timeline: Send + Sync {
     /// Relation size is increased implicitly and decreased with Truncate updates.
     // TODO ordering guarantee?
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>>;
+
+    // Check transaction status
+    fn get_tx_status(&self, xid: TransactionId, lsn: Lsn) -> anyhow::Result<u8> {
+        let blknum = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+        let tag = ObjectTag::Clog(SlruBufferTag { blknum });
+        let clog_page = self.get_page_at_lsn(tag, lsn)?;
+        let status = transaction_id_get_status(xid, &clog_page[..]);
+        Ok(status)
+    }
 }
 
 pub trait History: Iterator<Item = Result<RelationUpdate>> {

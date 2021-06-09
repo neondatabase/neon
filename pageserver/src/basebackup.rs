@@ -17,8 +17,7 @@ use std::time::SystemTime;
 use tar::{Builder, Header};
 use walkdir::WalkDir;
 
-use crate::repository::{DatabaseTag, ObjectTag, SlruBufferTag, Timeline};
-use postgres_ffi::nonrelfile_utils::*;
+use crate::repository::{DatabaseTag, ObjectTag, Timeline};
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
@@ -188,21 +187,14 @@ impl<'a> Basebackup<'a> {
         Ok(())
     }
 
-    // Check transaction status
-    fn get_tx_status(&self, xid: TransactionId) -> anyhow::Result<u8> {
-        let blknum = xid / pg_constants::CLOG_XACTS_PER_PAGE;
-        let tag = ObjectTag::Clog(SlruBufferTag { blknum });
-        let clog_page = self.timeline.get_page_at_lsn(tag, self.lsn)?;
-        let status = transaction_id_get_status(xid, &clog_page[..]);
-        Ok(status)
-    }
-
     //
     // Extract twophase state files
     //
     fn add_twophase_file(&mut self, tag: &ObjectTag, xid: TransactionId) -> anyhow::Result<()> {
         // Include in tarball two-phase files only of in-progress transactions
-        if self.get_tx_status(xid)? == pg_constants::TRANSACTION_STATUS_IN_PROGRESS {
+        if self.timeline.get_tx_status(xid, self.lsn)?
+            == pg_constants::TRANSACTION_STATUS_IN_PROGRESS
+        {
             let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
             let mut buf = BytesMut::new();
             buf.extend_from_slice(&img[..]);
@@ -225,8 +217,8 @@ impl<'a> Basebackup<'a> {
         let pg_control_bytes = self
             .timeline
             .get_page_at_lsn_nowait(ObjectTag::ControlFile, self.lsn)?;
-        let mut pg_control = postgres_ffi::decode_pg_control(pg_control_bytes)?;
-        let mut checkpoint = postgres_ffi::decode_checkpoint(checkpoint_bytes)?;
+        let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
+        let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
         // Here starts pg_resetwal inspired magic
         // Generate new pg_control and WAL needed for bootstrap
@@ -234,7 +226,7 @@ impl<'a> Basebackup<'a> {
 
         let new_lsn = XLogSegNoOffsetToRecPtr(
             new_segno,
-            SizeOfXLogLongPHD as u32,
+            XLOG_SIZE_OF_XLOG_LONG_PHD as u32,
             pg_constants::WAL_SEGMENT_SIZE,
         );
         checkpoint.redo = new_lsn;
@@ -247,7 +239,7 @@ impl<'a> Basebackup<'a> {
         pg_control.checkPointCopy = checkpoint;
 
         //send pg_control
-        let pg_control_bytes = postgres_ffi::encode_pg_control(pg_control);
+        let pg_control_bytes = pg_control.encode();
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
         self.ar.append(&header, &pg_control_bytes[..])?;
 
