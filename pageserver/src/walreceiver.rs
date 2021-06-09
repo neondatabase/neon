@@ -120,7 +120,10 @@ fn walreceiver_main(
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
-    let connect_cfg = format!("{} replication=true", wal_producer_connstr);
+    let connect_cfg = format!(
+        "{} application_name=pageserver replication=true",
+        wal_producer_connstr
+    );
 
     let mut rclient = Client::connect(&connect_cfg, NoTls)?;
     info!("connected!");
@@ -166,7 +169,7 @@ fn walreceiver_main(
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     while let Some(replication_message) = physical_stream.next()? {
-        match replication_message {
+        let status_update = match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.
@@ -226,12 +229,14 @@ fn walreceiver_main(
                     info!("caught up at LSN {}", endlsn);
                     caught_up = true;
                 }
+
+                Some(endlsn)
             }
 
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
                 let wal_end = keepalive.wal_end();
                 let timestamp = keepalive.timestamp();
-                let reply_requested: bool = keepalive.reply() != 0;
+                let reply_requested = keepalive.reply() != 0;
 
                 trace!(
                     "received PrimaryKeepAlive(wal_end: {}, timestamp: {:?} reply: {})",
@@ -239,20 +244,23 @@ fn walreceiver_main(
                     timestamp,
                     reply_requested,
                 );
-                if reply_requested {
-                    // TODO: More thought should go into what values are sent here.
-                    let last_lsn = PgLsn::from(u64::from(timeline.get_last_valid_lsn()));
-                    let write_lsn = last_lsn;
-                    let flush_lsn = last_lsn;
-                    let apply_lsn = PgLsn::from(0);
-                    let ts = SystemTime::now();
-                    const NO_REPLY: u8 = 0u8;
 
-                    physical_stream
-                        .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)?;
-                }
+                reply_requested.then(|| timeline.get_last_valid_lsn())
             }
-            _ => (),
+
+            _ => None,
+        };
+
+        if let Some(last_lsn) = status_update {
+            // TODO: More thought should go into what values are sent here.
+            let last_lsn = PgLsn::from(u64::from(last_lsn));
+            let write_lsn = last_lsn;
+            let flush_lsn = last_lsn;
+            let apply_lsn = PgLsn::from(0);
+            let ts = SystemTime::now();
+            const NO_REPLY: u8 = 0;
+
+            physical_stream.standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)?;
         }
     }
     Ok(())

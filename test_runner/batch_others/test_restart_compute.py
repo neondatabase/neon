@@ -1,5 +1,4 @@
 import psycopg2
-import time
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -37,13 +36,6 @@ def test_restart_compute(zenith_cli, pageserver, postgres, pg_bin):
     cur.execute("INSERT INTO foo VALUES ('bar2')")
     cur.execute('SELECT count(*) FROM foo')
     assert cur.fetchone() == (2, )
-
-    # FIXME: Currently, there is no guarantee that by the time the INSERT commits, the WAL
-    # has been streamed safely to the WAL safekeeper or page server. It is merely stored
-    # on the Postgres instance's local disk. Sleep a little, to give it time to be
-    # streamed. This should be removed, when we have the ability to run the Postgres
-    # instance -> safekeeper streaming in synchronous mode.
-    time.sleep(5)
 
     # Stop, and destroy the Postgres instance. Then recreate and restart it.
     pg_conn.close()

@@ -151,8 +151,11 @@ impl ComputeControlPlane {
         node.append_conf(
             "postgresql.conf",
             format!(
-                "shared_preload_libraries = zenith\n\
-                zenith.callmemaybe_connstring = '{}'\n", // FIXME escaping
+                concat!(
+                    "shared_preload_libraries = zenith\n",
+                    "synchronous_standby_names = 'pageserver'\n", // TODO: add a new function arg?
+                    "zenith.callmemaybe_connstring = '{}'\n", // FIXME escaping
+                ),
                 node.connstr()
             )
             .as_str(),
