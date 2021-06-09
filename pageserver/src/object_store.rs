@@ -65,13 +65,13 @@ pub trait ObjectStore: Send + Sync {
     ///
     /// Returns all page versions in descending LSN order, along with the LSN
     /// of each page version.
-    fn object_versions<'a>(&'a self, key: &ObjectKey, lsn: Lsn) -> Result<Box<ObjectsIter<'a>>>;
+    fn object_versions(&self, key: &ObjectKey, lsn: Lsn) -> Result<Box<ObjectsIter>>;
 
     /// Iterate through versions of all objects in a timeline.
     ///
     /// Returns objects in increasing key-version order.
     /// Returns all versions up to and including the specified LSN.
-    fn objects<'a>(&'a self, timeline: ZTimelineId, lsn: Lsn) -> Result<Box<AllObjectsIter<'a>>>;
+    fn objects(&self, timeline: ZTimelineId, lsn: Lsn) -> Result<Box<AllObjectsIter>>;
 
     /// Iterate through all keys with given tablespace and database ID, and LSN <= 'lsn'.
     /// Both dbnode and spcnode can be InvalidId (0) which means get all relations in tablespace/cluster

@@ -183,7 +183,7 @@ impl ObjectStore for RocksObjectStore {
     ///
     /// Returns objects in increasing key-version order.
     /// Returns all versions up to and including the specified LSN.
-    fn objects<'a>(&'a self, timeline: ZTimelineId, lsn: Lsn) -> Result<Box<AllObjectsIter<'a>>> {
+    fn objects(&self, timeline: ZTimelineId, lsn: Lsn) -> Result<Box<AllObjectsIter<'_>>> {
         let start_key = StorageKey::timeline_start(timeline);
         let start_key_bytes = StorageKey::ser(&start_key)?;
         let iter = self.db.iterator(rocksdb::IteratorMode::From(

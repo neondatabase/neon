@@ -757,7 +757,7 @@ struct ObjectHistory<'a> {
     last_relation_size: Option<(BufferTag, u32)>,
 }
 
-impl<'a> Iterator for ObjectHistory<'a> {
+impl Iterator for ObjectHistory<'_> {
     type Item = Result<RelationUpdate>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -765,13 +765,13 @@ impl<'a> Iterator for ObjectHistory<'a> {
     }
 }
 
-impl<'a> History for ObjectHistory<'a> {
+impl History for ObjectHistory<'_> {
     fn lsn(&self) -> Lsn {
         self.lsn
     }
 }
 
-impl<'a> ObjectHistory<'a> {
+impl ObjectHistory<'_> {
     fn handle_relation_size(
         &mut self,
         buf_tag: BufferTag,
