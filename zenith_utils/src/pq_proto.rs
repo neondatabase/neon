@@ -93,10 +93,9 @@ impl FeMessage {
         let len = stream.read_u32::<BE>()?;
 
         // The message length includes itself, so it better be at least 4
-        let bodylen = len.checked_sub(4).ok_or(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid message length: parsing u32",
-        ))?;
+        let bodylen = len
+            .checked_sub(4)
+            .ok_or_else(|| anyhow!("invalid message length: parsing u32"))?;
 
         // Read message body
         let mut body_buf: Vec<u8> = vec![0; bodylen as usize];
