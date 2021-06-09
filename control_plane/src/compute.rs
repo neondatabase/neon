@@ -154,7 +154,7 @@ impl ComputeControlPlane {
                 concat!(
                     "shared_preload_libraries = zenith\n",
                     "synchronous_standby_names = 'pageserver'\n", // TODO: add a new function arg?
-                    "zenith.callmemaybe_connstring = '{}'\n", // FIXME escaping
+                    "zenith.callmemaybe_connstring = '{}'\n",     // FIXME escaping
                 ),
                 node.connstr()
             )

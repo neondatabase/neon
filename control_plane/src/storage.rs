@@ -52,9 +52,6 @@ impl PageServerNode {
                 self.env.pg_distrib_dir.to_str().unwrap(),
             )
             .env("ZENITH_REPO_DIR", self.repo_path())
-            .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .status()
             .expect("pageserver init failed");
 
@@ -94,10 +91,7 @@ impl PageServerNode {
             "POSTGRES_DISTRIB_DIR",
             self.env.pg_distrib_dir.to_str().unwrap(),
         )
-        .env("ZENITH_REPO_DIR", self.repo_path())
-        .env("PATH", self.env.pg_bin_dir().to_str().unwrap()) // needs postres-wal-redo binary
-        .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
+        .env("ZENITH_REPO_DIR", self.repo_path());
 
         if !cmd.status()?.success() {
             bail!(

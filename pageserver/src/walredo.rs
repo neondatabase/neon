@@ -22,7 +22,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::Error;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::sync::Mutex;
@@ -206,15 +206,10 @@ impl PostgresRedoManagerInternal {
 
         let process: PostgresRedoProcess;
 
-        // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
-        // just create one with constant name. That fails if you try to launch more than
-        // one WAL redo manager concurrently.
-        let datadir = self.conf.workdir.join("wal-redo-datadir");
-
         info!("launching WAL redo postgres process");
 
         process = runtime
-            .block_on(PostgresRedoProcess::launch(&datadir))
+            .block_on(PostgresRedoProcess::launch(self.conf))
             .unwrap();
 
         // Loop forever, handling requests as they come.
@@ -290,12 +285,12 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    // Tests who run pageserver binary are setting proper PG_BIN_DIR
-    // and PG_LIB_DIR so that WalRedo would start right postgres.
+    async fn launch(conf: &PageServerConf) -> Result<PostgresRedoProcess, Error> {
+        // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
+        // just create one with constant name. That fails if you try to launch more than
+        // one WAL redo manager concurrently.
+        let datadir = conf.workdir.join("wal-redo-datadir");
 
-    // do that: We may later
-    // switch to setting same things in pageserver config file.
-    async fn launch(datadir: &Path) -> Result<PostgresRedoProcess, Error> {
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
             info!("directory {:?} exists, removing", &datadir);
@@ -304,9 +299,12 @@ impl PostgresRedoProcess {
             }
         }
         info!("running initdb in {:?}", datadir.display());
-        let initdb = Command::new("initdb")
+        let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
             .args(&["-D", datadir.to_str().unwrap()])
             .arg("-N")
+            .env_clear()
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
             .output()
             .await
             .expect("failed to execute initdb");
@@ -328,12 +326,15 @@ impl PostgresRedoProcess {
             config.write_all(b"zenith.wal_redo=on\n")?;
         }
         // Start postgres itself
-        let mut child = Command::new("postgres")
+        let mut child = Command::new(conf.pg_bin_dir().join("postgres"))
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
-            .env("PGDATA", datadir)
+            .env_clear()
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+            .env("PGDATA", &datadir)
             .spawn()
             .expect("postgres --wal-redo command failed to start");
 
