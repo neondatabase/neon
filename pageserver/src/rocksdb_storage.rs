@@ -68,7 +68,7 @@ impl GarbageCollector {
     fn was_deleted(&self, key: &[u8]) -> bool {
         let key = key.to_vec();
         let mut garbage = self.garbage.lock().unwrap();
-        return garbage.remove(&key);
+        garbage.remove(&key)
     }
 }
 
@@ -198,9 +198,9 @@ impl ObjectStore for RocksObjectStore {
         ));
 
         Ok(Box::new(RocksObjects {
+            iter,
             timeline,
             lsn,
-            iter,
         }))
     }
 }

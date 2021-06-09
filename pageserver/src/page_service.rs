@@ -458,7 +458,8 @@ impl postgres_backend::Handler for PageServerHandler {
                 .parse()?;
             let timeline = page_cache::get_repository().get_timeline(timeline_id)?;
 
-            let postgres_connection_uri = it.next().ok_or(anyhow!("missing postgres uri"))?;
+            let postgres_connection_uri =
+                it.next().ok_or_else(|| anyhow!("missing postgres uri"))?;
 
             let mut conn = postgres::Client::connect(postgres_connection_uri, postgres::NoTls)?;
             let mut copy_in = conn.copy_in(format!("push {}", timeline_id.to_string()).as_str())?;
