@@ -99,5 +99,6 @@ Before submitting a patch, please consider:
 * Writing a couple of docstrings to clarify the reasoning behind a new test.
 * Running `flake8` (or a linter of your choice, e.g. `pycodestyle`) and fixing possible defects, if any.
 * Formatting the code with `yapf -r -i .` (TODO: implement an opt-in pre-commit hook for that).
+* (Optional) Typechecking the code with `mypy .`. Currently this mostly affects `fixtures/zenith_fixtures.py`.
 
 The tools can be installed with `pipenv install --dev`.
