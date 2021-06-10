@@ -73,7 +73,10 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
         .output()
         .with_context(|| "failed to execute initdb")?;
     if !initdb_otput.status.success() {
-        anyhow::bail!("initdb failed");
+        anyhow::bail!(
+            "initdb failed: '{}'",
+            String::from_utf8_lossy(&initdb_otput.stderr)
+        );
     }
     println!("initdb succeeded");
 
