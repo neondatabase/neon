@@ -241,9 +241,15 @@ impl ReceiveWalConn {
         my_info.server = server_info.clone();
         my_info.server.node_id = node_id;
 
+        /* Need to save incompleted my_info in timeline to provide wal_seg_size for find_end_of_wal */
+        self.timeline.get().set_info(&my_info);
+
         /* Calculate WAL end based on local data */
         let (flush_lsn, timeline) = self.timeline.find_end_of_wal(&self.conf.data_dir, true);
         my_info.flush_lsn = flush_lsn;
+
+        let min_lsn = Lsn((server_info.wal_seg_size as u64) * 2); // strt from second segment because of pg_resetwal
+        my_info.restart_lsn = Lsn::max(my_info.restart_lsn, min_lsn);
         my_info.server.timeline = timeline;
 
         /* Report my identifier to proposer */

@@ -267,6 +267,7 @@ impl Timeline for ObjectTimeline {
     }
 
     fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes> {
+        const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
         let searchkey = ObjectKey {
@@ -289,7 +290,7 @@ impl Timeline for ObjectTimeline {
 
                     self.put_page_image(tag, lsn, page_img.clone())?;
                 }
-                x => bail!("Unexpected object value: {:?}", x),
+                _ => page_img = Bytes::from_static(&ZERO_PAGE),
             }
             // FIXME: assumes little-endian. Only used for the debugging log though
             let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
@@ -304,7 +305,6 @@ impl Timeline for ObjectTimeline {
             );
             return Ok(page_img);
         }
-        static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         trace!("page {:?} at {} not found", tag, lsn);
         Ok(Bytes::from_static(&ZERO_PAGE))
         /* return Err("could not find page image")?; */
