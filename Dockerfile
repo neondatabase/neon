@@ -80,6 +80,16 @@ RUN cargo build --release
 FROM alpine:3.13
 RUN apk add --update openssl build-base
 RUN apk --no-cache --update --repository https://dl-cdn.alpinelinux.org/alpine/edge/testing add rocksdb
-WORKDIR zenith
 COPY --from=build /zenith/target/release/pageserver /usr/local/bin
 COPY --from=pg-build /zenith/tmp_install /usr/local
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+
+RUN addgroup zenith && adduser -h /data -D -G zenith zenith
+VOLUME ["/data"]
+WORKDIR /data
+USER zenith
+ENV ZENITH_REPO_DIR /data/
+ENV POSTGRES_DISTRIB_DIR /usr/local
+
+EXPOSE 6400
+ENTRYPOINT ["/docker-entrypoint.sh"]
