@@ -54,14 +54,14 @@ impl Events {
             thread::spawn(move || {
                 let stdin = io::stdin();
                 for evt in stdin.keys() {
-                    if let Ok(key) = evt {
-                        if let Err(err) = tx.send(Event::Input(key)) {
-                            eprintln!("{}", err);
-                            return;
-                        }
-                        if !ignore_exit_key.load(Ordering::Relaxed) && key == config.exit_key {
-                            return;
-                        }
+                    // This will panic if stdin returns EOF.
+                    let key = evt.unwrap();
+                    if let Err(err) = tx.send(Event::Input(key)) {
+                        eprintln!("{}", err);
+                        return;
+                    }
+                    if !ignore_exit_key.load(Ordering::Relaxed) && key == config.exit_key {
+                        return;
                     }
                 }
             })
