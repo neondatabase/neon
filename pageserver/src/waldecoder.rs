@@ -97,10 +97,12 @@ impl WalStreamDecoder {
                 let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf);
 
                 if hdr.std.xlp_pageaddr != self.lsn.0 {
-                    return Err(WalDecodeError {
-                        msg: "invalid xlog segment header".into(),
-                        lsn: self.lsn,
-                    });
+                    info!(
+                        "Receive page with LSN {} instead of expected {}",
+                        Lsn(hdr.std.xlp_pageaddr),
+                        self.lsn
+                    );
+                    self.lsn = Lsn(hdr.std.xlp_pageaddr);
                 }
                 // TODO: verify the remaining fields in the header
 

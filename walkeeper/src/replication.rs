@@ -63,11 +63,15 @@ impl ReplicationConn {
                     let feedback = HotStandbyFeedback::des(&m)?;
                     timeline.add_hs_feedback(feedback)
                 }
-                msg => {
+                None => {
+                    break;
+                }
+                Some(msg) => {
                     info!("unexpected message {:?}", msg);
                 }
             }
         }
+        Err(anyhow!("Connection closed"))
     }
 
     /// Helper function that parses a pair of LSNs.

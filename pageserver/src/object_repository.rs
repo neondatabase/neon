@@ -290,7 +290,7 @@ impl Timeline for ObjectTimeline {
 
                     self.put_page_image(tag, lsn, page_img.clone())?;
                 }
-                _ => page_img = Bytes::from_static(&ZERO_PAGE),
+                x => bail!("Unexpected object value: {:?}", x),
             }
             // FIXME: assumes little-endian. Only used for the debugging log though
             let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
@@ -554,16 +554,16 @@ impl Timeline for ObjectTimeline {
     fn advance_last_record_lsn(&self, lsn: Lsn) {
         // Can't move backwards.
         let old = self.last_record_lsn.fetch_max(lsn);
-        assert!(old <= lsn);
-
-        // Also advance last_valid_lsn
-        let old = self.last_valid_lsn.advance(lsn);
-        // Can't move backwards.
-        if lsn < old {
-            warn!(
-                "attempted to move last record LSN backwards (was {}, new {})",
-                old, lsn
-            );
+        if old <= lsn {
+            // Also advance last_valid_lsn
+            let old = self.last_valid_lsn.advance(lsn);
+            // Can't move backwards.
+            if lsn < old {
+                warn!(
+                    "attempted to move last record LSN backwards (was {}, new {})",
+                    old, lsn
+                );
+            }
         }
     }
     fn get_last_record_lsn(&self) -> Lsn {
@@ -779,9 +779,6 @@ impl ObjectTimeline {
                             }
                         }
                         ObjectTag::RelationBuffer(tag) => {
-                            // Reconstruct last page
-                            self.get_page_at_lsn_nowait(obj, last_lsn)?;
-
                             // Reconstruct page at horizon unless relation was dropped
                             // and delete all older versions over horizon
                             let mut last_version = true;
@@ -820,9 +817,6 @@ impl ObjectTimeline {
                         ObjectTag::Clog(_)
                         | ObjectTag::MultiXactOffsets(_)
                         | ObjectTag::MultiXactMembers(_) => {
-                            // Materialize last version
-                            self.get_page_at_lsn_nowait(obj, last_lsn)?;
-
                             // Remove old versions over horizon
                             let mut last_version = true;
                             let key = ObjectKey {

@@ -566,13 +566,13 @@ mod tests {
         tline.advance_last_valid_lsn(Lsn(2));
         let mut snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(2));
-        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         let expected_truncate = RelationUpdate {
             rel,
             lsn: Lsn(2),
             update: Update::Truncate { n_blocks: 0 },
         };
         assert_eq!(Some(expected_truncate), snapshot.next().transpose()?); // TODO ordering not guaranteed by API
+        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         assert_eq!(None, snapshot.next().transpose()?);
 
         Ok(())
