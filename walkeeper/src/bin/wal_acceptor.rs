@@ -28,13 +28,6 @@ fn main() -> Result<()> {
                 .help("Path to the WAL acceptor data directory"),
         )
         .arg(
-            Arg::with_name("systemid")
-                .long("systemid")
-                .takes_value(true)
-                .required(true)
-                .help("PostgreSQL system id, from pg_control"),
-        )
-        .arg(
             Arg::with_name("listen")
                 .short("l")
                 .long("listen")
@@ -75,12 +68,8 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let systemid_str = arg_matches.value_of("systemid").unwrap();
-    let systemid: u64 = systemid_str.parse()?;
-
     let mut conf = WalAcceptorConf {
         data_dir: PathBuf::from("./"),
-        systemid,
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
