@@ -44,14 +44,15 @@ impl PageServerNode {
     pub fn init(&self) -> Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         let status = cmd
-            .args(&["--init", "-D", self.env.base_data_dir.to_str().unwrap()])
+            .args(&[
+                "--init",
+                "-D",
+                self.env.base_data_dir.to_str().unwrap(),
+                "--postgres-distrib",
+                self.env.pg_distrib_dir.to_str().unwrap(),
+            ])
             .env_clear()
             .env("RUST_BACKTRACE", "1")
-            .env(
-                "POSTGRES_DISTRIB_DIR",
-                self.env.pg_distrib_dir.to_str().unwrap(),
-            )
-            .env("ZENITH_REPO_DIR", self.repo_path())
             .status()
             .expect("pageserver init failed");
 
@@ -83,15 +84,12 @@ impl PageServerNode {
             self.address().to_string().as_str(),
             "-D",
             self.repo_path().to_str().unwrap(),
+            "--postgres-distrib",
+            self.env.pg_distrib_dir.to_str().unwrap(),
         ])
         .arg("-d")
         .env_clear()
-        .env("RUST_BACKTRACE", "1")
-        .env(
-            "POSTGRES_DISTRIB_DIR",
-            self.env.pg_distrib_dir.to_str().unwrap(),
-        )
-        .env("ZENITH_REPO_DIR", self.repo_path());
+        .env("RUST_BACKTRACE", "1");
 
         if !cmd.status()?.success() {
             bail!(
