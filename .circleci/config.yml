@@ -119,8 +119,7 @@ jobs:
             - target
 
         # Run rust unit tests
-        # FIXME: remove -p zenith_utils once integration tests are moved to python
-      - run: cargo test -p zenith_utils
+      - run: cargo test
 
         # Install the rust binaries, for use by test jobs
         # `--locked` is required; otherwise, `cargo install` will ignore Cargo.lock.

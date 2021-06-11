@@ -14,7 +14,7 @@ def test_isolation(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg
 
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    pg = postgres.create_start('test_isolation', ['max_prepared_transactions=100'])
+    pg = postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])
     pg_conn = psycopg2.connect(pg.connstr())
     pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
     cur = pg_conn.cursor()

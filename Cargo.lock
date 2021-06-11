@@ -787,20 +787,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integration_tests"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "control_plane",
- "lazy_static",
- "nix",
- "pageserver",
- "postgres",
- "rand",
- "walkeeper",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

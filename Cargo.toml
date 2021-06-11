@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "integration_tests",
     "pageserver",
     "walkeeper",
     "zenith",
