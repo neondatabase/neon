@@ -159,9 +159,18 @@ impl Repository for ObjectRepository {
     }
 }
 
+///
+/// Relation metadata (currently only size) is stored in separate record
+/// in object store and is update by each put operation: we need to check if
+/// new block size is greater or equal than existed relation size and if so: update
+/// the relation metadata. So it requires extra object storage lookup at each
+/// put operation. To avoid this lookup we maintain in-memory cache of relation metadata.
+/// To prevent memory overflow metadata only of the most recent version of relation is cached.
+/// If page server needs to access some older version, then object storage has to be accessed.
+///
 struct RelMetadata {
-    size: Option<u32>,
-    last_updated: Lsn,
+    size: u32,         // size of relation
+    last_updated: Lsn, // lsn of last metadata update (used to determine when cache value can be used)
 }
 
 ///
@@ -259,7 +268,7 @@ impl Timeline for ObjectTimeline {
             let rel_meta = self.rel_meta.read().unwrap();
             if let Some(meta) = rel_meta.get(&rel) {
                 if meta.last_updated <= lsn {
-                    return Ok(meta.size.is_some());
+                    return Ok(true);
                 }
             }
         }
@@ -352,7 +361,7 @@ impl Timeline for ObjectTimeline {
             rel_meta.insert(
                 tag.rel,
                 RelMetadata {
-                    size: Some(new_nblocks),
+                    size: new_nblocks,
                     last_updated: lsn,
                 },
             );
@@ -400,7 +409,7 @@ impl Timeline for ObjectTimeline {
             rel_meta.insert(
                 tag.rel,
                 RelMetadata {
-                    size: Some(new_nblocks),
+                    size: new_nblocks,
                     last_updated: lsn,
                 },
             );
@@ -425,7 +434,7 @@ impl Timeline for ObjectTimeline {
         rel_meta.insert(
             rel,
             RelMetadata {
-                size: Some(nblocks),
+                size: nblocks,
                 last_updated: lsn,
             },
         );
@@ -580,7 +589,7 @@ impl ObjectTimeline {
             let rel_meta = self.rel_meta.read().unwrap();
             if let Some(meta) = rel_meta.get(&rel) {
                 if meta.last_updated <= lsn {
-                    return Ok(meta.size);
+                    return Ok(Some(meta.size));
                 }
             }
         }
