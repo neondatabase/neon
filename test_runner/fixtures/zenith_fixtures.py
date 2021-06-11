@@ -1,8 +1,12 @@
 import getpass
 import os
+import signal
 import pytest
 import shutil
 import subprocess
+import psycopg2
+
+from pathlib import Path
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, Literal
 
@@ -30,6 +34,8 @@ Fn = TypeVar('Fn', bound=Callable[..., Any])
 
 DEFAULT_OUTPUT_DIR = 'test_output'
 DEFAULT_POSTGRES_DIR = 'tmp_install'
+
+DEFAULT_PAGESERVER_PORT = 64000
 
 
 def determine_scope(fixture_name: str, config: Any) -> str:
@@ -155,7 +161,9 @@ class ZenithPageserver:
     # returns a libpq connection string for connecting to it.
     def connstr(self) -> str:
         username = getpass.getuser()
-        conn_str = 'host={} port={} dbname=postgres user={}'.format('localhost', 64000, username)
+        conn_str = 'host={} port={} dbname=postgres user={}'.format('localhost',
+                                                                    DEFAULT_PAGESERVER_PORT,
+                                                                    username)
         return conn_str
 
 
@@ -197,9 +205,14 @@ class Postgres:
         self.branch: Optional[str] = None  # dubious, see asserts below
         # path to conf is <repo_dir>/pgdatadirs/<branch_name>/postgresql.conf
 
-    def create(self, branch: str, config_lines: Optional[List[str]] = None) -> 'Postgres':
+    def create(self,
+               branch: str,
+               wal_acceptors: Optional[str] = None,
+               config_lines: Optional[List[str]] = None) -> 'Postgres':
         """
         Create the pg data directory.
+        If wal_acceptors is not None, node will use wal acceptors; config is
+        adjusted accordingly.
         Returns self.
         """
 
@@ -208,6 +221,10 @@ class Postgres:
 
         self.zenith_cli.run(['pg', 'create', branch])
         self.branch = branch
+        if wal_acceptors is not None:
+            self.adjust_for_wal_acceptors(wal_acceptors)
+        if config_lines is None:
+            config_lines = []
         self.config(config_lines)
 
         return self
@@ -224,6 +241,32 @@ class Postgres:
 
         return self
 
+    """ Path to postgresql.conf """
+
+    def config_file_path(self) -> str:
+        filename = 'pgdatadirs/{}/postgresql.conf'.format(self.branch)
+        return os.path.join(self.repo_dir, filename)
+
+    """
+    Adjust instance config for working with wal acceptors instead of
+    pageserver (pre-configured by CLI) directly.
+    """
+
+    def adjust_for_wal_acceptors(self, wal_acceptors) -> 'Postgres':
+        with open(self.config_file_path(), "r") as f:
+            cfg_lines = f.readlines()
+        with open(self.config_file_path(), "w") as f:
+            for cfg_line in cfg_lines:
+                # walproposer uses different application_name
+                if ("synchronous_standby_names" in cfg_line or
+                        # don't ask pageserver to fetch WAL from compute
+                        "callmemaybe_connstring" in cfg_line):
+                    continue
+                f.write(cfg_line)
+            f.write("synchronous_standby_names = 'walproposer'\n")
+            f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
+        return self
+
     def config(self, lines: List[str]) -> 'Postgres':
         """
         Add lines to postgresql.conf.
@@ -231,9 +274,7 @@ class Postgres:
         Returns self.
         """
 
-        filename = 'pgdatadirs/{}/postgresql.conf'.format(self.branch)
-        config_name = os.path.join(self.repo_dir, filename)
-        with open(config_name, 'a') as conf:
+        with open(self.config_file_path(), 'a') as conf:
             for line in lines:
                 conf.write(line)
                 conf.write('\n')
@@ -264,13 +305,16 @@ class Postgres:
 
         return self
 
-    def create_start(self, branch: str, config_lines: Optional[List[str]] = None) -> 'Postgres':
+    def create_start(self,
+                     branch: str,
+                     wal_acceptors: Optional[str] = None,
+                     config_lines: Optional[List[str]] = None) -> 'Postgres':
         """
         Create a Postgres instance, then start it.
         Returns self.
         """
 
-        self.create(branch, config_lines).start()
+        self.create(branch, wal_acceptors, config_lines).start()
 
         return self
 
@@ -284,6 +328,17 @@ class Postgres:
 
         return conn_str
 
+    def safe_psql(self, query, dbname='postgres', username=None):
+        """
+        Execute query against the node and return all (fetchall) results
+        """
+        with psycopg2.connect(self.connstr(dbname, username)) as conn:
+            with conn.cursor() as curs:
+                curs.execute(query)
+                if curs.description is None:
+                    return []  # query didn't return data
+                return curs.fetchall()
+
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
@@ -296,13 +351,14 @@ class PostgresFactory:
 
     def create_start(self,
                      branch: str = "main",
+                     wal_acceptors: Optional[str] = None,
                      config_lines: Optional[List[str]] = None) -> Postgres:
 
         pg = Postgres(self.zenith_cli, self.repo_dir, self.num_instances + 1)
         self.num_instances += 1
         self.instances.append(pg)
 
-        return pg.create_start(branch, config_lines)
+        return pg.create_start(branch, wal_acceptors, config_lines)
 
     def stop_all(self) -> 'PostgresFactory':
         for pg in self.instances:
@@ -382,12 +438,119 @@ def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir)
 
 
+""" Read content of file into number """
+
+
+def read_pid(path):
+    return int(Path(path).read_text())
+
+
+""" An object representing a running wal acceptor daemon. """
+
+
+class WalAcceptor:
+    def __init__(self, wa_binpath, data_dir, port, num):
+        self.wa_binpath = wa_binpath
+        self.data_dir = data_dir
+        self.port = port
+        self.num = num  # identifier for logging
+
+    def start(self) -> 'WalAcceptor':
+        # create data directory if not exists
+        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+
+        cmd = [self.wa_binpath]
+        cmd.extend(["-D", self.data_dir])
+        cmd.extend(["-l", "127.0.0.1:{}".format(self.port)])
+        cmd.append("--daemonize")
+        cmd.append("--no-sync")
+        # Tell page server it can receive WAL from this WAL safekeeper
+        cmd.extend(["--pageserver", "127.0.0.1:{}".format(DEFAULT_PAGESERVER_PORT)])
+        cmd.extend(["--recall", "1 second"])
+        print('Running command "{}"'.format(' '.join(cmd)))
+        subprocess.run(cmd, check=True)
+
+        return self
+
+    def stop(self) -> 'WalAcceptor':
+        print('Stopping wal acceptor {}'.format(self.num))
+        pidfile_path = os.path.join(self.data_dir, "wal_acceptor.pid")
+        try:
+            pid = read_pid(pidfile_path)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass  # pidfile might be obsolete
+            # TODO: cleanup pid file on exit in wal acceptor
+            return self
+            # for _ in range(5):
+            # print('waiting wal acceptor {} (pid {}) to stop...', self.num, pid)
+            # try:
+            # read_pid(pidfile_path)
+            # except FileNotFoundError:
+            # return  # done
+            # time.sleep(1)
+            # raise Exception('Failed to wait for wal acceptor {} shutdown'.format(self.num))
+        except FileNotFoundError:
+            print("Wal acceptor {} is not running".format(self.num))
+            return self
+
+
+class WalAcceptorFactory:
+    """ An object representing multiple running wal acceptors. """
+    def __init__(self, zenith_binpath, data_dir):
+        self.wa_binpath = os.path.join(zenith_binpath, 'wal_acceptor')
+        self.data_dir = data_dir
+        self.instances = []
+        self.initial_port = 54321
+        """
+        Start new wal acceptor.
+        """
+
+    def start_new(self) -> WalAcceptor:
+        wa_num = len(self.instances)
+        wa = WalAcceptor(self.wa_binpath,
+                         os.path.join(self.data_dir, "wal_acceptor_{}".format(wa_num)),
+                         self.initial_port + wa_num, wa_num)
+        wa.start()
+        self.instances.append(wa)
+        return wa
+
+    """
+    Start n new wal acceptors
+    """
+
+    def start_n_new(self, n):
+        for _ in range(n):
+            self.start_new()
+
+    def stop_all(self) -> 'WalAcceptorFactory':
+        for wa in self.instances:
+            wa.stop()
+        return self
+
+    """ Get list of wal acceptor endpoints suitable for wal_acceptors GUC  """
+
+    def get_connstrs(self) -> str:
+        return ','.join(["127.0.0.1:{}".format(wa.port) for wa in self.instances])
+
+
+@zenfixture
+def wa_factory(zenith_binpath, repo_dir) -> Iterator[WalAcceptorFactory]:
+    """ Gives WalAcceptorFactory providing wal acceptors. """
+    wafactory = WalAcceptorFactory(zenith_binpath, os.path.join(repo_dir, "wal_acceptors"))
+    yield wafactory
+    # After the yield comes any cleanup code we need.
+    print('Starting wal acceptors cleanup')
+    wafactory.stop_all()
+
+
 @zenfixture
 def base_dir() -> str:
     """ find the base directory (currently this is the git root) """
 
     base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
-    print('base_dir is', base_dir)
+    print('\nbase_dir is', base_dir)
     return base_dir
 
 

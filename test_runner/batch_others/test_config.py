@@ -11,7 +11,7 @@ def test_config(zenith_cli, pageserver, postgres, pg_bin):
     zenith_cli.run(["branch", "test_config", "empty"])
 
     # change config
-    pg = postgres.create_start('test_config', ['log_min_messages=debug1'])
+    pg = postgres.create_start('test_config', config_lines=['log_min_messages=debug1'])
     print('postgres is running on test_config branch')
 
     with psycopg2.connect(pg.connstr()) as conn:

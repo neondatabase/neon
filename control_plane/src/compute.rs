@@ -97,51 +97,6 @@ impl ComputeControlPlane {
         Ok(node)
     }
 
-    pub fn new_test_node(&mut self, branch_name: &str) -> Arc<PostgresNode> {
-        let timeline_id = self
-            .pageserver
-            .branch_get_by_name(branch_name)
-            .expect("failed to get timeline_id")
-            .timeline_id;
-
-        let node = self.new_from_page_server(true, timeline_id, branch_name);
-        let node = node.unwrap();
-
-        // Configure the node to stream WAL directly to the pageserver
-        node.append_conf(
-            "postgresql.conf",
-            format!(
-                "shared_preload_libraries = zenith\n\
-                zenith.callmemaybe_connstring = '{}'\n", // FIXME escaping
-                node.connstr()
-            )
-            .as_str(),
-        )
-        .unwrap();
-
-        node
-    }
-
-    pub fn new_test_master_node(&mut self, branch_name: &str) -> Arc<PostgresNode> {
-        let timeline_id = self
-            .pageserver
-            .branch_get_by_name(branch_name)
-            .expect("failed to get timeline_id")
-            .timeline_id;
-
-        let node = self
-            .new_from_page_server(true, timeline_id, branch_name)
-            .unwrap();
-
-        node.append_conf(
-            "postgresql.conf",
-            "synchronous_standby_names = 'walproposer'\n",
-        )
-        .unwrap();
-
-        node
-    }
-
     pub fn new_node(&mut self, branch_name: &str) -> Result<Arc<PostgresNode>> {
         let timeline_id = self.pageserver.branch_get_by_name(branch_name)?.timeline_id;
 
