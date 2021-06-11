@@ -245,7 +245,11 @@ fn walreceiver_main(
                     reply_requested,
                 );
 
-                reply_requested.then(|| timeline.get_last_valid_lsn())
+                if reply_requested {
+                    Some(timeline.get_last_valid_lsn())
+                } else {
+                    None
+                }
             }
 
             _ => None,
