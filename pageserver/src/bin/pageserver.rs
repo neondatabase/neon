@@ -4,14 +4,15 @@
 
 use log::*;
 use parse_duration::parse;
-use std::io;
-use std::process::exit;
-use std::thread;
-use std::time::Duration;
-use std::{env, path::PathBuf};
 use std::{
+    env,
     fs::{File, OpenOptions},
+    io,
     net::TcpListener,
+    path::{Path, PathBuf},
+    process::exit,
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -76,24 +77,20 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Working directory for the pageserver"),
         )
+        .arg(
+            Arg::with_name("postgres-distrib")
+                .long("postgres-distrib")
+                .takes_value(true)
+                .help("Postgres distribution directory"),
+        )
         .get_matches();
 
-    let workdir = if let Some(workdir_arg) = arg_matches.value_of("workdir") {
-        PathBuf::from(workdir_arg)
-    } else if let Some(workdir_arg) = std::env::var_os("ZENITH_REPO_DIR") {
-        PathBuf::from(workdir_arg.to_str().unwrap())
-    } else {
-        PathBuf::from(".zenith")
-    };
+    let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
 
-    let pg_distrib_dir: PathBuf = {
-        if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
-            postgres_bin.into()
-        } else {
-            let cwd = env::current_dir()?;
-            cwd.join("tmp_install")
-        }
-    };
+    let pg_distrib_dir = arg_matches
+        .value_of("postgres-distrib")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::current_dir().unwrap().join("tmp_install"));
 
     if !pg_distrib_dir.join("bin/postgres").exists() {
         anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
