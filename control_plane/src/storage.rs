@@ -219,22 +219,6 @@ impl PageServerNode {
 
         Ok(branch.clone())
     }
-
-    pub fn system_id_get(&self) -> Result<u64> {
-        let mut client = self.page_server_psql_client()?;
-        let query_result = client
-            .simple_query("identify_system")?
-            .first()
-            .map(|msg| match msg {
-                postgres::SimpleQueryMessage::Row(row) => row.get(0),
-                _ => None,
-            })
-            .flatten()
-            .ok_or_else(|| anyhow!("failed to get system_id"))?
-            .parse::<u64>()?;
-
-        Ok(query_result)
-    }
 }
 
 impl Drop for PageServerNode {
