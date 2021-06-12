@@ -3,12 +3,12 @@
 //
 
 use log::*;
-use parse_duration::parse;
+use serde::{Deserialize, Serialize};
 use std::{
     env,
     fs::{File, OpenOptions},
     io,
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::exit,
     thread,
@@ -16,17 +16,94 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::{App, Arg};
+use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
 use slog::{Drain, FnValue};
 
 use pageserver::{branches, page_cache, page_service, tui, PageServerConf};
 
+const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
+
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-const DEFAULT_GC_PERIOD_SEC: u64 = 10;
-//const DEFAULT_GC_HORIZON: u64 = 1024 * 1024 * 1024;
-//const DEFAULT_GC_PERIOD_SEC: u64 = 600;
+const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(10);
+
+/// String arguments that can be declared via CLI or config file
+#[derive(Serialize, Deserialize)]
+struct CfgFileParams {
+    listen_addr: Option<String>,
+    gc_horizon: Option<String>,
+    gc_period: Option<String>,
+    pg_distrib_dir: Option<String>,
+}
+
+impl CfgFileParams {
+    /// Extract string arguments from CLI
+    fn from_args(arg_matches: &ArgMatches) -> Self {
+        let get_arg = |arg_name: &str| -> Option<String> {
+            arg_matches.value_of(arg_name).map(str::to_owned)
+        };
+
+        Self {
+            listen_addr: get_arg("listen"),
+            gc_horizon: get_arg("gc_horizon"),
+            gc_period: get_arg("gc_period"),
+            pg_distrib_dir: get_arg("postgres-distrib"),
+        }
+    }
+
+    /// Fill missing values in `self` with `other`
+    fn or(self, other: CfgFileParams) -> Self {
+        // TODO cleaner way to do this
+        Self {
+            listen_addr: self.listen_addr.or(other.listen_addr),
+            gc_horizon: self.gc_horizon.or(other.gc_horizon),
+            gc_period: self.gc_period.or(other.gc_period),
+            pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
+        }
+    }
+
+    /// Create a PageServerConf from these string parameters
+    fn try_into_config(&self) -> Result<PageServerConf> {
+        let listen_addr: SocketAddr = self
+            .listen_addr
+            .as_deref()
+            .unwrap_or(DEFAULT_LISTEN_ADDR)
+            .parse()?;
+
+        let gc_horizon: u64 = match self.gc_horizon.as_ref() {
+            Some(horizon_str) => horizon_str.parse()?,
+            None => DEFAULT_GC_HORIZON,
+        };
+
+        let gc_period: Duration = match self.gc_period.as_ref() {
+            Some(period_str) => parse_duration::parse(period_str)?,
+            None => DEFAULT_GC_PERIOD,
+        };
+
+        let pg_distrib_dir = match self.pg_distrib_dir.as_ref() {
+            Some(pg_distrib_dir_str) => PathBuf::from(pg_distrib_dir_str),
+            None => env::current_dir()?.join("tmp_install"),
+        };
+
+        if !pg_distrib_dir.join("bin/postgres").exists() {
+            anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
+        }
+
+        Ok(PageServerConf {
+            daemonize: false,
+            interactive: false,
+
+            listen_addr,
+            gc_horizon,
+            gc_period,
+
+            workdir: PathBuf::from("."),
+
+            pg_distrib_dir,
+        })
+    }
+}
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
@@ -86,51 +163,35 @@ fn main() -> Result<()> {
         .get_matches();
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
+    let cfg_file_path = workdir.canonicalize()?.join("pageserver.toml");
 
-    let pg_distrib_dir = arg_matches
-        .value_of("postgres-distrib")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap().join("tmp_install"));
+    let args_params = CfgFileParams::from_args(&arg_matches);
 
-    if !pg_distrib_dir.join("bin/postgres").exists() {
-        anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
-    }
-
-    let mut conf = PageServerConf {
-        daemonize: false,
-        interactive: false,
-        gc_horizon: DEFAULT_GC_HORIZON,
-        gc_period: Duration::from_secs(DEFAULT_GC_PERIOD_SEC),
-        listen_addr: "127.0.0.1:64000".parse().unwrap(),
-        // we will change the current working directory to the repository below,
-        // so always set 'workdir' to '.'
-        workdir: PathBuf::from("."),
-        pg_distrib_dir,
+    let init = arg_matches.is_present("init");
+    let params = if init {
+        // We're initializing the repo, so there's no config file yet
+        args_params
+    } else {
+        // Supplement the CLI arguments with the config file
+        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)?;
+        let file_params: CfgFileParams = toml::from_str(&cfg_file_contents)?;
+        args_params.or(file_params)
     };
 
-    if arg_matches.is_present("daemonize") {
-        conf.daemonize = true;
-    }
+    // Ensure the config is valid, even if just init-ing
+    let mut conf = params.try_into_config()?;
 
-    if arg_matches.is_present("interactive") {
-        conf.interactive = true;
+    conf.daemonize = arg_matches.is_present("daemonize");
+    conf.interactive = arg_matches.is_present("interactive");
+
+    if init && (conf.daemonize || conf.interactive) {
+        eprintln!("--daemonize and --interactive may not be used with --init");
+        exit(1);
     }
 
     if conf.daemonize && conf.interactive {
         eprintln!("--daemonize is not allowed with --interactive: choose one");
         exit(1);
-    }
-
-    if let Some(addr) = arg_matches.value_of("listen") {
-        conf.listen_addr = addr.parse()?;
-    }
-
-    if let Some(horizon) = arg_matches.value_of("gc_horizon") {
-        conf.gc_horizon = horizon.parse()?;
-    }
-
-    if let Some(period) = arg_matches.value_of("gc_period") {
-        conf.gc_period = parse(period)?;
     }
 
     // The configuration is all set up now. Turn it into a 'static
@@ -139,8 +200,13 @@ fn main() -> Result<()> {
     let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
     // Create repo and exit if init was requested
-    if arg_matches.is_present("init") {
+    if init {
         branches::init_repo(conf, &workdir)?;
+
+        // write the config file
+        let cfg_file_contents = toml::to_string_pretty(&params)?;
+        std::fs::write(&cfg_file_path, cfg_file_contents)?;
+
         return Ok(());
     }
 
