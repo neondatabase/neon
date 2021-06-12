@@ -79,17 +79,10 @@ impl PageServerNode {
         );
 
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        cmd.args(&[
-            "-l",
-            self.address().to_string().as_str(),
-            "-D",
-            self.repo_path().to_str().unwrap(),
-            "--postgres-distrib",
-            self.env.pg_distrib_dir.to_str().unwrap(),
-        ])
-        .arg("-d")
-        .env_clear()
-        .env("RUST_BACKTRACE", "1");
+        cmd.args(&["-D", self.repo_path().to_str().unwrap()])
+            .arg("-d")
+            .env_clear()
+            .env("RUST_BACKTRACE", "1");
 
         if !cmd.status()?.success() {
             bail!(
