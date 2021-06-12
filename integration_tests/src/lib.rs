@@ -102,8 +102,6 @@ impl TestStorageControlPlane {
         cplane.pageserver.init().unwrap();
         cplane.pageserver.start().unwrap();
 
-        let systemid = cplane.pageserver.system_id_get().unwrap();
-
         const WAL_ACCEPTOR_PORT: usize = 54321;
 
         let datadir_base = local_env.base_data_dir.join("safekeepers");
@@ -115,7 +113,6 @@ impl TestStorageControlPlane {
                     .parse()
                     .unwrap(),
                 data_dir: datadir_base.join(format!("wal_acceptor_{}", i)),
-                systemid,
                 env: local_env.clone(),
                 pass_to_pageserver: true,
             };
@@ -298,7 +295,6 @@ impl PostgresNodeExt for PostgresNode {
 pub struct WalAcceptorNode {
     listen: SocketAddr,
     data_dir: PathBuf,
-    systemid: u64,
     env: LocalEnv,
     pass_to_pageserver: bool,
 }
@@ -334,7 +330,6 @@ impl WalAcceptorNode {
         )
         .args(&["-D", self.data_dir.to_str().unwrap()])
         .args(&["-l", self.listen.to_string().as_str()])
-        .args(&["--systemid", self.systemid.to_string().as_str()])
         .args(&ps_arg)
         .arg("-d")
         .arg("-n")
