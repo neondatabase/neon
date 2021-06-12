@@ -94,3 +94,4 @@ ENV POSTGRES_DISTRIB_DIR /usr/local
 
 EXPOSE 6400
 ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["pageserver"]
