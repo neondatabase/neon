@@ -419,8 +419,7 @@ impl Timeline for ObjectTimeline {
                     lsn
                 );
 
-                self.obj_store
-                    .put(&key, lsn, &ObjectValue::ser(&val)?)?;
+                self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
                 let mut rel_meta = self.rel_meta.write().unwrap();
                 rel_meta.insert(
                     tag.rel,
@@ -446,6 +445,15 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
+    fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()> {
+        let key = ObjectKey {
+            timeline: self.timelineid,
+            tag,
+        };
+        self.obj_store.put(&key, lsn, data)?;
+        Ok(())
+    }
+
     ///
     /// Memorize a full image of a page version
     ///
@@ -468,17 +476,12 @@ impl Timeline for ObjectTimeline {
                 let new_nblocks = tag.blknum + 1;
                 let key = relation_size_key(self.timelineid, tag.rel);
                 let val = ObjectValue::RelationSize(new_nblocks);
-
                 trace!(
                     "Extended relation {} from {} to {} blocks at {}",
-                    tag.rel,
-                    old_nblocks,
-                    new_nblocks,
-                    lsn
+                    tag.rel, old_nblocks, new_nblocks, lsn
                 );
 
-                self.obj_store
-                    .put(&key, lsn, &ObjectValue::ser(&val)?)?;
+                self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
                 let mut rel_meta = self.rel_meta.write().unwrap();
                 rel_meta.insert(
                     tag.rel,
@@ -502,8 +505,7 @@ impl Timeline for ObjectTimeline {
 
         info!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
 
-        self.obj_store
-            .put(&key, lsn, &ObjectValue::ser(&val)?)?;
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
         let mut rel_meta = self.rel_meta.write().unwrap();
         rel_meta.insert(
             rel,
@@ -601,11 +603,7 @@ impl Timeline for ObjectTimeline {
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
         let lsn = self.last_valid_lsn.load();
         let iter = self.obj_store.objects(self.timelineid, lsn)?;
-        Ok(Box::new(ObjectHistory {
-            lsn,
-            iter,
-            last_relation_size: None,
-        }))
+        Ok(Box::new(ObjectHistory { lsn, iter }))
     }
 }
 
@@ -939,14 +937,15 @@ impl ObjectTimeline {
 struct ObjectHistory<'a> {
     iter: Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>,
     lsn: Lsn,
-    last_relation_size: Option<(RelTag, u32)>,
 }
 
 impl<'a> Iterator for ObjectHistory<'a> {
-    type Item = Result<RelationUpdate>;
+    type Item = Result<Modification>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_result().transpose()
+        self.iter
+            .next()
+            .map(|result| result.map(|t| Modification::new(t)))
     }
 }
 
@@ -956,64 +955,12 @@ impl<'a> History for ObjectHistory<'a> {
     }
 }
 
-impl<'a> ObjectHistory<'a> {
-    fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
-        while let Some((tag, lsn, value)) = self.iter.next().transpose()? {
-            let entry = ObjectValue::des(&value)?;
-            let rel_tag: RelTag;
-            let update = match tag {
-                ObjectTag::RelationMetadata(rel) => {
-                    rel_tag = rel;
-                    match entry {
-                        ObjectValue::RelationSize(size) => {
-                            // we only want to output truncations, expansions are filtered out
-                            let last_relation_size = self.last_relation_size.replace((rel, size));
-
-                            match last_relation_size {
-                                Some((last_rel, last_size))
-                                    if last_rel != rel || size < last_size =>
-                                {
-                                    Update::Truncate { n_blocks: size }
-                                }
-                                _ => continue,
-                            }
-                        }
-                        ObjectValue::Unlink => Update::Unlink,
-                        _ => continue,
-                    }
-                }
-                ObjectTag::RelationBuffer(buf_tag) => {
-                    rel_tag = buf_tag.rel;
-                    match entry {
-                        ObjectValue::Page(img) => Update::Page {
-                            blknum: buf_tag.blknum,
-                            img,
-                        },
-                        ObjectValue::WALRecord(rec) => Update::WALRecord {
-                            blknum: buf_tag.blknum,
-                            rec,
-                        },
-                        _ => continue,
-                    }
-                }
-                _ => continue,
-            };
-            return Ok(Some(RelationUpdate {
-                rel: rel_tag,
-                lsn,
-                update,
-            }));
-        }
-        Ok(None)
-    }
-}
-
 ///
 /// We store several kinds of objects in the repository.
 /// We have per-page, per-relation(or non-rel file) and per-timeline entries.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum ObjectValue {
+pub enum ObjectValue {
     /// Ready-made images of the block
     Page(Bytes),
     /// WAL records, to be applied on top of the "previous" entry
