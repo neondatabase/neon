@@ -339,7 +339,7 @@ impl PostgresNode {
                         "-D",
                         self.pgdata().to_str().unwrap(),
                         "-l",
-                        self.pgdata().join("log").to_str().unwrap(),
+                        self.pgdata().join("pg.log").to_str().unwrap(),
                         "-w", //wait till pg_ctl actually does what was asked
                     ],
                     args,

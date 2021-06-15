@@ -215,20 +215,11 @@ jobs:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
           # pageserver state, perhaps a tarball would be a better idea.
-          name: Delete pageserver data
+          name: Delete all data but logs
           when: always
           command: |
             du -sh /tmp/test_output/*
-            for DIR in /tmp/test_output/*; do
-              mv $DIR/repo/pageserver.log $DIR/ || true # ignore errors
-              for PGDIR in $DIR/repo/pgdatadirs/*; do
-                echo "PGDIR: $PGDIR"
-                NEW_LOG="${PGDIR##*/}_log"
-                mv $PGDIR/log "$DIR/$NEW_LOG" || true # ignore errors
-              done
-              echo "rm $DIR/repo"
-              rm -rf $DIR/repo
-            done
+            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "wal_acceptor.log" -delete
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output
