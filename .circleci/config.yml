@@ -210,7 +210,12 @@ jobs:
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
             # in its "Tests" tab in the results page.
-            pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short $TEST_SELECTION $EXTRA_PARAMS
+            # -s prevents pytest from capturing output, which helps to see
+            # what's going on if the test hangs
+            # --verbose prints name of each test (helpful when there are
+            # multiple tests in one file)
+            # -rA prints summary in the end
+            pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short -s --verbose -rA $TEST_SELECTION $EXTRA_PARAMS
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
