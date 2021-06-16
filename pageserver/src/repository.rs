@@ -3,7 +3,7 @@ use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
@@ -25,6 +25,10 @@ pub trait Repository: Send + Sync {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
+    fn get_timeline_descendants(
+        &self,
+        timeline: ZTimelineId,
+    ) -> Result<HashMap<ZTimelineId, Arc<dyn Timeline>>>;
     //fn get_stats(&self) -> RepositoryStats;
 }
 

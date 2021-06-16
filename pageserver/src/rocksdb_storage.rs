@@ -112,6 +112,21 @@ impl ObjectStore for RocksObjectStore {
         Ok(())
     }
 
+    /// Get oldest version of particular object in timeline
+    fn oldest_version(&self, key: &ObjectKey) -> Result<Option<(Lsn, Vec<u8>)>> {
+        let mut iter = self.db.raw_iterator();
+        iter.seek(StorageKey::ser(&StorageKey {
+            obj_key: key.clone(),
+            lsn: Lsn(0),
+        })?);
+        if iter.valid() {
+            let first_key = StorageKey::des(iter.key().unwrap())?;
+            Ok(Some((first_key.lsn, iter.value().unwrap().to_vec())))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Iterate through page versions of given page, starting from the given LSN.
     /// The versions are walked in descending LSN order.
     fn object_versions<'a>(

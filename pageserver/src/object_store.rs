@@ -50,6 +50,9 @@ pub trait ObjectStore: Send + Sync {
         lsn: Lsn,
     ) -> Result<Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>>;
 
+    /// Get oldest version of particular object in timeline
+    fn oldest_version(&self, key: &ObjectKey) -> Result<Option<(Lsn, Vec<u8>)>>;
+
     /// Iterate through versions of all objects in a timeline.
     ///
     /// Returns objects in increasing key-version order.

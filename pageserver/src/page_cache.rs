@@ -3,6 +3,7 @@
 //! isn't much here. If we implement multi-tenancy, this will probably be changed into
 //! a hash map, keyed by the tenant ID.
 
+use crate::branches;
 use crate::object_repository::ObjectRepository;
 use crate::repository::Repository;
 use crate::rocksdb_storage::RocksObjectStore;
@@ -16,17 +17,21 @@ lazy_static! {
 }
 
 pub fn init(conf: &'static PageServerConf) {
-    let mut m = REPOSITORY.lock().unwrap();
+    {
+        let mut m = REPOSITORY.lock().unwrap();
 
-    let obj_store = RocksObjectStore::open(conf).unwrap();
+        let obj_store = RocksObjectStore::open(conf).unwrap();
 
-    // Set up a WAL redo manager, for applying WAL records.
-    let walredo_mgr = PostgresRedoManager::new(conf);
+        // Set up a WAL redo manager, for applying WAL records.
+        let walredo_mgr = PostgresRedoManager::new(conf);
 
-    // we have already changed current dir to the repository.
-    let repo = ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr));
+        // we have already changed current dir to the repository.
+        let repo = ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr));
 
-    *m = Some(Arc::new(repo));
+        *m = Some(Arc::new(repo));
+    }
+    // Force loading timelines
+    let _ = branches::get_branches(conf);
 }
 
 pub fn get_repository() -> Arc<dyn Repository> {

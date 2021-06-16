@@ -14,6 +14,7 @@
 //! key-value store for each timeline.
 
 use crate::object_store::{ObjectKey, ObjectStore};
+use crate::page_cache;
 use crate::repository::*;
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
@@ -96,6 +97,33 @@ impl Repository for ObjectRepository {
                 Ok(timeline_rc)
             }
         }
+    }
+
+    // Build closure of timeline descendants
+    fn get_timeline_descendants(
+        &self,
+        timelineid: ZTimelineId,
+    ) -> Result<HashMap<ZTimelineId, Arc<dyn Timeline>>> {
+        let mut descendants: HashMap<ZTimelineId, Arc<dyn Timeline>> = HashMap::new();
+        // Add target timeline as descandant of itself
+        descendants.insert(timelineid, self.get_timeline(timelineid)?);
+        let timelines = self.timelines.lock().unwrap();
+        let mut updated = true;
+        while updated {
+            updated = false;
+            for entry in timelines.iter() {
+                let timeline_id = entry.0;
+                let timeline = entry.1;
+                if let Some(ancestor_timeline) = timeline.ancestor_timeline {
+                    if descendants.contains_key(&ancestor_timeline) {
+                        updated = descendants.insert(*timeline_id, timeline.clone()).is_none();
+                    }
+                }
+            }
+        }
+        // remove ourselves from closure
+        descendants.remove(&timelineid);
+        Ok(descendants)
     }
 
     /// Create a new, empty timeline. The caller is responsible for loading data into it
@@ -679,8 +707,19 @@ impl ObjectTimeline {
     fn do_gc(&self, conf: &'static PageServerConf) -> Result<()> {
         loop {
             thread::sleep(conf.gc_period);
+            let descendant_timelines =
+                page_cache::get_repository().get_timeline_descendants(self.timelineid)?;
+            // Calculate minimal last LSN for all descendant timelines.
+            // TODO: it may be reasonable to let user specify PITR horizon for each timeline individually
             let last_lsn = self.get_last_valid_lsn();
-
+            let last_lsn = Lsn::min(
+                last_lsn,
+                descendant_timelines
+                    .values()
+                    .map(|t| t.get_last_valid_lsn())
+                    .min()
+                    .unwrap_or(last_lsn),
+            );
             // checked_sub() returns None on overflow.
             if let Some(horizon) = last_lsn.checked_sub(conf.gc_horizon) {
                 // WAL is large enough to perform GC
@@ -689,7 +728,9 @@ impl ObjectTimeline {
                 let mut deleted = 0u64;
 
                 // Iterate through all relations
-                for rels in &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)? {
+                'for_all_rels: for rels in
+                    &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)?
+                {
                     let mut last_version = true;
                     let mut key = relation_size_key(self.timelineid, *rels);
                     let mut max_size = 0u32;
@@ -712,6 +753,17 @@ impl ObjectTimeline {
                         }
                         if last_version {
                             last_version = false;
+                            for timeline in descendant_timelines.keys() {
+                                let descendant_key = ObjectKey {
+                                    timeline: *timeline,
+                                    buf_tag: key.buf_tag,
+                                };
+                                if self.obj_store.oldest_version(&descendant_key)?.is_none() {
+                                    // No versions of this relation in descendant timeline:
+                                    // postpone cleanup of this relation
+                                    continue 'for_all_rels;
+                                }
+                            }
                             if !relation_dropped {
                                 // preserve last version
                                 continue;
@@ -721,12 +773,33 @@ impl ObjectTimeline {
                         deleted += 1;
                     }
                     // Now process all relation blocks
-                    for blknum in 0..max_size {
+                    'for_all_rel_blocks: for blknum in 0..max_size {
                         key.buf_tag.blknum = blknum;
                         last_version = true;
                         for vers in self.obj_store.object_versions(&key, horizon)? {
                             let lsn = vers.0;
                             if last_version {
+                                for timeline in descendant_timelines.keys() {
+                                    let descedant_key = ObjectKey {
+                                        timeline: *timeline,
+                                        buf_tag: key.buf_tag,
+                                    };
+                                    if let Some((_lsn, rec)) =
+                                        self.obj_store.oldest_version(&descedant_key)?
+                                    {
+                                        if let PageEntry::WALRecord(_) = PageEntry::des(&rec)? {
+                                            // Last version in descendant timeline is WAL record:
+                                            // we have to postpone cleanup of this object version
+                                            // history in in this timeline
+                                            continue 'for_all_rel_blocks;
+                                        }
+                                    } else {
+                                        // No versions of this object in descendant timeline:
+                                        // also postpone cleanup of this object version
+                                        // history in in this timeline
+                                        continue 'for_all_rel_blocks;
+                                    }
+                                }
                                 last_version = false;
                                 truncated += 1;
                                 if !relation_dropped {
