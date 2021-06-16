@@ -6,6 +6,7 @@ name = "pypi"
 [packages]
 pytest = ">=6.0.0"
 psycopg2 = "*"
+typing-extensions = "*"
 
 [dev-packages]
 yapf = "*"
