@@ -8,7 +8,8 @@ import psycopg2
 
 from pathlib import Path
 
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, Literal
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar
+from typing_extensions import Literal
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
 """
