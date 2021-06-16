@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub mod pq_protocol;
 pub mod receive_wal;
 pub mod replication;
 pub mod s3_offload;

@@ -17,12 +17,12 @@ use std::thread::sleep;
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 
-use crate::pq_protocol::*;
 use crate::replication::HotStandbyFeedback;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
 use pageserver::ZTimelineId;
 use postgres_ffi::xlog_utils::{TimeLineID, XLogFileName, MAX_SEND_SIZE, XLOG_BLCKSZ};
+use zenith_utils::pq_proto::SystemId;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 1;
