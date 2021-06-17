@@ -31,10 +31,10 @@ def test_zenith_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_di
     pg_regress_command = [
         pg_regress,
         '--use-existing',
-        '--bindir={}'.format(bindir),
-        '--dlpath={}'.format(build_path),
-        '--schedule={}'.format(schedule),
-        '--inputdir={}'.format(src_path),
+        f'--bindir={bindir}',
+        f'--dlpath={build_path}',
+        f'--schedule={schedule}',
+        f'--inputdir={src_path}',
     ]
 
     print(pg_regress_command)

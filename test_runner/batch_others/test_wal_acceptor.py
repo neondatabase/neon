@@ -33,7 +33,7 @@ def test_many_timelines(zenith_cli, pageserver, postgres, wa_factory):
 
     wa_factory.start_n_new(3)
 
-    branches = ["test_wal_acceptors_many_timelines_{}".format(tlin) for tlin in range(n_timelines)]
+    branches = [f'test_wal_acceptors_many_timelines_{tlin}' for tlin in range(n_timelines)]
 
     # start postgres on each timeline
     pgs = []

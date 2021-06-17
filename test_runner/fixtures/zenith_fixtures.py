@@ -94,7 +94,7 @@ class PgProtocol:
         return f'host={self.host} port={self.port} user={username} dbname={dbname}'
 
     # autocommit=True here by default because that's what we need most of the time
-    def connect(self, *, autocommit=True, **kwargs: Any) -> PgConnection:
+    def connect(self, *, autocommit: bool = True, **kwargs: Any) -> PgConnection:
         """
         Connect to the node.
         Returns psycopg2's connection object.
@@ -301,7 +301,7 @@ class Postgres(PgProtocol):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
+            f.write(f"wal_acceptors = '{wal_acceptors}'\n")
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
@@ -521,8 +521,7 @@ class WalAcceptorFactory:
         """
 
         wa_num = len(self.instances)
-        wa = WalAcceptor(self.wa_binpath,
-                         os.path.join(self.data_dir, "wal_acceptor_{}".format(wa_num)),
+        wa = WalAcceptor(self.wa_binpath, os.path.join(self.data_dir, f"wal_acceptor_{wa_num}"),
                          self.initial_port + wa_num, wa_num)
         wa.start()
         self.instances.append(wa)
@@ -543,14 +542,17 @@ class WalAcceptorFactory:
 
     def get_connstrs(self) -> str:
         """ Get list of wal acceptor endpoints suitable for wal_acceptors GUC  """
-        return ','.join(["localhost:{}".format(wa.port) for wa in self.instances])
+        return ','.join([f"localhost:{wa.port}" for wa in self.instances])
 
 
 @zenfixture
 def wa_factory(zenith_binpath: str, repo_dir: str) -> Iterator[WalAcceptorFactory]:
     """ Gives WalAcceptorFactory providing wal acceptors. """
+
     wafactory = WalAcceptorFactory(zenith_binpath, os.path.join(repo_dir, "wal_acceptors"))
+
     yield wafactory
+
     # After the yield comes any cleanup code we need.
     print('Starting wal acceptors cleanup')
     wafactory.stop_all()
@@ -619,7 +621,7 @@ def zenith_binpath(base_dir: str) -> str:
     else:
         zenith_dir = os.path.join(base_dir, 'target/debug')
     if not os.path.exists(os.path.join(zenith_dir, 'pageserver')):
-        raise Exception('zenith binaries not found at "{}"'.format(zenith_dir))
+        raise Exception(f'zenith binaries not found at "{zenith_dir}"')
     return zenith_dir
 
 
@@ -634,5 +636,5 @@ def pg_distrib_dir(base_dir: str) -> str:
         pg_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
     print('postgres dir is', pg_dir)
     if not os.path.exists(os.path.join(pg_dir, 'bin/postgres')):
-        raise Exception('postgres not found at "{}"'.format(pg_dir))
+        raise Exception(f'postgres not found at "{pg_dir}"')
     return pg_dir
