@@ -1,4 +1,4 @@
-import psycopg2
+from contextlib import closing
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -12,9 +12,7 @@ def test_createuser(zenith_cli, pageserver, postgres, pg_bin):
     pg = postgres.create_start('test_createuser')
     print("postgres is running on 'test_createuser' branch")
 
-    with psycopg2.connect(pg.connstr()) as conn:
-        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-
+    with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             # Cause a 'relmapper' change in the original branch
             cur.execute('CREATE USER testuser with password %s', ('testpwd', ))
@@ -30,7 +28,4 @@ def test_createuser(zenith_cli, pageserver, postgres, pg_bin):
     pg2 = postgres.create_start('test_createuser2')
 
     # Test that you can connect to new branch as a new user
-    conn2 = psycopg2.connect(pg2.connstr(username='testuser'))
-    with conn2.cursor() as cur:
-        cur.execute('select current_user;')
-        assert cur.fetchone() == ('testuser', )
+    assert pg2.safe_psql('select current_user', username='testuser') == [('testuser', )]

@@ -1,4 +1,3 @@
-import psycopg2
 import json
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -24,8 +23,7 @@ def helper_compare_branch_list(page_server_cur, zenith_cli):
 
 def test_cli_branch_list(pageserver, zenith_cli):
 
-    page_server_conn = psycopg2.connect(pageserver.connstr())
-    page_server_conn.autocommit = True
+    page_server_conn = pageserver.connect()
     page_server_cur = page_server_conn.cursor()
 
     # Initial sanity check

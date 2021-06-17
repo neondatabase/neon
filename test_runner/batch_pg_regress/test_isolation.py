@@ -1,5 +1,4 @@
 import os
-import psycopg2
 
 from fixtures.utils import mkdir_if_needed
 
@@ -15,11 +14,7 @@ def test_isolation(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
     pg = postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])
-    pg_conn = psycopg2.connect(pg.connstr())
-    pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-    cur = pg_conn.cursor()
-    cur.execute('CREATE DATABASE isolation_regression')
-    pg_conn.close()
+    pg.safe_psql('CREATE DATABASE isolation_regression')
 
     # Create some local directories for pg_isolation_regress to run in.
     runpath = os.path.join(test_output_dir, 'regress')

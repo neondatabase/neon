@@ -1,8 +1,8 @@
-import psycopg2
 import pytest
 import random
 import time
 
+from contextlib import closing
 from multiprocessing import Process, Value
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -16,15 +16,14 @@ def test_normal_work(zenith_cli, pageserver, postgres, wa_factory):
     pg = postgres.create_start('test_wal_acceptors_normal_work',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    pg_conn = psycopg2.connect(pg.connstr())
-    # do commit after each statement as waiting for acceptors happens there
-    pg_conn.autocommit = True
-
-    cur = pg_conn.cursor()
-    cur.execute('CREATE TABLE t(key int primary key, value text)')
-    cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
-    cur.execute('SELECT sum(key) FROM t')
-    assert cur.fetchone() == (5000050000, )
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            # we rely upon autocommit after each statement
+            # as waiting for acceptors happens there
+            cur.execute('CREATE TABLE t(key int primary key, value text)')
+            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+            cur.execute('SELECT sum(key) FROM t')
+            assert cur.fetchone() == (5000050000, )
 
 
 # Run page server and multiple acceptors, and multiple compute nodes running
@@ -72,10 +71,9 @@ def test_restarts(zenith_cli, pageserver, postgres, wa_factory):
     pg = postgres.create_start('test_wal_acceptors_restarts',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    pg_conn = psycopg2.connect(pg.connstr())
-    # do commit after each statement as waiting for acceptors happens there
-    pg_conn.autocommit = True
-
+    # we rely upon autocommit after each statement
+    # as waiting for acceptors happens there
+    pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
     failed_node = None
@@ -110,9 +108,9 @@ def test_unavailability(zenith_cli, pageserver, postgres, wa_factory):
     pg = postgres.create_start('test_wal_acceptors_unavailability',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    pg_conn = psycopg2.connect(pg.connstr())
-    # do commit after each statement as waiting for acceptors happens there
-    pg_conn.autocommit = True
+    # we rely upon autocommit after each statement
+    # as waiting for acceptors happens there
+    pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
     # check basic work with table
@@ -181,9 +179,9 @@ def test_race_conditions(zenith_cli, pageserver, postgres, wa_factory, stop_valu
     pg = postgres.create_start('test_wal_acceptors_race_conditions',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    pg_conn = psycopg2.connect(pg.connstr())
-    # do commit after each statement as waiting for acceptors happens there
-    pg_conn.autocommit = True
+    # we rely upon autocommit after each statement
+    # as waiting for acceptors happens there
+    pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
     cur.execute('CREATE TABLE t(key int primary key, value text)')
