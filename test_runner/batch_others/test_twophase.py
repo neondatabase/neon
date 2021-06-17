@@ -1,5 +1,3 @@
-import psycopg2
-
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -12,8 +10,7 @@ def test_twophase(zenith_cli, pageserver, postgres, pg_bin):
     pg = postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
     print("postgres is running on 'test_twophase' branch")
 
-    conn = psycopg2.connect(pg.connstr())
-    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    conn = pg.connect()
     cur = conn.cursor()
 
     cur.execute('CREATE TABLE foo (t text)')
@@ -33,8 +30,7 @@ def test_twophase(zenith_cli, pageserver, postgres, pg_bin):
 
     pg2 = postgres.create_start('test_twophase_prepared',
                                 config_lines=['max_prepared_transactions=5'])
-    conn2 = psycopg2.connect(pg2.connstr())
-    conn2.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    conn2 = pg2.connect()
     cur2 = conn2.cursor()
 
     # On the new branch, commit one of the prepared transactions, abort the other one.

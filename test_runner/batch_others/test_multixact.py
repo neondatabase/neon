@@ -1,5 +1,3 @@
-import psycopg2
-
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -15,8 +13,7 @@ def test_multixact(pageserver, postgres, pg_bin, zenith_cli, base_dir):
     pg = postgres.create_start('test_multixact')
 
     print("postgres is running on 'test_multixact' branch")
-    pg_conn = psycopg2.connect(pg.connstr())
-    pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
     cur.execute('''
@@ -31,10 +28,10 @@ def test_multixact(pageserver, postgres, pg_bin, zenith_cli, base_dir):
     nclients = 3
     connections = []
     for i in range(nclients):
-        con = psycopg2.connect(pg.connstr())
         # Do not turn on autocommit. We want to hold the key-share locks.
-        con.cursor().execute('select * from t1 for key share')
-        connections.append(con)
+        conn = pg.connect(autocommit=False)
+        conn.cursor().execute('select * from t1 for key share')
+        connections.append(conn)
 
     # We should have a multixact now. We can close the connections.
     for c in connections:
@@ -56,8 +53,7 @@ def test_multixact(pageserver, postgres, pg_bin, zenith_cli, base_dir):
     pg_new = postgres.create_start('test_multixact_new')
 
     print("postgres is running on 'test_multixact_new' branch")
-    pg_new_conn = psycopg2.connect(pg_new.connstr())
-    pg_new_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    pg_new_conn = pg_new.connect()
     cur_new = pg_new_conn.cursor()
 
     cur_new.execute('SELECT next_multixact_id FROM pg_control_checkpoint()')

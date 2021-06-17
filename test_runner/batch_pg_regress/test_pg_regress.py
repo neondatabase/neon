@@ -1,5 +1,4 @@
 import os
-import psycopg2
 
 from fixtures.utils import mkdir_if_needed
 
@@ -14,11 +13,7 @@ def test_pg_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, p
 
     # Connect to postgres and create a database called "regression".
     pg = postgres.create_start('test_pg_regress')
-    pg_conn = psycopg2.connect(pg.connstr())
-    pg_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-    cur = pg_conn.cursor()
-    cur.execute('CREATE DATABASE regression')
-    pg_conn.close()
+    pg.safe_psql('CREATE DATABASE regression')
 
     # Create some local directories for pg_regress to run in.
     runpath = os.path.join(test_output_dir, 'regress')

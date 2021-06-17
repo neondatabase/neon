@@ -1,14 +1,17 @@
 import getpass
 import os
-import signal
+import psycopg2
 import pytest
 import shutil
+import signal
 import subprocess
-import psycopg2
 
+from contextlib import closing
 from pathlib import Path
 
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar
+# Type-related stuff
+from psycopg2.extensions import connection as PgConnection
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast
 from typing_extensions import Literal
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
@@ -75,6 +78,48 @@ def safety_check() -> None:
         raise Exception('found interfering processes running')
 
 
+class PgProtocol:
+    """ Reusable connection logic """
+    def __init__(self, host: str, port: int, username: Optional[str] = None):
+        self.host = host
+        self.port = port
+        self.username = username or getpass.getuser()
+
+    def connstr(self, *, dbname: str = 'postgres', username: Optional[str] = None) -> str:
+        """
+        Build a libpq connection string for the Postgres instance.
+        """
+
+        username = username or self.username
+        return f'host={self.host} port={self.port} user={username} dbname={dbname}'
+
+    # autocommit=True here by default because that's what we need most of the time
+    def connect(self, *, autocommit=True, **kwargs: Any) -> PgConnection:
+        """
+        Connect to the node.
+        Returns psycopg2's connection object.
+        This method passes all extra params to connstr.
+        """
+
+        conn = psycopg2.connect(self.connstr(**kwargs))
+        # WARNING: this setting affects *all* tests!
+        conn.autocommit = autocommit
+        return conn
+
+    def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
+        """
+        Execute query against the node and return all rows.
+        This method passes all extra params to connstr.
+        """
+
+        with closing(self.connect(**kwargs)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                if cur.description is None:
+                    return []  # query didn't return data
+                return cast(List[Any], cur.fetchall())
+
+
 class ZenithCli:
     """
     An object representing the CLI binary named "zenith".
@@ -120,9 +165,11 @@ def zenith_cli(zenith_binpath: str, repo_dir: str, pg_distrib_dir: str) -> Zenit
     return ZenithCli(zenith_binpath, repo_dir, pg_distrib_dir)
 
 
-class ZenithPageserver:
+class ZenithPageserver(PgProtocol):
     """ An object representing a running pageserver. """
     def __init__(self, zenith_cli: ZenithCli):
+        super().__init__(host='localhost', port=DEFAULT_PAGESERVER_PORT)
+
         self.zenith_cli = zenith_cli
         self.running = False
 
@@ -157,16 +204,6 @@ class ZenithPageserver:
 
         return self
 
-    # The page server speaks the Postgres FE/BE protocol, so you can connect
-    # to it with any Postgres client, and run special commands. This function
-    # returns a libpq connection string for connecting to it.
-    def connstr(self) -> str:
-        username = getpass.getuser()
-        conn_str = 'host={} port={} dbname=postgres user={}'.format('localhost',
-                                                                    DEFAULT_PAGESERVER_PORT,
-                                                                    username)
-        return conn_str
-
 
 @zenfixture
 def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
@@ -193,15 +230,14 @@ def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
     ps.stop()
 
 
-class Postgres:
+class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, zenith_cli: ZenithCli, repo_dir: str, instance_num: int):
+        super().__init__(host='localhost', port=55431 + instance_num)
+
         self.zenith_cli = zenith_cli
         self.instance_num = instance_num
         self.running = False
-        self.username = getpass.getuser()
-        self.host = 'localhost'
-        self.port = 55431 + instance_num  # TODO: find a better way
         self.repo_dir = repo_dir
         self.branch: Optional[str] = None  # dubious, see asserts below
         # path to conf is <repo_dir>/pgdatadirs/<branch_name>/postgresql.conf
@@ -242,18 +278,18 @@ class Postgres:
 
         return self
 
-    """ Path to postgresql.conf """
-
     def config_file_path(self) -> str:
-        filename = 'pgdatadirs/{}/postgresql.conf'.format(self.branch)
+        """ Path to postgresql.conf """
+        filename = f'pgdatadirs/{self.branch}/postgresql.conf'
         return os.path.join(self.repo_dir, filename)
 
-    """
-    Adjust instance config for working with wal acceptors instead of
-    pageserver (pre-configured by CLI) directly.
-    """
+    def adjust_for_wal_acceptors(self, wal_acceptors: str) -> 'Postgres':
+        """
+        Adjust instance config for working with wal acceptors instead of
+        pageserver (pre-configured by CLI) directly.
+        """
 
-    def adjust_for_wal_acceptors(self, wal_acceptors) -> 'Postgres':
+        # TODO: reuse config()
         with open(self.config_file_path(), "r") as f:
             cfg_lines = f.readlines()
         with open(self.config_file_path(), "w") as f:
@@ -319,33 +355,11 @@ class Postgres:
 
         return self
 
-    def connstr(self, dbname: str = 'postgres', username: Optional[str] = None) -> str:
-        """
-        Build a libpq connection string for the Postgres instance.
-        """
-
-        conn_str = 'host={} port={} dbname={} user={}'.format(self.host, self.port, dbname,
-                                                              (username or self.username))
-
-        return conn_str
-
-    def safe_psql(self, query, dbname='postgres', username=None):
-        """
-        Execute query against the node and return all (fetchall) results
-        """
-        with psycopg2.connect(self.connstr(dbname, username)) as conn:
-            with conn.cursor() as curs:
-                curs.execute(query)
-                if curs.description is None:
-                    return []  # query didn't return data
-                return curs.fetchall()
-
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
     def __init__(self, zenith_cli: ZenithCli, repo_dir: str):
         self.zenith_cli = zenith_cli
-        self.host = 'localhost'
         self.repo_dir = repo_dir
         self.num_instances = 0
         self.instances: List[Postgres] = []
@@ -439,17 +453,13 @@ def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir)
 
 
-""" Read content of file into number """
-
-
 def read_pid(path):
+    """ Read content of file into number """
     return int(Path(path).read_text())
 
 
-""" An object representing a running wal acceptor daemon. """
-
-
 class WalAcceptor:
+    """ An object representing a running wal acceptor daemon. """
     def __init__(self, wa_binpath, data_dir, port, num):
         self.wa_binpath = wa_binpath
         self.data_dir = data_dir
@@ -504,11 +514,12 @@ class WalAcceptorFactory:
         self.data_dir = data_dir
         self.instances = []
         self.initial_port = 54321
+
+    def start_new(self) -> WalAcceptor:
         """
         Start new wal acceptor.
         """
 
-    def start_new(self) -> WalAcceptor:
         wa_num = len(self.instances)
         wa = WalAcceptor(self.wa_binpath,
                          os.path.join(self.data_dir, "wal_acceptor_{}".format(wa_num)),
@@ -517,11 +528,11 @@ class WalAcceptorFactory:
         self.instances.append(wa)
         return wa
 
-    """
-    Start n new wal acceptors
-    """
+    def start_n_new(self, n: int) -> None:
+        """
+        Start n new wal acceptors.
+        """
 
-    def start_n_new(self, n):
         for _ in range(n):
             self.start_new()
 
@@ -530,14 +541,13 @@ class WalAcceptorFactory:
             wa.stop()
         return self
 
-    """ Get list of wal acceptor endpoints suitable for wal_acceptors GUC  """
-
     def get_connstrs(self) -> str:
+        """ Get list of wal acceptor endpoints suitable for wal_acceptors GUC  """
         return ','.join(["127.0.0.1:{}".format(wa.port) for wa in self.instances])
 
 
 @zenfixture
-def wa_factory(zenith_binpath, repo_dir) -> Iterator[WalAcceptorFactory]:
+def wa_factory(zenith_binpath: str, repo_dir: str) -> Iterator[WalAcceptorFactory]:
     """ Gives WalAcceptorFactory providing wal acceptors. """
     wafactory = WalAcceptorFactory(zenith_binpath, os.path.join(repo_dir, "wal_acceptors"))
     yield wafactory

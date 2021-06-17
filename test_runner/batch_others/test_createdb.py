@@ -1,4 +1,4 @@
-import psycopg2
+from contextlib import closing
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -12,9 +12,7 @@ def test_createdb(zenith_cli, pageserver, postgres, pg_bin):
     pg = postgres.create_start('test_createdb')
     print("postgres is running on 'test_createdb' branch")
 
-    with psycopg2.connect(pg.connstr()) as conn:
-        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-
+    with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             # Cause a 'relmapper' change in the original branch
             cur.execute('VACUUM FULL pg_class')
@@ -31,4 +29,4 @@ def test_createdb(zenith_cli, pageserver, postgres, pg_bin):
 
     # Test that you can connect to the new database on both branches
     for db in (pg, pg2):
-        psycopg2.connect(db.connstr('foodb')).close()
+        db.connect(dbname='foodb').close()

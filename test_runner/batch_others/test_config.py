@@ -1,4 +1,4 @@
-import psycopg2
+from contextlib import closing
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -14,9 +14,7 @@ def test_config(zenith_cli, pageserver, postgres, pg_bin):
     pg = postgres.create_start('test_config', config_lines=['log_min_messages=debug1'])
     print('postgres is running on test_config branch')
 
-    with psycopg2.connect(pg.connstr()) as conn:
-        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-
+    with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute('''
                 SELECT setting
