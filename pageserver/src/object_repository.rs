@@ -478,7 +478,10 @@ impl Timeline for ObjectTimeline {
                 let val = ObjectValue::RelationSize(new_nblocks);
                 trace!(
                     "Extended relation {} from {} to {} blocks at {}",
-                    tag.rel, old_nblocks, new_nblocks, lsn
+                    tag.rel,
+                    old_nblocks,
+                    new_nblocks,
+                    lsn
                 );
 
                 self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
@@ -556,16 +559,16 @@ impl Timeline for ObjectTimeline {
     fn advance_last_record_lsn(&self, lsn: Lsn) {
         // Can't move backwards.
         let old = self.last_record_lsn.fetch_max(lsn);
-        if old <= lsn {
-            // Also advance last_valid_lsn
-            let old = self.last_valid_lsn.advance(lsn);
-            // Can't move backwards.
-            if lsn < old {
-                warn!(
-                    "attempted to move last record LSN backwards (was {}, new {})",
-                    old, lsn
-                );
-            }
+        assert!(old <= lsn);
+
+        // Also advance last_valid_lsn
+        let old = self.last_valid_lsn.advance(lsn);
+        // Can't move backwards.
+        if lsn < old {
+            warn!(
+                "attempted to move last record LSN backwards (was {}, new {})",
+                old, lsn
+            );
         }
     }
     fn get_last_record_lsn(&self) -> Lsn {

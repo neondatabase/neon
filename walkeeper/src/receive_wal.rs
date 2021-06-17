@@ -247,16 +247,6 @@ impl ReceiveWalConn {
         /* Calculate WAL end based on local data */
         let (flush_lsn, timeline) = self.timeline.find_end_of_wal(&self.conf.data_dir, true);
         my_info.flush_lsn = flush_lsn;
-
-        // FIXME: Yet another trick to handle creation of new WAL segment at
-        // compute node startup (a-la pg_resetwal).
-        // If restart_lsn was not adjusted then walproposer will try to perform recovery
-        // because restart_lsn != flush_lsn and fail because first WAL segment is missed.
-        // May be it is better to handle it by wal proposer, but it will contradict with wal_proposer
-        // usage in other branches.
-        // This adjustment is needed only for first segment.
-        let min_lsn = Lsn((server_info.wal_seg_size as u64) * 2);
-        my_info.restart_lsn = Lsn::max(my_info.restart_lsn, min_lsn);
         my_info.server.timeline = timeline;
 
         /* Report my identifier to proposer */

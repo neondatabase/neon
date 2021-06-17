@@ -334,7 +334,6 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
                 // Assume that an error means we've reached the end of
                 // a partial WAL record. So that's ok.
                 trace!("WAL decoder error {:?}", rec);
-                waldecoder.set_position(Lsn((segno + 1) * pg_constants::WAL_SEGMENT_SIZE as u64));
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {

@@ -65,13 +65,6 @@ impl WalStreamDecoder {
         }
     }
 
-    pub fn set_position(&mut self, lsn: Lsn) {
-        self.lsn = lsn;
-        self.contlen = 0;
-        self.padlen = 0;
-        self.inputbuf.clear();
-    }
-
     pub fn feed_bytes(&mut self, buf: &[u8]) {
         self.inputbuf.extend_from_slice(buf);
     }
@@ -97,12 +90,10 @@ impl WalStreamDecoder {
                 let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf);
 
                 if hdr.std.xlp_pageaddr != self.lsn.0 {
-                    info!(
-                        "Receive page with LSN {} instead of expected {}",
-                        Lsn(hdr.std.xlp_pageaddr),
-                        self.lsn
-                    );
-                    self.lsn = Lsn(hdr.std.xlp_pageaddr);
+                    return Err(WalDecodeError {
+                        msg: "invalid xlog segment header".into(),
+                        lsn: self.lsn,
+                    });
                 }
                 // TODO: verify the remaining fields in the header
 

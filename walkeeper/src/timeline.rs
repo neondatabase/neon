@@ -234,10 +234,7 @@ impl TimelineTools for Option<Arc<Timeline>> {
         let seg_size = self.get().get_info().server.wal_seg_size as usize;
         assert!(seg_size > 0);
         let (lsn, timeline) = find_end_of_wal(data_dir, seg_size, precise);
-        // FIXME: because of generation of new segment at compute node start we just do not have first WAL segment
-        let wal_start = Lsn((seg_size * 2) as u64);
-        let lsn = Lsn::max(Lsn(lsn), wal_start);
-        (lsn, timeline)
+        (Lsn(lsn), timeline)
     }
 }
 

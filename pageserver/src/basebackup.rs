@@ -220,23 +220,23 @@ impl<'a> Basebackup<'a> {
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
-        // Here starts pg_resetwal inspired magic
         // Generate new pg_control and WAL needed for bootstrap
-        let new_segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE) + 1;
-
-        let new_lsn = XLogSegNoOffsetToRecPtr(
-            new_segno,
+        let checkpoint_segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
+        let checkpoint_lsn = XLogSegNoOffsetToRecPtr(
+            checkpoint_segno,
             XLOG_SIZE_OF_XLOG_LONG_PHD as u32,
             pg_constants::WAL_SEGMENT_SIZE,
         );
-        checkpoint.redo = new_lsn;
+        checkpoint.redo = self.lsn.0 + self.lsn.calc_padding(8u32);
 
         //reset some fields we don't want to preserve
         checkpoint.oldestActiveXid = 0;
 
         //save new values in pg_control
-        pg_control.checkPoint = new_lsn;
+        pg_control.checkPoint = checkpoint_lsn;
         pg_control.checkPointCopy = checkpoint;
+        info!("pg_control.state = {}", pg_control.state);
+        pg_control.state = pg_constants::DB_SHUTDOWNED;
 
         //send pg_control
         let pg_control_bytes = pg_control.encode();
@@ -246,7 +246,7 @@ impl<'a> Basebackup<'a> {
         //send wal segment
         let wal_file_name = XLogFileName(
             1, // FIXME: always use Postgres timeline 1
-            new_segno,
+            checkpoint_segno,
             pg_constants::WAL_SEGMENT_SIZE,
         );
         let wal_file_path = format!("pg_wal/{}", wal_file_name);

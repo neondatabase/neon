@@ -399,7 +399,7 @@ pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
                 xlp_magic: XLOG_PAGE_MAGIC as u16,
                 xlp_info: pg_constants::XLP_LONG_HEADER,
                 xlp_tli: 1, // FIXME: always use Postgres timeline 1
-                xlp_pageaddr: pg_control.checkPointCopy.redo - XLOG_SIZE_OF_XLOG_LONG_PHD as u64,
+                xlp_pageaddr: pg_control.checkPoint - XLOG_SIZE_OF_XLOG_LONG_PHD as u64,
                 xlp_rem_len: 0,
             }
         },
