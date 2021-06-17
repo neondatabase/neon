@@ -3,9 +3,9 @@ import os
 import psycopg2
 import pytest
 import shutil
-import signal
 import subprocess
 
+from subprocess import Popen
 from contextlib import closing
 from pathlib import Path
 
@@ -453,67 +453,62 @@ def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir)
 
 
-def read_pid(path):
-    """ Read content of file into number """
-    return int(Path(path).read_text())
-
-
 class WalAcceptor:
     """ An object representing a running wal acceptor daemon. """
-    def __init__(self, wa_binpath, data_dir, port, num):
+    def __init__(self, wa_binpath: str, data_dir: str, port: int, num: int):
         self.wa_binpath = wa_binpath
         self.data_dir = data_dir
         self.port = port
         self.num = num  # identifier for logging
+        self.process: Optional[Popen[bytes]] = None
 
     def start(self) -> 'WalAcceptor':
         # create data directory if not exists
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
 
-        cmd = [self.wa_binpath]
-        cmd.extend(["-D", self.data_dir])
-        cmd.extend(["-l", "localhost:{}".format(self.port)])
-        cmd.append("--daemonize")
-        cmd.append("--no-sync")
-        # Tell page server it can receive WAL from this WAL safekeeper
-        cmd.extend(["--pageserver", "localhost:{}".format(DEFAULT_PAGESERVER_PORT)])
-        cmd.extend(["--recall", "1 second"])
+        cmd = [
+            self.wa_binpath,
+            '--dir',
+            self.data_dir,
+            '--listen',
+            f'localhost:{self.port}',
+            '--no-sync',
+            # Tell page server it can receive WAL from this WAL safekeeper
+            '--pageserver',
+            f'localhost:{DEFAULT_PAGESERVER_PORT}',
+            '--recall',
+            '1 second',
+        ]
+
         print('Running command "{}"'.format(' '.join(cmd)))
-        subprocess.run(cmd, check=True)
+        if not self.process:
+            self.process = Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         return self
 
     def stop(self) -> 'WalAcceptor':
-        print('Stopping wal acceptor {}'.format(self.num))
-        pidfile_path = os.path.join(self.data_dir, "wal_acceptor.pid")
-        try:
-            pid = read_pid(pidfile_path)
+        print(f'Stopping wal acceptor {self.num}')
+        if self.process:
             try:
-                os.kill(pid, signal.SIGTERM)
-            except Exception:
-                pass  # pidfile might be obsolete
-            # TODO: cleanup pid file on exit in wal acceptor
-            return self
-            # for _ in range(5):
-            # print('waiting wal acceptor {} (pid {}) to stop...', self.num, pid)
-            # try:
-            # read_pid(pidfile_path)
-            # except FileNotFoundError:
-            # return  # done
-            # time.sleep(1)
-            # raise Exception('Failed to wait for wal acceptor {} shutdown'.format(self.num))
-        except FileNotFoundError:
-            print("Wal acceptor {} is not running".format(self.num))
-            return self
+                # Gently ask process to exit
+                self.process.terminate()
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # This time we kill for real
+                self.process.kill()
+                self.process.wait()
+            self.process = None
+
+        return self
 
 
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """
-    def __init__(self, zenith_binpath, data_dir):
+    def __init__(self, zenith_binpath: str, data_dir: str):
         self.wa_binpath = os.path.join(zenith_binpath, 'wal_acceptor')
         self.data_dir = data_dir
-        self.instances = []
         self.initial_port = 54321
+        self.instances: List[WalAcceptor] = []
 
     def start_new(self) -> WalAcceptor:
         """
