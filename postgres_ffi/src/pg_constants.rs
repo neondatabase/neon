@@ -182,4 +182,5 @@ pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 
 pub const XLOG_BLCKSZ: usize = 8192;
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
+pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;

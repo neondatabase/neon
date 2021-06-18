@@ -445,7 +445,7 @@ impl PostgresRedoManagerInternal {
                             transaction_id_set_status(xid, status, &mut page);
                         }
                     } else if info == pg_constants::XLOG_XACT_PREPARE {
-                        info!("Apply prepare {} record", xlogrec.xl_xid);
+                        trace!("Apply prepare {} record", xlogrec.xl_xid);
                         page.clear();
                         page.extend_from_slice(&buf[..]);
                     } else {

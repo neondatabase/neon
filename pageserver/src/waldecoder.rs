@@ -1181,6 +1181,19 @@ pub fn decode_wal_record(checkpoint: &mut CheckPoint, record: Bytes) -> DecodedW
             if next_oid > checkpoint.nextOid {
                 checkpoint.nextOid = next_oid;
             }
+        } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
+            || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+        {
+            let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
+            buf.copy_to_slice(&mut checkpoint_bytes);
+            let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes).unwrap();
+            trace!(
+                "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
+                xlog_checkpoint.oldestXid, checkpoint.oldestXid
+            );
+            if (checkpoint.oldestXid.wrapping_sub(xlog_checkpoint.oldestXid) as i32) < 0 {
+                checkpoint.oldestXid = xlog_checkpoint.oldestXid;
+            }
         }
     }
 

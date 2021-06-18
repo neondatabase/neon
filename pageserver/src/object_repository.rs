@@ -506,8 +506,6 @@ impl Timeline for ObjectTimeline {
         let key = relation_size_key(self.timelineid, rel);
         let val = ObjectValue::RelationSize(nblocks);
 
-        info!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
-
         self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
         let mut rel_meta = self.rel_meta.write().unwrap();
         rel_meta.insert(
