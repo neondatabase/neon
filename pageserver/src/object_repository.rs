@@ -704,6 +704,19 @@ impl ObjectTimeline {
             .unwrap();
     }
 
+	///
+	/// Perform garbage collection in the timeline: remove ll deteriorated versions of objects.
+	/// Pageserver keeps all WAL records in PITR interval [last_valid_lsn-conf.gc_horizon..last_valid_lsn].
+	/// WAL records preceding last_valid_lsn-conf.gc_horizon LSN are removed by GC.
+	/// But before removing this records GC has to materialize last version with LSN <= last_valid_lsn-conf.gc_horizon '
+	/// (to provide FPI for reconstruction of any other version in PITR interval).
+	///
+	/// GC is performed individually in each timeline and affects only versions belonging to this timeline.
+	/// If this timeline has descendant branches, then GC should check if this version is needed for one of this branches.
+	/// If theoldest version of this object in one of the descendant branches is WAL record,
+	/// then GC is of this object is postponed. May be less conservative strategy should be used here, but we assume
+	/// that most branches have short lifetime and change relatively small fraction of objects.
+	///
     fn do_gc(&self, conf: &'static PageServerConf) -> Result<()> {
         loop {
             thread::sleep(conf.gc_period);
