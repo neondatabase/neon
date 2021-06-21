@@ -238,6 +238,9 @@ impl<'a> Basebackup<'a> {
         info!("pg_control.state = {}", pg_control.state);
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
+		// add zenith.signal file
+        self.ar.append(&new_tar_header("zenith.signal", 0)?, &b""[..])?;
+
         //send pg_control
         let pg_control_bytes = pg_control.encode();
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
