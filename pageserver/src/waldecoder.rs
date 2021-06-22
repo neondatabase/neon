@@ -208,6 +208,7 @@ pub struct DecodedBkpBlock {
     has_image: bool,       /* has image, even for consistency checking */
     pub apply_image: bool, /* has image that should be restored */
     pub will_init: bool,   /* record doesn't need previous page version to apply */
+    pub will_drop: bool,   /* record drops relation */
     //char	   *bkp_image;
     hole_offset: u16,
     hole_length: u16,
@@ -228,6 +229,7 @@ impl DecodedBkpBlock {
             has_image: false,
             apply_image: false,
             will_init: false,
+            will_drop: false,
             hole_offset: 0,
             hole_length: 0,
             bimg_len: 0,
@@ -738,7 +740,15 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     let spcnode = buf.get_u32_le();
                     let dbnode = buf.get_u32_le();
                     let relnode = buf.get_u32_le();
-                    //TODO handle this too?
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationMetadata(RelTag {
+                        forknum: pg_constants::MAIN_FORKNUM,
+                        spcnode,
+                        dbnode,
+                        relnode,
+                    });
+                    blk.will_drop = true;
+                    blocks.push(blk);
                     trace!(
                         "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
                         spcnode,
@@ -784,7 +794,15 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     let spcnode = buf.get_u32_le();
                     let dbnode = buf.get_u32_le();
                     let relnode = buf.get_u32_le();
-                    //TODO handle this too?
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationMetadata(RelTag {
+                        forknum: pg_constants::MAIN_FORKNUM,
+                        spcnode,
+                        dbnode,
+                        relnode,
+                    });
+                    blk.will_drop = true;
+                    blocks.push(blk);
                     trace!(
                         "XLOG_XACT_ABORT relfilenode {}/{}/{}",
                         spcnode,

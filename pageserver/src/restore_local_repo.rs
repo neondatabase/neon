@@ -258,13 +258,17 @@ pub fn save_decoded_record(
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
     for blk in decoded.blocks.iter() {
-        let rec = WALRecord {
-            lsn,
-            will_init: blk.will_init || blk.apply_image,
-            rec: recdata.clone(),
-            main_data_offset: decoded.main_data_offset as u32,
-        };
-        timeline.put_wal_record(blk.tag, rec)?;
+        if blk.will_drop {
+            timeline.put_unlink(blk.tag, lsn)?;
+        } else {
+            let rec = WALRecord {
+                lsn,
+                will_init: blk.will_init || blk.apply_image,
+                rec: recdata.clone(),
+                main_data_offset: decoded.main_data_offset as u32,
+            };
+            timeline.put_wal_record(blk.tag, rec)?;
+        }
     }
 
     // Handle a few special record types
