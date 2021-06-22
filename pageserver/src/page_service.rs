@@ -27,7 +27,7 @@ use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 use crate::basebackup;
 use crate::branches;
 use crate::page_cache;
-use crate::repository::{BufferTag, RelTag, RelationUpdate, Update};
+use crate::repository::{BufferTag, Modification, ObjectTag, RelTag};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
@@ -229,7 +229,7 @@ impl PageServerHandler {
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
                 }
                 PagestreamFeMessage::Read(req) => {
-                    let buf_tag = BufferTag {
+                    let tag = ObjectTag::RelationBuffer(BufferTag {
                         rel: RelTag {
                             spcnode: req.spcnode,
                             dbnode: req.dbnode,
@@ -237,9 +237,9 @@ impl PageServerHandler {
                             forknum: req.forknum,
                         },
                         blknum: req.blkno,
-                    };
+                    });
 
-                    let read_response = match timeline.get_page_at_lsn(buf_tag, req.lsn) {
+                    let read_response = match timeline.get_page_at_lsn(tag, req.lsn) {
                         Ok(p) => PagestreamReadResponse {
                             ok: true,
                             n_blocks: 0,
@@ -404,38 +404,14 @@ impl postgres_backend::Handler for PageServerHandler {
             while let Some(msg) = pgb.read_message()? {
                 match msg {
                     FeMessage::CopyData(bytes) => {
-                        let relation_update = RelationUpdate::des(&bytes)?;
+                        let modification = Modification::des(&bytes)?;
 
-                        last_lsn = relation_update.lsn;
-
-                        match relation_update.update {
-                            Update::Page { blknum, img } => {
-                                let tag = BufferTag {
-                                    rel: relation_update.rel,
-                                    blknum,
-                                };
-
-                                timeline.put_page_image(tag, relation_update.lsn, img)?;
-                            }
-                            Update::WALRecord { blknum, rec } => {
-                                let tag = BufferTag {
-                                    rel: relation_update.rel,
-                                    blknum,
-                                };
-
-                                timeline.put_wal_record(tag, rec)?;
-                            }
-                            Update::Truncate { n_blocks } => {
-                                timeline.put_truncation(
-                                    relation_update.rel,
-                                    relation_update.lsn,
-                                    n_blocks,
-                                )?;
-                            }
-                            Update::Unlink => {
-                                todo!()
-                            }
-                        }
+                        last_lsn = modification.lsn;
+                        timeline.put_raw_data(
+                            modification.tag,
+                            last_lsn,
+                            &modification.data[..],
+                        )?;
                     }
                     FeMessage::CopyDone => {
                         timeline.advance_last_valid_lsn(last_lsn);

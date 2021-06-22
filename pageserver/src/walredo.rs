@@ -17,6 +17,7 @@
 //!
 use bytes::{BufMut, Bytes, BytesMut};
 use log::*;
+use std::assert;
 use std::cell::RefCell;
 use std::fs;
 use std::fs::OpenOptions;
@@ -35,8 +36,7 @@ use tokio::time::timeout;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-use crate::repository::BufferTag;
-use crate::repository::WALRecord;
+use crate::repository::{BufferTag, ObjectTag, WALRecord};
 use crate::PageServerConf;
 
 ///
@@ -52,7 +52,7 @@ pub trait WalRedoManager: Send + Sync {
     /// the reords.
     fn request_redo(
         &self,
-        tag: BufferTag,
+        tag: ObjectTag,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
@@ -68,7 +68,7 @@ pub struct DummyRedoManager {}
 impl crate::walredo::WalRedoManager for DummyRedoManager {
     fn request_redo(
         &self,
-        _tag: BufferTag,
+        _tag: ObjectTag,
         _lsn: Lsn,
         _base_img: Option<Bytes>,
         _records: Vec<WALRecord>,
@@ -97,7 +97,7 @@ struct PostgresRedoManagerInternal {
 
 #[derive(Debug)]
 struct WalRedoRequest {
-    tag: BufferTag,
+    tag: ObjectTag,
     lsn: Lsn,
 
     base_img: Option<Bytes>,
@@ -159,14 +159,13 @@ impl WalRedoManager for PostgresRedoManager {
     ///
     fn request_redo(
         &self,
-        tag: BufferTag,
+        tag: ObjectTag,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
     ) -> Result<Bytes, WalRedoError> {
         // Create a channel where to receive the response
         let (tx, rx) = mpsc::channel::<Result<Bytes, WalRedoError>>();
-
         let request = WalRedoRequest {
             tag,
             lsn,
@@ -249,8 +248,22 @@ impl PostgresRedoManagerInternal {
         let start = Instant::now();
 
         let apply_result: Result<Bytes, Error>;
-        apply_result = process.apply_wal_records(tag, base_img, records).await;
-
+        if let ObjectTag::RelationBuffer(buf_tag) = tag {
+            // Relational WAL records are applied using wal-redo-postgres
+            apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
+		} else {
+            // Non-relational WAL records we will aply ourselves.
+            const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+            let mut page = BytesMut::new();
+            if let Some(fpi) = base_img {
+                // If full-page image is provided, then use it...
+                page.extend_from_slice(&fpi[..]);
+            } else {
+                //  otherwise initialize page with zeros
+                page.extend_from_slice(&ZERO_PAGE);
+            }
+            apply_result = Ok::<Bytes, Error>(page.freeze());
+		}
         let duration = start.elapsed();
 
         let result: Result<Bytes, WalRedoError>;

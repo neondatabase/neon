@@ -21,9 +21,7 @@ use crate::{PageServerConf, ZTimelineId};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use log::*;
-use postgres_ffi::pg_constants;
 use serde::{Deserialize, Serialize};
-use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex, RwLock};
@@ -113,10 +111,11 @@ impl Repository for ObjectRepository {
             ancestor_timeline: None,
             ancestor_lsn: start_lsn,
         };
+        let val = ObjectValue::TimelineMetadata(metadata);
         self.obj_store.put(
             &timeline_metadata_key(timelineid),
             Lsn(0),
-            &MetadataEntry::ser(&metadata)?,
+            &ObjectValue::ser(&val)?,
         )?;
 
         info!("Created empty timeline {}", timelineid);
@@ -138,9 +137,6 @@ impl Repository for ObjectRepository {
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, at_lsn: Lsn) -> Result<()> {
-        // just to check the source timeline exists
-        let _ = self.get_timeline(src)?;
-
         // Write a metadata key, noting the ancestor of th new timeline. There is initially
         // no data in it, but all the read-calls know to look into the ancestor.
         let metadata = MetadataEntry {
@@ -149,10 +145,11 @@ impl Repository for ObjectRepository {
             ancestor_timeline: Some(src),
             ancestor_lsn: at_lsn,
         };
+        let val = ObjectValue::TimelineMetadata(metadata);
         self.obj_store.put(
             &timeline_metadata_key(dst),
             Lsn(0),
-            &MetadataEntry::ser(&metadata)?,
+            &ObjectValue::ser(&val)?,
         )?;
 
         Ok(())
@@ -223,19 +220,22 @@ impl ObjectTimeline {
         let v = obj_store
             .get(&timeline_metadata_key(timelineid), Lsn(0))
             .with_context(|| "timeline not found in repository")?;
-        let metadata = MetadataEntry::des(&v)?;
 
-        let timeline = ObjectTimeline {
-            timelineid,
-            obj_store,
-            walredo_mgr,
-            last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
-            last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
-            ancestor_timeline: metadata.ancestor_timeline,
-            ancestor_lsn: metadata.ancestor_lsn,
-            rel_meta: RwLock::new(BTreeMap::new()),
-        };
-        Ok(timeline)
+        if let ObjectValue::TimelineMetadata(metadata) = ObjectValue::des(&v)? {
+            let timeline = ObjectTimeline {
+                timelineid,
+                obj_store,
+                walredo_mgr,
+                last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
+                last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
+                ancestor_timeline: metadata.ancestor_timeline,
+                ancestor_lsn: metadata.ancestor_lsn,
+                rel_meta: RwLock::new(BTreeMap::new()),
+            };
+            Ok(timeline)
+        } else {
+            bail!("Invalid timeline metadata");
+        }
     }
 }
 
@@ -245,10 +245,54 @@ impl Timeline for ObjectTimeline {
     //------------------------------------------------------------------------------
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, tag: BufferTag, req_lsn: Lsn) -> Result<Bytes> {
+    fn get_page_at_lsn(&self, tag: ObjectTag, req_lsn: Lsn) -> Result<Bytes> {
         let lsn = self.wait_lsn(req_lsn)?;
 
         self.get_page_at_lsn_nowait(tag, lsn)
+    }
+
+    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes> {
+        const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+        // Look up the page entry. If it's a page image, return that. If it's a WAL record,
+        // ask the WAL redo service to reconstruct the page image from the WAL records.
+        let searchkey = ObjectKey {
+            timeline: self.timelineid,
+            tag,
+        };
+        let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
+
+        if let Some((version_lsn, value)) = iter.next().transpose()? {
+            let page_img: Bytes;
+
+            match ObjectValue::des(&value)? {
+                ObjectValue::Page(img) => {
+                    page_img = img;
+                }
+                ObjectValue::WALRecord(_rec) => {
+                    // Request the WAL redo manager to apply the WAL records for us.
+                    let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
+                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
+
+                    self.put_page_image(tag, lsn, page_img.clone())?;
+                }
+                x => bail!("Unexpected object value: {:?}", x),
+            }
+            // FIXME: assumes little-endian. Only used for the debugging log though
+            let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
+            let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
+            trace!(
+                "Returning page with LSN {:X}/{:X} for {:?} from {} (request {})",
+                page_lsn_hi,
+                page_lsn_lo,
+                tag,
+                version_lsn,
+                lsn
+            );
+            return Ok(page_img);
+        }
+        trace!("page {:?} at {} not found", tag, lsn);
+        Ok(Bytes::from_static(&ZERO_PAGE))
+        /* return Err("could not find page image")?; */
     }
 
     /// Get size of relation
@@ -282,6 +326,11 @@ impl Timeline for ObjectTimeline {
         Ok(false)
     }
 
+    /// Get a list of non-relational objects
+    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>> {
+        self.obj_store.list_objects(self.timelineid, true, lsn)
+    }
+
     /// Get a list of all distinct relations in given tablespace and database.
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
         // List all relations in this timeline.
@@ -306,10 +355,12 @@ impl Timeline for ObjectTimeline {
                 .obj_store
                 .get(&timeline_metadata_key(timeline), Lsn(0))
                 .with_context(|| "timeline not found in repository")?;
-            let metadata = MetadataEntry::des(&v)?;
-
-            prev_timeline = metadata.ancestor_timeline;
-            lsn = metadata.ancestor_lsn;
+            if let ObjectValue::TimelineMetadata(metadata) = ObjectValue::des(&v)? {
+                prev_timeline = metadata.ancestor_timeline;
+                lsn = metadata.ancestor_lsn;
+            } else {
+                bail!("Invalid timeline metadata");
+            }
         }
 
         Ok(all_rels)
@@ -325,96 +376,98 @@ impl Timeline for ObjectTimeline {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()> {
+    fn put_wal_record(&self, tag: ObjectTag, rec: WALRecord) -> Result<()> {
         let lsn = rec.lsn;
         let key = ObjectKey {
             timeline: self.timelineid,
-            buf_tag: tag,
+            tag,
         };
-        let val = PageEntry::WALRecord(rec);
+        let val = ObjectValue::WALRecord(rec);
 
-        self.obj_store.put(&key, lsn, &PageEntry::ser(&val)?)?;
-        debug!(
-            "put_wal_record rel {} blk {} at {}",
-            tag.rel, tag.blknum, lsn
-        );
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
+        debug!("put_wal_record {:?} at {}", tag, lsn);
 
-        // Also check if this created or extended the file
-        let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
+        if let ObjectTag::RelationBuffer(tag) = tag {
+            // Also check if this created or extended the file
+            let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
 
-        if tag.blknum >= old_nblocks {
-            let new_nblocks = tag.blknum + 1;
-            let key = relation_size_key(self.timelineid, tag.rel);
-            let val = RelationSizeEntry::Size(new_nblocks);
+            if tag.blknum >= old_nblocks {
+                let new_nblocks = tag.blknum + 1;
+                let key = relation_size_key(self.timelineid, tag.rel);
+                let val = ObjectValue::RelationSize(new_nblocks);
 
-            trace!(
-                "Extended relation {} from {} to {} blocks at {}",
-                tag.rel,
-                old_nblocks,
-                new_nblocks,
-                lsn
-            );
+                trace!(
+                    "Extended relation {} from {} to {} blocks at {}",
+                    tag.rel,
+                    old_nblocks,
+                    new_nblocks,
+                    lsn
+                );
 
-            self.obj_store
-                .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
-            let mut rel_meta = self.rel_meta.write().unwrap();
-            rel_meta.insert(
-                tag.rel,
-                RelMetadata {
-                    size: new_nblocks,
-                    last_updated: lsn,
-                },
-            );
+                self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
+                let mut rel_meta = self.rel_meta.write().unwrap();
+                rel_meta.insert(
+                    tag.rel,
+                    RelMetadata {
+                        size: new_nblocks,
+                        last_updated: lsn,
+                    },
+                );
+            }
         }
+        Ok(())
+    }
 
+    fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()> {
+        let key = ObjectKey {
+            timeline: self.timelineid,
+            tag,
+        };
+        self.obj_store.put(&key, lsn, data)?;
         Ok(())
     }
 
     ///
     /// Memorize a full image of a page version
     ///
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
+    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes) -> Result<()> {
         let key = ObjectKey {
             timeline: self.timelineid,
-            buf_tag: tag,
+            tag,
         };
-        let val = PageEntry::Page(img);
+        let val = ObjectValue::Page(img);
 
-        self.obj_store.put(&key, lsn, &PageEntry::ser(&val)?)?;
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
 
-        debug!(
-            "put_page_image rel {} blk {} at {}",
-            tag.rel, tag.blknum, lsn
-        );
+        debug!("put_page_image {:?} at {}", tag, lsn);
 
-        // Also check if this created or extended the file
-        let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
+        if let ObjectTag::RelationBuffer(tag) = tag {
+            // Also check if this created or extended the file
+            let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
 
-        if tag.blknum >= old_nblocks {
-            let new_nblocks = tag.blknum + 1;
-            let key = relation_size_key(self.timelineid, tag.rel);
-            let val = RelationSizeEntry::Size(new_nblocks);
+            if tag.blknum >= old_nblocks {
+                let new_nblocks = tag.blknum + 1;
+                let key = relation_size_key(self.timelineid, tag.rel);
+                let val = ObjectValue::RelationSize(new_nblocks);
+                trace!(
+                    "Extended relation {} from {} to {} blocks at {}",
+                    tag.rel,
+                    old_nblocks,
+                    new_nblocks,
+                    lsn
+                );
 
-            trace!(
-                "Extended relation {} from {} to {} blocks at {}",
-                tag.rel,
-                old_nblocks,
-                new_nblocks,
-                lsn
-            );
-
-            self.obj_store
-                .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
-            let mut rel_meta = self.rel_meta.write().unwrap();
-            rel_meta.insert(
-                tag.rel,
-                RelMetadata {
-                    size: new_nblocks,
-                    last_updated: lsn,
-                },
-            );
+                self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
+                let mut rel_meta = self.rel_meta.write().unwrap();
+                rel_meta.insert(
+                    tag.rel,
+                    RelMetadata {
+                        size: new_nblocks,
+                        last_updated: lsn,
+                    },
+                );
+            }
         }
-
         Ok(())
     }
 
@@ -424,12 +477,9 @@ impl Timeline for ObjectTimeline {
     ///
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()> {
         let key = relation_size_key(self.timelineid, rel);
-        let val = RelationSizeEntry::Size(nblocks);
+        let val = ObjectValue::RelationSize(nblocks);
 
-        info!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
-
-        self.obj_store
-            .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
         let mut rel_meta = self.rel_meta.write().unwrap();
         rel_meta.insert(
             rel,
@@ -512,13 +562,14 @@ impl Timeline for ObjectTimeline {
             ancestor_timeline: self.ancestor_timeline,
             ancestor_lsn: self.ancestor_lsn,
         };
+        trace!("checkpoint at {}", metadata.last_valid_lsn);
+
+        let val = ObjectValue::TimelineMetadata(metadata);
         self.obj_store.put(
             &timeline_metadata_key(self.timelineid),
             Lsn(0),
-            &MetadataEntry::ser(&metadata)?,
+            &ObjectValue::ser(&val)?,
         )?;
-
-        trace!("checkpoint at {}", metadata.last_valid_lsn);
 
         Ok(())
     }
@@ -526,59 +577,11 @@ impl Timeline for ObjectTimeline {
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
         let lsn = self.last_valid_lsn.load();
         let iter = self.obj_store.objects(self.timelineid, lsn)?;
-        Ok(Box::new(ObjectHistory {
-            lsn,
-            iter,
-            last_relation_size: None,
-        }))
+        Ok(Box::new(ObjectHistory { lsn, iter }))
     }
 }
 
 impl ObjectTimeline {
-    fn get_page_at_lsn_nowait(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes> {
-        // Look up the page entry. If it's a page image, return that. If it's a WAL record,
-        // ask the WAL redo service to reconstruct the page image from the WAL records.
-        let searchkey = ObjectKey {
-            timeline: self.timelineid,
-            buf_tag: tag,
-        };
-        let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
-
-        if let Some((version_lsn, value)) = iter.next().transpose()? {
-            let page_img: Bytes;
-
-            match PageEntry::des(&value)? {
-                PageEntry::Page(img) => {
-                    page_img = img;
-                }
-                PageEntry::WALRecord(_rec) => {
-                    // Request the WAL redo manager to apply the WAL records for us.
-                    let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
-                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
-
-                    self.put_page_image(tag, lsn, page_img.clone())?;
-                }
-            }
-            // FIXME: assumes little-endian. Only used for the debugging log though
-            let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
-            let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
-            trace!(
-                "Returning page with LSN {:X}/{:X} for {} blk {} from {} (request {})",
-                page_lsn_hi,
-                page_lsn_lo,
-                tag.rel,
-                tag.blknum,
-                version_lsn,
-                lsn
-            );
-            return Ok(page_img);
-        }
-        static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-        trace!("page {} blk {} at {} not found", tag.rel, tag.blknum, lsn);
-        Ok(Bytes::from_static(&ZERO_PAGE))
-        /* return Err("could not find page image")?; */
-    }
-
     ///
     /// Internal function to get relation size at given LSN.
     ///
@@ -597,8 +600,9 @@ impl ObjectTimeline {
         let mut iter = self.object_versions(&*self.obj_store, &key, lsn)?;
 
         if let Some((version_lsn, value)) = iter.next().transpose()? {
-            match RelationSizeEntry::des(&value)? {
-                RelationSizeEntry::Size(nblocks) => {
+            let value = ObjectValue::des(&value)?;
+            match value {
+                ObjectValue::RelationSize(nblocks) => {
                     trace!(
                         "relation {} has size {} at {} (request {})",
                         rel,
@@ -608,7 +612,7 @@ impl ObjectTimeline {
                     );
                     Ok(Some(nblocks))
                 }
-                RelationSizeEntry::Unlink => {
+                ObjectValue::Unlink => {
                     trace!(
                         "relation {} not found; it was dropped at lsn {}",
                         rel,
@@ -616,9 +620,15 @@ impl ObjectTimeline {
                     );
                     Ok(None)
                 }
+                _ => bail!(
+                    "Unexpect relation {} size value {:?} at {}",
+                    rel,
+                    value,
+                    lsn
+                ),
             }
         } else {
-            info!("relation {} not found at {}", rel, lsn);
+            debug!("relation {} not found at {}", rel, lsn);
             Ok(None)
         }
     }
@@ -632,7 +642,7 @@ impl ObjectTimeline {
     ///
     fn collect_records_for_apply(
         &self,
-        tag: BufferTag,
+        tag: ObjectTag,
         lsn: Lsn,
     ) -> Result<(Option<Bytes>, Vec<WALRecord>)> {
         let mut base_img: Option<Bytes> = None;
@@ -642,24 +652,25 @@ impl ObjectTimeline {
         // old page image.
         let searchkey = ObjectKey {
             timeline: self.timelineid,
-            buf_tag: tag,
+            tag,
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
         while let Some((_key, value)) = iter.next().transpose()? {
-            match PageEntry::des(&value)? {
-                PageEntry::Page(img) => {
+            match ObjectValue::des(&value)? {
+                ObjectValue::Page(img) => {
                     // We have a base image. No need to dig deeper into the list of
                     // records
                     base_img = Some(img);
                     break;
                 }
-                PageEntry::WALRecord(rec) => {
+                ObjectValue::WALRecord(rec) => {
                     records.push(rec.clone());
                     // If this WAL record initializes the page, no need to dig deeper.
                     if rec.will_init {
                         break;
                     }
                 }
+                x => bail!("Unexpected object value {:?}", x),
             }
         }
         records.reverse();
@@ -686,62 +697,83 @@ impl ObjectTimeline {
                 // WAL is large enough to perform GC
                 let now = Instant::now();
                 let mut truncated = 0u64;
+                let mut inspected = 0u64;
                 let mut deleted = 0u64;
 
-                // Iterate through all relations
-                for rels in &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)? {
-                    let mut last_version = true;
-                    let mut key = relation_size_key(self.timelineid, *rels);
-                    let mut max_size = 0u32;
-                    let mut relation_dropped = false;
-
-                    // Process relation metadata versions
-                    for vers in self.obj_store.object_versions(&key, horizon)? {
-                        let lsn = vers.0;
-                        let rel_meta = RelationSizeEntry::des(&vers.1)?;
-                        // If relation is dropped at the horizon,
-                        // we can remove all its versions including last (Unlink)
-                        match rel_meta {
-                            RelationSizeEntry::Size(size) => max_size = max(max_size, size),
-                            RelationSizeEntry::Unlink => {
+                // Iterate through all objects in timeline
+                for obj in self
+                    .obj_store
+                    .list_objects(self.timelineid, false, last_lsn)?
+                {
+                    inspected += 1;
+                    match obj {
+                        ObjectTag::RelationMetadata(_) => {
+                            // Do not need to reconstruct page images,
+                            // just delete all old versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
                                 if last_version {
-                                    relation_dropped = true;
-                                    info!("Relation {:?} dropped", rels);
+                                    let content = vers.1;
+                                    match ObjectValue::des(&content[..])? {
+                                        ObjectValue::Unlink => {
+                                            self.obj_store.unlink(&key, lsn)?;
+                                            deleted += 1;
+                                        }
+                                        _ => (), // preserve last version
+                                    }
+                                    last_version = false;
+                                    truncated += 1;
+                                } else {
+                                    self.obj_store.unlink(&key, lsn)?;
+                                    deleted += 1;
                                 }
                             }
                         }
-                        if last_version {
-                            last_version = false;
-                            if !relation_dropped {
-                                // preserve last version
-                                continue;
-                            }
-                        }
-                        self.obj_store.unlink(&key, lsn)?;
-                        deleted += 1;
-                    }
-                    // Now process all relation blocks
-                    for blknum in 0..max_size {
-                        key.buf_tag.blknum = blknum;
-                        last_version = true;
-                        for vers in self.obj_store.object_versions(&key, horizon)? {
-                            let lsn = vers.0;
-                            if last_version {
-                                last_version = false;
-                                truncated += 1;
-                                if !relation_dropped {
-                                    // preserve and materialize last version before deleting all preceeding
-                                    self.get_page_at_lsn_nowait(key.buf_tag, lsn)?;
-                                    continue;
+                        ObjectTag::RelationBuffer(tag) => {
+                            // Reconstruct page at horizon unless relation was dropped
+                            // and delete all older versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
+                                if last_version {
+                                    truncated += 1;
+                                    last_version = false;
+                                    if let Some(rel_size) = self.relsize_get_nowait(tag.rel, lsn)? {
+                                        if rel_size > tag.blknum {
+                                            // preserve and materialize last version before deleting all preceeding
+                                            self.get_page_at_lsn_nowait(obj, lsn)?;
+                                            continue;
+                                        }
+                                        debug!("Drop last block {} of relation {:?} at {} because it is beyond relation size {}", tag.blknum, tag.rel, lsn, rel_size);
+                                    } else {
+                                        if let Some(rel_size) =
+                                            self.relsize_get_nowait(tag.rel, last_lsn)?
+                                        {
+                                            debug!("Preserve block {} of relation {:?} at {} because relation has size {} at {}", tag.rel, tag, lsn, rel_size, last_lsn);
+                                            continue;
+                                        }
+                                        debug!("Relation {:?} was dropped at {}", tag.rel, lsn);
+                                    }
+                                    // relation was dropped or truncated so this block can be removed
                                 }
+                                self.obj_store.unlink(&key, lsn)?;
+                                deleted += 1;
                             }
-                            self.obj_store.unlink(&key, lsn)?;
-                            deleted += 1;
                         }
+                        _ => (), // do nothing
                     }
                 }
-                info!("Garbage collection completed in {:?}: {} version histories truncated, {} versions deleted",
-					  now.elapsed(), truncated, deleted);
+                info!("Garbage collection completed in {:?}:\n{} version chains inspected,  {} version histories truncated, {} versions deleted",
+					  now.elapsed(), inspected, truncated, deleted);
             }
         }
     }
@@ -797,7 +829,7 @@ impl ObjectTimeline {
 
         Ok(ObjectVersionIter {
             obj_store,
-            buf_tag: key.buf_tag,
+            tag: key.tag,
             current_iter,
             ancestor_timeline: self.ancestor_timeline,
             ancestor_lsn: self.ancestor_lsn,
@@ -806,16 +838,17 @@ impl ObjectTimeline {
 }
 
 struct ObjectHistory<'a> {
-    iter: Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>,
+    iter: Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>,
     lsn: Lsn,
-    last_relation_size: Option<(BufferTag, u32)>,
 }
 
 impl<'a> Iterator for ObjectHistory<'a> {
-    type Item = Result<RelationUpdate>;
+    type Item = Result<Modification>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_result().transpose()
+        self.iter
+            .next()
+            .map(|result| result.map(|t| Modification::new(t)))
     }
 }
 
@@ -825,124 +858,41 @@ impl<'a> History for ObjectHistory<'a> {
     }
 }
 
-impl<'a> ObjectHistory<'a> {
-    fn handle_relation_size(
-        &mut self,
-        buf_tag: BufferTag,
-        entry: RelationSizeEntry,
-    ) -> Option<Update> {
-        match entry {
-            RelationSizeEntry::Size(size) => {
-                // we only want to output truncations, expansions are filtered out
-                let last_relation_size = self.last_relation_size.replace((buf_tag, size));
-
-                match last_relation_size {
-                    Some((last_buf, last_size)) if last_buf != buf_tag || size < last_size => {
-                        Some(Update::Truncate { n_blocks: size })
-                    }
-                    _ => None,
-                }
-            }
-            RelationSizeEntry::Unlink => Some(Update::Unlink),
-        }
-    }
-
-    fn handle_page(&mut self, buf_tag: BufferTag, entry: PageEntry) -> Update {
-        match entry {
-            PageEntry::Page(img) => Update::Page {
-                blknum: buf_tag.blknum,
-                img,
-            },
-            PageEntry::WALRecord(rec) => Update::WALRecord {
-                blknum: buf_tag.blknum,
-                rec,
-            },
-        }
-    }
-
-    fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
-        while let Some((buf_tag, lsn, value)) = self.iter.next().transpose()? {
-            if buf_tag.rel.forknum == pg_constants::ROCKSDB_SPECIAL_FORKNUM {
-                continue;
-            }
-
-            let update = if buf_tag.blknum == RELATION_SIZE_BLKNUM {
-                let entry = RelationSizeEntry::des(&value)?;
-                match self.handle_relation_size(buf_tag, entry) {
-                    Some(relation_update) => relation_update,
-                    None => continue,
-                }
-            } else {
-                let entry = PageEntry::des(&value)?;
-                self.handle_page(buf_tag, entry)
-            };
-
-            return Ok(Some(RelationUpdate {
-                rel: buf_tag.rel,
-                lsn,
-                update,
-            }));
-        }
-
-        Ok(None)
-    }
-}
-
 ///
-/// We store two kinds of page versions in the repository:
-///
-/// 1. Ready-made images of the block
-/// 2. WAL records, to be applied on top of the "previous" entry
-///
-/// Some WAL records will initialize the page from scratch. For such records,
-/// the 'will_init' flag is set. They don't need the previous page image before
-/// applying. The 'will_init' flag is set for records containing a full-page image,
-/// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
-/// stored directly in the cache entry in that you still need to run the WAL redo
-/// routine to generate the page image.
+/// We store several kinds of objects in the repository.
+/// We have per-page, per-relation(or non-rel file) and per-timeline entries.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum PageEntry {
+pub enum ObjectValue {
+    /// Ready-made images of the block
     Page(Bytes),
+    /// WAL records, to be applied on top of the "previous" entry
+    ///
+    /// Some WAL records will initialize the page from scratch. For such records,
+    /// the 'will_init' flag is set. They don't need the previous page image before
+    /// applying. The 'will_init' flag is set for records containing a full-page image,
+    /// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
+    /// stored directly in the cache entry in that you still need to run the WAL redo
+    /// routine to generate the page image.
     WALRecord(WALRecord),
-}
-
-///
-/// In addition to page versions, we store relation size as a separate, versioned,
-/// object.
-///
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RelationSizeEntry {
-    Size(u32),
-
+    /// RelationSize. We store it separately not only to ansver nblocks requests faster.
+    /// We also need it to support relation truncation.
+    RelationSize(u32),
     /// Tombstone for a dropped relation.
-    //
-    // TODO: Not used. Currently, we never drop relations. The parsing
-    // of relation drops in COMMIT/ABORT records has not been
-    // implemented. We should also have a mechanism to remove
-    // "orphaned" relfiles, if the compute node crashes before writing
-    // the COMMIT/ABORT record.
     Unlink,
+    TimelineMetadata(MetadataEntry),
 }
-
-// No real block in PostgreSQL will have block number u32::MAX
-// See vendor/postgres/src/include/storage/block.h
-const RELATION_SIZE_BLKNUM: u32 = u32::MAX;
 
 const fn relation_size_key(timelineid: ZTimelineId, rel: RelTag) -> ObjectKey {
     ObjectKey {
         timeline: timelineid,
-        buf_tag: BufferTag {
-            rel,
-            blknum: RELATION_SIZE_BLKNUM,
-        },
+        tag: ObjectTag::RelationMetadata(rel),
     }
 }
 
 ///
 /// In addition to those per-page and per-relation entries, we also
-/// store a little metadata blob for each timeline. It is stored using
-/// STORAGE_SPECIAL_FORKNUM.
+/// store a little metadata blob for each timeline.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataEntry {
@@ -955,15 +905,7 @@ pub struct MetadataEntry {
 const fn timeline_metadata_key(timelineid: ZTimelineId) -> ObjectKey {
     ObjectKey {
         timeline: timelineid,
-        buf_tag: BufferTag {
-            rel: RelTag {
-                forknum: pg_constants::ROCKSDB_SPECIAL_FORKNUM,
-                spcnode: 0,
-                dbnode: 0,
-                relnode: 0,
-            },
-            blknum: 0,
-        },
+        tag: ObjectTag::TimelineMetadataTag,
     }
 }
 
@@ -976,7 +918,7 @@ const fn timeline_metadata_key(timelineid: ZTimelineId) -> ObjectKey {
 struct ObjectVersionIter<'a> {
     obj_store: &'a dyn ObjectStore,
 
-    buf_tag: BufferTag,
+    tag: ObjectTag,
 
     /// Iterator on the current timeline.
     current_iter: Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>,
@@ -1013,7 +955,7 @@ impl<'a> ObjectVersionIter<'a> {
             if let Some(ancestor_timeline) = self.ancestor_timeline {
                 let searchkey = ObjectKey {
                     timeline: ancestor_timeline,
-                    buf_tag: self.buf_tag,
+                    tag: self.tag,
                 };
                 let ancestor_iter = self
                     .obj_store
@@ -1026,11 +968,13 @@ impl<'a> ObjectVersionIter<'a> {
                     .obj_store
                     .get(&timeline_metadata_key(ancestor_timeline), Lsn(0))
                     .with_context(|| "timeline not found in repository")?;
-                let ancestor_metadata = MetadataEntry::des(&v)?;
-
-                self.ancestor_timeline = ancestor_metadata.ancestor_timeline;
-                self.ancestor_lsn = ancestor_metadata.ancestor_lsn;
-                self.current_iter = ancestor_iter;
+                if let ObjectValue::TimelineMetadata(ancestor_metadata) = ObjectValue::des(&v)? {
+                    self.ancestor_timeline = ancestor_metadata.ancestor_timeline;
+                    self.ancestor_lsn = ancestor_metadata.ancestor_lsn;
+                    self.current_iter = ancestor_iter;
+                } else {
+                    bail!("Invalid timeline metadata");
+                }
             } else {
                 return Ok(None);
             }

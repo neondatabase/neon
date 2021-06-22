@@ -1,3 +1,4 @@
+use crate::waldecoder::TransactionId;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -5,6 +6,7 @@ use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
+use std::iter::Iterator;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 
@@ -34,7 +36,10 @@ pub trait Timeline: Send + Sync {
     //------------------------------------------------------------------------------
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes>;
+    fn get_page_at_lsn(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
+
+    /// Look up given page in the cache.
+    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
 
     /// Get size of relation
     fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<u32>;
@@ -42,8 +47,11 @@ pub trait Timeline: Send + Sync {
     /// Does relation exist?
     fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool>;
 
-    /// Get a list of all distinct relations in given tablespace and database.
+    /// Get a list of all relations in given tablespace and database.
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>>;
+
+    /// Get a list of non-relational objects
+    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>>;
 
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
@@ -51,14 +59,17 @@ pub trait Timeline: Send + Sync {
     // These are called by the WAL receiver to digest WAL records.
     //------------------------------------------------------------------------------
 
+    /// Put raw data
+    fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()>;
+
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()>;
+    fn put_wal_record(&self, tag: ObjectTag, rec: WALRecord) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()>;
+    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
@@ -96,24 +107,26 @@ pub trait Timeline: Send + Sync {
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>>;
 }
 
-pub trait History: Iterator<Item = Result<RelationUpdate>> {
+pub trait History: Iterator<Item = Result<Modification>> {
     /// The last_valid_lsn at the time of history() call.
     fn lsn(&self) -> Lsn;
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RelationUpdate {
-    pub rel: RelTag,
+pub struct Modification {
+    pub tag: ObjectTag,
     pub lsn: Lsn,
-    pub update: Update,
+    pub data: Vec<u8>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Update {
-    Page { blknum: u32, img: Bytes },
-    WALRecord { blknum: u32, rec: WALRecord },
-    Truncate { n_blocks: u32 },
-    Unlink,
+impl Modification {
+    pub fn new(entry: (ObjectTag, Lsn, Vec<u8>)) -> Modification {
+        Modification {
+            tag: entry.0,
+            lsn: entry.1,
+            data: entry.2,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -185,6 +198,8 @@ impl fmt::Display for RelTag {
 /// In Postgres `BufferTag` structure is used for exactly the same purpose.
 /// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
 ///
+/// NOTE: In this context we use buffer, block and page interchangeably when speak about relation files.
+///
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct BufferTag {
     pub rel: RelTag,
@@ -196,6 +211,71 @@ impl BufferTag {
         rel: RelTag::ZEROED,
         blknum: 0,
     };
+}
+
+///
+/// Non-relation transaction status files (clog (a.k.a. pg_xact) and pg_multixact)
+/// in Postgres are handled by SLRU (Simple LRU) buffer, hence the name.
+///
+/// These files are global for a postgres instance.
+///
+/// These files are divided into segments, which are divided into pages
+/// of the same BLCKSZ as used for relation files.
+///
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SlruBufferTag {
+    pub blknum: u32,
+}
+
+///
+/// Special type of Postgres files: pg_filenode.map is needed to map
+/// catalog table OIDs to filenode numbers, which define filename.
+///
+/// Each database has a map file for its local mapped catalogs,
+/// and there is a separate map file for shared catalogs.
+///
+/// These files have untypical size of 512 bytes.
+///
+/// See PostgreSQL relmapper.c for details.
+///
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DatabaseTag {
+    pub spcnode: u32,
+    pub dbnode: u32,
+}
+
+///
+/// Non-relation files that keep state for prepared transactions.
+/// Unlike other files these are not divided into pages.
+///
+/// See PostgreSQL twophase.c for details.
+///
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PrepareTag {
+    pub xid: TransactionId,
+}
+
+/// ObjectTag is a part of ObjectKey that is specific
+/// to the type of the stored object.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ObjectTag {
+    // dummy tag preceeding all other keys
+    FirstTag,
+    TimelineMetadataTag,
+    // Special entry that represents PostgreSQL checkpoint.
+    // We use it to track fields needed to restore controlfile checkpoint.
+    Checkpoint,
+    // Various types of non-relation files.
+    // We need them to bootstrap compute node.
+    ControlFile,
+    Clog(SlruBufferTag),
+    MultiXactMembers(SlruBufferTag),
+    MultiXactOffsets(SlruBufferTag),
+    FileNodeMap(DatabaseTag),
+    TwoPhase(PrepareTag),
+    // put relations at the end of enum to allow efficient iterations through non-rel objects
+    RelationMetadata(RelTag),
+    RelationBuffer(BufferTag),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +319,7 @@ impl WALRecord {
 mod tests {
     use super::*;
     use crate::object_repository::ObjectRepository;
+    use crate::object_repository::ObjectValue;
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
@@ -247,6 +328,7 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
+    use zenith_utils::bin_ser::BeSer;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -259,11 +341,11 @@ mod tests {
     /// Convenience function to create a BufferTag for testing.
     /// Helps to keeps the tests shorter.
     #[allow(non_snake_case)]
-    fn TEST_BUF(blknum: u32) -> BufferTag {
-        BufferTag {
+    fn TEST_BUF(blknum: u32) -> ObjectTag {
+        ObjectTag::RelationBuffer(BufferTag {
             rel: TESTREL_A,
             blknum,
-        }
+        })
     }
 
     /// Convenience function to create a page image with given string as the only content
@@ -443,45 +525,83 @@ mod tests {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
-        let mut snapshot = tline.history()?;
+        let snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(0));
+        let mut snapshot = snapshot.skip_while(|r| match r {
+            Ok(m) => match m.tag {
+                ObjectTag::RelationBuffer(_) => false,
+                _ => true,
+            },
+            _ => true,
+        });
         assert_eq!(None, snapshot.next().transpose()?);
 
         // add a page and advance the last valid LSN
-        let buf = TEST_BUF(1);
-        tline.put_page_image(buf, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
+        let rel = TESTREL_A;
+        let tag = TEST_BUF(1);
+        tline.put_page_image(tag, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
         tline.advance_last_valid_lsn(Lsn(1));
-        let mut snapshot = tline.history()?;
+        let snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
-        let expected_page = RelationUpdate {
-            rel: buf.rel,
-            lsn: Lsn(1),
-            update: Update::Page {
-                blknum: buf.blknum,
-                img: TEST_IMG("blk 1 @ lsn 1"),
+        let mut snapshot = snapshot.skip_while(|r| match r {
+            Ok(m) => match m.tag {
+                ObjectTag::RelationBuffer(_) => false,
+                _ => true,
             },
+            _ => true,
+        });
+        let expected_page = Modification {
+            tag,
+            lsn: Lsn(1),
+            data: ObjectValue::ser(&ObjectValue::Page(TEST_IMG("blk 1 @ lsn 1")))?,
         };
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         assert_eq!(None, snapshot.next().transpose()?);
 
         // truncate to zero, but don't advance the last valid LSN
-        tline.put_truncation(buf.rel, Lsn(2), 0)?;
-        let mut snapshot = tline.history()?;
+        tline.put_truncation(rel, Lsn(2), 0)?;
+        let snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
+        let mut snapshot = snapshot.skip_while(|r| match r {
+            Ok(m) => match m.tag {
+                ObjectTag::RelationBuffer(_) => false,
+                _ => true,
+            },
+            _ => true,
+        });
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         assert_eq!(None, snapshot.next().transpose()?);
 
         // advance the last valid LSN and the truncation should be observable
         tline.advance_last_valid_lsn(Lsn(2));
-        let mut snapshot = tline.history()?;
+        let snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(2));
-        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
-        let expected_truncate = RelationUpdate {
-            rel: buf.rel,
-            lsn: Lsn(2),
-            update: Update::Truncate { n_blocks: 0 },
+        let mut snapshot = snapshot.skip_while(|r| match r {
+            Ok(m) => match m.tag {
+                ObjectTag::RelationMetadata(_) => false,
+                _ => true,
+            },
+            _ => true,
+        });
+        let expected_truncate = Modification {
+            tag: ObjectTag::RelationMetadata(rel),
+            lsn: Lsn(1),
+            data: ObjectValue::ser(&ObjectValue::RelationSize(2))?,
         };
-        assert_eq!(Some(expected_truncate), snapshot.next().transpose()?); // TODO ordering not guaranteed by API
+        assert_eq!(
+            Some(&expected_truncate),
+            snapshot.next().transpose()?.as_ref()
+        ); // TODO ordering not guaranteed by API
+        let expected_truncate = Modification {
+            tag: ObjectTag::RelationMetadata(rel),
+            lsn: Lsn(2),
+            data: ObjectValue::ser(&ObjectValue::RelationSize(0))?,
+        };
+        assert_eq!(
+            Some(&expected_truncate),
+            snapshot.next().transpose()?.as_ref()
+        ); // TODO ordering not guaranteed by API
+        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         assert_eq!(None, snapshot.next().transpose()?);
 
         Ok(())
@@ -493,15 +613,14 @@ mod tests {
     impl WalRedoManager for TestRedoManager {
         fn request_redo(
             &self,
-            tag: BufferTag,
+            tag: ObjectTag,
             lsn: Lsn,
             base_img: Option<Bytes>,
             records: Vec<WALRecord>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
-                "redo for rel {} blk {} to get to {}, with {} and {} records",
-                tag.rel,
-                tag.blknum,
+                "redo for {:?} to get to {}, with {} and {} records",
+                tag,
                 lsn,
                 if base_img.is_some() {
                     "base image"

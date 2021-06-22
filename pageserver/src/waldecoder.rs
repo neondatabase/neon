@@ -2,6 +2,7 @@
 //! WAL decoder. For each WAL record, it decodes the record to figure out which data blocks
 //! the record affects, to add the records to the page cache.
 //!
+use crate::repository::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use postgres_ffi::pg_constants;
@@ -198,12 +199,7 @@ pub struct DecodedBkpBlock {
     //in_use: bool,
 
     /* Identify the block this refers to */
-    pub rnode_spcnode: u32,
-    pub rnode_dbnode: u32,
-    pub rnode_relnode: u32,
-    // Note that we have a few special forknum values for non-rel files.
-    pub forknum: u8,
-    pub blkno: u32,
+    pub tag: ObjectTag,
 
     /* copy of the fork_flags field from the XLogRecordBlockHeader */
     flags: u8,
@@ -226,11 +222,7 @@ pub struct DecodedBkpBlock {
 impl DecodedBkpBlock {
     pub fn new() -> DecodedBkpBlock {
         DecodedBkpBlock {
-            rnode_spcnode: 0,
-            rnode_dbnode: 0,
-            rnode_relnode: 0,
-            forknum: 0,
-            blkno: 0,
+            tag: ObjectTag::FirstTag,
 
             flags: 0,
             has_image: false,
@@ -491,9 +483,10 @@ impl XlMultiXactTruncate {
 //      ...
 //      main data
 pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
-    let mut rnode_spcnode: u32 = 0;
-    let mut rnode_dbnode: u32 = 0;
-    let mut rnode_relnode: u32 = 0;
+    let mut spcnode: u32 = 0;
+    let mut dbnode: u32 = 0;
+    let mut relnode: u32 = 0;
+    let mut forknum: u8;
     let mut got_rnode = false;
 
     let mut buf = record.clone();
@@ -567,7 +560,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 max_block_id = block_id;
 
                 fork_flags = buf.get_u8();
-                blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
+                forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
                 blk.flags = fork_flags;
                 blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;
                 blk.has_data = (fork_flags & pg_constants::BKPBLOCK_HAS_DATA) != 0;
@@ -673,9 +666,9 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     }
                 }
                 if fork_flags & pg_constants::BKPBLOCK_SAME_REL == 0 {
-                    rnode_spcnode = buf.get_u32_le();
-                    rnode_dbnode = buf.get_u32_le();
-                    rnode_relnode = buf.get_u32_le();
+                    spcnode = buf.get_u32_le();
+                    dbnode = buf.get_u32_le();
+                    relnode = buf.get_u32_le();
                     got_rnode = true;
                 } else if !got_rnode {
                     // TODO
@@ -686,18 +679,16 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     goto err;           */
                 }
 
-                blk.rnode_spcnode = rnode_spcnode;
-                blk.rnode_dbnode = rnode_dbnode;
-                blk.rnode_relnode = rnode_relnode;
-
-                blk.blkno = buf.get_u32_le();
-                trace!(
-                    "this record affects {}/{}/{} blk {}",
-                    rnode_spcnode,
-                    rnode_dbnode,
-                    rnode_relnode,
-                    blk.blkno
-                );
+                blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                    rel: RelTag {
+                        forknum,
+                        spcnode,
+                        dbnode,
+                        relnode,
+                    },
+                    blknum: buf.get_u32_le(),
+                });
+                trace!("this record affects {:?}", blk.tag);
 
                 blocks.push(blk);
             }
@@ -838,8 +829,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             trace!("XLOG_TBLSPC_DROP is not handled yet");
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
-        let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_HEAP_INSERT {
             let xlrec = XlHeapInsert::decode(&mut buf);
             if (xlrec.flags
@@ -847,52 +837,96 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
                 != 0
             {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
+                }
             }
         } else if info == pg_constants::XLOG_HEAP_DELETE {
             let xlrec = XlHeapDelete::decode(&mut buf);
             if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
+                }
             }
         } else if info == pg_constants::XLOG_HEAP_UPDATE
             || info == pg_constants::XLOG_HEAP_HOT_UPDATE
         {
             let xlrec = XlHeapUpdate::decode(&mut buf);
             if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
+                }
             }
             if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0
                 && blocks.len() > 1
             {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blocks[1].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
-                blk.rnode_spcnode = blocks[1].rnode_spcnode;
-                blk.rnode_dbnode = blocks[1].rnode_dbnode;
-                blk.rnode_relnode = blocks[1].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag1) = blocks[1].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag1.rel.spcnode,
+                            dbnode: tag1.rel.dbnode,
+                            relnode: tag1.rel.relnode,
+                        },
+                        blknum: tag1.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 1 is expected to be relation buffer tag but it is {:?}",
+                        blocks[1].tag
+                    );
+                }
             }
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
             let xlrec = XlHeapMultiInsert::decode(&mut buf);
             if (xlrec.flags
@@ -900,14 +934,24 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
                 != 0
             {
-                let mut blk = DecodedBkpBlock::new();
-                let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
+                if let ObjectTag::RelationBuffer(tag0) = blocks[0].tag {
+                    let mut blk = DecodedBkpBlock::new();
+                    blk.tag = ObjectTag::RelationBuffer(BufferTag {
+                        rel: RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: tag0.rel.spcnode,
+                            dbnode: tag0.rel.dbnode,
+                            relnode: tag0.rel.relnode,
+                        },
+                        blknum: tag0.blknum / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                    });
+                    blocks.push(blk);
+                } else {
+                    panic!(
+                        "Block 0 is expected to be relation buffer tag but it is {:?}",
+                        blocks[0].tag
+                    );
+                }
             }
         }
     }
