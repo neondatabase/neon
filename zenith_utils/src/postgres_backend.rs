@@ -116,7 +116,12 @@ impl PostgresBackend {
                 Some(FeMessage::StartupMessage(m)) => {
                     trace!("got startup message {:?}", m);
 
-                    handler.startup(self, &m)?;
+                    if let Err(e) = handler.startup(self, &m) {
+                        // try to send error to the client
+                        let errmsg = format!("{}", e);
+                        self.write_message(&BeMessage::ErrorResponse(errmsg))?;
+                        return Err(e);
+                    }
 
                     match m.kind {
                         StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {

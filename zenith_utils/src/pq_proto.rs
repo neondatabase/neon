@@ -366,6 +366,7 @@ pub struct XLogDataBody<'a> {
 
 pub static HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(&[Some(b"hello world")]);
 pub const TEXT_OID: Oid = 25;
+pub const JSON_OID: Oid = 114;
 // single text column
 pub static SINGLE_COL_ROWDESC: BeMessage = BeMessage::RowDescription(&[RowDescriptor {
     name: b"data",

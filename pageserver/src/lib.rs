@@ -112,6 +112,9 @@ impl FromStr for ZTimelineId {
     fn from_str(s: &str) -> Result<ZTimelineId, Self::Err> {
         let timelineid = hex::decode(s)?;
 
+	if timelineid.len() != 16 {
+	    return Err(hex::FromHexError::InvalidStringLength);
+	}
         let mut buf: [u8; 16] = [0u8; 16];
         buf.copy_from_slice(timelineid.as_slice());
         Ok(ZTimelineId(buf))

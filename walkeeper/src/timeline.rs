@@ -55,10 +55,12 @@ impl SharedState {
     }
 
     /// Load and lock control file (prevent running more than one instance of safekeeper)
+    /// If create=false and file doesn't exist, bails out.
     pub fn load_control_file(
         &mut self,
         conf: &WalAcceptorConf,
         timelineid: ZTimelineId,
+        create: bool,
     ) -> Result<()> {
         if self.control_file.is_some() {
             info!("control file for timeline {} is already open", timelineid);
@@ -69,13 +71,17 @@ impl SharedState {
             .data_dir
             .join(timelineid.to_string())
             .join(CONTROL_FILE_NAME);
-        info!("loading control file {}", control_file_path.display());
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&control_file_path)
-        {
+        info!(
+            "loading control file {}, create={}",
+            control_file_path.display(),
+            create
+        );
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true);
+        if create {
+            opts.create(true);
+        }
+        match opts.open(&control_file_path) {
             Ok(file) => {
                 // Lock file to prevent two or more active wal_acceptors
                 match file.try_lock_exclusive() {
@@ -91,29 +97,36 @@ impl SharedState {
                 self.control_file = Some(file);
 
                 let cfile_ref = self.control_file.as_mut().unwrap();
-                match SafeKeeperInfo::des_from(cfile_ref) {
-                    Err(e) => {
-                        warn!("read from {:?} failed: {}", control_file_path, e);
+                if cfile_ref.metadata().unwrap().len() == 0 {
+                    if !create {
+                        bail!("control file is empty");
                     }
-                    Ok(info) => {
-                        if info.magic != SK_MAGIC {
-                            bail!("Invalid control file magic: {}", info.magic);
+                } else {
+                    match SafeKeeperInfo::des_from(cfile_ref) {
+                        Err(e) => {
+                            bail!("failed to read control file {:?}: {}", control_file_path, e);
                         }
-                        if info.format_version != SK_FORMAT_VERSION {
-                            bail!(
-                                "Incompatible format version: {} vs. {}",
-                                info.format_version,
-                                SK_FORMAT_VERSION
-                            );
+                        Ok(info) => {
+                            if info.magic != SK_MAGIC {
+                                bail!("Invalid control file magic: {}", info.magic);
+                            }
+                            if info.format_version != SK_FORMAT_VERSION {
+                                bail!(
+                                    "Incompatible format version: {} vs. {}",
+                                    info.format_version,
+                                    SK_FORMAT_VERSION
+                                );
+                            }
+                            self.info = info;
                         }
-                        self.info = info;
                     }
                 }
             }
             Err(e) => {
-                panic!(
+                bail!(
                     "Failed to open control file {:?}: {}",
-                    &control_file_path, e
+                    &control_file_path,
+                    e
                 );
             }
         }
@@ -198,9 +211,9 @@ impl Timeline {
         shared_state.hs_feedback.clone()
     }
 
-    pub fn load_control_file(&self, conf: &WalAcceptorConf) -> Result<()> {
+    pub fn load_control_file(&self, conf: &WalAcceptorConf, create: bool) -> Result<()> {
         let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.load_control_file(conf, self.timelineid)
+        shared_state.load_control_file(conf, self.timelineid, create)
     }
 
     pub fn save_control_file(&self, sync: bool) -> Result<()> {
@@ -211,17 +224,23 @@ impl Timeline {
 
 // Utilities needed by various Connection-like objects
 pub trait TimelineTools {
-    fn set(&mut self, timeline_id: ZTimelineId) -> Result<()>;
+    fn set(&mut self, conf: &WalAcceptorConf, timeline_id: ZTimelineId, create: bool)
+        -> Result<()>;
     fn get(&self) -> &Arc<Timeline>;
     fn find_end_of_wal(&self, data_dir: &Path, precise: bool) -> (Lsn, TimeLineID);
 }
 
 impl TimelineTools for Option<Arc<Timeline>> {
-    fn set(&mut self, timeline_id: ZTimelineId) -> Result<()> {
+    fn set(
+        &mut self,
+        conf: &WalAcceptorConf,
+        timeline_id: ZTimelineId,
+        create: bool,
+    ) -> Result<()> {
         // We will only set the timeline once. If it were to ever change,
         // anyone who cloned the Arc would be out of date.
         assert!(self.is_none());
-        *self = Some(GlobalTimelines::store(timeline_id)?);
+        *self = Some(GlobalTimelines::get(conf, timeline_id, create)?);
         Ok(())
     }
 
@@ -243,11 +262,16 @@ lazy_static! {
 }
 
 /// A zero-sized struct used to manage access to the global timelines map.
-struct GlobalTimelines;
+pub struct GlobalTimelines;
 
 impl GlobalTimelines {
-    /// Store a new timeline into the global TIMELINES map.
-    fn store(timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
+    /// Get a timeline with control file loaded from the global TIMELINES map.
+    /// If control file doesn't exist and create=false, bails out.
+    pub fn get(
+        conf: &WalAcceptorConf,
+        timeline_id: ZTimelineId,
+        create: bool,
+    ) -> Result<Arc<Timeline>> {
         let mut timelines = TIMELINES.lock().unwrap();
 
         match timelines.get(&timeline_id) {
@@ -258,9 +282,10 @@ impl GlobalTimelines {
 
                 let shared_state = SharedState::new();
 
-                let new_tid = Arc::new(Timeline::new(timeline_id, shared_state));
-                timelines.insert(timeline_id, Arc::clone(&new_tid));
-                Ok(new_tid)
+                let new_tli = Arc::new(Timeline::new(timeline_id, shared_state));
+                new_tli.load_control_file(conf, create)?;
+                timelines.insert(timeline_id, Arc::clone(&new_tli));
+                Ok(new_tli)
             }
         }
     }

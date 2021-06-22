@@ -213,8 +213,8 @@ impl ReceiveWalConn {
             self.peer_addr, server_info.system_id, server_info.timeline_id,
         );
         // FIXME: also check that the system identifier matches
-        self.timeline.set(server_info.timeline_id)?;
-        self.timeline.get().load_control_file(&self.conf)?;
+        self.timeline
+            .set(&self.conf, server_info.timeline_id, true)?;
 
         let mut my_info = self.timeline.get().get_info();
 

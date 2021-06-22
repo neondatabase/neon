@@ -1,6 +1,7 @@
 import pytest
 import random
 import time
+import json
 
 from contextlib import closing
 from multiprocessing import Process, Value
@@ -197,3 +198,22 @@ def test_race_conditions(zenith_cli, pageserver, postgres, wa_factory, stop_valu
 
     stop_value.value = 1
     proc.join()
+
+def test_state(zenith_cli, pageserver, postgres, wa_factory):
+    wa_factory.start_n_new(1)
+
+    zenith_cli.run(["branch", "test_wal_acceptors_state", "empty"])
+    pg = postgres.create_start('test_wal_acceptors_state',
+                               wal_acceptors=wa_factory.get_connstrs())
+
+    # learn zenith timeline from compute
+    ztli = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+
+    pg.safe_psql("create table t(i int)")
+
+    pg.stop().start()
+    pg.safe_psql("insert into t values(10)")
+
+    wa = wa_factory.instances[0]
+    state = wa.safe_psql("state", options="'-c ztimelineid={}'".format(ztli), sslmode='disable')[0][0]
+    print(state)

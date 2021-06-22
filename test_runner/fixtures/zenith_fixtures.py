@@ -85,13 +85,17 @@ class PgProtocol:
         self.port = port
         self.username = username or getpass.getuser()
 
-    def connstr(self, *, dbname: str = 'postgres', username: Optional[str] = None) -> str:
+    def connstr(self, *, dbname: str = 'postgres', username: Optional[str] = None, **kwargs) -> str:
         """
         Build a libpq connection string for the Postgres instance.
         """
 
         username = username or self.username
-        return f'host={self.host} port={self.port} user={username} dbname={dbname}'
+        connstr = f'host={self.host} port={self.port} user={username} dbname={dbname}'
+        for k, v in kwargs.items():
+            connstr += " {}={}".format(k, v)
+        print("connstr is {}".format(connstr))
+        return connstr
 
     # autocommit=True here by default because that's what we need most of the time
     def connect(self, *, autocommit=True, **kwargs: Any) -> PgConnection:
@@ -458,9 +462,10 @@ def read_pid(path):
     return int(Path(path).read_text())
 
 
-class WalAcceptor:
+class WalAcceptor(PgProtocol):
     """ An object representing a running wal acceptor daemon. """
     def __init__(self, wa_binpath, data_dir, port, num):
+        super().__init__(host='127.0.0.1', port=port)
         self.wa_binpath = wa_binpath
         self.data_dir = data_dir
         self.port = port
