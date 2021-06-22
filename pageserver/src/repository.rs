@@ -139,10 +139,6 @@ pub struct RepositoryStats {
 /// are used for the same purpose.
 /// [See more related comments here](https:///github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/relfilenode.h#L57).
 ///
-/// We use additional fork numbers to logically separate relational and
-/// non-relational data inside pageserver key-value storage.
-/// See, e.g., `ROCKSDB_SPECIAL_FORKNUM`.
-///
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct RelTag {
     pub forknum: u8,
@@ -475,13 +471,16 @@ mod tests {
         tline.advance_last_valid_lsn(Lsn(2));
         let mut snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(2));
-        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
+
+        // TODO ordering not guaranteed by API. But currently it returns the
+        // truncation entry before the block data.
         let expected_truncate = RelationUpdate {
             rel: buf.rel,
             lsn: Lsn(2),
             update: Update::Truncate { n_blocks: 0 },
         };
-        assert_eq!(Some(expected_truncate), snapshot.next().transpose()?); // TODO ordering not guaranteed by API
+        assert_eq!(Some(expected_truncate), snapshot.next().transpose()?);
+        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         assert_eq!(None, snapshot.next().transpose()?);
 
         Ok(())

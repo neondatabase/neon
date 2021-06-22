@@ -1,18 +1,12 @@
 //! Low-level key-value storage abstraction.
 //!
-use crate::repository::{BufferTag, RelTag};
+use crate::object_key::*;
+use crate::repository::RelTag;
 use crate::ZTimelineId;
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::iter::Iterator;
 use zenith_utils::lsn::Lsn;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObjectKey {
-    pub timeline: ZTimelineId,
-    pub buf_tag: BufferTag,
-}
 
 ///
 /// Low-level storage abstraction.
@@ -58,7 +52,7 @@ pub trait ObjectStore: Send + Sync {
         &'a self,
         timeline: ZTimelineId,
         lsn: Lsn,
-    ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>>;
+    ) -> Result<Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>>;
 
     /// Iterate through all keys with given tablespace and database ID, and LSN <= 'lsn'.
     /// Both dbnode and spcnode can be InvalidId (0) which means get all relations in tablespace/cluster

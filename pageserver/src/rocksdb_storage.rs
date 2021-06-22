@@ -1,8 +1,9 @@
 //!
 //! An implementation of the ObjectStore interface, backed by RocksDB
 //!
-use crate::object_store::{ObjectKey, ObjectStore};
-use crate::repository::{BufferTag, RelTag};
+use crate::object_key::*;
+use crate::object_store::ObjectStore;
+use crate::repository::RelTag;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use anyhow::{bail, Result};
@@ -24,7 +25,7 @@ impl StorageKey {
         Self {
             obj_key: ObjectKey {
                 timeline,
-                buf_tag: BufferTag::ZEROED,
+                tag: ObjectTag::TimelineMetadataTag,
             },
             lsn: Lsn(0),
         }
@@ -140,42 +141,46 @@ impl ObjectStore for RocksObjectStore {
 
         let mut rels: HashSet<RelTag> = HashSet::new();
 
-        let mut search_key = StorageKey {
-            obj_key: ObjectKey {
-                timeline: timelineid,
-                buf_tag: BufferTag {
-                    rel: RelTag {
-                        spcnode,
-                        dbnode,
-                        relnode: 0,
-                        forknum: 0u8,
-                    },
-                    blknum: 0,
-                },
-            },
-            lsn: Lsn(0),
+        let mut search_rel_tag = RelTag {
+            spcnode,
+            dbnode,
+            relnode: 0,
+            forknum: 0u8,
         };
         let mut iter = self.db.raw_iterator();
         loop {
+            let search_key = StorageKey {
+                obj_key: ObjectKey {
+                    timeline: timelineid,
+                    tag: ObjectTag::RelationMetadata(search_rel_tag),
+                },
+                lsn: Lsn(0),
+            };
             iter.seek(search_key.ser()?);
             if !iter.valid() {
                 break;
             }
             let key = StorageKey::des(iter.key().unwrap())?;
-            if (spcnode != 0 && key.obj_key.buf_tag.rel.spcnode != spcnode)
-                || (dbnode != 0 && key.obj_key.buf_tag.rel.dbnode != dbnode)
-            {
+
+            if let ObjectTag::RelationMetadata(rel_tag) = key.obj_key.tag {
+                if spcnode != 0 && rel_tag.spcnode != spcnode
+                    || dbnode != 0 && rel_tag.dbnode != dbnode
+                {
+                    break;
+                }
+                if key.lsn < lsn
+                {
+                    // visible in this snapshot
+                    rels.insert(rel_tag);
+                }
+                search_rel_tag = rel_tag;
+                // skip to next relation
+                // FIXME: What if relnode is u32::MAX ?
+                search_rel_tag.relnode += 1;
+            } else {
+                // no more relation metadata entries
                 break;
             }
-
-            if key.obj_key.buf_tag.rel.relnode != 0 // skip non-relational records (like timeline metadata)
-                && key.lsn < lsn
-            // visible in this snapshot
-            {
-                rels.insert(key.obj_key.buf_tag.rel);
-            }
-            search_key = key.clone();
-            search_key.obj_key.buf_tag.rel.relnode += 1; // skip to next relation
         }
 
         Ok(rels)
@@ -189,7 +194,7 @@ impl ObjectStore for RocksObjectStore {
         &'a self,
         timeline: ZTimelineId,
         lsn: Lsn,
-    ) -> Result<Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>> {
         let start_key = StorageKey::timeline_start(timeline);
         let start_key_bytes = StorageKey::ser(&start_key)?;
         let iter = self.db.iterator(rocksdb::IteratorMode::From(
@@ -296,7 +301,7 @@ impl<'a> Iterator for RocksObjectVersionIter<'a> {
             return None;
         }
         let key = StorageKey::des(self.dbiter.key().unwrap()).unwrap();
-        if key.obj_key.buf_tag != self.obj_key.buf_tag {
+        if key.obj_key.tag != self.obj_key.tag {
             return None;
         }
         let val = self.dbiter.value().unwrap();
@@ -314,7 +319,7 @@ struct RocksObjects<'r> {
 
 impl<'r> Iterator for RocksObjects<'r> {
     // TODO consider returning Box<[u8]>
-    type Item = Result<(BufferTag, Lsn, Vec<u8>)>;
+    type Item = Result<(ObjectTag, Lsn, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_result().transpose()
@@ -322,7 +327,7 @@ impl<'r> Iterator for RocksObjects<'r> {
 }
 
 impl<'r> RocksObjects<'r> {
-    fn next_result(&mut self) -> Result<Option<(BufferTag, Lsn, Vec<u8>)>> {
+    fn next_result(&mut self) -> Result<Option<(ObjectTag, Lsn, Vec<u8>)>> {
         for (key_bytes, v) in &mut self.iter {
             let key = StorageKey::des(&key_bytes)?;
 
@@ -335,7 +340,7 @@ impl<'r> RocksObjects<'r> {
                 continue;
             }
 
-            return Ok(Some((key.obj_key.buf_tag, key.lsn, v.to_vec())));
+            return Ok(Some((key.obj_key.tag, key.lsn, v.to_vec())));
         }
 
         Ok(None)

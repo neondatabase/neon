@@ -8,6 +8,7 @@ use std::time::Duration;
 
 pub mod basebackup;
 pub mod branches;
+pub mod object_key;
 pub mod object_repository;
 pub mod object_store;
 pub mod page_cache;

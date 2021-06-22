@@ -13,7 +13,8 @@
 //! until we find the page we're looking for, making a separate lookup into the
 //! key-value store for each timeline.
 
-use crate::object_store::{ObjectKey, ObjectStore};
+use crate::object_key::*;
+use crate::object_store::ObjectStore;
 use crate::repository::*;
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
@@ -21,7 +22,6 @@ use crate::{PageServerConf, ZTimelineId};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use log::*;
-use postgres_ffi::pg_constants;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -329,7 +329,7 @@ impl Timeline for ObjectTimeline {
         let lsn = rec.lsn;
         let key = ObjectKey {
             timeline: self.timelineid,
-            buf_tag: tag,
+            tag: ObjectTag::RelationBuffer(tag),
         };
         let val = PageEntry::WALRecord(rec);
 
@@ -376,7 +376,7 @@ impl Timeline for ObjectTimeline {
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
         let key = ObjectKey {
             timeline: self.timelineid,
-            buf_tag: tag,
+            tag: ObjectTag::RelationBuffer(tag),
         };
         let val = PageEntry::Page(img);
 
@@ -540,7 +540,7 @@ impl ObjectTimeline {
         // ask the WAL redo service to reconstruct the page image from the WAL records.
         let searchkey = ObjectKey {
             timeline: self.timelineid,
-            buf_tag: tag,
+            tag: ObjectTag::RelationBuffer(tag),
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
 
@@ -642,7 +642,7 @@ impl ObjectTimeline {
         // old page image.
         let searchkey = ObjectKey {
             timeline: self.timelineid,
-            buf_tag: tag,
+            tag: ObjectTag::RelationBuffer(tag),
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
         while let Some((_key, value)) = iter.next().transpose()? {
@@ -690,8 +690,9 @@ impl ObjectTimeline {
 
                 // Iterate through all relations
                 for rels in &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)? {
+                    let rel = *rels;
                     let mut last_version = true;
-                    let mut key = relation_size_key(self.timelineid, *rels);
+                    let key = relation_size_key(self.timelineid, rel);
                     let mut max_size = 0u32;
                     let mut relation_dropped = false;
 
@@ -722,7 +723,14 @@ impl ObjectTimeline {
                     }
                     // Now process all relation blocks
                     for blknum in 0..max_size {
-                        key.buf_tag.blknum = blknum;
+                        let buf_tag = BufferTag {
+                            rel,
+                            blknum,
+                        };
+                        let key = ObjectKey {
+                            timeline: self.timelineid,
+                            tag: ObjectTag::RelationBuffer(buf_tag),
+                        };
                         last_version = true;
                         for vers in self.obj_store.object_versions(&key, horizon)? {
                             let lsn = vers.0;
@@ -731,7 +739,7 @@ impl ObjectTimeline {
                                 truncated += 1;
                                 if !relation_dropped {
                                     // preserve and materialize last version before deleting all preceeding
-                                    self.get_page_at_lsn_nowait(key.buf_tag, lsn)?;
+                                    self.get_page_at_lsn_nowait(buf_tag, lsn)?;
                                     continue;
                                 }
                             }
@@ -797,7 +805,7 @@ impl ObjectTimeline {
 
         Ok(ObjectVersionIter {
             obj_store,
-            buf_tag: key.buf_tag,
+            object_tag: key.tag,
             current_iter,
             ancestor_timeline: self.ancestor_timeline,
             ancestor_lsn: self.ancestor_lsn,
@@ -806,9 +814,9 @@ impl ObjectTimeline {
 }
 
 struct ObjectHistory<'a> {
-    iter: Box<dyn Iterator<Item = Result<(BufferTag, Lsn, Vec<u8>)>> + 'a>,
+    iter: Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>,
     lsn: Lsn,
-    last_relation_size: Option<(BufferTag, u32)>,
+    last_relation_size: Option<(RelTag, u32)>,
 }
 
 impl<'a> Iterator for ObjectHistory<'a> {
@@ -828,16 +836,16 @@ impl<'a> History for ObjectHistory<'a> {
 impl<'a> ObjectHistory<'a> {
     fn handle_relation_size(
         &mut self,
-        buf_tag: BufferTag,
+        rel_tag: RelTag,
         entry: RelationSizeEntry,
     ) -> Option<Update> {
         match entry {
             RelationSizeEntry::Size(size) => {
                 // we only want to output truncations, expansions are filtered out
-                let last_relation_size = self.last_relation_size.replace((buf_tag, size));
+                let last_relation_size = self.last_relation_size.replace((rel_tag, size));
 
                 match last_relation_size {
-                    Some((last_buf, last_size)) if last_buf != buf_tag || size < last_size => {
+                    Some((last_buf, last_size)) if last_buf != rel_tag || size < last_size => {
                         Some(Update::Truncate { n_blocks: size })
                     }
                     _ => None,
@@ -861,24 +869,26 @@ impl<'a> ObjectHistory<'a> {
     }
 
     fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
-        while let Some((buf_tag, lsn, value)) = self.iter.next().transpose()? {
-            if buf_tag.rel.forknum == pg_constants::ROCKSDB_SPECIAL_FORKNUM {
-                continue;
-            }
+        while let Some((object_tag, lsn, value)) = self.iter.next().transpose()? {
 
-            let update = if buf_tag.blknum == RELATION_SIZE_BLKNUM {
-                let entry = RelationSizeEntry::des(&value)?;
-                match self.handle_relation_size(buf_tag, entry) {
-                    Some(relation_update) => relation_update,
-                    None => continue,
+            let (rel_tag, update) = match object_tag {
+                ObjectTag::TimelineMetadataTag => continue,
+                ObjectTag::RelationMetadata(rel_tag) => {
+                    let entry = RelationSizeEntry::des(&value)?;
+                    match self.handle_relation_size(rel_tag, entry) {
+                        Some(relation_update) => (rel_tag, relation_update),
+                        None => continue,
+                    }
+                },
+                ObjectTag::RelationBuffer(buf_tag) => {
+                    let entry = PageEntry::des(&value)?;
+                    let update = self.handle_page(buf_tag, entry);
+                    (buf_tag.rel, update)
                 }
-            } else {
-                let entry = PageEntry::des(&value)?;
-                self.handle_page(buf_tag, entry)
             };
 
             return Ok(Some(RelationUpdate {
-                rel: buf_tag.rel,
+                rel: rel_tag,
                 lsn,
                 update,
             }));
@@ -925,24 +935,16 @@ pub enum RelationSizeEntry {
     Unlink,
 }
 
-// No real block in PostgreSQL will have block number u32::MAX
-// See vendor/postgres/src/include/storage/block.h
-const RELATION_SIZE_BLKNUM: u32 = u32::MAX;
-
 const fn relation_size_key(timelineid: ZTimelineId, rel: RelTag) -> ObjectKey {
     ObjectKey {
         timeline: timelineid,
-        buf_tag: BufferTag {
-            rel,
-            blknum: RELATION_SIZE_BLKNUM,
-        },
+        tag: ObjectTag::RelationMetadata(rel),
     }
 }
 
 ///
 /// In addition to those per-page and per-relation entries, we also
-/// store a little metadata blob for each timeline. It is stored using
-/// STORAGE_SPECIAL_FORKNUM.
+/// store a little metadata blob for each timeline.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataEntry {
@@ -955,15 +957,7 @@ pub struct MetadataEntry {
 const fn timeline_metadata_key(timelineid: ZTimelineId) -> ObjectKey {
     ObjectKey {
         timeline: timelineid,
-        buf_tag: BufferTag {
-            rel: RelTag {
-                forknum: pg_constants::ROCKSDB_SPECIAL_FORKNUM,
-                spcnode: 0,
-                dbnode: 0,
-                relnode: 0,
-            },
-            blknum: 0,
-        },
+        tag: ObjectTag::TimelineMetadataTag,
     }
 }
 
@@ -976,7 +970,7 @@ const fn timeline_metadata_key(timelineid: ZTimelineId) -> ObjectKey {
 struct ObjectVersionIter<'a> {
     obj_store: &'a dyn ObjectStore,
 
-    buf_tag: BufferTag,
+    object_tag: ObjectTag,
 
     /// Iterator on the current timeline.
     current_iter: Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>,
@@ -1013,7 +1007,7 @@ impl<'a> ObjectVersionIter<'a> {
             if let Some(ancestor_timeline) = self.ancestor_timeline {
                 let searchkey = ObjectKey {
                     timeline: ancestor_timeline,
-                    buf_tag: self.buf_tag,
+                    tag: self.object_tag,
                 };
                 let ancestor_iter = self
                     .obj_store
