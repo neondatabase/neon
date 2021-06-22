@@ -48,7 +48,7 @@ fn main() -> Result<()> {
                 .help("interval for keeping WAL as walkeeper node, after which them will be uploaded to S3 and removed locally"),
         )
         .arg(
-            Arg::with_name("recall-period")
+            Arg::with_name("recall")
                 .long("recall")
                 .takes_value(true)
                 .help("Period for requestion pageserver to call for replication"),
