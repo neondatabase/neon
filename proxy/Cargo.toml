@@ -1,0 +1,14 @@
+[package]
+name = "proxy"
+version = "0.1.0"
+authors = ["Stas Kelvich <stas.kelvich@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+bytes = { version = "1.0.1", features = ['serde'] }
+md5 = "0.7.0"
+
+zenith_utils = { path = "../zenith_utils" }

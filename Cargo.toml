@@ -7,6 +7,7 @@ members = [
     "postgres_ffi",
     "zenith_utils",
     "workspace_hack",
+    "proxy"
 ]
 
 [profile.release]

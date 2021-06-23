@@ -19,8 +19,8 @@ use std::net::TcpListener;
 use std::str::FromStr;
 use std::thread;
 use std::{io, net::TcpStream};
-use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
+use zenith_utils::postgres_backend::{self, AuthType};
 use zenith_utils::pq_proto::{
     BeMessage, FeMessage, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
 };
@@ -154,7 +154,7 @@ pub fn thread_main(conf: &'static PageServerConf, listener: TcpListener) -> anyh
 
 fn page_service_conn_main(conf: &'static PageServerConf, socket: TcpStream) -> anyhow::Result<()> {
     let mut conn_handler = PageServerHandler::new(conf);
-    let mut pgbackend = PostgresBackend::new(socket)?;
+    let mut pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
     pgbackend.run(&mut conn_handler)
 }
 

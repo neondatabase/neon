@@ -28,6 +28,7 @@ pub enum FeMessage {
     Terminate,
     CopyData(Bytes),
     CopyDone,
+    PasswordMessage(Bytes),
 }
 
 #[derive(Debug)]
@@ -115,6 +116,7 @@ impl FeMessage {
             b'X' => Ok(Some(FeMessage::Terminate)),
             b'd' => Ok(Some(FeMessage::CopyData(body))),
             b'c' => Ok(Some(FeMessage::CopyDone)),
+            b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
             tag => Err(anyhow!("unknown message tag: {},'{:?}'", tag, body)),
         }
     }
@@ -307,6 +309,7 @@ fn read_null_terminated(buf: &mut Bytes) -> anyhow::Result<Bytes> {
 #[derive(Debug)]
 pub enum BeMessage<'a> {
     AuthenticationOk,
+    AuthenticationMD5Password(&'a [u8; 4]),
     BindComplete,
     CommandComplete(&'a [u8]),
     ControlFile,
@@ -442,7 +445,17 @@ impl<'a> BeMessage<'a> {
             BeMessage::AuthenticationOk => {
                 buf.put_u8(b'R');
                 write_body(buf, |buf| {
-                    buf.put_i32(0);
+                    buf.put_i32(0); // Specifies that the authentication was successful.
+                    Ok::<_, io::Error>(())
+                })
+                .unwrap(); // write into BytesMut can't fail
+            }
+
+            BeMessage::AuthenticationMD5Password(salt) => {
+                buf.put_u8(b'R');
+                write_body(buf, |buf| {
+                    buf.put_i32(5); // Specifies that an MD5-encrypted password is required.
+                    buf.put_slice(&salt[..]);
                     Ok::<_, io::Error>(())
                 })
                 .unwrap(); // write into BytesMut can't fail
