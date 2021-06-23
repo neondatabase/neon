@@ -21,6 +21,10 @@ pub trait Handler {
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()>;
 
     /// Called on startup packet receival, allows to process params.
+    ///
+    /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
+    /// creation is the proxy code. That is quite hacky and ad-hoc solution, may be we could allow
+    /// to override whole init logic in implementations.
     fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupMessage) -> Result<()> {
         Ok(())
     }
@@ -54,8 +58,9 @@ pub struct PostgresBackend {
     buf_out: BytesMut,
 
     state: ProtoState,
+
     pub md5_salt: [u8; 4],
-    auth_type: AuthType,
+    pub auth_type: AuthType,
 }
 
 // In replication.rs a separate thread is reading keepalives from the
@@ -157,14 +162,16 @@ impl PostgresBackend {
                 Some(FeMessage::StartupMessage(m)) => {
                     trace!("got startup message {:?}", m);
 
-                    handler.startup(self, &m)?;
-
                     match m.kind {
                         StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
                             info!("SSL requested");
                             self.write_message(&BeMessage::Negotiate)?;
                         }
                         StartupRequestCode::Normal => {
+                            // NB: startup() may change self.auth_type -- we are using that in proxy code
+                            // to bypass auth for new users.
+                            handler.startup(self, &m)?;
+
                             if self.auth_type == AuthType::Trust {
                                 self.write_message_noflush(&BeMessage::AuthenticationOk)?;
                                 // psycopg2 will not connect if client_encoding is not
