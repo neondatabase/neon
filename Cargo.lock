@@ -1318,6 +1318,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "md5",
+ "zenith_utils",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2395,6 +2405,7 @@ dependencies = [
  "hex-literal",
  "log",
  "postgres",
+ "rand",
  "serde",
  "thiserror",
  "workspace_hack",

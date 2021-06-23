@@ -8,6 +8,7 @@ use anyhow::bail;
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use log::*;
+use rand::Rng;
 use std::io;
 use std::io::{BufReader, Write};
 use std::net::{Shutdown, TcpStream};
@@ -18,10 +19,29 @@ pub trait Handler {
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care).
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()>;
+
     /// Called on startup packet receival, allows to process params.
     fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupMessage) -> Result<()> {
         Ok(())
     }
+
+    /// Check auth
+    fn check_auth_md5(&mut self, _pgb: &mut PostgresBackend, _md5_response: &[u8]) -> Result<()> {
+        bail!("Auth failed")
+    }
+}
+
+#[derive(PartialEq)]
+enum ProtoState {
+    Initialization,
+    Authentication,
+    Established,
+}
+
+#[derive(PartialEq)]
+pub enum AuthType {
+    Trust,
+    MD5,
 }
 
 pub struct PostgresBackend {
@@ -32,7 +52,10 @@ pub struct PostgresBackend {
     stream_out: TcpStream,
     // Output buffer. c.f. BeMessage::write why we are using BytesMut here.
     buf_out: BytesMut,
-    init_done: bool,
+
+    state: ProtoState,
+    pub md5_salt: [u8; 4],
+    auth_type: AuthType,
 }
 
 // In replication.rs a separate thread is reading keepalives from the
@@ -45,12 +68,14 @@ impl Drop for PostgresBackend {
 }
 
 impl PostgresBackend {
-    pub fn new(socket: TcpStream) -> Result<Self, std::io::Error> {
+    pub fn new(socket: TcpStream, auth_type: AuthType) -> Result<Self, std::io::Error> {
         let mut pb = PostgresBackend {
             stream_in: None,
             stream_out: socket,
             buf_out: BytesMut::with_capacity(10 * 1024),
-            init_done: false,
+            state: ProtoState::Initialization,
+            md5_salt: [0u8; 4],
+            auth_type,
         };
         // if socket cloning fails, report the error and bail out
         pb.stream_in = match pb.stream_out.try_clone() {
@@ -78,10 +103,11 @@ impl PostgresBackend {
 
     /// Read full message or return None if connection is closed.
     pub fn read_message(&mut self) -> Result<Option<FeMessage>> {
-        if !self.init_done {
-            FeStartupMessage::read(self.get_stream_in()?)
-        } else {
-            FeMessage::read(self.get_stream_in()?)
+        match self.state {
+            ProtoState::Initialization => FeStartupMessage::read(self.get_stream_in()?),
+            ProtoState::Authentication | ProtoState::Established => {
+                FeMessage::read(self.get_stream_in()?)
+            }
         }
     }
 
@@ -112,6 +138,21 @@ impl PostgresBackend {
         loop {
             let msg = self.read_message()?;
             trace!("got message {:?}", msg);
+
+            // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
+            // TODO: change that to proper top-level match of protocol state with separate message handling for each state
+            if self.state == ProtoState::Authentication || self.state == ProtoState::Initialization
+            {
+                match msg {
+                    Some(FeMessage::PasswordMessage(ref _m)) => {}
+                    Some(FeMessage::StartupMessage(ref _m)) => {}
+                    Some(_) => {
+                        bail!("protocol violation");
+                    }
+                    None => {}
+                };
+            }
+
             match msg {
                 Some(FeMessage::StartupMessage(m)) => {
                     trace!("got startup message {:?}", m);
@@ -124,16 +165,52 @@ impl PostgresBackend {
                             self.write_message(&BeMessage::Negotiate)?;
                         }
                         StartupRequestCode::Normal => {
-                            self.write_message_noflush(&BeMessage::AuthenticationOk)?;
-                            // psycopg2 will not connect if client_encoding is not
-                            // specified by the server
-                            self.write_message_noflush(&BeMessage::ParameterStatus)?;
-                            self.write_message(&BeMessage::ReadyForQuery)?;
-                            self.init_done = true;
+                            if self.auth_type == AuthType::Trust {
+                                self.write_message_noflush(&BeMessage::AuthenticationOk)?;
+                                // psycopg2 will not connect if client_encoding is not
+                                // specified by the server
+                                self.write_message_noflush(&BeMessage::ParameterStatus)?;
+                                self.write_message(&BeMessage::ReadyForQuery)?;
+                                self.state = ProtoState::Established;
+                            } else {
+                                rand::thread_rng().fill(&mut self.md5_salt);
+                                let md5_salt = self.md5_salt.clone();
+                                self.write_message(&BeMessage::AuthenticationMD5Password(
+                                    &md5_salt,
+                                ))?;
+                                self.state = ProtoState::Authentication;
+                            }
                         }
                         StartupRequestCode::Cancel => break,
                     }
                 }
+
+                Some(FeMessage::PasswordMessage(m)) => {
+                    trace!("got password message '{:?}'", m);
+
+                    assert!(self.state == ProtoState::Authentication);
+
+                    let (trailing_null, md5_response) = m.split_last().unwrap();
+
+                    if *trailing_null != 0 {
+                        let errmsg = "protocol violation";
+                        self.write_message(&BeMessage::ErrorResponse(format!("{}", errmsg)))?;
+                        bail!("auth failed: {}", errmsg);
+                    }
+
+                    if let Err(e) = handler.check_auth_md5(self, md5_response) {
+                        self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                        bail!("auth failed: {}", e);
+                    } else {
+                        self.write_message_noflush(&BeMessage::AuthenticationOk)?;
+                        // psycopg2 will not connect if client_encoding is not
+                        // specified by the server
+                        self.write_message_noflush(&BeMessage::ParameterStatus)?;
+                        self.write_message(&BeMessage::ReadyForQuery)?;
+                        self.state = ProtoState::Established;
+                    }
+                }
+
                 Some(FeMessage::Query(m)) => {
                     trace!("got query {:?}", m.body);
                     // xxx distinguish fatal and recoverable errors?

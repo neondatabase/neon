@@ -14,6 +14,7 @@ bincode = "1.3"
 thiserror = "1.0"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 workspace_hack = { path = "../workspace_hack" }
+rand = "0.8.3"
 
 [dev-dependencies]
 hex-literal = "0.3"
