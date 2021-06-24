@@ -44,11 +44,11 @@ impl CPlaneApi {
         }
     }
 
-    fn get_database_uri(_user: String, _database: String) -> Option<String> {
-        Some("postgresql://localhost/stas".to_string())
+    pub fn get_database_uri(&self, _user: &String, _database: &String) -> Result<String> {
+        Ok("user=stas dbname=stas".to_string())
     }
 
-    fn create_database(_user: String, _database: String) -> Option<String> {
-        Some("postgresql://localhost/stas".to_string())
+    pub fn create_database(&self, _user: &String, _database: &String) -> Result<String> {
+        Ok("user=stas dbname=stas".to_string())
     }
 }

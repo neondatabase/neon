@@ -10,5 +10,10 @@ edition = "2018"
 anyhow = "1.0"
 bytes = { version = "1.0.1", features = ['serde'] }
 md5 = "0.7.0"
+rand = "0.8.3"
+hex = "0.4.3"
+
+tokio = "1.7.1"
+tokio-postgres = "0.7.2"
 
 zenith_utils = { path = "../zenith_utils" }

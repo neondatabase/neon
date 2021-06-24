@@ -11,7 +11,7 @@ use log::*;
 use rand::Rng;
 use std::io;
 use std::io::{BufReader, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::TcpStream;
 
 pub trait Handler {
     /// Handle single query.
@@ -36,7 +36,7 @@ pub trait Handler {
 }
 
 #[derive(PartialEq)]
-enum ProtoState {
+pub enum ProtoState {
     Initialization,
     Authentication,
     Established,
@@ -57,20 +57,23 @@ pub struct PostgresBackend {
     // Output buffer. c.f. BeMessage::write why we are using BytesMut here.
     buf_out: BytesMut,
 
-    state: ProtoState,
+    pub state: ProtoState,
 
-    pub md5_salt: [u8; 4],
-    pub auth_type: AuthType,
+    md5_salt: [u8; 4],
+    auth_type: AuthType,
 }
 
-// In replication.rs a separate thread is reading keepalives from the
-// socket. When main one finishes, tell it to get down by shutdowning the
-// socket.
-impl Drop for PostgresBackend {
-    fn drop(&mut self) {
-        let _res = self.stream_out.shutdown(Shutdown::Both);
-    }
-}
+// TODO: call shutdown() manually.
+// into_shtm() methods do not work with types implementing Drop
+
+// // In replication.rs a separate thread is reading keepalives from the
+// // socket. When main one finishes, tell it to get down by shutdowning the
+// // socket.
+// impl Drop for PostgresBackend {
+//     fn drop(&mut self) {
+//         let _res = self.stream_out.shutdown(Shutdown::Both);
+//     }
+// }
 
 impl PostgresBackend {
     pub fn new(socket: TcpStream, auth_type: AuthType) -> Result<Self, std::io::Error> {
@@ -92,6 +95,10 @@ impl PostgresBackend {
             }
         };
         Ok(pb)
+    }
+
+    pub fn into_stream(self) -> TcpStream {
+        self.stream_out
     }
 
     /// Get direct reference (into the Option) to the read stream.
@@ -172,20 +179,23 @@ impl PostgresBackend {
                             // to bypass auth for new users.
                             handler.startup(self, &m)?;
 
-                            if self.auth_type == AuthType::Trust {
-                                self.write_message_noflush(&BeMessage::AuthenticationOk)?;
-                                // psycopg2 will not connect if client_encoding is not
-                                // specified by the server
-                                self.write_message_noflush(&BeMessage::ParameterStatus)?;
-                                self.write_message(&BeMessage::ReadyForQuery)?;
-                                self.state = ProtoState::Established;
-                            } else {
-                                rand::thread_rng().fill(&mut self.md5_salt);
-                                let md5_salt = self.md5_salt.clone();
-                                self.write_message(&BeMessage::AuthenticationMD5Password(
-                                    &md5_salt,
-                                ))?;
-                                self.state = ProtoState::Authentication;
+                            match self.auth_type {
+                                AuthType::Trust => {
+                                    self.write_message_noflush(&BeMessage::AuthenticationOk)?;
+                                    // psycopg2 will not connect if client_encoding is not
+                                    // specified by the server
+                                    self.write_message_noflush(&BeMessage::ParameterStatus)?;
+                                    self.write_message(&BeMessage::ReadyForQuery)?;
+                                    self.state = ProtoState::Established;
+                                }
+                                AuthType::MD5 => {
+                                    rand::thread_rng().fill(&mut self.md5_salt);
+                                    let md5_salt = self.md5_salt.clone();
+                                    self.write_message(&BeMessage::AuthenticationMD5Password(
+                                        &md5_salt,
+                                    ))?;
+                                    self.state = ProtoState::Authentication;
+                                }
                             }
                         }
                         StartupRequestCode::Cancel => break,
