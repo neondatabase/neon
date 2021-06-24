@@ -331,6 +331,7 @@ pub enum BeMessage<'a> {
     ReadyForQuery,
     RowDescription(&'a [RowDescriptor<'a>]),
     XLogData(XLogDataBody<'a>),
+    NoticeResponse(String),
 }
 
 // One row desciption in RowDescription packet.
@@ -559,6 +560,30 @@ impl<'a> BeMessage<'a> {
                 write_body(buf, |buf| {
                     buf.put_u8(b'S'); // severity
                     write_cstr(&Bytes::from("ERROR"), buf)?;
+
+                    buf.put_u8(b'C'); // SQLSTATE error code
+                    write_cstr(&Bytes::from("CXX000"), buf)?;
+
+                    buf.put_u8(b'M'); // the message
+                    write_cstr(error_msg.as_bytes(), buf)?;
+
+                    buf.put_u8(0); // terminator
+                    Ok::<_, io::Error>(())
+                })
+                .unwrap();
+            }
+
+            // NoticeResponse has the same format as ErrorResponse. From doc: "The frontend should display the
+            // message but continue listening for ReadyForQuery or ErrorResponse"
+            BeMessage::NoticeResponse(error_msg) => {
+                // For all the errors set Severity to Error and error code to
+                // 'internal error'.
+
+                // 'N' signalizes NoticeResponse messages
+                buf.put_u8(b'N');
+                write_body(buf, |buf| {
+                    buf.put_u8(b'S'); // severity
+                    write_cstr(&Bytes::from("NOTICE"), buf)?;
 
                     buf.put_u8(b'C'); // SQLSTATE error code
                     write_cstr(&Bytes::from("CXX000"), buf)?;

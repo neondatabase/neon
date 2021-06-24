@@ -11,6 +11,7 @@ use std::{
 };
 
 mod cplane_api;
+mod mgmt;
 mod proxy;
 
 pub struct ProxyConf {
@@ -37,11 +38,28 @@ fn main() -> anyhow::Result<()> {
     println!("Starting proxy on {}", conf.proxy_address);
     let pageserver_listener = TcpListener::bind(conf.proxy_address)?;
 
+    println!("Starting mgmt on {}", conf.mgmt_address);
+    let mgmt_listener = TcpListener::bind(conf.mgmt_address)?;
+
+    let mut threads = Vec::new();
+
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.
-    let proxy_listener_thread = thread::Builder::new()
-        .name("Proxy thread".into())
-        .spawn(move || proxy::thread_main(&conf, pageserver_listener))?;
+    threads.push(
+        thread::Builder::new()
+            .name("Proxy thread".into())
+            .spawn(move || proxy::thread_main(&conf, pageserver_listener))?,
+    );
 
-    proxy_listener_thread.join().unwrap()
+    threads.push(
+        thread::Builder::new()
+            .name("Mgmt thread".into())
+            .spawn(move || mgmt::thread_main(&conf, mgmt_listener))?,
+    );
+
+    for t in threads {
+        let _ = t.join().unwrap();
+    }
+
+    Ok(())
 }
