@@ -113,10 +113,11 @@ impl Repository for ObjectRepository {
             ancestor_timeline: None,
             ancestor_lsn: start_lsn,
         };
+        let val = ObjectValue::TimelineMetadata(metadata);
         self.obj_store.put(
             &timeline_metadata_key(timelineid),
             Lsn(0),
-            &MetadataEntry::ser(&metadata)?,
+            &ObjectValue::ser(&val)?,
         )?;
 
         info!("Created empty timeline {}", timelineid);
@@ -149,10 +150,11 @@ impl Repository for ObjectRepository {
             ancestor_timeline: Some(src),
             ancestor_lsn: at_lsn,
         };
+        let val = ObjectValue::TimelineMetadata(metadata);
         self.obj_store.put(
             &timeline_metadata_key(dst),
             Lsn(0),
-            &MetadataEntry::ser(&metadata)?,
+            &ObjectValue::ser(&val)?,
         )?;
 
         Ok(())
@@ -223,19 +225,21 @@ impl ObjectTimeline {
         let v = obj_store
             .get(&timeline_metadata_key(timelineid), Lsn(0))
             .with_context(|| "timeline not found in repository")?;
-        let metadata = MetadataEntry::des(&v)?;
-
-        let timeline = ObjectTimeline {
-            timelineid,
-            obj_store,
-            walredo_mgr,
-            last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
-            last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
-            ancestor_timeline: metadata.ancestor_timeline,
-            ancestor_lsn: metadata.ancestor_lsn,
-            rel_meta: RwLock::new(BTreeMap::new()),
-        };
-        Ok(timeline)
+        if let ObjectValue::TimelineMetadata(metadata) = ObjectValue::des(&v)? {
+            let timeline = ObjectTimeline {
+                timelineid,
+                obj_store,
+                walredo_mgr,
+                last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
+                last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
+                ancestor_timeline: metadata.ancestor_timeline,
+                ancestor_lsn: metadata.ancestor_lsn,
+                rel_meta: RwLock::new(BTreeMap::new()),
+            };
+            Ok(timeline)
+        } else {
+            bail!("Invalid timeline metadata");
+        }
     }
 }
 
@@ -306,10 +310,12 @@ impl Timeline for ObjectTimeline {
                 .obj_store
                 .get(&timeline_metadata_key(timeline), Lsn(0))
                 .with_context(|| "timeline not found in repository")?;
-            let metadata = MetadataEntry::des(&v)?;
-
-            prev_timeline = metadata.ancestor_timeline;
-            lsn = metadata.ancestor_lsn;
+            if let ObjectValue::TimelineMetadata(metadata) = ObjectValue::des(&v)? {
+                prev_timeline = metadata.ancestor_timeline;
+                lsn = metadata.ancestor_lsn;
+            } else {
+                bail!("Invalid timeline metadata");
+            }
         }
 
         Ok(all_rels)
@@ -331,9 +337,9 @@ impl Timeline for ObjectTimeline {
             timeline: self.timelineid,
             tag: ObjectTag::RelationBuffer(tag),
         };
-        let val = PageEntry::WALRecord(rec);
+        let val = ObjectValue::WALRecord(rec);
 
-        self.obj_store.put(&key, lsn, &PageEntry::ser(&val)?)?;
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
         debug!(
             "put_wal_record rel {} blk {} at {}",
             tag.rel, tag.blknum, lsn
@@ -345,7 +351,7 @@ impl Timeline for ObjectTimeline {
         if tag.blknum >= old_nblocks {
             let new_nblocks = tag.blknum + 1;
             let key = relation_size_key(self.timelineid, tag.rel);
-            let val = RelationSizeEntry::Size(new_nblocks);
+            let val = ObjectValue::RelationSize(new_nblocks);
 
             trace!(
                 "Extended relation {} from {} to {} blocks at {}",
@@ -355,8 +361,7 @@ impl Timeline for ObjectTimeline {
                 lsn
             );
 
-            self.obj_store
-                .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
+            self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
             let mut rel_meta = self.rel_meta.write().unwrap();
             rel_meta.insert(
                 tag.rel,
@@ -376,9 +381,8 @@ impl Timeline for ObjectTimeline {
             timeline: self.timelineid,
             tag: ObjectTag::RelationMetadata(rel_tag),
         };
-        let val = RelationSizeEntry::Unlink;
-        self.obj_store
-            .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
+        let val = ObjectValue::Unlink;
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
 
         Ok(())
     }
@@ -391,9 +395,9 @@ impl Timeline for ObjectTimeline {
             timeline: self.timelineid,
             tag: ObjectTag::RelationBuffer(tag),
         };
-        let val = PageEntry::Page(img);
+        let val = ObjectValue::Page(img);
 
-        self.obj_store.put(&key, lsn, &PageEntry::ser(&val)?)?;
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
 
         debug!(
             "put_page_image rel {} blk {} at {}",
@@ -406,7 +410,7 @@ impl Timeline for ObjectTimeline {
         if tag.blknum >= old_nblocks {
             let new_nblocks = tag.blknum + 1;
             let key = relation_size_key(self.timelineid, tag.rel);
-            let val = RelationSizeEntry::Size(new_nblocks);
+            let val = ObjectValue::RelationSize(new_nblocks);
 
             trace!(
                 "Extended relation {} from {} to {} blocks at {}",
@@ -416,8 +420,7 @@ impl Timeline for ObjectTimeline {
                 lsn
             );
 
-            self.obj_store
-                .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
+            self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
             let mut rel_meta = self.rel_meta.write().unwrap();
             rel_meta.insert(
                 tag.rel,
@@ -437,12 +440,11 @@ impl Timeline for ObjectTimeline {
     ///
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()> {
         let key = relation_size_key(self.timelineid, rel);
-        let val = RelationSizeEntry::Size(nblocks);
+        let val = ObjectValue::RelationSize(nblocks);
 
         info!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
 
-        self.obj_store
-            .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
+        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
         let mut rel_meta = self.rel_meta.write().unwrap();
         rel_meta.insert(
             rel,
@@ -525,13 +527,14 @@ impl Timeline for ObjectTimeline {
             ancestor_timeline: self.ancestor_timeline,
             ancestor_lsn: self.ancestor_lsn,
         };
+        trace!("checkpoint at {}", metadata.last_valid_lsn);
+
+        let val = ObjectValue::TimelineMetadata(metadata);
         self.obj_store.put(
             &timeline_metadata_key(self.timelineid),
             Lsn(0),
-            &MetadataEntry::ser(&metadata)?,
+            &ObjectValue::ser(&val)?,
         )?;
-
-        trace!("checkpoint at {}", metadata.last_valid_lsn);
 
         Ok(())
     }
@@ -568,18 +571,19 @@ impl Timeline for ObjectTimeline {
                 let mut latest_version = true;
                 for vers in self.obj_store.object_versions(&key, horizon)? {
                     let lsn = vers.0;
-                    let rel_meta = RelationSizeEntry::des(&vers.1)?;
+                    let rel_meta = ObjectValue::des(&vers.1)?;
                     // If relation is dropped at the horizon,
                     // we can remove all its versions including latest (Unlink)
                     match rel_meta {
-                        RelationSizeEntry::Size(size) => max_size = max(max_size, size),
-                        RelationSizeEntry::Unlink => {
+                        ObjectValue::RelationSize(size) => max_size = max(max_size, size),
+                        ObjectValue::Unlink => {
                             if latest_version {
                                 relation_dropped = true;
                                 info!("Relation {:?} dropped", rels);
                                 result.dropped += 1;
                             }
                         }
+                        _ => {}
                     }
                     // preserve latest version, unless the relation was dropped completely.
                     if latest_version {
@@ -641,11 +645,11 @@ impl ObjectTimeline {
         if let Some((version_lsn, value)) = iter.next().transpose()? {
             let page_img: Bytes;
 
-            match PageEntry::des(&value)? {
-                PageEntry::Page(img) => {
+            match ObjectValue::des(&value)? {
+                ObjectValue::Page(img) => {
                     page_img = img;
                 }
-                PageEntry::WALRecord(_rec) => {
+                ObjectValue::WALRecord(_rec) => {
                     // Request the WAL redo manager to apply the WAL records for us.
                     let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
                     page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
@@ -656,6 +660,7 @@ impl ObjectTimeline {
                     // redo the WAL again.
                     self.put_page_image(tag, lsn, page_img.clone())?;
                 }
+                x => bail!("Unexpected object value: {:?}", x),
             }
             // FIXME: assumes little-endian. Only used for the debugging log though
             let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
@@ -695,8 +700,8 @@ impl ObjectTimeline {
         let mut iter = self.object_versions(&*self.obj_store, &key, lsn)?;
 
         if let Some((version_lsn, value)) = iter.next().transpose()? {
-            match RelationSizeEntry::des(&value)? {
-                RelationSizeEntry::Size(nblocks) => {
+            match ObjectValue::des(&value)? {
+                ObjectValue::RelationSize(nblocks) => {
                     trace!(
                         "relation {} has size {} at {} (request {})",
                         rel,
@@ -706,7 +711,7 @@ impl ObjectTimeline {
                     );
                     Ok(Some(nblocks))
                 }
-                RelationSizeEntry::Unlink => {
+                ObjectValue::Unlink => {
                     trace!(
                         "relation {} not found; it was dropped at lsn {}",
                         rel,
@@ -714,6 +719,12 @@ impl ObjectTimeline {
                     );
                     Ok(None)
                 }
+                _ => bail!(
+                    "Unexpect relation {} size value {:?} at {}",
+                    rel,
+                    value,
+                    lsn
+                ),
             }
         } else {
             info!("relation {} not found at {}", rel, lsn);
@@ -744,20 +755,21 @@ impl ObjectTimeline {
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
         while let Some((_key, value)) = iter.next().transpose()? {
-            match PageEntry::des(&value)? {
-                PageEntry::Page(img) => {
+            match ObjectValue::des(&value)? {
+                ObjectValue::Page(img) => {
                     // We have a base image. No need to dig deeper into the list of
                     // records
                     base_img = Some(img);
                     break;
                 }
-                PageEntry::WALRecord(rec) => {
+                ObjectValue::WALRecord(rec) => {
                     records.push(rec.clone());
                     // If this WAL record initializes the page, no need to dig deeper.
                     if rec.will_init {
                         break;
                     }
                 }
+                x => bail!("Unexpected object value {:?}", x),
             }
         }
         records.reverse();
@@ -861,13 +873,9 @@ impl<'a> History for ObjectHistory<'a> {
 }
 
 impl<'a> ObjectHistory<'a> {
-    fn handle_relation_size(
-        &mut self,
-        rel_tag: RelTag,
-        entry: RelationSizeEntry,
-    ) -> Option<Update> {
+    fn handle_relation_size(&mut self, rel_tag: RelTag, entry: ObjectValue) -> Option<Update> {
         match entry {
-            RelationSizeEntry::Size(size) => {
+            ObjectValue::RelationSize(size) => {
                 // we only want to output truncations, expansions are filtered out
                 let last_relation_size = self.last_relation_size.replace((rel_tag, size));
 
@@ -878,20 +886,22 @@ impl<'a> ObjectHistory<'a> {
                     _ => None,
                 }
             }
-            RelationSizeEntry::Unlink => Some(Update::Unlink),
+            ObjectValue::Unlink => Some(Update::Unlink),
+            _ => None,
         }
     }
 
-    fn handle_page(&mut self, buf_tag: BufferTag, entry: PageEntry) -> Update {
+    fn handle_page(&mut self, buf_tag: BufferTag, entry: ObjectValue) -> Option<Update> {
         match entry {
-            PageEntry::Page(img) => Update::Page {
+            ObjectValue::Page(img) => Some(Update::Page {
                 blknum: buf_tag.blknum,
                 img,
-            },
-            PageEntry::WALRecord(rec) => Update::WALRecord {
+            }),
+            ObjectValue::WALRecord(rec) => Some(Update::WALRecord {
                 blknum: buf_tag.blknum,
                 rec,
-            },
+            }),
+            _ => None,
         }
     }
 
@@ -900,16 +910,19 @@ impl<'a> ObjectHistory<'a> {
             let (rel_tag, update) = match object_tag {
                 ObjectTag::TimelineMetadataTag => continue,
                 ObjectTag::RelationMetadata(rel_tag) => {
-                    let entry = RelationSizeEntry::des(&value)?;
+                    let entry = ObjectValue::des(&value)?;
                     match self.handle_relation_size(rel_tag, entry) {
                         Some(relation_update) => (rel_tag, relation_update),
                         None => continue,
                     }
                 }
                 ObjectTag::RelationBuffer(buf_tag) => {
-                    let entry = PageEntry::des(&value)?;
-                    let update = self.handle_page(buf_tag, entry);
-                    (buf_tag.rel, update)
+                    let entry = ObjectValue::des(&value)?;
+                    if let Some(update) = self.handle_page(buf_tag, entry) {
+                        (buf_tag.rel, update)
+                    } else {
+                        continue;
+                    }
                 }
             };
 
@@ -925,40 +938,28 @@ impl<'a> ObjectHistory<'a> {
 }
 
 ///
-/// We store two kinds of page versions in the repository:
-///
-/// 1. Ready-made images of the block
-/// 2. WAL records, to be applied on top of the "previous" entry
-///
-/// Some WAL records will initialize the page from scratch. For such records,
-/// the 'will_init' flag is set. They don't need the previous page image before
-/// applying. The 'will_init' flag is set for records containing a full-page image,
-/// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
-/// stored directly in the cache entry in that you still need to run the WAL redo
-/// routine to generate the page image.
+/// We store several kinds of objects in the repository.
+/// We have per-page, per-relation(or non-rel file) and per-timeline entries.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum PageEntry {
+pub enum ObjectValue {
+    /// Ready-made images of the block
     Page(Bytes),
+    /// WAL records, to be applied on top of the "previous" entry
+    ///
+    /// Some WAL records will initialize the page from scratch. For such records,
+    /// the 'will_init' flag is set. They don't need the previous page image before
+    /// applying. The 'will_init' flag is set for records containing a full-page image,
+    /// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
+    /// stored directly in the cache entry in that you still need to run the WAL redo
+    /// routine to generate the page image.
     WALRecord(WALRecord),
-}
-
-///
-/// In addition to page versions, we store relation size as a separate, versioned,
-/// object.
-///
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RelationSizeEntry {
-    Size(u32),
-
+    /// RelationSize. We store it separately not only to ansver nblocks requests faster.
+    /// We also need it to support relation truncation.
+    RelationSize(u32),
     /// Tombstone for a dropped relation.
-    //
-    // TODO: Not used. Currently, we never drop relations. The parsing
-    // of relation drops in COMMIT/ABORT records has not been
-    // implemented. We should also have a mechanism to remove
-    // "orphaned" relfiles, if the compute node crashes before writing
-    // the COMMIT/ABORT record.
     Unlink,
+    TimelineMetadata(MetadataEntry),
 }
 
 const fn relation_size_key(timelineid: ZTimelineId, rel: RelTag) -> ObjectKey {
@@ -1046,11 +1047,13 @@ impl<'a> ObjectVersionIter<'a> {
                     .obj_store
                     .get(&timeline_metadata_key(ancestor_timeline), Lsn(0))
                     .with_context(|| "timeline not found in repository")?;
-                let ancestor_metadata = MetadataEntry::des(&v)?;
-
-                self.ancestor_timeline = ancestor_metadata.ancestor_timeline;
-                self.ancestor_lsn = ancestor_metadata.ancestor_lsn;
-                self.current_iter = ancestor_iter;
+                if let ObjectValue::TimelineMetadata(ancestor_metadata) = ObjectValue::des(&v)? {
+                    self.ancestor_timeline = ancestor_metadata.ancestor_timeline;
+                    self.ancestor_lsn = ancestor_metadata.ancestor_lsn;
+                    self.current_iter = ancestor_iter;
+                } else {
+                    bail!("Invalid timeline metadata");
+                }
             } else {
                 return Ok(None);
             }
