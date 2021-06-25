@@ -870,7 +870,6 @@ impl<'a> ObjectHistory<'a> {
 
     fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
         while let Some((object_tag, lsn, value)) = self.iter.next().transpose()? {
-
             let (rel_tag, update) = match object_tag {
                 ObjectTag::TimelineMetadataTag => continue,
                 ObjectTag::RelationMetadata(rel_tag) => {
@@ -879,7 +878,7 @@ impl<'a> ObjectHistory<'a> {
                         Some(relation_update) => (rel_tag, relation_update),
                         None => continue,
                     }
-                },
+                }
                 ObjectTag::RelationBuffer(buf_tag) => {
                     let entry = PageEntry::des(&value)?;
                     let update = self.handle_page(buf_tag, entry);

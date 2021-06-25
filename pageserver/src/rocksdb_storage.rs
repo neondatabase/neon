@@ -168,8 +168,7 @@ impl ObjectStore for RocksObjectStore {
                 {
                     break;
                 }
-                if key.lsn < lsn
-                {
+                if key.lsn < lsn {
                     // visible in this snapshot
                     rels.insert(rel_tag);
                 }
