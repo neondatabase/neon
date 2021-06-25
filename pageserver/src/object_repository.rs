@@ -387,6 +387,15 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
+    fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()> {
+        let key = ObjectKey {
+            timeline: self.timelineid,
+            tag,
+        };
+        self.obj_store.put(&key, lsn, data)?;
+        Ok(())
+    }
+
     ///
     /// Memorize a full image of a page version
     ///
@@ -542,11 +551,7 @@ impl Timeline for ObjectTimeline {
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
         let lsn = self.last_valid_lsn.load();
         let iter = self.obj_store.objects(self.timelineid, lsn)?;
-        Ok(Box::new(ObjectHistory {
-            lsn,
-            iter,
-            last_relation_size: None,
-        }))
+        Ok(Box::new(ObjectHistory { lsn, iter }))
     }
 
     fn gc_iteration(&self, horizon: u64) -> Result<GcResult> {
@@ -855,85 +860,21 @@ impl ObjectTimeline {
 struct ObjectHistory<'a> {
     iter: Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>,
     lsn: Lsn,
-    last_relation_size: Option<(RelTag, u32)>,
 }
 
 impl<'a> Iterator for ObjectHistory<'a> {
-    type Item = Result<RelationUpdate>;
+    type Item = Result<Modification>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_result().transpose()
+        self.iter
+            .next()
+            .map(|result| result.map(|t| Modification::new(t)))
     }
 }
 
 impl<'a> History for ObjectHistory<'a> {
     fn lsn(&self) -> Lsn {
         self.lsn
-    }
-}
-
-impl<'a> ObjectHistory<'a> {
-    fn handle_relation_size(&mut self, rel_tag: RelTag, entry: ObjectValue) -> Option<Update> {
-        match entry {
-            ObjectValue::RelationSize(size) => {
-                // we only want to output truncations, expansions are filtered out
-                let last_relation_size = self.last_relation_size.replace((rel_tag, size));
-
-                match last_relation_size {
-                    Some((last_buf, last_size)) if last_buf != rel_tag || size < last_size => {
-                        Some(Update::Truncate { n_blocks: size })
-                    }
-                    _ => None,
-                }
-            }
-            ObjectValue::Unlink => Some(Update::Unlink),
-            _ => None,
-        }
-    }
-
-    fn handle_page(&mut self, buf_tag: BufferTag, entry: ObjectValue) -> Option<Update> {
-        match entry {
-            ObjectValue::Page(img) => Some(Update::Page {
-                blknum: buf_tag.blknum,
-                img,
-            }),
-            ObjectValue::WALRecord(rec) => Some(Update::WALRecord {
-                blknum: buf_tag.blknum,
-                rec,
-            }),
-            _ => None,
-        }
-    }
-
-    fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
-        while let Some((object_tag, lsn, value)) = self.iter.next().transpose()? {
-            let (rel_tag, update) = match object_tag {
-                ObjectTag::TimelineMetadataTag => continue,
-                ObjectTag::RelationMetadata(rel_tag) => {
-                    let entry = ObjectValue::des(&value)?;
-                    match self.handle_relation_size(rel_tag, entry) {
-                        Some(relation_update) => (rel_tag, relation_update),
-                        None => continue,
-                    }
-                }
-                ObjectTag::RelationBuffer(buf_tag) => {
-                    let entry = ObjectValue::des(&value)?;
-                    if let Some(update) = self.handle_page(buf_tag, entry) {
-                        (buf_tag.rel, update)
-                    } else {
-                        continue;
-                    }
-                }
-            };
-
-            return Ok(Some(RelationUpdate {
-                rel: rel_tag,
-                lsn,
-                update,
-            }));
-        }
-
-        Ok(None)
     }
 }
 
