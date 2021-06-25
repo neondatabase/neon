@@ -207,13 +207,9 @@ impl PostgresBackend {
 
                     assert!(self.state == ProtoState::Authentication);
 
-                    let (trailing_null, md5_response) = m.split_last().unwrap();
-
-                    if *trailing_null != 0 {
-                        let errmsg = "protocol violation";
-                        self.write_message(&BeMessage::ErrorResponse(format!("{}", errmsg)))?;
-                        bail!("auth failed: {}", errmsg);
-                    }
+                    let (_, md5_response) = m
+                        .split_last()
+                        .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
 
                     if let Err(e) = handler.check_auth_md5(self, md5_response) {
                         self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;

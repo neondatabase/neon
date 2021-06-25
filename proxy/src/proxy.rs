@@ -1,9 +1,12 @@
-use crate::{cplane_api::CPlaneApi, ProxyConf};
+use crate::cplane_api::CPlaneApi;
+use crate::cplane_api::DatabaseInfo;
+use crate::ProxyState;
 
 use anyhow::bail;
 use tokio_postgres::NoTls;
 
 use rand::Rng;
+use std::sync::mpsc::channel;
 use std::thread;
 use tokio::io::AsyncWriteExt;
 use zenith_utils::postgres_backend::{PostgresBackend, ProtoState};
@@ -16,7 +19,7 @@ use zenith_utils::{postgres_backend, pq_proto::BeMessage};
 /// Listens for connections, and launches a new handler thread for each.
 ///
 pub fn thread_main(
-    conf: &'static ProxyConf,
+    state: &'static ProxyState,
     listener: std::net::TcpListener,
 ) -> anyhow::Result<()> {
     loop {
@@ -25,15 +28,17 @@ pub fn thread_main(
         socket.set_nodelay(true).unwrap();
 
         thread::spawn(move || {
-            if let Err(err) = proxy_conn_main(conf, socket) {
+            if let Err(err) = proxy_conn_main(state, socket) {
                 println!("error: {}", err);
             }
         });
     }
 }
 
+// XXX: clean up fields
 struct ProxyConnection {
-    conf: &'static ProxyConf,
+    state: &'static ProxyState,
+
     existing_user: bool,
     cplane: CPlaneApi,
 
@@ -42,20 +47,23 @@ struct ProxyConnection {
 
     pgb: PostgresBackend,
     md5_salt: [u8; 4],
+
+    psql_session_id: String,
 }
 
 pub fn proxy_conn_main(
-    conf: &'static ProxyConf,
+    state: &'static ProxyState,
     socket: std::net::TcpStream,
 ) -> anyhow::Result<()> {
     let mut conn = ProxyConnection {
-        conf,
+        state,
         existing_user: false,
-        cplane: CPlaneApi::new(&conf.cplane_address),
+        cplane: CPlaneApi::new(&state.conf.cplane_address),
         user: "".into(),
         database: "".into(),
         pgb: PostgresBackend::new(socket, postgres_backend::AuthType::MD5)?,
         md5_salt: [0u8; 4],
+        psql_session_id: "".into(),
     };
 
     // Check StartupMessage
@@ -63,7 +71,7 @@ pub fn proxy_conn_main(
     conn.handle_startup()?;
 
     // both scenarious here should end up producing database connection string
-    let database_uri = if conn.existing_user {
+    let db_info = if conn.existing_user {
         conn.handle_existing_user()?
     } else {
         conn.handle_new_user()?
@@ -75,11 +83,7 @@ pub fn proxy_conn_main(
         .build()
         .unwrap();
 
-    let _ = runtime.block_on(proxy_pass(
-        conn.pgb,
-        "127.0.0.1:5432".to_string(),
-        database_uri,
-    ))?;
+    let _ = runtime.block_on(proxy_pass(conn.pgb, db_info))?;
 
     println!("proxy_conn_main done;");
 
@@ -134,12 +138,12 @@ impl ProxyConnection {
         Ok(())
     }
 
-    fn handle_existing_user(&mut self) -> anyhow::Result<String> {
+    fn handle_existing_user(&mut self) -> anyhow::Result<DatabaseInfo> {
         // ask password
         rand::thread_rng().fill(&mut self.md5_salt);
         self.pgb
             .write_message(&BeMessage::AuthenticationMD5Password(&self.md5_salt))?;
-        self.pgb.state = ProtoState::Authentication;
+        self.pgb.state = ProtoState::Authentication; // XXX
 
         // check password
         println!("handle_existing_user");
@@ -171,21 +175,21 @@ impl ProxyConnection {
         self.cplane.get_database_uri(&self.user, &self.database)
     }
 
-    fn handle_new_user(&mut self) -> anyhow::Result<String> {
-        let mut reg_id_buf = [0u8; 8];
-        rand::thread_rng().fill(&mut reg_id_buf);
-        let reg_id = hex::encode(reg_id_buf);
+    fn handle_new_user(&mut self) -> anyhow::Result<DatabaseInfo> {
+        let mut psql_session_id_buf = [0u8; 8];
+        rand::thread_rng().fill(&mut psql_session_id_buf);
+        self.psql_session_id = hex::encode(psql_session_id_buf);
 
         let hello_message = format!("☀️  Welcome to Zenith!
 
 To proceed with database creation open following link:
 
-    https://console.zenith.tech/claim_db/{}
+    https://console.zenith.tech/psql_session/{}
 
 It needed to be done once and we will send you '.pgpass' file which will allow you to access or create
 databases without opening the browser.
 
-", reg_id);
+", self.psql_session_id);
 
         self.pgb
             .write_message_noflush(&BeMessage::AuthenticationOk)?;
@@ -195,10 +199,24 @@ databases without opening the browser.
             .write_message(&BeMessage::NoticeResponse(hello_message.to_string()))?;
 
         // await for database creation
-        let connstring = self.cplane.get_database_uri(&self.user, &self.database)?;
+        let (tx, rx) = channel::<anyhow::Result<DatabaseInfo>>();
+        let _ = self
+            .state
+            .waiters
+            .lock()
+            .unwrap()
+            .insert(self.psql_session_id.clone(), tx);
+
+        // Wait for web console response
+        // XXX: respond with error to client
+        let dbinfo = rx.recv()??;
+
+        self.pgb.write_message_noflush(&BeMessage::NoticeResponse(
+            "Connecting to database.".to_string(),
+        ))?;
         self.pgb.write_message(&BeMessage::ReadyForQuery)?;
 
-        Ok(connstring)
+        Ok(dbinfo)
     }
 
     fn check_auth_md5(&self, md5_response: &[u8]) -> anyhow::Result<()> {
@@ -208,13 +226,9 @@ databases without opening the browser.
     }
 }
 
-async fn proxy_pass(
-    pgb: PostgresBackend,
-    proxy_addr: String,
-    connstr: String,
-) -> anyhow::Result<()> {
-    let mut socket = tokio::net::TcpStream::connect(proxy_addr).await?;
-    let config = connstr.parse::<tokio_postgres::Config>()?;
+async fn proxy_pass(pgb: PostgresBackend, db_info: DatabaseInfo) -> anyhow::Result<()> {
+    let mut socket = tokio::net::TcpStream::connect(db_info.addr).await?;
+    let config = db_info.connstr.parse::<tokio_postgres::Config>()?;
     let _ = config.connect_raw(&mut socket, NoTls).await?;
 
     println!("Connected to pg, proxying");
