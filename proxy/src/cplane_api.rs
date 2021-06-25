@@ -1,8 +1,15 @@
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr};
 
 pub struct CPlaneApi {
     address: SocketAddr,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DatabaseInfo {
+    pub addr: SocketAddr,
+    pub connstr: String,
 }
 
 // mock cplane api
@@ -44,11 +51,17 @@ impl CPlaneApi {
         }
     }
 
-    pub fn get_database_uri(&self, _user: &String, _database: &String) -> Result<String> {
-        Ok("user=stas dbname=stas".to_string())
+    pub fn get_database_uri(&self, _user: &String, _database: &String) -> Result<DatabaseInfo> {
+        Ok(DatabaseInfo {
+            addr: "127.0.0.1:5432".parse()?,
+            connstr: "user=stas dbname=stas".into(),
+        })
     }
 
-    pub fn create_database(&self, _user: &String, _database: &String) -> Result<String> {
-        Ok("user=stas dbname=stas".to_string())
+    pub fn create_database(&self, _user: &String, _database: &String) -> Result<DatabaseInfo> {
+        Ok(DatabaseInfo {
+            addr: "127.0.0.1:5432".parse()?,
+            connstr: "user=stas dbname=stas".into(),
+        })
     }
 }

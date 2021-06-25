@@ -12,7 +12,8 @@ bytes = { version = "1.0.1", features = ['serde'] }
 md5 = "0.7.0"
 rand = "0.8.3"
 hex = "0.4.3"
-
+serde = "1"
+serde_json = "1"
 tokio = "1.7.1"
 tokio-postgres = "0.7.2"
 

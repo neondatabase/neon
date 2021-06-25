@@ -1355,6 +1355,8 @@ dependencies = [
  "hex",
  "md5",
  "rand",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-postgres 0.7.2",
  "zenith_utils",
