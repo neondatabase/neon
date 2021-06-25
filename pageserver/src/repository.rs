@@ -268,6 +268,7 @@ impl WALRecord {
 mod tests {
     use super::*;
     use crate::object_repository::ObjectRepository;
+    use crate::object_repository::ObjectValue;
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
@@ -276,6 +277,7 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
+    use zenith_utils::bin_ser::BeSer;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -498,7 +500,7 @@ mod tests {
             _ => true,
         });
         let expected_page = Modification {
-            tag,
+            tag: ObjectTag::RelationBuffer(tag),
             lsn: Lsn(1),
             data: ObjectValue::ser(&ObjectValue::Page(TEST_IMG("blk 1 @ lsn 1")))?,
         };
