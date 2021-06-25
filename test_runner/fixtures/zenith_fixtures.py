@@ -41,6 +41,8 @@ DEFAULT_POSTGRES_DIR = 'tmp_install'
 
 DEFAULT_PAGESERVER_PORT = 64000
 
+STANDALONE_PORT = 64001
+
 
 def determine_scope(fixture_name: str, config: Any) -> str:
     return 'session'
@@ -227,6 +229,76 @@ def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
 
     # After the yield comes any cleanup code we need.
     print('Starting pageserver cleanup')
+    ps.stop()
+
+
+class StandalonePageserver(PgProtocol):
+    """ An object representing a pageserver running outside of the Zenith CLI. """
+
+    proc: Any
+
+    def __init__(self, zenith_binpath: str, test_output_dir: str, pg_distrib_dir: str):
+        super().__init__(host='localhost', port=STANDALONE_PORT)
+        self.bin = os.path.join(zenith_binpath, 'pageserver')
+        self.dir = os.path.join(test_output_dir, 'standalone')
+        self.pg_distrib_dir = pg_distrib_dir
+
+        self.proc = None
+
+    def init(self) -> 'StandalonePageserver':
+        shutil.rmtree(self.dir, ignore_errors=True)
+        mkdir_if_needed(self.dir)
+
+        subprocess.check_call([
+            self.bin,
+            '--init',
+            '-D',
+            self.dir,
+            '--postgres-distrib',
+            self.pg_distrib_dir,
+            '-l',
+            f"127.0.0.1:{STANDALONE_PORT}",
+        ])
+        return self
+
+    def start(self) -> 'StandalonePageserver':
+        assert self.proc is None
+
+        basepath = os.path.join(self.dir, 'pageserver')
+        stdout = open(basepath + '.stdout', 'w')
+        stderr = open(basepath + '.stderr', 'w')
+
+        self.proc = subprocess.Popen([
+            self.bin,
+            '-D',
+            self.dir,
+        ], stdout=stdout, stderr=stderr)
+
+        # TODO wait for pageserver to accept connections
+
+        return self
+
+    def stop(self) -> 'StandalonePageserver':
+        assert self.proc is not None
+
+        self.proc.kill()
+        self.proc.wait()
+
+        self.proc = None
+
+        return self
+
+
+@zenfixture
+def standalone_pageserver(zenith_binpath: str, test_output_dir: str,
+                          pg_distrib_dir: str) -> Iterator[StandalonePageserver]:
+    """
+    The standalone pageserver fixture provides a pageserver outside of the Zenith CLI.
+    """
+    ps = StandalonePageserver(zenith_binpath, test_output_dir, pg_distrib_dir).init().start()
+
+    yield ps
+
     ps.stop()
 
 
