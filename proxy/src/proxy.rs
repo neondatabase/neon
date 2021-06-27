@@ -227,8 +227,8 @@ databases without opening the browser.
 }
 
 async fn proxy_pass(pgb: PostgresBackend, db_info: DatabaseInfo) -> anyhow::Result<()> {
-    let mut socket = tokio::net::TcpStream::connect(db_info.addr).await?;
-    let config = db_info.connstr.parse::<tokio_postgres::Config>()?;
+    let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()).await?;
+    let config = db_info.conn_string().parse::<tokio_postgres::Config>()?;
     let _ = config.connect_raw(&mut socket, NoTls).await?;
 
     println!("Connected to pg, proxying");

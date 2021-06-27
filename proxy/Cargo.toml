@@ -16,5 +16,6 @@ serde = "1"
 serde_json = "1"
 tokio = "1.7.1"
 tokio-postgres = "0.7.2"
+clap = "2.33.0"
 
 zenith_utils = { path = "../zenith_utils" }

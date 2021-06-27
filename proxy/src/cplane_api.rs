@@ -1,22 +1,41 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+};
 
 pub struct CPlaneApi {
-    address: SocketAddr,
+    // address: SocketAddr,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct DatabaseInfo {
-    pub addr: SocketAddr,
-    pub connstr: String,
+    pub host: IpAddr, // TODO: allow host name here too
+    pub port: u16,
+    pub dbname: String,
+    pub user: String,
+    pub password: String,
+}
+
+impl DatabaseInfo {
+    pub fn socket_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.host, self.port)
+    }
+
+    pub fn conn_string(&self) -> String {
+        format!(
+            "dbname={} user={} password={}",
+            self.dbname, self.user, self.password
+        )
+    }
 }
 
 // mock cplane api
 impl CPlaneApi {
-    pub fn new(address: &SocketAddr) -> CPlaneApi {
+    pub fn new(_address: &SocketAddr) -> CPlaneApi {
         CPlaneApi {
-            address: address.clone(),
+            // address: address.clone(),
         }
     }
 
@@ -53,15 +72,21 @@ impl CPlaneApi {
 
     pub fn get_database_uri(&self, _user: &String, _database: &String) -> Result<DatabaseInfo> {
         Ok(DatabaseInfo {
-            addr: "127.0.0.1:5432".parse()?,
-            connstr: "user=stas dbname=stas".into(),
+            host: "127.0.0.1".parse()?,
+            port: 5432,
+            dbname: "stas".to_string(),
+            user: "stas".to_string(),
+            password: "mypass".to_string(),
         })
     }
 
-    pub fn create_database(&self, _user: &String, _database: &String) -> Result<DatabaseInfo> {
-        Ok(DatabaseInfo {
-            addr: "127.0.0.1:5432".parse()?,
-            connstr: "user=stas dbname=stas".into(),
-        })
-    }
+    // pub fn create_database(&self, _user: &String, _database: &String) -> Result<DatabaseInfo> {
+    //     Ok(DatabaseInfo {
+    //         host: "127.0.0.1".parse()?,
+    //         port: 5432,
+    //         dbname: "stas".to_string(),
+    //         user: "stas".to_string(),
+    //         password: "mypass".to_string(),
+    //     })
+    // }
 }

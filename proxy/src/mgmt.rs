@@ -46,8 +46,11 @@ struct MgmtHandler {
 //     "session_id": "71d6d03e6d93d99a",
 //     "result": {
 //         "Success": {
-//             "addr": "127.0.0.1:5432",
-//             "connstr": "user=stas dbname=stas"
+//             "host": "127.0.0.1",
+//             "port": 5432,
+//             "dbname": "stas",
+//             "user": "stas"
+//             "password": "mypass"
 //         }
 //     }
 // }

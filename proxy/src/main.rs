@@ -12,6 +12,8 @@ use std::{
     thread,
 };
 
+use clap::{App, Arg};
+
 use cplane_api::DatabaseInfo;
 
 mod cplane_api;
@@ -26,7 +28,7 @@ pub struct ProxyConf {
     /// will notify us here, so that we can 'unfreeze' user session.
     pub mgmt_address: SocketAddr,
 
-    /// control plane address where we check auth and create clusters.
+    /// control plane address where we would check auth.
     pub cplane_address: SocketAddr,
 }
 
@@ -36,9 +38,28 @@ pub struct ProxyState {
 }
 
 fn main() -> anyhow::Result<()> {
+    let arg_matches = App::new("Zenith proxy/router")
+        .arg(
+            Arg::with_name("proxy")
+                .short("p")
+                .long("proxy")
+                .takes_value(true)
+                .help("listen for incoming client connections on ip:port")
+                .default_value("127.0.0.1:4432"),
+        )
+        .arg(
+            Arg::with_name("mgmt")
+                .short("m")
+                .long("mgmt")
+                .takes_value(true)
+                .help("listen for management callback connection on ip:port")
+                .default_value("127.0.0.1:7000"),
+        )
+        .get_matches();
+
     let conf = ProxyConf {
-        proxy_address: "0.0.0.0:4000".parse()?,
-        mgmt_address: "0.0.0.0:8080".parse()?,
+        proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
+        mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         cplane_address: "127.0.0.1:3000".parse()?,
     };
     let state = ProxyState {
