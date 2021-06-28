@@ -22,7 +22,7 @@ use zenith_utils::lsn::Lsn;
 
 use crate::page_cache;
 use crate::restore_local_repo;
-use crate::{repository::Repository, PageServerConf, ZTimelineId};
+use crate::{repository::Repository, PageServerConf, ZTimelineId, repository::Timeline};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -39,20 +39,9 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
-    // top-level dir may exist if we are creating it through CLI
-    fs::create_dir_all(repo_dir)
-        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
-
-    env::set_current_dir(repo_dir)?;
-
-    fs::create_dir(std::path::Path::new("timelines"))?;
-    fs::create_dir(std::path::Path::new("refs"))?;
-    fs::create_dir(std::path::Path::new("refs").join("branches"))?;
-    fs::create_dir(std::path::Path::new("refs").join("tags"))?;
-
-    println!("created directory structure in {}", repo_dir.display());
-
+// Returns chekpoint LSN from controlfile
+pub fn prepare_init_from_empty_repo(conf: &'static PageServerConf) -> Result<Lsn>
+{
     // Run initdb
     //
     // We create the cluster temporarily in a "tmp" directory inside the repository,
@@ -85,31 +74,20 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
     // let systemid = controlfile.system_identifier;
     let lsn = controlfile.checkPoint;
-    let lsnstr = format!("{:016X}", lsn);
 
-    // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
-    let tli = create_timeline(conf, None)?;
+    Ok(Lsn(lsn))
+}
+
+pub fn init_from_empty_repo(conf: &'static PageServerConf,
+    tli: ZTimelineId,
+    timeline: &dyn Timeline,
+    lsn: Lsn
+) -> Result<()>
+{
+    let tmppath = std::path::Path::new("tmp");
+    restore_local_repo::import_timeline_from_postgres_datadir(&tmppath, &*timeline, lsn)?;
+
     let timelinedir = conf.timeline_path(tli);
-
-    // We don't use page_cache here, because we don't want to spawn the WAL redo thread during
-    // repository initialization.
-    //
-    // FIXME: That caused trouble, because the WAL redo thread launched initdb in the background,
-    // and it kept running even after the "zenith init" had exited. In tests, we started the
-    // page server immediately after that, so that initdb was still running in the background,
-    // and we failed to run initdb again in the same directory. This has been solved for the
-    // rapid init+start case now, but the general race condition remains if you restart the
-    // server quickly.
-    let storage = crate::rocksdb_storage::RocksObjectStore::create(conf)?;
-
-    let repo = crate::object_repository::ObjectRepository::new(
-        conf,
-        std::sync::Arc::new(storage),
-        std::sync::Arc::new(crate::walredo::DummyRedoManager {}),
-    );
-    let timeline = repo.create_empty_timeline(tli, Lsn(lsn))?;
-
-    restore_local_repo::import_timeline_from_postgres_datadir(&tmppath, &*timeline, Lsn(lsn))?;
 
     // Move the initial WAL file
     fs::rename(
@@ -130,8 +108,51 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // Move the data directory as an initial base backup.
     // FIXME: It would be enough to only copy the non-relation files here, the relation
     // data was already loaded into the repository.
-    let target = timelinedir.join("snapshots").join(&lsnstr);
+    let target = timelinedir.join("snapshots").join(&format!("{:016X}", lsn.0));
     fs::rename(tmppath, &target)?;
+
+    Ok(())
+}
+
+pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
+    // top-level dir may exist if we are creating it through CLI
+    fs::create_dir_all(repo_dir)
+        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
+
+    env::set_current_dir(repo_dir)?;
+
+    fs::create_dir(std::path::Path::new("timelines"))?;
+    fs::create_dir(std::path::Path::new("refs"))?;
+    fs::create_dir(std::path::Path::new("refs").join("branches"))?;
+    fs::create_dir(std::path::Path::new("refs").join("tags"))?;
+
+    println!("created directory structure in {}", repo_dir.display());
+
+    // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
+    let lsn = prepare_init_from_empty_repo(conf)?;
+
+    let tli = create_timeline(conf, None)?;
+
+    // We don't use page_cache here, because we don't want to spawn the WAL redo thread during
+    // repository initialization.
+    //
+    // FIXME: That caused trouble, because the WAL redo thread launched initdb in the background,
+    // and it kept running even after the "zenith init" had exited. In tests, we started the
+    // page server immediately after that, so that initdb was still running in the background,
+    // and we failed to run initdb again in the same directory. This has been solved for the
+    // rapid init+start case now, but the general race condition remains if you restart the
+    // server quickly.
+    let storage = crate::rocksdb_storage::RocksObjectStore::create(conf)?;
+
+    let repo = crate::object_repository::ObjectRepository::new(
+        conf,
+        std::sync::Arc::new(storage),
+        std::sync::Arc::new(crate::walredo::DummyRedoManager {}),
+    );
+    let timeline = repo.create_empty_timeline(tli, lsn)?;
+
+    // Load data into pageserver
+    init_from_empty_repo(conf, tli, &*timeline, lsn)?;
 
     println!(
         "new zenith repository was created in {}",
