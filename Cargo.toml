@@ -8,3 +8,8 @@ members = [
     "zenith_utils",
     "workspace_hack",
 ]
+
+[profile.release]
+# This is useful for profiling and, to some extent, debug.
+# Besides, debug info should not affect the performance.
+debug = true
