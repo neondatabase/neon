@@ -623,6 +623,7 @@ impl ObjectTimeline {
             result.elapsed = now.elapsed();
             info!("Garbage collection completed in {:?}: {} relations inspected, {} version histories truncated, {} versions deleted, {} relations dropped",
                   result.elapsed, &result.n_relations, &result.truncated, &result.deleted, &result.dropped);
+            self.obj_store.compact();
         }
         Ok(())
     }

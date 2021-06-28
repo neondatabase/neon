@@ -207,6 +207,10 @@ impl ObjectStore for RocksObjectStore {
             lsn,
         }))
     }
+
+    fn compact(&self) {
+        self.db.compact_range::<&[u8], &[u8]>(None, None);
+    }
 }
 
 impl RocksObjectStore {

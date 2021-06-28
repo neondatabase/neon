@@ -68,4 +68,7 @@ pub trait ObjectStore: Send + Sync {
 
     /// Unlink object (used by GC). This mehod may actually delete object or just mark it for deletion.
     fn unlink(&self, key: &ObjectKey, lsn: Lsn) -> Result<()>;
+
+    // Compact storage and remove versions marged for deletion
+    fn compact(&self);
 }
