@@ -15,10 +15,11 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, Header};
+use std::fs;
 
 use crate::object_key::*;
-use crate::repository::Timeline;
 use postgres_ffi::relfile_utils::*;
+use crate::repository::{DatabaseTag, ObjectTag, Timeline};
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
@@ -160,6 +161,17 @@ impl<'a> Basebackup<'a> {
         } else {
             // User defined tablespaces are not supported
             assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
+
+            // Append dir path for each database
+            let path = format!("base/{}", db.dbnode);
+            let fullpath = std::path::Path::new(&self.snappath).join(path.clone());
+            //FIXME It's a hack to send dir with append_dir()
+            info!("create dir before {:?}", fullpath.clone());
+            fs::create_dir_all(fullpath.clone())?;
+            info!("create dir {:?}", fullpath.clone());
+            self.ar.append_dir(path, fullpath.clone())?;
+            info!("append dir done {:?}", fullpath.clone());
+
             let dst_path = format!("base/{}/PG_VERSION", db.dbnode);
             let data = "14".as_bytes();
             let header = new_tar_header(&dst_path, data.len() as u64)?;
