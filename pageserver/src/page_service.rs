@@ -21,7 +21,9 @@ use std::thread;
 use std::{io, net::TcpStream};
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeMessage, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC};
+use zenith_utils::pq_proto::{
+    BeMessage, FeMessage, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
+};
 use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 
 use crate::basebackup;
@@ -500,6 +502,70 @@ impl postgres_backend::Handler for PageServerHandler {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?;
             pgb.write_message_noflush(&BeMessage::DataRow(&[Some(system_id.as_bytes())]))?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with(b"do_gc ") {
+            // Run GC immediately on given timeline.
+            // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
+            // This probably should require special authentication or a global flag to
+            // enable, I don't think we want to or need to allow regular clients to invoke
+            // GC.
+            let query_str = std::str::from_utf8(&query_string)?;
+
+            let mut it = query_str.split(' ');
+            it.next().unwrap();
+
+            let timeline_id: ZTimelineId = it
+                .next()
+                .ok_or_else(|| anyhow!("missing timeline id"))?
+                .parse()?;
+            let timeline = page_cache::get_repository().get_timeline(timeline_id)?;
+
+            let horizon: u64 = it
+                .next()
+                .unwrap_or(&self.conf.gc_horizon.to_string())
+                .parse()?;
+
+            let result = timeline.gc_iteration(horizon)?;
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                RowDescriptor {
+                    name: b"n_relations",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+                RowDescriptor {
+                    name: b"truncated",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+                RowDescriptor {
+                    name: b"deleted",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+                RowDescriptor {
+                    name: b"dropped",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+                RowDescriptor {
+                    name: b"elapsed",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+            ]))?
+            .write_message_noflush(&BeMessage::DataRow(&[
+                Some(&result.n_relations.to_string().as_bytes()),
+                Some(&result.truncated.to_string().as_bytes()),
+                Some(&result.deleted.to_string().as_bytes()),
+                Some(&result.dropped.to_string().as_bytes()),
+                Some(&result.elapsed.as_millis().to_string().as_bytes()),
+            ]))?
+            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }

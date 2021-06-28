@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -26,6 +27,18 @@ pub trait Repository: Send + Sync {
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
     //fn get_stats(&self) -> RepositoryStats;
+}
+
+///
+/// Result of performing GC
+///
+#[derive(Default)]
+pub struct GcResult {
+    pub n_relations: u64,
+    pub truncated: u64,
+    pub deleted: u64,
+    pub dropped: u64,
+    pub elapsed: Duration,
 }
 
 pub trait Timeline: Send + Sync {
@@ -94,6 +107,13 @@ pub trait Timeline: Send + Sync {
     /// Relation size is increased implicitly and decreased with Truncate updates.
     // TODO ordering guarantee?
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>>;
+
+    /// Perform one garbage collection iteration.
+    /// Garbage collection is periodically performed by GC thread,
+    /// but it can be explicitly requested through page server API.
+    ///
+    /// `horizon` specifies delta from last LSN to preserve all object versions (PITR interval).
+    fn gc_iteration(&self, horizon: u64) -> Result<GcResult>;
 }
 
 pub trait History: Iterator<Item = Result<RelationUpdate>> {

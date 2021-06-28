@@ -532,29 +532,15 @@ impl Timeline for ObjectTimeline {
             last_relation_size: None,
         }))
     }
-}
 
-///
-/// Result of performing GC
-///
-#[derive(Default)]
-struct GcResult {
-    n_relations: u64,
-    truncated: u64,
-    deleted: u64,
-    dropped: u64,
-    elapsed: Duration,
-}
-
-impl ObjectTimeline {
-    fn gc_iteration(&self, horizon: u64) -> Result<()> {
+    fn gc_iteration(&self, horizon: u64) -> Result<GcResult> {
         let last_lsn = self.get_last_valid_lsn();
+        let mut result: GcResult = Default::default();
 
         // checked_sub() returns None on overflow.
         if let Some(horizon) = last_lsn.checked_sub(horizon) {
             // WAL is large enough to perform GC
             let now = Instant::now();
-            let mut result: GcResult = Default::default();
 
             // Iterate through all relations
             for rels in &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)? {
@@ -625,9 +611,11 @@ impl ObjectTimeline {
                   result.elapsed, &result.n_relations, &result.truncated, &result.deleted, &result.dropped);
             self.obj_store.compact();
         }
-        Ok(())
+        Ok(result)
     }
+}
 
+impl ObjectTimeline {
     fn get_page_at_lsn_nowait(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes> {
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
