@@ -184,3 +184,38 @@ pub const XLOG_BLCKSZ: usize = 8192;
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
+
+
+pub const PGDATA_SUBDIRS: [&'static str; 22] =
+[
+    "global",
+	"pg_wal/archive_status",
+	"pg_commit_ts",
+	"pg_dynshmem",
+	"pg_notify",
+	"pg_serial",
+	"pg_snapshots",
+	"pg_subtrans",
+	"pg_twophase",
+	"pg_multixact",
+	"pg_multixact/members",
+	"pg_multixact/offsets",
+	"base",
+	"base/1",
+	"pg_replslot",
+	"pg_tblspc",
+	"pg_stat",
+	"pg_stat_tmp",
+	"pg_xact",
+	"pg_logical",
+	"pg_logical/snapshots",
+	"pg_logical/mappings"
+];
+
+pub const PGDATA_SPECIAL_FILES: [&'static str; 4] =
+[
+    "pg_hba.conf",
+    "pg_ident.conf",
+    "postgresql.conf",
+    "postgresql.auto.conf"
+];

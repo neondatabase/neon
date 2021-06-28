@@ -96,20 +96,27 @@ pub fn init_from_empty_repo(conf: &'static PageServerConf,
             .join("wal")
             .join("000000010000000000000001.partial"),
     )?;
+
     println!("created initial timeline {}", tli);
 
     let data = tli.to_string();
     fs::write(conf.branch_path("main"), data)?;
     println!("created main branch");
 
-    // Remove pg_wal
-    fs::remove_dir_all(tmppath.join("pg_wal"))?;
-
-    // Move the data directory as an initial base backup.
-    // FIXME: It would be enough to only copy the non-relation files here, the relation
-    // data was already loaded into the repository.
     let target = timelinedir.join("snapshots").join(&format!("{:016X}", lsn.0));
-    fs::rename(tmppath, &target)?;
+
+    fs::create_dir_all(target.clone())?;
+
+    // Preserve initial config files
+    // We will need them to start compute node and now we don't store/generate them in pageserver.
+    // FIXME this is a temporary hack. Config files should be handled by some other service.
+    for i in 0..pg_constants::PGDATA_SPECIAL_FILES.len()
+    {
+        let path = pg_constants::PGDATA_SPECIAL_FILES[i];
+        fs::copy(tmppath.join(path), target.join(path))?;
+    }
+
+    fs::remove_dir_all(tmppath)?;
 
     Ok(())
 }

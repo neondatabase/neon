@@ -15,7 +15,6 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, Header};
-use walkdir::WalkDir;
 
 use crate::object_key::*;
 use crate::repository::Timeline;
@@ -58,40 +57,14 @@ impl<'a> Basebackup<'a> {
 
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
         debug!("sending tarball of snapshot in {}", self.snappath);
-        for entry in WalkDir::new(&self.snappath) {
-            let entry = entry?;
-            let fullpath = entry.path();
-            let relpath = entry.path().strip_prefix(&self.snappath).unwrap();
 
-            if relpath.to_str().unwrap() == "" {
-                continue;
-            }
-
-            if entry.file_type().is_dir() {
-                trace!(
-                    "sending dir {} as {}",
-                    fullpath.display(),
-                    relpath.display()
-                );
-                self.ar.append_dir(relpath, fullpath)?;
-            } else if entry.file_type().is_symlink() {
-                error!("ignoring symlink in snapshot dir");
-            } else if entry.file_type().is_file() {
-                if !is_rel_file_path(relpath.to_str().unwrap()) {
-                    if entry.file_name() != "pg_filenode.map" // this files will be generated from object storage
-                        && !relpath.starts_with("pg_xact/")
-                        && !relpath.starts_with("pg_multixact/")
-                    {
-                        trace!("sending {}", relpath.display());
-                        self.ar.append_path_with_name(fullpath, relpath)?;
-                    }
-                } else {
-                    // relation pages are loaded on demand and should not be included in tarball
-                    trace!("not sending {}", relpath.display());
-                }
-            } else {
-                error!("unknown file type: {}", fullpath.display());
-            }
+        // We need a few config files to start compute node and now we don't store/generate them in pageserver.
+        // So we preserve them in snappath directory at zenith-init.
+        // FIXME this is a temporary hack. Config files should be handled by some other service.
+        for i in 0..pg_constants::PGDATA_SPECIAL_FILES.len()
+        {
+            let path = pg_constants::PGDATA_SPECIAL_FILES[i];
+            self.ar.append_path_with_name(std::path::Path::new(&self.snappath).join(path), path)?;
         }
 
         // Generate non-relational files.
@@ -172,13 +145,26 @@ impl<'a> Basebackup<'a> {
         let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
         info!("add_relmap_file {:?}", db);
         let path = if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
+
+            let dst_path = format!("PG_VERSION");
+            let data = "14".as_bytes();
+            let header = new_tar_header(&dst_path, data.len() as u64)?;
+            self.ar.append(&header, &data[..])?;
+
+            let dst_path = format!("global/PG_VERSION");
+            let data = "14".as_bytes();
+            let header = new_tar_header(&dst_path, data.len() as u64)?;
+            self.ar.append(&header, &data[..])?;
+
             String::from("global/pg_filenode.map") // filenode map for global tablespace
         } else {
             // User defined tablespaces are not supported
             assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
-            let src_path = format!("{}/base/1/PG_VERSION", self.snappath);
             let dst_path = format!("base/{}/PG_VERSION", db.dbnode);
-            self.ar.append_path_with_name(&src_path, &dst_path)?;
+            let data = "14".as_bytes();
+            let header = new_tar_header(&dst_path, data.len() as u64)?;
+            self.ar.append(&header, &data[..])?;
+
             format!("base/{}/pg_filenode.map", db.dbnode)
         };
         assert!(img.len() == 512);
@@ -261,59 +247,63 @@ impl<'a> Basebackup<'a> {
     }
 }
 
-///
-/// Parse a path, relative to the root of PostgreSQL data directory, as
-/// a PostgreSQL relation data file.
-///
-fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
-    /*
-     * Relation data files can be in one of the following directories:
-     *
-     * global/
-     *		shared relations
-     *
-     * base/<db oid>/
-     *		regular relations, default tablespace
-     *
-     * pg_tblspc/<tblspc oid>/<tblspc version>/
-     *		within a non-default tablespace (the name of the directory
-     *		depends on version)
-     *
-     * And the relation data files themselves have a filename like:
-     *
-     * <oid>.<segment number>
-     */
-    if let Some(fname) = path.strip_prefix("global/") {
-        let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
+// -------------- TODO move this code to relfile_utils.rs or remove
 
-        Ok(())
-    } else if let Some(dbpath) = path.strip_prefix("base/") {
-        let mut s = dbpath.split('/');
-        let dbnode_str = s.next().ok_or(FilePathError::InvalidFileName)?;
-        let _dbnode = dbnode_str.parse::<u32>()?;
-        let fname = s.next().ok_or(FilePathError::InvalidFileName)?;
-        if s.next().is_some() {
-            return Err(FilePathError::InvalidFileName);
-        };
+// ///
+// /// Parse a path, relative to the root of PostgreSQL data directory, as
+// /// a PostgreSQL relation data file.
+// ///
+// fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
+//     /*
+//      * Relation data files can be in one of the following directories:
+//      *
+//      * global/
+//      *		shared relations
+//      *
+//      * base/<db oid>/
+//      *		regular relations, default tablespace
+//      *
+//      * pg_tblspc/<tblspc oid>/<tblspc version>/
+//      *		within a non-default tablespace (the name of the directory
+//      *		depends on version)
+//      *
+//      * And the relation data files themselves have a filename like:
+//      *
+//      * <oid>.<segment number>
+//      */
+//     if let Some(fname) = path.strip_prefix("global/") {
+//         let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
 
-        let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
+//         Ok(())
+//     } else if let Some(dbpath) = path.strip_prefix("base/") {
+//         let mut s = dbpath.split('/');
+//         let dbnode_str = s.next().ok_or(FilePathError::InvalidFileName)?;
+//         let _dbnode = dbnode_str.parse::<u32>()?;
+//         let fname = s.next().ok_or(FilePathError::InvalidFileName)?;
+//         if s.next().is_some() {
+//             return Err(FilePathError::InvalidFileName);
+//         };
 
-        Ok(())
-    } else if path.strip_prefix("pg_tblspc/").is_some() {
-        // TODO
-        error!("tablespaces not implemented yet");
-        Err(FilePathError::InvalidFileName)
-    } else {
-        Err(FilePathError::InvalidFileName)
-    }
-}
+//         let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
 
-//
-// Check if it is relational file
-//
-fn is_rel_file_path(path: &str) -> bool {
-    parse_rel_file_path(path).is_ok()
-}
+//         Ok(())
+//     } else if path.strip_prefix("pg_tblspc/").is_some() {
+//         // TODO
+//         error!("tablespaces not implemented yet");
+//         Err(FilePathError::InvalidFileName)
+//     } else {
+//         Err(FilePathError::InvalidFileName)
+//     }
+// }
+
+// //
+// // Check if it is relational file
+// //
+// fn is_rel_file_path(path: &str) -> bool {
+//     parse_rel_file_path(path).is_ok()
+// }
+
+// ---------------
 
 //
 // Create new tarball entry header

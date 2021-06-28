@@ -19,6 +19,7 @@ use crate::local_env::LocalEnv;
 use pageserver::ZTimelineId;
 
 use crate::storage::PageServerNode;
+use postgres_ffi::pg_constants;
 
 //
 // ComputeControlPlane
@@ -239,18 +240,26 @@ impl PostgresNode {
             },
         )?;
 
-        // FIXME: The compute node should be able to stream the WAL it needs from the WAL safekeepers or archive.
-        // But that's not implemented yet. For now, 'pg_wal' is included in the base backup tarball that
-        // we receive from the Page Server, so we don't need to create the empty 'pg_wal' directory here.
-        //fs::create_dir_all(pgdata.join("pg_wal"))?;
+        // Create pgdata subdirs structure
+        for i in 0..pg_constants::PGDATA_SUBDIRS.len() {
+            let path = pgdata.as_path().join(pg_constants::PGDATA_SUBDIRS[i]);
+
+            fs::create_dir_all(path.clone())?;
+
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).with_context(
+                || {
+                    format!(
+                        "could not set permissions in data directory {}",
+                        pgdata.display()
+                    )
+                },
+            )?;
+        }
 
         let mut copyreader = client
             .copy_out(sql.as_str())
             .with_context(|| "page server 'basebackup' command failed")?;
 
-        // FIXME: Currently, we slurp the whole tarball into memory, and then extract it,
-        // but we really should do this:
-        //let mut ar = tar::Archive::new(copyreader);
         let mut buf = vec![];
         copyreader
             .read_to_end(&mut buf)
@@ -301,7 +310,6 @@ impl PostgresNode {
             ),
         )?;
 
-        fs::create_dir_all(self.pgdata().join("pg_wal"))?;
         fs::create_dir_all(self.pgdata().join("pg_wal").join("archive_status"))?;
         Ok(())
     }
