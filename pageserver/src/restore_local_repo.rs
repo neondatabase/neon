@@ -282,11 +282,16 @@ pub fn save_decoded_record(
     {
         let truncate = XlSmgrTruncate::decode(&decoded);
         save_xlog_smgr_truncate(timeline, lsn, &truncate)?;
-    } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID
-        && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_DBASE_CREATE
-    {
-        let createdb = XlCreateDatabase::decode(&decoded);
-        save_xlog_dbase_create(timeline, lsn, &createdb)?;
+    } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
+        if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_DBASE_CREATE {
+            let createdb = XlCreateDatabase::decode(&decoded);
+            save_xlog_dbase_create(timeline, lsn, &createdb)?;
+        } else {
+            // TODO
+            trace!("XLOG_DBASE_DROP is not handled yet");
+        }
+    } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
+        trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
     }
 
     // Now that this record has been handled, let the repository know that
