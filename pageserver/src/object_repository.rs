@@ -534,6 +534,18 @@ impl Timeline for ObjectTimeline {
     }
 }
 
+///
+/// Result of performing GC
+///
+#[derive(Default)]
+struct GcResult {
+    n_relations: u64,
+    truncated: u64,
+    deleted: u64,
+    dropped: u64,
+    elapsed: Duration,
+}
+
 impl ObjectTimeline {
     fn gc_iteration(&self, horizon: u64) -> Result<()> {
         let last_lsn = self.get_last_valid_lsn();
@@ -542,41 +554,43 @@ impl ObjectTimeline {
         if let Some(horizon) = last_lsn.checked_sub(horizon) {
             // WAL is large enough to perform GC
             let now = Instant::now();
-            let mut truncated = 0u64;
-            let mut deleted = 0u64;
+            let mut result: GcResult = Default::default();
 
             // Iterate through all relations
             for rels in &self.obj_store.list_rels(self.timelineid, 0, 0, last_lsn)? {
                 let rel = *rels;
-                let mut last_version = true;
                 let key = relation_size_key(self.timelineid, rel);
                 let mut max_size = 0u32;
                 let mut relation_dropped = false;
 
+                result.n_relations += 1;
+
                 // Process relation metadata versions
+                let mut latest_version = true;
                 for vers in self.obj_store.object_versions(&key, horizon)? {
                     let lsn = vers.0;
                     let rel_meta = RelationSizeEntry::des(&vers.1)?;
                     // If relation is dropped at the horizon,
-                    // we can remove all its versions including last (Unlink)
+                    // we can remove all its versions including latest (Unlink)
                     match rel_meta {
                         RelationSizeEntry::Size(size) => max_size = max(max_size, size),
                         RelationSizeEntry::Unlink => {
-                            if last_version {
+                            if latest_version {
                                 relation_dropped = true;
                                 info!("Relation {:?} dropped", rels);
+                                result.dropped += 1;
                             }
                         }
                     }
-                    if last_version {
-                        last_version = false;
+                    // preserve latest version, unless the relation was dropped completely.
+                    if latest_version {
+                        latest_version = false;
                         if !relation_dropped {
-                            // preserve last version
                             continue;
                         }
                     }
                     self.obj_store.unlink(&key, lsn)?;
-                    deleted += 1;
+                    result.deleted += 1;
                 }
                 // Now process all relation blocks
                 for blknum in 0..max_size {
@@ -585,25 +599,30 @@ impl ObjectTimeline {
                         timeline: self.timelineid,
                         tag: ObjectTag::RelationBuffer(buf_tag),
                     };
-                    last_version = true;
-                    for vers in self.obj_store.object_versions(&key, horizon)? {
-                        let lsn = vers.0;
-                        if last_version {
-                            last_version = false;
-                            truncated += 1;
+                    let mut latest_version = true;
+                    let mut deleted_page_versions = 0;
+                    for (lsn, _val) in self.obj_store.object_versions(&key, horizon)? {
+                        // Preserve and materialize latest version before deleting all preceding versions.
+                        // We let get_page_at_lsn_nowait() do the materialization.
+                        if latest_version {
+                            latest_version = false;
                             if !relation_dropped {
-                                // preserve and materialize last version before deleting all preceeding
                                 self.get_page_at_lsn_nowait(buf_tag, lsn)?;
                                 continue;
                             }
                         }
                         self.obj_store.unlink(&key, lsn)?;
-                        deleted += 1;
+                        deleted_page_versions += 1;
                     }
+                    if deleted_page_versions > 0 && !relation_dropped {
+                        result.truncated += 1;
+                    }
+                    result.deleted += deleted_page_versions;
                 }
             }
-            info!("Garbage collection completed in {:?}: {} version histories truncated, {} versions deleted",
-					  now.elapsed(), &truncated, &deleted);
+            result.elapsed = now.elapsed();
+            info!("Garbage collection completed in {:?}: {} relations inspected, {} version histories truncated, {} versions deleted, {} relations dropped",
+                  result.elapsed, &result.n_relations, &result.truncated, &result.deleted, &result.dropped);
         }
         Ok(())
     }
@@ -629,6 +648,10 @@ impl ObjectTimeline {
                     let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
                     page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
 
+                    // Garbage collection assumes that we remember the materialized page
+                    // version. Otherwise we could opt to not do it, with the downside that
+                    // the next GetPage@LSN call of the same page version would have to
+                    // redo the WAL again.
                     self.put_page_image(tag, lsn, page_img.clone())?;
                 }
             }
