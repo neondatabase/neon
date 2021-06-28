@@ -16,7 +16,7 @@ use bytes::Bytes;
 
 use crate::repository::{BufferTag, RelTag, Timeline, WALRecord};
 use crate::waldecoder::{decode_wal_record, DecodedWALRecord, Oid, WalStreamDecoder};
-use crate::waldecoder::{XlCreateDatabase, XlSmgrTruncate};
+use crate::waldecoder::{XlCreateDatabase, XlSmgrTruncate, XlXactParsedRecord};
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
@@ -292,6 +292,16 @@ pub fn save_decoded_record(
         }
     } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
         trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
+    } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
+        let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        if info == pg_constants::XLOG_XACT_COMMIT
+            || info == pg_constants::XLOG_XACT_COMMIT_PREPARED
+            || info == pg_constants::XLOG_XACT_ABORT
+            || info == pg_constants::XLOG_XACT_ABORT_PREPARED
+        {
+            let parsed_xact = XlXactParsedRecord::decode(&decoded);
+            save_xact_record(timeline, lsn, &parsed_xact)?;
+        }
     }
 
     // Now that this record has been handled, let the repository know that
@@ -423,6 +433,24 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
         }
         let num_vm_blocks = 0;
         timeline.put_truncation(rel, lsn, num_vm_blocks)?;
+    }
+    Ok(())
+}
+
+/// Subroutine of save_decoded_record(), to handle an XLOG_XACT_* records.
+///
+/// We are currently only interested in the dropped relations.
+fn save_xact_record(timeline: &dyn Timeline, lsn: Lsn, rec: &XlXactParsedRecord) -> Result<()> {
+    for xnode in &rec.xnodes {
+        for forknum in pg_constants::MAIN_FORKNUM..=pg_constants::VISIBILITYMAP_FORKNUM {
+            let rel_tag = RelTag {
+                forknum,
+                spcnode: xnode.spcnode,
+                dbnode: xnode.dbnode,
+                relnode: xnode.relnode,
+            };
+            timeline.put_unlink(rel_tag, lsn)?;
+        }
     }
     Ok(())
 }

@@ -370,6 +370,19 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
+    /// Unlink object. This method is used for marking dropped relations.
+    fn put_unlink(&self, rel_tag: RelTag, lsn: Lsn) -> Result<()> {
+        let key = ObjectKey {
+            timeline: self.timelineid,
+            tag: ObjectTag::RelationMetadata(rel_tag),
+        };
+        let val = RelationSizeEntry::Unlink;
+        self.obj_store
+            .put(&key, lsn, &RelationSizeEntry::ser(&val)?)?;
+
+        Ok(())
+    }
+
     ///
     /// Memorize a full image of a page version
     ///

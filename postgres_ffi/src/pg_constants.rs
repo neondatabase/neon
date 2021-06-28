@@ -33,10 +33,30 @@ pub const SIZE_OF_PAGE_HEADER: u16 = 24;
 pub const BITS_PER_HEAPBLOCK: u16 = 2;
 pub const HEAPBLOCKS_PER_PAGE: u16 = (BLCKSZ - SIZE_OF_PAGE_HEADER) * 8 / BITS_PER_HEAPBLOCK;
 
+// From xact.h
+pub const XLOG_XACT_COMMIT: u8 = 0x00;
+pub const XLOG_XACT_PREPARE: u8 = 0x10;
+pub const XLOG_XACT_ABORT: u8 = 0x20;
+pub const XLOG_XACT_COMMIT_PREPARED: u8 = 0x30;
+pub const XLOG_XACT_ABORT_PREPARED: u8 = 0x40;
+
 /* mask for filtering opcodes out of xl_info */
 pub const XLOG_XACT_OPMASK: u8 = 0x70;
 /* does this record have a 'xinfo' field or not */
 pub const XLOG_XACT_HAS_INFO: u8 = 0x80;
+
+/*
+ * The following flags, stored in xinfo, determine which information is
+ * contained in commit/abort records.
+ */
+pub const XACT_XINFO_HAS_DBINFO: u32 = 1u32 << 0;
+pub const XACT_XINFO_HAS_SUBXACTS: u32 = 1u32 << 1;
+pub const XACT_XINFO_HAS_RELFILENODES: u32 = 1u32 << 2;
+pub const XACT_XINFO_HAS_INVALS: u32 = 1u32 << 3;
+pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
+// pub const XACT_XINFO_HAS_ORIGIN: u32 = 1u32 << 5;
+// pub const XACT_XINFO_HAS_AE_LOCKS: u32 = 1u32 << 6;
+// pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
 
 // From pg_control.h and rmgrlist.h
 pub const XLOG_SWITCH: u8 = 0x40;

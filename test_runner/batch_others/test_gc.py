@@ -84,3 +84,14 @@ def test_gc(zenith_cli, pageserver, postgres, pg_bin):
                     assert row['dropped'] == 0
                     assert row['truncated'] == 0
                     assert row['deleted'] == 0
+
+                    #
+                    # Test DROP TABLE checks that relation data and metadata was deleted by GC from object storage
+                    #
+                    cur.execute("DROP TABLE foo")
+
+                    pscur.execute(f"do_gc {timeline} 0")
+                    row = pscur.fetchone()
+                    print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
+                    # Each relation fork is counted separately, hence 3.
+                    assert row['dropped'] == 3
