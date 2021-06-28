@@ -104,7 +104,7 @@ impl SendWalHandler {
             Some(lsn_bytes),
             None,
         ]))?
-        .write_message(&BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"))?;
+        .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         Ok(())
     }
 }
