@@ -78,15 +78,14 @@ impl postgres_backend::Handler for MgmtHandler {
         pgb: &mut PostgresBackend,
         query_string: Bytes,
     ) -> anyhow::Result<()> {
-        let (_, query_string) = query_string
-            .split_last()
-            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
+        let mut query_string = query_string.to_vec();
+        if let Some(ch) = query_string.last() {
+            if *ch == 0 {
+                query_string.pop();
+            }
+        }
 
-        let (_, query_string) = query_string
-            .split_last()
-            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
-
-        println!("Got mgmt query: {:?}", query_string);
+        println!("Got mgmt query: '{}'", std::str::from_utf8(&query_string)?);
 
         let resp: PsqlSessionResponse = serde_json::from_slice(&query_string)?;
 
@@ -94,7 +93,7 @@ impl postgres_backend::Handler for MgmtHandler {
 
         let sender = waiters
             .get(&resp.session_id)
-            .ok_or_else(|| anyhow::Error::msg("psql session_id is not found"))?;
+            .ok_or_else(|| anyhow::Error::msg("psql_session_id is not found"))?;
 
         match resp.result {
             PsqlSessionResult::Success(db_info) => {
