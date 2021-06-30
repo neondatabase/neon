@@ -930,16 +930,19 @@ impl<'a> ObjectHistory<'a> {
 /// 1. Ready-made images of the block
 /// 2. WAL records, to be applied on top of the "previous" entry
 ///
-/// Some WAL records will initialize the page from scratch. For such records,
-/// the 'will_init' flag is set. They don't need the previous page image before
-/// applying. The 'will_init' flag is set for records containing a full-page image,
-/// and for records with the BKPBLOCK_WILL_INIT flag. These differ from PageImages
-/// stored directly in the cache entry in that you still need to run the WAL redo
-/// routine to generate the page image.
-///
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum PageEntry {
+    /// Ready-made image of the block
     Page(Bytes),
+
+    /// WAL record, to be applied on top of the "previous" entry
+    ///
+    /// Some WAL records will initialize the page from scratch. For such records,
+    /// the 'will_init' flag is set. They don't need the previous page image before
+    /// applying. The 'will_init' flag is set for records containing a full-page image,
+    /// and for records with the BKPBLOCK_WILL_INIT flag. These differ from Page images
+    /// stored directly in the repository in that you still need to run the WAL redo
+    /// routine to generate the page image.
     WALRecord(WALRecord),
 }
 
@@ -952,12 +955,6 @@ pub enum RelationSizeEntry {
     Size(u32),
 
     /// Tombstone for a dropped relation.
-    //
-    // TODO: Not used. Currently, we never drop relations. The parsing
-    // of relation drops in COMMIT/ABORT records has not been
-    // implemented. We should also have a mechanism to remove
-    // "orphaned" relfiles, if the compute node crashes before writing
-    // the COMMIT/ABORT record.
     Unlink,
 }
 
