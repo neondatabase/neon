@@ -1,10 +1,10 @@
+use crate::object_key::ObjectTag;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use crate::object_key::ObjectTag;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -467,6 +467,17 @@ mod tests {
         Ok(())
     }
 
+    fn skip_nonrel_objects<'a>(
+        snapshot: Box<dyn History + 'a>,
+    ) -> Result<impl Iterator<Item = <dyn History as Iterator>::Item> + 'a> {
+        Ok(snapshot.skip_while(|r| match r {
+            Ok(m) => match m.tag {
+                ObjectTag::RelationMetadata(_) => false,
+                _ => true,
+            },
+            _ => panic!("Iteration error"),
+        }))
+    }
     #[test]
     fn test_history() -> Result<()> {
         let repo = get_test_repo("test_snapshot")?;
@@ -476,13 +487,7 @@ mod tests {
 
         let snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(0));
-        let mut snapshot = snapshot.skip_while(|r| match r {
-            Ok(m) => match m.tag {
-                ObjectTag::RelationBuffer(_) => false,
-                _ => true,
-            },
-            _ => true,
-        });
+        let mut snapshot = skip_nonrel_objects(snapshot)?;
         assert_eq!(None, snapshot.next().transpose()?);
 
         // add a page and advance the last valid LSN
@@ -490,34 +495,43 @@ mod tests {
         let tag = TEST_BUF(1);
         tline.put_page_image(tag, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
         tline.advance_last_valid_lsn(Lsn(1));
-        let snapshot = tline.history()?;
-        assert_eq!(snapshot.lsn(), Lsn(1));
-        let mut snapshot = snapshot.skip_while(|r| match r {
-            Ok(m) => match m.tag {
-                ObjectTag::RelationBuffer(_) => false,
-                _ => true,
-            },
-            _ => true,
-        });
+
         let expected_page = Modification {
             tag: ObjectTag::RelationBuffer(tag),
             lsn: Lsn(1),
             data: ObjectValue::ser(&ObjectValue::Page(TEST_IMG("blk 1 @ lsn 1")))?,
         };
+        let expected_init_size = Modification {
+            tag: ObjectTag::RelationMetadata(rel),
+            lsn: Lsn(1),
+            data: ObjectValue::ser(&ObjectValue::RelationSize(2))?,
+        };
+        let expected_trunc_size = Modification {
+            tag: ObjectTag::RelationMetadata(rel),
+            lsn: Lsn(2),
+            data: ObjectValue::ser(&ObjectValue::RelationSize(0))?,
+        };
+
+        let snapshot = tline.history()?;
+        assert_eq!(snapshot.lsn(), Lsn(1));
+        let mut snapshot = skip_nonrel_objects(snapshot)?;
+        assert_eq!(
+            Some(&expected_init_size),
+            snapshot.next().transpose()?.as_ref()
+        );
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         assert_eq!(None, snapshot.next().transpose()?);
 
         // truncate to zero, but don't advance the last valid LSN
         tline.put_truncation(rel, Lsn(2), 0)?;
+
         let snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
-        let mut snapshot = snapshot.skip_while(|r| match r {
-            Ok(m) => match m.tag {
-                ObjectTag::RelationBuffer(_) => false,
-                _ => true,
-            },
-            _ => true,
-        });
+        let mut snapshot = skip_nonrel_objects(snapshot)?;
+        assert_eq!(
+            Some(&expected_init_size),
+            snapshot.next().transpose()?.as_ref()
+        );
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
         assert_eq!(None, snapshot.next().transpose()?);
 
@@ -525,29 +539,13 @@ mod tests {
         tline.advance_last_valid_lsn(Lsn(2));
         let snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(2));
-        let mut snapshot = snapshot.skip_while(|r| match r {
-            Ok(m) => match m.tag {
-                ObjectTag::RelationMetadata(_) => false,
-                _ => true,
-            },
-            _ => true,
-        });
-        let expected_truncate = Modification {
-            tag: ObjectTag::RelationMetadata(rel),
-            lsn: Lsn(1),
-            data: ObjectValue::ser(&ObjectValue::RelationSize(2))?,
-        };
+        let mut snapshot = skip_nonrel_objects(snapshot)?;
         assert_eq!(
-            Some(&expected_truncate),
+            Some(&expected_init_size),
             snapshot.next().transpose()?.as_ref()
         );
-        let expected_truncate = Modification {
-            tag: ObjectTag::RelationMetadata(rel),
-            lsn: Lsn(2),
-            data: ObjectValue::ser(&ObjectValue::RelationSize(0))?,
-        };
         assert_eq!(
-            Some(&expected_truncate),
+            Some(&expected_trunc_size),
             snapshot.next().transpose()?.as_ref()
         );
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());

@@ -29,7 +29,7 @@ use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 use crate::basebackup;
 use crate::branches;
 use crate::page_cache;
-use crate::repository::{BufferTag, RelTag, Modification};
+use crate::repository::{BufferTag, Modification, RelTag};
 use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
