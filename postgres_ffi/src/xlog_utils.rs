@@ -9,14 +9,16 @@
 
 use crate::pg_constants;
 use crate::CheckPoint;
+use crate::ControlFileData;
 use crate::FullTransactionId;
 use crate::XLogLongPageHeaderData;
 use crate::XLogPageHeaderData;
 use crate::XLogRecord;
-
 use crate::XLOG_PAGE_MAGIC;
+
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
+use bytes::{BufMut, BytesMut};
 use crc32c::*;
 use log::*;
 use std::cmp::min;
@@ -35,11 +37,14 @@ pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = std::mem::size_of::<XLogPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
+pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
 pub type TimestampTz = u64;
 pub type XLogSegNo = u64;
+
+const XID_CHECKPOINT_INTERVAL: u32 = 1024;
 
 #[allow(non_snake_case)]
 pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
@@ -368,6 +373,7 @@ impl CheckPoint {
     // Next XID should be greater than new_xid.
     // Also take in account 32-bit wrap-around.
     pub fn update_next_xid(&mut self, xid: u32) {
+        let xid = xid.wrapping_add(XID_CHECKPOINT_INTERVAL - 1) & !(XID_CHECKPOINT_INTERVAL - 1);
         let full_xid = self.nextXid.value;
         let new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
         let old_xid = full_xid as u32;
@@ -382,4 +388,59 @@ impl CheckPoint {
             };
         }
     }
+}
+
+pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
+    let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
+
+    let hdr = XLogLongPageHeaderData {
+        std: {
+            XLogPageHeaderData {
+                xlp_magic: XLOG_PAGE_MAGIC as u16,
+                xlp_info: pg_constants::XLP_LONG_HEADER,
+                xlp_tli: 1, // FIXME: always use Postgres timeline 1
+                xlp_pageaddr: pg_control.checkPoint - XLOG_SIZE_OF_XLOG_LONG_PHD as u64,
+                xlp_rem_len: 0,
+            }
+        },
+        xlp_sysid: pg_control.system_identifier,
+        xlp_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32,
+        xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
+    };
+
+    let hdr_bytes = hdr.encode();
+    seg_buf.extend_from_slice(&hdr_bytes);
+
+    let rec_hdr = XLogRecord {
+        xl_tot_len: (XLOG_SIZE_OF_XLOG_RECORD
+            + SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT
+            + SIZEOF_CHECKPOINT) as u32,
+        xl_xid: 0, //0 is for InvalidTransactionId
+        xl_prev: 0,
+        xl_info: pg_constants::XLOG_CHECKPOINT_SHUTDOWN,
+        xl_rmid: pg_constants::RM_XLOG_ID,
+        xl_crc: 0,
+    };
+
+    let mut rec_shord_hdr_bytes = BytesMut::new();
+    rec_shord_hdr_bytes.put_u8(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
+    rec_shord_hdr_bytes.put_u8(SIZEOF_CHECKPOINT as u8);
+
+    let rec_bytes = rec_hdr.encode();
+    let checkpoint_bytes = pg_control.checkPointCopy.encode();
+
+    //calculate record checksum
+    let mut crc = 0;
+    crc = crc32c_append(crc, &rec_shord_hdr_bytes[..]);
+    crc = crc32c_append(crc, &checkpoint_bytes[..]);
+    crc = crc32c_append(crc, &rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
+
+    seg_buf.extend_from_slice(&rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
+    seg_buf.put_u32_le(crc);
+    seg_buf.extend_from_slice(&rec_shord_hdr_bytes);
+    seg_buf.extend_from_slice(&checkpoint_bytes);
+
+    //zero out remainig file
+    seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
+    seg_buf.freeze()
 }

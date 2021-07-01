@@ -15,7 +15,8 @@
 //! TODO: Even though the postgres code runs in a separate process,
 //! it's not a secure sandbox.
 //!
-use bytes::{BufMut, Bytes, BytesMut};
+use byteorder::{ByteOrder, LittleEndian};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::cell::RefCell;
 use std::fs;
@@ -35,9 +36,15 @@ use tokio::time::timeout;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
+use crate::object_key::*;
 use crate::repository::BufferTag;
 use crate::repository::WALRecord;
+use crate::waldecoder::XlXactParsedRecord;
+use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
+use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
+use postgres_ffi::pg_constants;
+use postgres_ffi::XLogRecord;
 
 ///
 /// WAL Redo Manager is responsible for replaying WAL records.
@@ -52,7 +59,7 @@ pub trait WalRedoManager: Send + Sync {
     /// the reords.
     fn request_redo(
         &self,
-        tag: BufferTag,
+        tag: ObjectTag,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
@@ -68,7 +75,7 @@ pub struct DummyRedoManager {}
 impl crate::walredo::WalRedoManager for DummyRedoManager {
     fn request_redo(
         &self,
-        _tag: BufferTag,
+        _tag: ObjectTag,
         _lsn: Lsn,
         _base_img: Option<Bytes>,
         _records: Vec<WALRecord>,
@@ -97,7 +104,7 @@ struct PostgresRedoManagerInternal {
 
 #[derive(Debug)]
 struct WalRedoRequest {
-    tag: BufferTag,
+    tag: ObjectTag,
     lsn: Lsn,
 
     base_img: Option<Bytes>,
@@ -159,7 +166,7 @@ impl WalRedoManager for PostgresRedoManager {
     ///
     fn request_redo(
         &self,
-        tag: BufferTag,
+        tag: ObjectTag,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
@@ -184,6 +191,24 @@ impl WalRedoManager for PostgresRedoManager {
         rx.recv()
             .expect("could not receive response to WAL redo request")
     }
+}
+
+fn mx_offset_to_flags_offset(xid: MultiXactId) -> usize {
+    ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32) as u16
+        % pg_constants::MULTIXACT_MEMBERGROUPS_PER_PAGE
+        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE) as usize
+}
+
+fn mx_offset_to_flags_bitshift(xid: MultiXactId) -> u16 {
+    (xid as u16) % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP
+        * pg_constants::MXACT_MEMBER_BITS_PER_XACT
+}
+
+/* Location (byte offset within page) of TransactionId of given member */
+fn mx_offset_to_member_offset(xid: MultiXactId) -> usize {
+    mx_offset_to_flags_offset(xid)
+        + (pg_constants::MULTIXACT_FLAGBYTES_PER_GROUP
+            + (xid as u16 % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP) * 4) as usize
 }
 
 ///
@@ -249,7 +274,151 @@ impl PostgresRedoManagerInternal {
         let start = Instant::now();
 
         let apply_result: Result<Bytes, Error>;
-        apply_result = process.apply_wal_records(tag, base_img, records).await;
+        if let ObjectTag::RelationBuffer(buf_tag) = tag {
+            // Relational WAL records are applied using wal-redo-postgres
+            apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
+        } else {
+            // Non-relational WAL records we will aply ourselves.
+            const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+            let mut page = BytesMut::new();
+            if let Some(fpi) = base_img {
+                // If full-page image is provided, then use it...
+                page.extend_from_slice(&fpi[..]);
+            } else {
+                //  otherwise initialize page with zeros
+                page.extend_from_slice(&ZERO_PAGE);
+            }
+            // Apply all callected WAL records
+            for record in records {
+                let mut buf = record.rec.clone();
+
+                // 1. Parse XLogRecord struct
+                // FIXME: refactor to avoid code duplication.
+                let xlogrec = XLogRecord::from_bytes(&mut buf);
+
+                //move to main data
+                // TODO probably, we should store some records in our special format
+                // to avoid this weird parsing on replay
+                let skip = (record.main_data_offset - pg_constants::SIZEOF_XLOGRECORD) as usize;
+                if buf.remaining() > skip {
+                    buf.advance(skip);
+                }
+
+                if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
+                    let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
+                    if info == pg_constants::CLOG_ZEROPAGE {
+                        // The only operation we need to implement is CLOG_ZEROPAGE
+                        page.copy_from_slice(&ZERO_PAGE);
+                    }
+                } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
+                    // Transaction manager stuff
+                    let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+                    let tag_blknum = match tag {
+                        ObjectTag::Clog(slru) => slru.blknum,
+                        ObjectTag::TwoPhase(_) => {
+                            assert!(info == pg_constants::XLOG_XACT_PREPARE);
+							trace!("Apply prepare {} record", xlogrec.xl_xid);
+							page.clear();
+							page.extend_from_slice(&buf[..]);
+                            continue;
+                        }
+                        _ => panic!("Not valid XACT object tag {:?}", tag),
+                    };
+                    let parsed_xact =
+                        XlXactParsedRecord::decode(&mut buf, xlogrec.xl_xid, xlogrec.xl_info);
+                    if parsed_xact.info == pg_constants::XLOG_XACT_COMMIT
+                        || parsed_xact.info == pg_constants::XLOG_XACT_COMMIT_PREPARED
+                    {
+                        transaction_id_set_status(
+                            parsed_xact.xid,
+                            pg_constants::TRANSACTION_STATUS_COMMITTED,
+                            &mut page,
+                        );
+                        for subxact in &parsed_xact.subxacts {
+                            let blkno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                            // only update xids on the requested page
+                            if tag_blknum == blkno {
+                                transaction_id_set_status(
+                                    *subxact,
+                                    pg_constants::TRANSACTION_STATUS_SUB_COMMITTED,
+                                    &mut page,
+                                );
+                            }
+                        }
+                    } else if parsed_xact.info == pg_constants::XLOG_XACT_ABORT
+                        || parsed_xact.info == pg_constants::XLOG_XACT_ABORT_PREPARED
+                    {
+                        transaction_id_set_status(
+                            parsed_xact.xid,
+                            pg_constants::TRANSACTION_STATUS_ABORTED,
+                            &mut page,
+                        );
+                        for subxact in &parsed_xact.subxacts {
+                            let blkno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                            // only update xids on the requested page
+                            if tag_blknum == blkno {
+                                transaction_id_set_status(
+                                    *subxact,
+                                    pg_constants::TRANSACTION_STATUS_ABORTED,
+                                    &mut page,
+                                );
+                            }
+                        }
+                    }
+                } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
+                    // Multiexact operations
+                    let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                    if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE
+                        || info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE
+                    {
+                        // Just need to ero page
+                        page.copy_from_slice(&ZERO_PAGE);
+                    } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
+                        let xlrec = XlMultiXactCreate::decode(&mut buf);
+                        if let ObjectTag::MultiXactMembers(slru) = tag {
+                            for i in 0..xlrec.nmembers {
+                                let blkno = i / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+                                if blkno == slru.blknum {
+                                    // update only target block
+                                    let offset = xlrec.moff + i;
+                                    let memberoff = mx_offset_to_member_offset(offset);
+                                    let flagsoff = mx_offset_to_flags_offset(offset);
+                                    let bshift = mx_offset_to_flags_bitshift(offset);
+                                    let mut flagsval =
+                                        LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
+                                    flagsval &=
+                                        !(((1 << pg_constants::MXACT_MEMBER_BITS_PER_XACT) - 1)
+                                            << bshift);
+                                    flagsval |= xlrec.members[i as usize].status << bshift;
+                                    LittleEndian::write_u32(
+                                        &mut page[flagsoff..flagsoff + 4],
+                                        flagsval,
+                                    );
+                                    LittleEndian::write_u32(
+                                        &mut page[memberoff..memberoff + 4],
+                                        xlrec.members[i as usize].xid,
+                                    );
+                                }
+                            }
+                        } else {
+                            // Multixact offsets SLRU
+                            let offs = (xlrec.mid % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32
+                                * 4) as usize;
+                            LittleEndian::write_u32(&mut page[offs..offs + 4], xlrec.moff);
+                        }
+                    } else {
+                        panic!();
+                    }
+                } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
+                    // Ralation map file has size 512 bytes
+                    page.clear();
+                    page.extend_from_slice(&buf[12..]); // skip xl_relmap_update
+                    assert!(page.len() == 512); // size of pg_filenode.map
+                }
+            }
+
+            apply_result = Ok::<Bytes, Error>(page.freeze());
+        }
 
         let duration = start.elapsed();
 

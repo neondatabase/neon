@@ -28,6 +28,7 @@ use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 
 use crate::basebackup;
 use crate::branches;
+use crate::object_key::ObjectTag;
 use crate::page_cache;
 use crate::repository::{BufferTag, RelTag, RelationUpdate, Update};
 use crate::restore_local_repo;
@@ -231,7 +232,7 @@ impl PageServerHandler {
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
                 }
                 PagestreamFeMessage::Read(req) => {
-                    let buf_tag = BufferTag {
+                    let tag = ObjectTag::RelationBuffer(BufferTag {
                         rel: RelTag {
                             spcnode: req.spcnode,
                             dbnode: req.dbnode,
@@ -239,9 +240,9 @@ impl PageServerHandler {
                             forknum: req.forknum,
                         },
                         blknum: req.blkno,
-                    };
+                    });
 
-                    let read_response = match timeline.get_page_at_lsn(buf_tag, req.lsn) {
+                    let read_response = match timeline.get_page_at_lsn(tag, req.lsn) {
                         Ok(p) => PagestreamReadResponse {
                             ok: true,
                             n_blocks: 0,
@@ -292,14 +293,20 @@ impl PageServerHandler {
         // find latest snapshot
         let snapshot_lsn =
             restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
-        let req_lsn = lsn.unwrap_or(snapshot_lsn);
-        basebackup::send_tarball_at_lsn(
-            &mut CopyDataSink { pgb },
-            timelineid,
-            &timeline,
-            req_lsn,
-            snapshot_lsn,
-        )?;
+
+        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
+
+        {
+            let mut writer = CopyDataSink { pgb };
+            let mut basebackup = basebackup::Basebackup::new(
+                &mut writer,
+                timelineid,
+                &timeline,
+                req_lsn,
+                snapshot_lsn,
+            );
+            basebackup.send_tarball()?;
+        }
         pgb.write_message(&BeMessage::CopyDone)?;
         debug!("CopyDone sent!");
 
@@ -412,18 +419,18 @@ impl postgres_backend::Handler for PageServerHandler {
 
                         match relation_update.update {
                             Update::Page { blknum, img } => {
-                                let tag = BufferTag {
+                                let tag = ObjectTag::RelationBuffer(BufferTag {
                                     rel: relation_update.rel,
                                     blknum,
-                                };
+                                });
 
                                 timeline.put_page_image(tag, relation_update.lsn, img)?;
                             }
                             Update::WALRecord { blknum, rec } => {
-                                let tag = BufferTag {
+                                let tag = ObjectTag::RelationBuffer(BufferTag {
                                     rel: relation_update.rel,
                                     blknum,
-                                };
+                                });
 
                                 timeline.put_wal_record(tag, rec)?;
                             }
@@ -546,6 +553,24 @@ impl postgres_backend::Handler for PageServerHandler {
                     ..Default::default()
                 },
                 RowDescriptor {
+                    name: b"prep_deleted",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+                RowDescriptor {
+                    name: b"slru_deleted",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+                RowDescriptor {
+                    name: b"chkp_deleted",
+                    typoid: 20,
+                    typlen: 8,
+                    ..Default::default()
+                },
+                RowDescriptor {
                     name: b"dropped",
                     typoid: 20,
                     typlen: 8,
@@ -562,6 +587,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(&result.n_relations.to_string().as_bytes()),
                 Some(&result.truncated.to_string().as_bytes()),
                 Some(&result.deleted.to_string().as_bytes()),
+                Some(&result.prep_deleted.to_string().as_bytes()),
+                Some(&result.slru_deleted.to_string().as_bytes()),
+                Some(&result.chkp_deleted.to_string().as_bytes()),
                 Some(&result.dropped.to_string().as_bytes()),
                 Some(&result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
