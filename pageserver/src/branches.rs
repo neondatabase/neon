@@ -96,7 +96,26 @@ fn init_from_repo(conf: &'static PageServerConf,
 {
     let pgdata_path = match init_pgdata_path
     {
-        Some(init_pgdata_path) => std::path::Path::new(init_pgdata_path),
+        Some(init_pgdata_path) =>
+        {
+            let mut s = init_pgdata_path.split(':');
+            let prefix = s.next().unwrap();
+            if prefix == "fs"
+            {
+                let path = s.next().unwrap();
+                std::path::Path::new(path)
+            }
+            else if prefix == "s3"
+            {
+                let bucket = s.next().unwrap();
+                bail!("{} storage method is not implemented yet. bucket {}", prefix, bucket)
+            }
+            else
+            {
+                bail!("{} storage method is unknown", prefix)
+            }
+        }
+
         None => {
             let initdb_path = std::path::Path::new("tmp");
             // Init temporarily repo to get bootstrap data

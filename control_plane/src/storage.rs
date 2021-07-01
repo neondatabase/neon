@@ -13,6 +13,7 @@ use postgres::{Client, NoTls};
 use crate::local_env::LocalEnv;
 use crate::read_pidfile;
 use pageserver::branches::BranchInfo;
+use std::env;
 
 //
 // Control routines for pageserver.
@@ -50,22 +51,49 @@ impl PageServerNode {
             "--postgres-distrib",
             self.env.pg_distrib_dir.to_str().unwrap()];
 
-        match snapshot_path
+
+        let status = match snapshot_path
         {
             Some(init_pgdata_path) =>
             {
                 args_vec.push("--init_pgdata_path");
                 args_vec.push(init_pgdata_path);
-            },
-            None => {}
-        };
 
-        let status = cmd
-            .args(&args_vec)
-            .env_clear()
-            .env("RUST_BACKTRACE", "1")
-            .status()
-            .expect("pageserver init failed");
+                let mut s = init_pgdata_path.split(':');
+                let prefix = s.next().unwrap();
+
+                if prefix == "s3"
+                {
+                    cmd
+                    .args(&args_vec)
+                    .env_clear()
+                    .env("RUST_BACKTRACE", "1")
+                    .env("S3_REGION", env::var("S3_REGION").unwrap())
+                    .env("S3_ENDPOINT", env::var("S3_ENDPOINT").unwrap())
+                    .env("S3_ACCESSKEY", env::var("S3_ACCESSKEY").unwrap())
+                    .env("S3_SECRET", env::var("S3_SECRET").unwrap())
+                    .status()
+                    .expect("pageserver init failed")
+                }
+                else
+                {
+                    cmd
+                    .args(&args_vec)
+                    .env_clear()
+                    .env("RUST_BACKTRACE", "1")
+                    .status()
+                    .expect("pageserver init failed")
+                }
+            },
+            None => {
+                cmd
+                .args(&args_vec)
+                .env_clear()
+                .env("RUST_BACKTRACE", "1")
+                .status()
+                .expect("pageserver init failed")
+            }
+        };
 
         if status.success() {
             Ok(())
