@@ -14,6 +14,7 @@ pub mod page_cache;
 pub mod page_service;
 pub mod repository;
 pub mod restore_local_repo;
+pub mod restore_s3_repo;
 pub mod rocksdb_storage;
 pub mod tui;
 pub mod tui_event;

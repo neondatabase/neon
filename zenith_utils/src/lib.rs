@@ -13,3 +13,5 @@ pub mod bin_ser;
 
 pub mod postgres_backend;
 pub mod pq_proto;
+
+pub mod s3_utils;

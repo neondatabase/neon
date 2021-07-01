@@ -2471,7 +2471,9 @@ dependencies = [
  "bytes",
  "hex-literal",
  "log",
+ "rust-s3",
  "serde",
  "thiserror",
+ "tokio",
  "workspace_hack",
 ]
