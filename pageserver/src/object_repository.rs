@@ -140,6 +140,7 @@ impl Repository for ObjectRepository {
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, at_lsn: Lsn) -> Result<()> {
         let src_timeline = self.get_timeline(src)?;
 
+        trace!("branch_timeline at lsn {}", at_lsn);
         // Write a metadata key, noting the ancestor of th new timeline. There is initially
         // no data in it, but all the read-calls know to look into the ancestor.
         let metadata = MetadataEntry {
@@ -156,6 +157,8 @@ impl Repository for ObjectRepository {
         )?;
 
         // Copy non-rel objects
+        // TODO Why do we need to copy them into new branch?
+        // Can't we just look for them in timeline's ancestor.
         for tag in src_timeline.list_nonrels(at_lsn)? {
             match tag {
                 ObjectTag::TimelineMetadataTag => {} // skip it
