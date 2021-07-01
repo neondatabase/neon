@@ -66,6 +66,7 @@ pub fn import_timeline_from_postgres_datadir(
             None => continue,
 
             // These special files appear in the snapshot, but are not needed by the page server
+            Some("pg_internal.init") => {},
             Some("pg_control") => {
                 import_nonrel_file(timeline, lsn, ObjectTag::ControlFile, &direntry.path())?
             }
@@ -103,6 +104,7 @@ pub fn import_timeline_from_postgres_datadir(
                 None => continue,
 
                 // These special files appear in the snapshot, but are not needed by the page server
+                Some("pg_internal.init") => {},
                 Some("PG_VERSION") => continue,
                 Some("pg_filenode.map") => import_nonrel_file(
                     timeline,
