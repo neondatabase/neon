@@ -596,7 +596,7 @@ impl Timeline for ObjectTimeline {
             ancestor_timeline: self.ancestor_timeline,
             ancestor_lsn: self.ancestor_lsn,
         };
-        trace!("checkpoint at {}", metadata.last_valid_lsn);
+        trace!("checkpoint at last_valid_lsn {} last_record_lsn {}", metadata.last_valid_lsn, metadata.last_record_lsn);
 
         self.put_timeline_metadata_entry(metadata)?;
 

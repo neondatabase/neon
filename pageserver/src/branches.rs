@@ -19,11 +19,13 @@ use std::{
     str::FromStr,
 };
 use zenith_utils::lsn::Lsn;
+use zenith_utils::s3_utils::S3Storage;
 
 use crate::page_cache;
 use crate::restore_local_repo;
+use crate::restore_s3_repo;
 use crate::{PageServerConf, ZTimelineId, repository::Repository};
-
+use log::*;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -94,7 +96,8 @@ fn init_from_repo(conf: &'static PageServerConf,
     init_pgdata_path: Option<&str>
 ) -> Result<()>
 {
-    let pgdata_path = match init_pgdata_path
+
+    let (pgdata_str, prefix) = match init_pgdata_path
     {
         Some(init_pgdata_path) =>
         {
@@ -103,12 +106,13 @@ fn init_from_repo(conf: &'static PageServerConf,
             if prefix == "fs"
             {
                 let path = s.next().unwrap();
-                std::path::Path::new(path)
+                (path, prefix)
             }
             else if prefix == "s3"
             {
                 let bucket = s.next().unwrap();
-                bail!("{} storage method is not implemented yet. bucket {}", prefix, bucket)
+                trace!("{} storage method: bucket {}", prefix, bucket);
+                (bucket, prefix)
             }
             else
             {
@@ -120,16 +124,30 @@ fn init_from_repo(conf: &'static PageServerConf,
             let initdb_path = std::path::Path::new("tmp");
             // Init temporarily repo to get bootstrap data
             run_initdb(conf, initdb_path)?;
-            initdb_path
+            ("tmp", "fs")
         }
     };
 
-    let lsn = get_lsn_from_controlfile(&pgdata_path)?;
+    let pgdata_path = std::path::Path::new(pgdata_str);
+
+    let lsn =
+    match prefix
+    {
+        "fs" => get_lsn_from_controlfile(&pgdata_path)?,
+        "s3" => restore_s3_repo::get_lsn_from_controlfile_s3(pgdata_str)?,
+        _ => { bail!("{} storage method is unknown", prefix) }
+    };
 
     println!("init_from_repo {:?} at lsn {}", pgdata_path, lsn);
 
     let timeline = repo.create_empty_timeline(tli, lsn)?;
-    restore_local_repo::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+    if prefix == "fs"
+    {
+        restore_local_repo::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+    } else if prefix == "s3"
+    {
+        restore_s3_repo::import_timeline_from_postgres_s3(&pgdata_str, &*timeline, lsn)?;
+    }
 
     let timelinedir = conf.timeline_path(tli);
 
@@ -137,7 +155,29 @@ fn init_from_repo(conf: &'static PageServerConf,
     // TODO This looks strange. Why won't we just import this wal to timeline right here?
     match init_pgdata_path
     {
-        Some(_init_pgdata_path) => {}, //TODO
+        Some(_init_pgdata_path) =>
+        {
+            if prefix == "fs"
+            {
+                fs::copy(
+                    pgdata_path.join("pg_wal").join("000000010000000000000001"),
+                    timelinedir
+                        .join("wal")
+                        .join("000000010000000000000001.partial"),
+                )?;
+            } else if prefix == "s3"
+            {
+                let s3_storage = S3Storage::new_from_env(pgdata_str).unwrap();
+
+                let filepath = "pg_wal/000000010000000000000001";
+                let data = s3_storage.get_object(&filepath).unwrap();
+
+                let mut file = File::create(timelinedir
+                    .join("wal")
+                    .join("000000010000000000000001.partial"))?;
+                file.write_all(&data)?;
+            }
+        },
         None => 
         {
             fs::copy(
@@ -161,10 +201,26 @@ fn init_from_repo(conf: &'static PageServerConf,
     // Preserve initial config files
     // We will need them to start compute node and now we don't store/generate them in pageserver.
     // FIXME this is a temporary hack. Config files should be handled by some other service.
-    for i in 0..pg_constants::PGDATA_SPECIAL_FILES.len()
+    if prefix == "fs"
     {
-        let path = pg_constants::PGDATA_SPECIAL_FILES[i];
-        fs::copy(pgdata_path.join(path), target.join(path))?;
+        for i in 0..pg_constants::PGDATA_SPECIAL_FILES.len()
+        {
+            let path = pg_constants::PGDATA_SPECIAL_FILES[i];
+            fs::copy(pgdata_path.join(path), target.join(path))?;
+        }
+    }
+    else if prefix == "s3"
+    {
+        let s3_storage = S3Storage::new_from_env(pgdata_str).unwrap();
+
+        for i in 0..pg_constants::PGDATA_SPECIAL_FILES.len()
+        {
+            let filepath = pg_constants::PGDATA_SPECIAL_FILES[i];
+            let data = s3_storage.get_object(&filepath).unwrap();
+
+            let mut file = File::create(target.join(filepath))?;
+            file.write_all(&data)?;
+        }
     }
 
     // Remove temp dir. We don't need it anymore
