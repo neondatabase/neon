@@ -34,6 +34,9 @@ pub trait ObjectStore: Send + Sync {
     /// correspond to any real relation.
     fn get(&self, key: &ObjectKey, lsn: Lsn) -> Result<Vec<u8>>;
 
+    /// Read key greater or equal than specified
+    fn get_next_key(&self, key: &ObjectKey) -> Result<Option<ObjectKey>>;
+
     /// Iterate through all page versions of one object.
     ///
     /// Returns all page versions in descending LSN order, along with the LSN
@@ -65,6 +68,17 @@ pub trait ObjectStore: Send + Sync {
         dbnode: u32,
         lsn: Lsn,
     ) -> Result<HashSet<RelTag>>;
+
+    /// Iterate through objects tags. If nonrel_only, then only non-relationa data is iterated.
+    ///
+    /// This is used to implement GC and preparing tarball for new node startup
+    /// Returns objects in increasing key-version order.
+    fn list_objects<'a>(
+        &'a self,
+        timelineid: ZTimelineId,
+        nonrel_only: bool,
+        lsn: Lsn,
+    ) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>>;
 
     /// Unlink object (used by GC). This mehod may actually delete object or just mark it for deletion.
     fn unlink(&self, key: &ObjectKey, lsn: Lsn) -> Result<()>;
