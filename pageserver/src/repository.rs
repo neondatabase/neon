@@ -1,10 +1,15 @@
+use crate::object_key::*;
+use crate::waldecoder::TransactionId;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
+use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::forknumber_to_name;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
+use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
 use zenith_utils::lsn::Lsn;
@@ -35,8 +40,12 @@ pub trait Repository: Send + Sync {
 #[derive(Default)]
 pub struct GcResult {
     pub n_relations: u64,
+    pub inspected: u64,
     pub truncated: u64,
     pub deleted: u64,
+    pub prep_deleted: u64, // 2PC prepare
+    pub slru_deleted: u64, // SLRU (clog, multixact)
+    pub chkp_deleted: u64, // Checkpoints
     pub dropped: u64,
     pub elapsed: Duration,
 }
@@ -47,7 +56,10 @@ pub trait Timeline: Send + Sync {
     //------------------------------------------------------------------------------
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes>;
+    fn get_page_at_lsn(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
+
+    /// Look up given page in the cache.
+    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
 
     /// Get size of relation
     fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<u32>;
@@ -57,6 +69,9 @@ pub trait Timeline: Send + Sync {
 
     /// Get a list of all distinct relations in given tablespace and database.
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>>;
+
+    /// Get a list of non-relational objects
+    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>>;
 
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
@@ -68,16 +83,25 @@ pub trait Timeline: Send + Sync {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()>;
+    fn put_wal_record(&self, tag: ObjectTag, rec: WALRecord) -> Result<()>;
+
+    /// Put raw data
+    fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()>;
+    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
 
-    /// Unlink object. This method is used for marking dropped relations.
+    /// Unlink relation. This method is used for marking dropped relations.
     fn put_unlink(&self, tag: RelTag, lsn: Lsn) -> Result<()>;
+
+    /// Truncate SRLU segment
+    fn put_slru_truncate(&self, tag: ObjectTag, lsn: Lsn) -> Result<()>;
+
+    // Get object tag greater or equal than specified
+    fn get_next_tag(&self, tag: ObjectTag) -> Result<Option<ObjectTag>>;
 
     /// Remember the all WAL before the given LSN has been processed.
     ///
@@ -117,6 +141,15 @@ pub trait Timeline: Send + Sync {
     ///
     /// `horizon` specifies delta from last LSN to preserve all object versions (PITR interval).
     fn gc_iteration(&self, horizon: u64) -> Result<GcResult>;
+
+    // Check transaction status
+    fn get_tx_status(&self, xid: TransactionId, lsn: Lsn) -> anyhow::Result<u8> {
+        let blknum = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+        let tag = ObjectTag::Clog(SlruBufferTag { blknum });
+        let clog_page = self.get_page_at_lsn(tag, lsn)?;
+        let status = transaction_id_get_status(xid, &clog_page[..]);
+        Ok(status)
+    }
 }
 
 pub trait History: Iterator<Item = Result<RelationUpdate>> {
@@ -278,11 +311,11 @@ mod tests {
     /// Convenience function to create a BufferTag for testing.
     /// Helps to keeps the tests shorter.
     #[allow(non_snake_case)]
-    fn TEST_BUF(blknum: u32) -> BufferTag {
-        BufferTag {
+    fn TEST_BUF(blknum: u32) -> ObjectTag {
+        ObjectTag::RelationBuffer(BufferTag {
             rel: TESTREL_A,
             blknum,
-        }
+        })
     }
 
     /// Convenience function to create a page image with given string as the only content
@@ -467,16 +500,17 @@ mod tests {
         assert_eq!(None, snapshot.next().transpose()?);
 
         // add a page and advance the last valid LSN
-        let buf = TEST_BUF(1);
-        tline.put_page_image(buf, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
+        let rel = TESTREL_A;
+        let tag = TEST_BUF(1);
+        tline.put_page_image(tag, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
         tline.advance_last_valid_lsn(Lsn(1));
         let mut snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
         let expected_page = RelationUpdate {
-            rel: buf.rel,
+            rel: rel,
             lsn: Lsn(1),
             update: Update::Page {
-                blknum: buf.blknum,
+                blknum: 1,
                 img: TEST_IMG("blk 1 @ lsn 1"),
             },
         };
@@ -484,7 +518,7 @@ mod tests {
         assert_eq!(None, snapshot.next().transpose()?);
 
         // truncate to zero, but don't advance the last valid LSN
-        tline.put_truncation(buf.rel, Lsn(2), 0)?;
+        tline.put_truncation(rel, Lsn(2), 0)?;
         let mut snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
         assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
@@ -498,7 +532,7 @@ mod tests {
         // TODO ordering not guaranteed by API. But currently it returns the
         // truncation entry before the block data.
         let expected_truncate = RelationUpdate {
-            rel: buf.rel,
+            rel: rel,
             lsn: Lsn(2),
             update: Update::Truncate { n_blocks: 0 },
         };
@@ -515,15 +549,14 @@ mod tests {
     impl WalRedoManager for TestRedoManager {
         fn request_redo(
             &self,
-            tag: BufferTag,
+            tag: ObjectTag,
             lsn: Lsn,
             base_img: Option<Bytes>,
             records: Vec<WALRecord>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
-                "redo for rel {} blk {} to get to {}, with {} and {} records",
-                tag.rel,
-                tag.blknum,
+                "redo for {:?} to get to {}, with {} and {} records",
+                tag,
                 lsn,
                 if base_img.is_some() {
                     "base image"

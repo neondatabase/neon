@@ -4,6 +4,7 @@
 //!
 //! We keep one WAL receiver active per timeline.
 
+use crate::object_key::*;
 use crate::page_cache;
 use crate::restore_local_repo;
 use crate::waldecoder::*;
@@ -15,8 +16,8 @@ use log::*;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
-use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use std::cmp::{max, min};
@@ -168,6 +169,10 @@ fn walreceiver_main(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
+    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
+    let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
+    trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
+
     while let Some(replication_message) = physical_stream.next()? {
         let status_update = match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
@@ -185,9 +190,25 @@ fn walreceiver_main(
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                    let old_checkpoint_bytes = checkpoint.encode();
                     let decoded = decode_wal_record(recdata.clone());
-                    restore_local_repo::save_decoded_record(&*timeline, &decoded, recdata, lsn)?;
+                    restore_local_repo::save_decoded_record(
+                        &mut checkpoint,
+                        &*timeline,
+                        &decoded,
+                        recdata,
+                        lsn,
+                    )?;
                     last_rec_lsn = lsn;
+
+                    let new_checkpoint_bytes = checkpoint.encode();
+                    if new_checkpoint_bytes != old_checkpoint_bytes {
+                        timeline.put_page_image(
+                            ObjectTag::Checkpoint,
+                            lsn,
+                            new_checkpoint_bytes,
+                        )?;
+                    }
                 }
 
                 // Update the last_valid LSN value in the page cache one more time. We updated
