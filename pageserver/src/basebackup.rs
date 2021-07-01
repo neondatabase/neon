@@ -141,6 +141,7 @@ impl<'a> Basebackup<'a> {
 
     //
     // Extract pg_filenode.map files from repository
+    // Along with them also send PG_VERSION for each database.
     //
     fn add_relmap_file(&mut self, tag: &ObjectTag, db: &DatabaseTag) -> anyhow::Result<()> {
         let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
@@ -148,6 +149,7 @@ impl<'a> Basebackup<'a> {
         let path = if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
 
             let dst_path = format!("PG_VERSION");
+            //TODO fix hardcoded value. Get this version num somewhere
             let data = "14".as_bytes();
             let header = new_tar_header(&dst_path, data.len() as u64)?;
             self.ar.append(&header, &data[..])?;
@@ -165,6 +167,7 @@ impl<'a> Basebackup<'a> {
             // Append dir path for each database
             let path = format!("base/{}", db.dbnode);
             let fullpath = std::path::Path::new(&self.snappath).join(path.clone());
+
             //FIXME It's a hack to send dir with append_dir()
             info!("create dir before {:?}", fullpath.clone());
             fs::create_dir_all(fullpath.clone())?;

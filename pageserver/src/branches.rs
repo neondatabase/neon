@@ -22,7 +22,8 @@ use zenith_utils::lsn::Lsn;
 
 use crate::page_cache;
 use crate::restore_local_repo;
-use crate::{repository::Repository, PageServerConf, ZTimelineId, repository::Timeline};
+use crate::{PageServerConf, ZTimelineId, repository::Repository};
+
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -39,21 +40,31 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-// Returns chekpoint LSN from controlfile
-pub fn prepare_init_from_empty_repo(conf: &'static PageServerConf) -> Result<Lsn>
+
+// Returns checkpoint LSN from controlfile
+fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn>
+{
+    // Read control file to extract the LSN
+    let controlfile_path = path.join("global").join("pg_control");
+    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
+    let lsn = controlfile.checkPoint;
+
+    Ok(Lsn(lsn))
+}
+
+
+// Create the cluster temporarily in a initdbpath directory inside the repository
+// to get bootstrap data for timeline initialization.
+//
+fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()>
 {
     // Run initdb
-    //
-    // We create the cluster temporarily in a "tmp" directory inside the repository,
-    // and move it to the right location from there.
-    let tmppath = std::path::Path::new("tmp");
-
     print!("running initdb... ");
     io::stdout().flush()?;
 
     let initdb_path = conf.pg_bin_dir().join("initdb");
     let initdb_otput = Command::new(initdb_path)
-        .args(&["-D", tmppath.to_str().unwrap()])
+        .args(&["-D", initdbpath.to_str().unwrap()])
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
@@ -69,42 +80,63 @@ pub fn prepare_init_from_empty_repo(conf: &'static PageServerConf) -> Result<Lsn
     }
     println!("initdb succeeded");
 
-    // Read control file to extract the LSN and system id
-    let controlfile_path = tmppath.join("global").join("pg_control");
-    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
-    // let systemid = controlfile.system_identifier;
-    let lsn = controlfile.checkPoint;
-
-    Ok(Lsn(lsn))
+    Ok(())
 }
 
-pub fn init_from_empty_repo(conf: &'static PageServerConf,
+// Import data from provided postgres datadir into 'main' branch of the timeline.
+//
+// If `init_pgdata_path` is empty, it means we need to initialize from empty postgres:
+// - run initdb to init temporary instance and get bootstrap data
+// - after initialization complete, remove the temp dir.
+fn init_from_repo(conf: &'static PageServerConf,
     tli: ZTimelineId,
-    timeline: &dyn Timeline,
-    lsn: Lsn
+    repo: &dyn Repository,
+    init_pgdata_path: Option<&str>
 ) -> Result<()>
 {
-    let tmppath = std::path::Path::new("tmp");
-    restore_local_repo::import_timeline_from_postgres_datadir(&tmppath, &*timeline, lsn)?;
+    let pgdata_path = match init_pgdata_path
+    {
+        Some(init_pgdata_path) => std::path::Path::new(init_pgdata_path),
+        None => {
+            let initdb_path = std::path::Path::new("tmp");
+            // Init temporarily repo to get bootstrap data
+            run_initdb(conf, initdb_path)?;
+            initdb_path
+        }
+    };
+
+    let lsn = get_lsn_from_controlfile(&pgdata_path)?;
+
+    println!("init_from_repo {:?} at lsn {}", pgdata_path, lsn);
+
+    let timeline = repo.create_empty_timeline(tli, lsn)?;
+    restore_local_repo::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
 
     let timelinedir = conf.timeline_path(tli);
 
-    // Move the initial WAL file
-    fs::rename(
-        tmppath.join("pg_wal").join("000000010000000000000001"),
-        timelinedir
-            .join("wal")
-            .join("000000010000000000000001.partial"),
-    )?;
+    // Preserve WAL files in timeline directory.
+    // TODO This looks strange. Why won't we just import this wal to timeline right here?
+    match init_pgdata_path
+    {
+        Some(_init_pgdata_path) => {}, //TODO
+        None => 
+        {
+            fs::copy(
+                pgdata_path.join("pg_wal").join("000000010000000000000001"),
+                timelinedir
+                    .join("wal")
+                    .join("000000010000000000000001.partial"),
+            )?;
+        }
+    };
 
-    println!("created initial timeline {}", tli);
+    println!("created initial timeline {} timeline.lsn {}", tli, timeline.get_last_record_lsn());
 
     let data = tli.to_string();
     fs::write(conf.branch_path("main"), data)?;
     println!("created main branch");
 
     let target = timelinedir.join("snapshots").join(&format!("{:016X}", lsn.0));
-
     fs::create_dir_all(target.clone())?;
 
     // Preserve initial config files
@@ -113,10 +145,14 @@ pub fn init_from_empty_repo(conf: &'static PageServerConf,
     for i in 0..pg_constants::PGDATA_SPECIAL_FILES.len()
     {
         let path = pg_constants::PGDATA_SPECIAL_FILES[i];
-        fs::copy(tmppath.join(path), target.join(path))?;
+        fs::copy(pgdata_path.join(path), target.join(path))?;
     }
 
-    fs::remove_dir_all(tmppath)?;
+    // Remove temp dir. We don't need it anymore
+    if init_pgdata_path == None
+    {
+        fs::remove_dir_all(pgdata_path)?;
+    }
 
     Ok(())
 }
@@ -136,7 +172,8 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     println!("created directory structure in {}", repo_dir.display());
 
     // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
-    let lsn = prepare_init_from_empty_repo(conf)?;
+    // TODO pass it as a parameter to import from existing pgdata
+    let init_pgdata_path = None;
 
     let tli = create_timeline(conf, None)?;
 
@@ -156,10 +193,9 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
         std::sync::Arc::new(storage),
         std::sync::Arc::new(crate::walredo::DummyRedoManager {}),
     );
-    let timeline = repo.create_empty_timeline(tli, lsn)?;
 
     // Load data into pageserver
-    init_from_empty_repo(conf, tli, &*timeline, lsn)?;
+    init_from_repo(conf, tli, &repo, init_pgdata_path)?;
 
     println!(
         "new zenith repository was created in {}",
@@ -220,6 +256,9 @@ pub(crate) fn get_branches(conf: &PageServerConf) -> Result<Vec<BranchInfo>> {
         .collect()
 }
 
+//TODO Why do we get system_id from snapshot file, not image, loaded into pageserver?
+//Why do we always refer to main branch?
+//It seems that this code is not covered with tests.
 pub(crate) fn get_system_id(conf: &PageServerConf) -> Result<u64> {
     // let branches = get_branches();
 
@@ -279,6 +318,8 @@ pub(crate) fn create_branch(
     fs_extra::dir::copy(oldsnapshotdir, newtimelinedir.join("snapshots"), &copy_opts)?;
 
     let oldtimelinedir = conf.timeline_path(startpoint.timelineid);
+
+    //TODO Why do we need that?
     copy_wal(
         &oldtimelinedir.join("wal"),
         &newtimelinedir.join("wal"),
