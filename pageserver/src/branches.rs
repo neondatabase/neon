@@ -157,7 +157,7 @@ fn init_from_repo(conf: &'static PageServerConf,
     Ok(())
 }
 
-pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
+pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path, init_pgdata_path: Option<&str>) -> Result<()> {
     // top-level dir may exist if we are creating it through CLI
     fs::create_dir_all(repo_dir)
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
@@ -170,10 +170,6 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     fs::create_dir(std::path::Path::new("refs").join("tags"))?;
 
     println!("created directory structure in {}", repo_dir.display());
-
-    // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
-    // TODO pass it as a parameter to import from existing pgdata
-    let init_pgdata_path = None;
 
     let tli = create_timeline(conf, None)?;
 

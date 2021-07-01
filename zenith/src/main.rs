@@ -46,6 +46,14 @@ fn main() -> Result<()> {
                         .long("remote-pageserver")
                         .required(false)
                         .value_name("pageserver-url"),
+                )
+                .arg(
+                    Arg::with_name("snapshot-path")
+                        .long("snapshot-path")
+                        .required(false)
+                        .value_name("snapshot-path")
+                        .help("Source to init repository from")
+                        ,
                 ),
         )
         .subcommand(
@@ -115,9 +123,11 @@ fn main() -> Result<()> {
     };
 
     match matches.subcommand() {
-        ("init", Some(_)) => {
+        ("init", Some(sub_args)) => {
+            let snapshot_path = sub_args.value_of("snapshot-path");
+
             let pageserver = PageServerNode::from_env(&env);
-            if let Err(e) = pageserver.init() {
+            if let Err(e) = pageserver.init(snapshot_path) {
                 eprintln!("pageserver init failed: {}", e);
                 exit(1);
             }

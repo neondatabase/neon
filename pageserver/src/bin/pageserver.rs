@@ -136,6 +136,12 @@ fn main() -> Result<()> {
                 .help("Initialize pageserver repo"),
         )
         .arg(
+            Arg::with_name("init_pgdata_path")
+                .long("init_pgdata_path")
+                .takes_value(true)
+                .help("Source pgdata to initialize pageserver repo from"),
+        )
+        .arg(
             Arg::with_name("gc_horizon")
                 .long("gc_horizon")
                 .takes_value(true)
@@ -201,7 +207,9 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_repo(conf, &workdir)?;
+        let init_pgdata_path = arg_matches.value_of("init_pgdata_path");
+
+        branches::init_repo(conf, &workdir, init_pgdata_path)?;
 
         // write the config file
         let cfg_file_contents = toml::to_string_pretty(&params)?;

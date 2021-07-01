@@ -41,16 +41,27 @@ impl PageServerNode {
         }
     }
 
-    pub fn init(&self) -> Result<()> {
+    pub fn init(&self, snapshot_path: Option<&str>) -> Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
+
+        let mut args_vec: Vec<&str> = vec![ "--init",
+            "-D",
+            self.env.base_data_dir.to_str().unwrap(),
+            "--postgres-distrib",
+            self.env.pg_distrib_dir.to_str().unwrap()];
+
+        match snapshot_path
+        {
+            Some(init_pgdata_path) =>
+            {
+                args_vec.push("--init_pgdata_path");
+                args_vec.push(init_pgdata_path);
+            },
+            None => {}
+        };
+
         let status = cmd
-            .args(&[
-                "--init",
-                "-D",
-                self.env.base_data_dir.to_str().unwrap(),
-                "--postgres-distrib",
-                self.env.pg_distrib_dir.to_str().unwrap(),
-            ])
+            .args(&args_vec)
             .env_clear()
             .env("RUST_BACKTRACE", "1")
             .status()
