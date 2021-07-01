@@ -63,6 +63,12 @@ impl ObjectRepository {
 }
 
 impl Repository for ObjectRepository {
+
+    fn get_conf(&self) -> &PageServerConf
+    {
+        self.conf
+    }
+
     /// Get Timeline handle for given zenith timeline ID.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();

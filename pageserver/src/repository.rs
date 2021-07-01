@@ -13,6 +13,7 @@ use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
 use zenith_utils::lsn::Lsn;
+use crate::PageServerConf;
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
@@ -31,6 +32,7 @@ pub trait Repository: Send + Sync {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
+    fn get_conf(&self) -> &PageServerConf;
     //fn get_stats(&self) -> RepositoryStats;
 }
 
@@ -210,6 +212,33 @@ impl RelTag {
         dbnode: 0,
         relnode: 0,
     };
+
+    pub fn to_pgdata_path(&self) -> String {
+
+        let dbpath =
+            if self.spcnode == pg_constants::DEFAULTTABLESPACE_OID
+            {
+                format!("base/{}", self.dbnode)
+            }
+            else if self.spcnode == pg_constants::GLOBALTABLESPACE_OID
+            {
+                format!("global")
+            }
+            else
+            {
+                //Tablespaces are not supported yet. Throw error here.
+                format!("pg_tblspc/{}/{}", self.spcnode, self.dbnode)
+            };
+
+        if let Some(forkname) = forknumber_to_name(self.forknum) {
+            format!("{}/{}_{}",
+                dbpath, self.relnode, forkname
+            )
+            
+        } else {
+            format!("{}/{}", dbpath, self.relnode)
+        }
+    }
 }
 
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:

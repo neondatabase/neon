@@ -11,6 +11,7 @@ use std::str::FromStr;
 
 use pageserver::{branches::BranchInfo, ZTimelineId};
 use zenith_utils::lsn::Lsn;
+use zenith_utils::s3_utils::{S3Storage};
 
 ///
 /// Branches tree element used as a value in the HashMap.
@@ -105,6 +106,18 @@ fn main() -> Result<()> {
                 .arg(Arg::with_name("timeline").required(true))
                 .arg(Arg::with_name("remote").required(true)),
         )
+
+        .subcommand(
+            SubCommand::with_name("export")
+                .about("Export timeline to persistent object storage (S3, minio, etc.)")
+                .arg(Arg::with_name("timeline").required(true))
+                .arg(Arg::with_name("snapshot-path")
+                    .long("snapshot-path")
+                    .required(true)
+                    .takes_value(true)
+                    .value_name("snapshot-path")
+                    .help("Destination to export repository to"))
+        )
         .get_matches();
 
     // Create config file
@@ -191,6 +204,13 @@ fn main() -> Result<()> {
         ("push", Some(push_match)) => {
             if let Err(e) = handle_push(push_match, &env) {
                 eprintln!("push operation failed: {}", e);
+                exit(1);
+            }
+        }
+
+        ("export", Some(export_match)) => {
+            if let Err(e) = handle_export(export_match, &env) {
+                eprintln!("export operation failed: {}", e);
                 exit(1);
             }
         }
@@ -451,6 +471,64 @@ fn handle_push(push_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> {
     let page_server = PageServerNode::from_env(local_env);
     let mut client = page_server.page_server_psql_client()?;
     client.simple_query(&format!("request_push {} {}", timeline_id_str, remote))?;
+
+    Ok(())
+}
+
+// Send chosen timeline to S3-like storage.
+// All credentials are taken from config.
+fn handle_export(export_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> {
+
+    let branch_name = export_match.value_of("timeline").unwrap();
+    let page_server = PageServerNode::from_env(local_env);
+
+    let timeline_id = page_server.branch_get_by_name(branch_name)?.timeline_id;
+
+    let mut client = page_server.page_server_psql_client()?;
+
+    let snapshot_path = export_match.value_of("snapshot-path").unwrap();
+    let mut s = snapshot_path.split(':');
+    let prefix = s.next().unwrap();
+
+    match prefix
+    {
+
+        "s3" => {
+            let bucket_name = s.next().unwrap();
+
+            let s3_storage = S3Storage::new_from_env(bucket_name).unwrap();
+
+            println!("send request_export {} {} {} {} {} {}",
+                timeline_id,
+                snapshot_path,
+                s3_storage.region,
+                s3_storage.endpoint,
+                s3_storage.access_key,
+                s3_storage.secret_key);
+
+            client.simple_query(&format!("request_export {} {} {} {} {} {}",
+                timeline_id,
+                snapshot_path,
+                s3_storage.region,
+                s3_storage.endpoint,
+                s3_storage.access_key,
+                s3_storage.secret_key,
+            ))?;
+
+        },
+        "fs" => 
+        {
+            client.simple_query(&format!("request_export {} {} ",
+                timeline_id,
+                snapshot_path
+             ))?;
+            bail!("fs export not implemented yet")
+        },
+        _ => bail!("unknown snaphot-path prefix: {}", prefix)
+    }
+
+
+
 
     Ok(())
 }

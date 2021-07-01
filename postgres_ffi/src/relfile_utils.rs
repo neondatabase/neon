@@ -55,8 +55,6 @@ pub fn forknumber_to_name(forknum: u8) -> Option<&'static str> {
 ///
 pub fn parse_relfilename(fname: &str) -> Result<(u32, u8, u32), FilePathError> {
 
-    println!("parse_filename {}", fname);
-
     lazy_static! {
         static ref RELFILE_RE: Regex =
             Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();

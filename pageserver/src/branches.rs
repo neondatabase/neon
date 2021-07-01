@@ -550,7 +550,7 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: usize) -> R
 }
 
 // Find the latest snapshot for a timeline
-fn find_latest_snapshot(conf: &PageServerConf, timeline: ZTimelineId) -> Result<(Lsn, PathBuf)> {
+pub fn find_latest_snapshot(conf: &PageServerConf, timeline: ZTimelineId) -> Result<(Lsn, PathBuf)> {
     let snapshotsdir = conf.snapshots_path(timeline);
     let paths = fs::read_dir(&snapshotsdir)?;
     let mut maxsnapshot = Lsn(0);

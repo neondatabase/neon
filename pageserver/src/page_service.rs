@@ -36,6 +36,8 @@ use crate::walreceiver;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 
+use zenith_utils::s3_utils::S3Storage;
+
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
     Exists(PagestreamRequest),
@@ -594,7 +596,67 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(&result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else {
+        } else if query_string.starts_with(b"request_export ") {
+            let query_str = std::str::from_utf8(&query_string)?;
+            let mut it = query_str.split(' ');
+            it.next().unwrap();
+
+            println!("request_export query {}", query_str);
+
+            let timelineid_str = it
+                .next()
+                .ok_or_else(|| anyhow!("missing timeline id"))?;
+
+            let timeline_id = ZTimelineId::from_str(&timelineid_str)?;
+
+            let s3_snapshot_path =
+                it.next().ok_or_else(|| anyhow!("missing s3_snapshot_path"))?;
+
+            let mut s = s3_snapshot_path.split(':');
+            let prefix = s.next().unwrap();
+
+            match prefix
+            {
+                "s3" => 
+                {
+                    let bucket_name = s.next().unwrap();
+
+                    let s3_region =
+                        it.next().ok_or_else(|| anyhow!("missing storage s3_region"))?;
+    
+                    let s3_endpoint =
+                        it.next().ok_or_else(|| anyhow!("missing storage s3_endpoint"))?;
+        
+                    let s3_accesskey =
+                    it.next().ok_or_else(|| anyhow!("missing storage s3_accesskey"))?;
+        
+                    let s3_secret =
+                        it.next().ok_or_else(|| anyhow!("missing storage s3_secret"))?;
+        
+                    let s3_storage =  S3Storage {
+                        region: s3_region.to_string(),
+                        endpoint: s3_endpoint.to_string(),
+                        access_key: s3_accesskey.to_string(),
+                        secret_key: s3_secret.to_string(),
+                        bucket_name: bucket_name.to_string(),
+                    };
+        
+                    println!("request_export {} {} {} {} {}",
+                    bucket_name,
+                    s3_region, s3_endpoint, 
+                    s3_accesskey, s3_secret
+                    );
+        
+                    basebackup::send_files_to_s3(s3_storage, timeline_id).unwrap();
+        
+                },
+                "fs" => bail!("fs snapshot is not implemented yet"),
+                _ => bail!("unknown snapshot-path prefix {}", prefix),
+            }
+
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        }
+        else {
             bail!("unknown command");
         }
 
