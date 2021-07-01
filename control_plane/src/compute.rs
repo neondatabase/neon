@@ -301,6 +301,8 @@ impl PostgresNode {
             ),
         )?;
 
+        fs::create_dir_all(self.pgdata().join("pg_wal"))?;
+        fs::create_dir_all(self.pgdata().join("pg_wal").join("archive_status"))?;
         Ok(())
     }
 

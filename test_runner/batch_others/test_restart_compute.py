@@ -19,7 +19,7 @@ def test_restart_compute(zenith_cli, pageserver, postgres, pg_bin):
             cur.execute("INSERT INTO foo VALUES ('bar')")
 
     # Stop and restart the Postgres instance
-    pg.stop().start()
+    pg.stop_and_destroy().create_start('test_restart_compute')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
