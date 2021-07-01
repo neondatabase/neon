@@ -30,7 +30,6 @@ use crate::basebackup;
 use crate::branches;
 use crate::page_cache;
 use crate::repository::{BufferTag, RelTag, RelationUpdate, Update};
-use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::PageServerConf;
 use crate::ZTimelineId;
@@ -290,8 +289,9 @@ impl PageServerHandler {
         /* Send a tarball of the latest snapshot on the timeline */
 
         // find latest snapshot
-        let snapshot_lsn =
-            restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
+        let (snapshot_lsn, _) = branches::find_latest_snapshot(&self.conf, timelineid).unwrap();
+
+
         let req_lsn = lsn.unwrap_or(snapshot_lsn);
         basebackup::send_tarball_at_lsn(
             &mut CopyDataSink { pgb },

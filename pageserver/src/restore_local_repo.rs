@@ -3,7 +3,7 @@
 //! zenith Timeline.
 //!
 use log::*;
-use std::cmp::{max, min};
+use std::cmp::{min};
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -17,36 +17,10 @@ use bytes::Bytes;
 use crate::repository::{BufferTag, RelTag, Timeline, WALRecord};
 use crate::waldecoder::{decode_wal_record, DecodedWALRecord, Oid, WalStreamDecoder};
 use crate::waldecoder::{XlCreateDatabase, XlSmgrTruncate, XlXactParsedRecord};
-use crate::PageServerConf;
-use crate::ZTimelineId;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use zenith_utils::lsn::Lsn;
-
-///
-/// Find latest snapshot in a timeline's 'snapshots' directory
-///
-pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<Lsn> {
-    let snapshotspath = format!("timelines/{}/snapshots", timeline);
-
-    let mut last_snapshot_lsn = Lsn(0);
-    for direntry in fs::read_dir(&snapshotspath).unwrap() {
-        let filename = direntry.unwrap().file_name();
-
-        if let Ok(lsn) = Lsn::from_filename(&filename) {
-            last_snapshot_lsn = max(lsn, last_snapshot_lsn);
-        } else {
-            error!("unrecognized file in snapshots directory: {:?}", filename);
-        }
-    }
-
-    if last_snapshot_lsn == Lsn(0) {
-        error!("could not find valid snapshot in {}", &snapshotspath);
-        // TODO return error?
-    }
-    Ok(last_snapshot_lsn)
-}
 
 ///
 /// Import all relation data pages from local disk into the repository.
