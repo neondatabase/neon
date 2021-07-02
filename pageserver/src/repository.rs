@@ -1,3 +1,5 @@
+pub mod inmemory;
+
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -299,6 +301,7 @@ mod tests {
         let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
         let _ = fs::remove_dir_all(&repo_dir);
         fs::create_dir_all(&repo_dir)?;
+        fs::create_dir_all(&repo_dir.join("timelines"))?;
 
         let conf = PageServerConf {
             daemonize: false,
@@ -314,23 +317,30 @@ mod tests {
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-        let repo = match conf.repository_format {
+        let walredo_mgr = TestRedoManager {};
+
+        let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
+            RepositoryFormat::InMemory => Box::new(inmemory::InMemoryRepository::new(conf, Arc::new(walredo_mgr))),
             RepositoryFormat::RocksDb => {
                 let obj_store = RocksObjectStore::create(conf)?;
 
-                let walredo_mgr = TestRedoManager {};
-
-                ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr))
+                Box::new(ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr)))
             }
         };
 
-        Ok(Box::new(repo))
+        Ok(repo)
     }
 
     /// Test get_relsize() and truncation.
     #[test]
     fn test_relsize_rocksdb() -> Result<()> {
         let repo = get_test_repo("test_relsize_rocksdb", RepositoryFormat::RocksDb)?;
+        test_relsize(&*repo)
+    }
+
+    #[test]
+    fn test_relsize_inmemory() -> Result<()> {
+        let repo = get_test_repo("test_relsize_inmemory", RepositoryFormat::InMemory)?;
         test_relsize(&*repo)
     }
 
@@ -424,7 +434,13 @@ mod tests {
     /// any attention to Postgres segment boundaries there.
     #[test]
     fn test_large_rel_rocksdb() -> Result<()> {
-        let repo = get_test_repo("test_large_rel", RepositoryFormat::RocksDb)?;
+        let repo = get_test_repo("test_large_rel_rocksdb", RepositoryFormat::RocksDb)?;
+        test_large_rel(&*repo)
+    }
+
+    #[test]
+    fn test_large_rel_inmemory() -> Result<()> {
+        let repo = get_test_repo("test_large_rel_inmemory", RepositoryFormat::InMemory)?;
         test_large_rel(&*repo)
     }
 
@@ -470,7 +486,12 @@ mod tests {
 
     #[test]
     fn test_history_rocksdb() -> Result<()> {
-        let repo = get_test_repo("test_history", RepositoryFormat::RocksDb)?;
+        let repo = get_test_repo("test_history_rocksdb", RepositoryFormat::RocksDb)?;
+        test_history(&*repo)
+    }
+    #[test]
+    fn test_history_inmemory() -> Result<()> {
+        let repo = get_test_repo("test_history_inmemory", RepositoryFormat::InMemory)?;
         test_history(&*repo)
     }
     fn test_history(repo: &dyn Repository) -> Result<()> {

@@ -4,6 +4,7 @@
 //! a hash map, keyed by the tenant ID.
 
 use crate::object_repository::ObjectRepository;
+use crate::repository::inmemory::InMemoryRepository;
 use crate::repository::Repository;
 use crate::rocksdb_storage::RocksObjectStore;
 use crate::walredo::PostgresRedoManager;
@@ -22,7 +23,8 @@ pub fn init(conf: &'static PageServerConf) {
     let walredo_mgr = PostgresRedoManager::new(conf);
 
     // we have already changed current dir to the repository.
-    let repo = match conf.repository_format {
+    let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
+        RepositoryFormat::InMemory => Arc::new(InMemoryRepository::new(conf, Arc::new(walredo_mgr))),
         RepositoryFormat::RocksDb => {
             let obj_store = RocksObjectStore::open(conf).unwrap();
 

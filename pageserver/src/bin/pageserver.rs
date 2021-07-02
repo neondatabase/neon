@@ -94,16 +94,16 @@ impl CfgFileParams {
             anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
         }
 
-        // FIXME
+        //
+        // FIXME: This pageserver --repository-format option is pretty useless as it
+        // isn't exposed as an option to "zenith init". But you can change the default
+        // here if you want to test the rocksdb implementation:
+        //
         let repository_format = match self.repository_format.as_ref() {
-            Some(repository_format_str) => {
-                if repository_format_str == "rocksdb" {
-                    RepositoryFormat::RocksDb
-                } else {
-                    anyhow::bail!("invalid --repository-format '{}', must be 'rocksdb'", repository_format_str);
-                }
-            },
-            None => RepositoryFormat::RocksDb,
+            Some(repo_format_str) if repo_format_str == "rocksdb" => RepositoryFormat::RocksDb,
+            Some(repo_format_str) if repo_format_str == "inmemory" => RepositoryFormat::InMemory,
+            Some(repo_format_str) => anyhow::bail!("invalid --repository-format '{}', must be 'rocksdb' or 'inmemory'", repo_format_str),
+            None => RepositoryFormat::InMemory, // default
         };
 
         Ok(PageServerConf {
@@ -181,7 +181,7 @@ fn main() -> Result<()> {
             Arg::with_name("repository-format")
                 .long("repository-format")
                 .takes_value(true)
-                .help("Which repository implementation to use (only 'rocksdb' is supported at the moment)"),
+                .help("Which repository implementation to use, 'rocksdb' or 'inmemory'"),
         )
         .get_matches();
 

@@ -46,6 +46,7 @@ pub struct PageServerConf {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RepositoryFormat {
+    InMemory,
     RocksDb,
 }
 
