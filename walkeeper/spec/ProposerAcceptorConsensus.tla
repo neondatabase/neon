@@ -242,6 +242,16 @@ NewEntry(p) ==
        /\ UNCHANGED <<acc_state, commit_lsns>>
 
 
+\* Write entry new_e to log wal, rolling back all higher entries if e is different.
+WriteEntry(wal, new_e) ==
+  (new_e.lsn :> new_e) @@
+  \* If wal has entry with such lsn and it is different, truncate all higher log.
+  IF new_e.lsn \in DOMAIN wal /\ wal[new_e.lsn] /= new_e THEN
+    SelectSeq(wal, LAMBDA e: e.lsn < new_e.lsn)
+  ELSE
+    wal
+
+
 \* Try to transfer entry from elected proposer p to acceptor a
 TransferEntry(p, a) ==
   /\ prop_state[p].state = "leader"
@@ -252,20 +262,15 @@ TransferEntry(p, a) ==
      IN
        /\ next_e /= NULL
        /\ LET
-            \* Consider bumping epoch if getting this entry recovers the acceptor.
-            \* Both vcl and flush_lsn must be reached in current impl as we don't
-            \* truncate the log.
+            \* Consider bumping epoch if getting this entry recovers the acceptor,
+            \* that is, we reach VCL.
             new_epoch ==
               IF /\ acc_state[a].epoch < prop_state[p].term
                  /\ next_e.lsn >= prop_state[p].vcl
-                 /\ next_e.lsn >= Len(acc_state[a].wal)
               THEN
                 prop_state[p].term
               ELSE
                 acc_state[a].epoch
-            \* TLC spits warning about non-existent entry if EXCEPT is used here,
-            \* so construct manually.
-            new_wal == (next_e.lsn :> next_e) @@ acc_state[a].wal
             \* Also check whether this entry allows to advance commit_lsn and
             \* if so, bump it where possible. Modeling this as separate action
             \* significantly bloats the space (5m vs 15m on max_entries=3 max_term=3,
@@ -276,7 +281,7 @@ TransferEntry(p, a) ==
                                /\ acc_state[o].epoch = prop_state[p].term
                                /\ next_e \in FValues(acc_state[o].wal)} \cup {a}
           IN
-            /\ acc_state' = [acc_state EXCEPT ![a].wal = new_wal,
+            /\ acc_state' = [acc_state EXCEPT ![a].wal = WriteEntry(acc_state[a].wal, next_e),
                                               ![a].epoch = new_epoch]
             /\ prop_state' = [prop_state EXCEPT ![p].next_send_lsn[a] =
                                                   prop_state[p].next_send_lsn[a] + 1]
@@ -325,11 +330,7 @@ LogIsMonotonic ==
   \A a \in acceptors:
     \A i \in DOMAIN acc_state[a].wal: \A j \in DOMAIN acc_state[a].wal:
       (i > j) => (/\ acc_state[a].wal[i].lsn > acc_state[a].wal[j].lsn
-                  \* currently we don't truncate log during recovery, so
-                  \* uncommitted part can be non-monotonic; remove the
-                  \* precondition once we switch to truncation
-                  /\ (i <= commit_lsns[a] /\ j <= commit_lsns[a]) =>
-                       (acc_state[a].wal[i].epoch >= acc_state[a].wal[j].epoch))
+                  /\ acc_state[a].wal[i].epoch >= acc_state[a].wal[j].epoch)
 
 \* Main invariant: log under commit_lsn must match everywhere.
 LogSafety ==
