@@ -263,10 +263,15 @@ TransferEntry(p, a) ==
        /\ next_e /= NULL
        /\ LET
             \* Consider bumping epoch if getting this entry recovers the acceptor,
-            \* that is, we reach VCL.
+            \* that is, we reach first record behind VCL. Strict comparison here
+            \* is important: it is possible that <= vcl part of log is correct
+            \* but there is a wrong tail which we must truncate before bumping
+            \* epoch; getting first record from new epoch does the truncation.
+            \* Another way to do this might be 'on receival of vcl record, if
+            \* epoch is not bumped yet, truncate the log'.
             new_epoch ==
               IF /\ acc_state[a].epoch < prop_state[p].term
-                 /\ next_e.lsn >= prop_state[p].vcl
+                 /\ next_e.lsn > prop_state[p].vcl
               THEN
                 prop_state[p].term
               ELSE
