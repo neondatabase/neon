@@ -184,12 +184,12 @@ impl ProxyConnection {
 
 To proceed with database creation open following link:
 
-    https://console.zenith.tech/psql_session/{}
+    {}{}
 
 It needed to be done once and we will send you '.pgpass' file which will allow you to access or create
 databases without opening the browser.
 
-", self.psql_session_id);
+", self.state.conf.redirect_uri,self.psql_session_id);
 
         self.pgb
             .write_message_noflush(&BeMessage::AuthenticationOk)?;
