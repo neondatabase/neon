@@ -28,6 +28,9 @@ pub struct ProxyConf {
     /// will notify us here, so that we can 'unfreeze' user session.
     pub mgmt_address: SocketAddr,
 
+    /// send unauthenticated users to this URI
+    pub redirect_uri: String,
+
     /// control plane address where we would check auth.
     pub cplane_address: SocketAddr,
 }
@@ -55,11 +58,20 @@ fn main() -> anyhow::Result<()> {
                 .help("listen for management callback connection on ip:port")
                 .default_value("127.0.0.1:7000"),
         )
+        .arg(
+            Arg::with_name("uri")
+                .short("u")
+                .long("uri")
+                .takes_value(true)
+                .help("redirect unauthenticated users to given uri")
+                .default_value("http://localhost:3000/psql_session/"),
+        )
         .get_matches();
 
     let conf = ProxyConf {
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
+        redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
         cplane_address: "127.0.0.1:3000".parse()?,
     };
     let state = ProxyState {
