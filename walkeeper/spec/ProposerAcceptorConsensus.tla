@@ -243,10 +243,16 @@ NewEntry(p) ==
 
 
 \* Write entry new_e to log wal, rolling back all higher entries if e is different.
-WriteEntry(wal, new_e) ==
+\* If bump_epoch is TRUE, it means we get record with lsn=vcl and going to update
+\* the epoch. Truncate log in this case as well, as we might have correct <= vcl
+\* part and some outdated entries behind it which we want to purge before
+\* declaring us as recovered. Another way to accomplish this (in previous commit)
+\* is wait for first-entry-from-new-epoch before bumping it.
+WriteEntry(wal, new_e, bump_epoch) ==
   (new_e.lsn :> new_e) @@
   \* If wal has entry with such lsn and it is different, truncate all higher log.
-  IF new_e.lsn \in DOMAIN wal /\ wal[new_e.lsn] /= new_e THEN
+  IF \/ (new_e.lsn \in DOMAIN wal /\ wal[new_e.lsn] /= new_e)
+     \/ bump_epoch THEN
     SelectSeq(wal, LAMBDA e: e.lsn < new_e.lsn)
   ELSE
     wal
@@ -263,15 +269,10 @@ TransferEntry(p, a) ==
        /\ next_e /= NULL
        /\ LET
             \* Consider bumping epoch if getting this entry recovers the acceptor,
-            \* that is, we reach first record behind VCL. Strict comparison here
-            \* is important: it is possible that <= vcl part of log is correct
-            \* but there is a wrong tail which we must truncate before bumping
-            \* epoch; getting first record from new epoch does the truncation.
-            \* Another way to do this might be 'on receival of vcl record, if
-            \* epoch is not bumped yet, truncate the log'.
+            \* that is, we reach first record behind VCL.
             new_epoch ==
               IF /\ acc_state[a].epoch < prop_state[p].term
-                 /\ next_e.lsn > prop_state[p].vcl
+                 /\ next_e.lsn >= prop_state[p].vcl
               THEN
                 prop_state[p].term
               ELSE
@@ -286,7 +287,7 @@ TransferEntry(p, a) ==
                                /\ acc_state[o].epoch = prop_state[p].term
                                /\ next_e \in FValues(acc_state[o].wal)} \cup {a}
           IN
-            /\ acc_state' = [acc_state EXCEPT ![a].wal = WriteEntry(acc_state[a].wal, next_e),
+            /\ acc_state' = [acc_state EXCEPT ![a].wal = WriteEntry(acc_state[a].wal, next_e, new_epoch /= acc_state[a].epoch),
                                               ![a].epoch = new_epoch]
             /\ prop_state' = [prop_state EXCEPT ![p].next_send_lsn[a] =
                                                   prop_state[p].next_send_lsn[a] + 1]
