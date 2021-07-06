@@ -89,7 +89,7 @@ impl Repository for ObjectRepository {
                     timeline.get_last_record_lsn()
                 );
                 let wal_dir = self.conf.timeline_path(timelineid).join("wal");
-                import_timeline_wal(&wal_dir, &timeline, timeline.get_last_record_lsn())?;
+                import_timeline_wal(&wal_dir, &timeline, timeline.get_last_record_lsn(), None)?;
 
                 let timeline_rc = Arc::new(timeline);
 

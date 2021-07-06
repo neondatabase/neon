@@ -23,6 +23,7 @@ use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::{pg_constants, CheckPoint, ControlFileData};
 use zenith_utils::lsn::Lsn;
+use zenith_utils::s3_utils::S3Storage;
 
 const MAX_MBR_BLKNO: u32 =
     pg_constants::MAX_MULTIXACT_ID / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
@@ -95,6 +96,12 @@ pub fn import_timeline_from_postgres_datadir(
     // E.g. 'base/12345', where 12345 is the database OID.
     for direntry in fs::read_dir(path.join("base"))? {
         let direntry = direntry?;
+
+        //skip all temporary files
+        if direntry.file_name().to_str().unwrap() == "pgsql_tmp"
+        {
+            continue;
+        }
 
         let dboid = direntry.file_name().to_str().unwrap().parse::<u32>()?;
 
@@ -282,7 +289,9 @@ fn import_slru_file(
 
 /// Scan PostgreSQL WAL files in given directory, and load all records >= 'startpoint' into
 /// the repository.
-pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: Lsn) -> Result<()> {
+/// If s3_storage is provided, get wal files from s3
+pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: Lsn,
+    s3_storage: Option<S3Storage>) -> Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
@@ -301,32 +310,62 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     loop {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
-        let mut path = walpath.join(&filename);
-
-        // It could be as .partial
-        if !PathBuf::from(&path).exists() {
-            path = walpath.join(filename + ".partial");
-        }
-
-        // Slurp the WAL file
-        let open_result = File::open(&path);
-        if let Err(e) = &open_result {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                break;
-            }
-        }
-        let mut file = open_result?;
-
-        if offset > 0 {
-            file.seek(SeekFrom::Start(offset as u64))?;
-        }
-
         let mut buf = Vec::new();
-        let nread = file.read_to_end(&mut buf)?;
-        if nread != pg_constants::WAL_SEGMENT_SIZE - offset as usize {
-            // Maybe allow this for .partial files?
-            error!("read only {} bytes from WAL file", nread);
-        }
+
+        //TODO How to handle this right in rust?
+        match s3_storage.clone()
+        {
+            Some(s3_storage) => {
+
+                let mut filepath = format!("pg_wal/{}", filename);
+
+                match s3_storage.get_object(&filepath)
+                {
+                    Ok(data) => buf = data,
+                    Err(_) => {
+                        filepath = format!("pg_wal/{}.partial", filename);
+                        match s3_storage.get_object(&filepath)
+                        {
+                            Ok(data) => buf = data,
+                            Err(_) => {
+                                trace!("segment {} is not found in s3. assume end of wal", filepath);
+                                break;
+                            }
+                        }
+                    }
+                }
+            },
+            None => {
+                //Read local file
+
+                let mut path = walpath.join(&filename);
+
+                // It could be as .partial
+                if !PathBuf::from(&path).exists() {
+                    path = walpath.join(filename + ".partial");
+                }
+
+                // Slurp the WAL file
+                let open_result = File::open(&path);
+                if let Err(e) = &open_result {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        break;
+                    }
+                }
+                let mut file = open_result?;
+
+                if offset > 0 {
+                    file.seek(SeekFrom::Start(offset as u64))?;
+                }
+
+                let nread = file.read_to_end(&mut buf)?;
+                if nread != pg_constants::WAL_SEGMENT_SIZE - offset as usize {
+                    // Maybe allow this for .partial files?
+                    error!("read only {} bytes from WAL file", nread);
+                }
+            }
+        };
+
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
@@ -349,18 +388,22 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
         }
 
         info!(
-            "imported {} records from WAL file {} up to {}",
+            "imported {} records up to {}",
             nrecords,
-            path.display(),
             last_lsn
         );
 
         segno += 1;
         offset = 0;
     }
+
     info!("reached end of WAL at {}", last_lsn);
     let checkpoint_bytes = checkpoint.encode();
     timeline.put_page_image(ObjectTag::Checkpoint, last_lsn, checkpoint_bytes)?;
+
+    timeline.advance_last_valid_lsn(last_lsn);
+    timeline.checkpoint()?;
+
     Ok(())
 }
 

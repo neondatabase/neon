@@ -6,11 +6,11 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use fs::File;
-use postgres_ffi::{pg_constants, xlog_utils, ControlFileData};
+use postgres_ffi::{pg_constants, ControlFileData};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::{Read, Write};
+use std::io::{Write};
 use std::{
     collections::HashMap,
     fs, io,
@@ -151,41 +151,28 @@ fn init_from_repo(conf: &'static PageServerConf,
 
     let timelinedir = conf.timeline_path(tli);
 
-    // Preserve WAL files in timeline directory.
-    // TODO This looks strange. Why won't we just import this wal to timeline right here?
     match init_pgdata_path
     {
         Some(_init_pgdata_path) =>
         {
             if prefix == "fs"
             {
-                fs::copy(
-                    pgdata_path.join("pg_wal").join("000000010000000000000001"),
-                    timelinedir
-                        .join("wal")
-                        .join("000000010000000000000001.partial"),
-                )?;
+                let wal_dir = pgdata_path.join("pg_wal");
+                restore_local_repo::import_timeline_wal(&wal_dir, &*timeline, timeline.get_last_record_lsn(), None)?;
+
             } else if prefix == "s3"
             {
                 let s3_storage = S3Storage::new_from_env(pgdata_str).unwrap();
 
-                let filepath = "pg_wal/000000010000000000000001";
-                let data = s3_storage.get_object(&filepath).unwrap();
+                restore_local_repo::import_timeline_wal(std::path::Path::new(""),
+                     &*timeline, timeline.get_last_record_lsn(), Some(s3_storage))?;
 
-                let mut file = File::create(timelinedir
-                    .join("wal")
-                    .join("000000010000000000000001.partial"))?;
-                file.write_all(&data)?;
             }
         },
         None => 
         {
-            fs::copy(
-                pgdata_path.join("pg_wal").join("000000010000000000000001"),
-                timelinedir
-                    .join("wal")
-                    .join("000000010000000000000001.partial"),
-            )?;
+            let wal_dir = pgdata_path.join("pg_wal");
+            restore_local_repo::import_timeline_wal(&wal_dir, &*timeline, timeline.get_last_record_lsn(), None)?;
         }
     };
 
@@ -388,16 +375,6 @@ pub(crate) fn create_branch(
     let copy_opts = fs_extra::dir::CopyOptions::new();
     fs_extra::dir::copy(oldsnapshotdir, newtimelinedir.join("snapshots"), &copy_opts)?;
 
-    let oldtimelinedir = conf.timeline_path(startpoint.timelineid);
-
-    //TODO Why do we need that?
-    copy_wal(
-        &oldtimelinedir.join("wal"),
-        &newtimelinedir.join("wal"),
-        startpoint.lsn,
-        pg_constants::WAL_SEGMENT_SIZE,
-    )?;
-
     // Remember the human-readable branch name for the new timeline.
     // FIXME: there's a race condition, if you create a branch with the same
     // name concurrently.
@@ -500,53 +477,6 @@ fn create_timeline(conf: &PageServerConf, ancestor: Option<PointInTime>) -> Resu
     }
 
     Ok(timelineid)
-}
-
-///
-/// Copy all WAL segments from one directory to another, up to given LSN.
-///
-/// If the given LSN is in the middle of a segment, the last segment containing it
-/// is written out as .partial, and padded with zeros.
-///
-fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: usize) -> Result<()> {
-    let last_segno = upto.segment_number(wal_seg_size);
-    let last_segoff = upto.segment_offset(wal_seg_size);
-
-    for entry in fs::read_dir(src_dir).unwrap().flatten() {
-        let entry_name = entry.file_name();
-        let fname = entry_name.to_str().unwrap();
-
-        // Check if the filename looks like an xlog file, or a .partial file.
-        if !xlog_utils::IsXLogFileName(fname) && !xlog_utils::IsPartialXLogFileName(fname) {
-            continue;
-        }
-        let (segno, _tli) = xlog_utils::XLogFromFileName(fname, wal_seg_size as usize);
-
-        let copylen;
-        let mut dst_fname = PathBuf::from(fname);
-        if segno > last_segno {
-            // future segment, skip
-            continue;
-        } else if segno < last_segno {
-            copylen = wal_seg_size;
-            dst_fname.set_extension("");
-        } else {
-            copylen = last_segoff;
-            dst_fname.set_extension("partial");
-        }
-
-        let src_file = File::open(entry.path())?;
-        let mut dst_file = File::create(dst_dir.join(&dst_fname))?;
-        std::io::copy(&mut src_file.take(copylen as u64), &mut dst_file)?;
-
-        if copylen < wal_seg_size {
-            std::io::copy(
-                &mut std::io::repeat(0).take((wal_seg_size - copylen) as u64),
-                &mut dst_file,
-            )?;
-        }
-    }
-    Ok(())
 }
 
 // Find the latest snapshot for a timeline
