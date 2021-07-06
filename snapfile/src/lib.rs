@@ -4,41 +4,19 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::cast_possible_truncation)]
 
+mod page;
+mod versioned;
+#[doc(inline)]
+pub use page::Page;
+
 use anyhow::{anyhow, bail, Result};
 use aversion::group::{DataSink, DataSourceExt};
 use aversion::util::cbor::CborData;
-use aversion::{assign_message_ids, UpgradeLatest, Versioned};
 use bookfile::{Book, BookWriter, ChapterIndex, ChapterWriter};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-
-// A random constant, to identify this file type.
-const SNAPFILE_MAGIC: u32 = 0x7fb8_38a8;
-
-// Constant chapter numbers
-// FIXME: the bookfile crate should use something better to index, e.g. strings.
-/// Snapshot-specific file metadata
-#[allow(dead_code)] // FIXME: this is a placeholder for future functionality.
-const CHAPTER_SNAP_META: u64 = 1;
-/// A packed set of 8KB pages.
-const CHAPTER_PAGES: u64 = 2;
-/// An index of pages.
-const CHAPTER_PAGE_INDEX: u64 = 3;
-
-// FIXME: move serialized data structs to a separate file.
-
-/// An index from page number to offset within the pages chapter.
-#[derive(Debug, Default, Serialize, Deserialize, Versioned, UpgradeLatest)]
-pub struct PageIndexV1 {
-    /// A map from page number to file offset.
-    map: BTreeMap<u64, u64>,
-}
-
-// A placeholder type, that will always point to the latest version.
-type PageIndex = PageIndexV1;
+use versioned::PageIndex;
 
 impl PageIndex {
     /// Retrieve the page offset from the index.
@@ -50,44 +28,6 @@ impl PageIndex {
 
     fn page_count(&self) -> usize {
         self.map.len()
-    }
-}
-
-// Each message gets a unique message id, for tracking by the aversion traits.
-assign_message_ids! {
-    PageIndex: 100,
-}
-
-/// A single 8KB page.
-pub struct Page(pub Box<[u8; 8192]>);
-
-impl Default for Page {
-    fn default() -> Self {
-        Page(Box::new([0u8; 8192]))
-    }
-}
-
-impl From<[u8; 8192]> for Page {
-    fn from(array: [u8; 8192]) -> Self {
-        Page(Box::new(array))
-    }
-}
-
-impl From<Box<[u8; 8192]>> for Page {
-    fn from(heap_array: Box<[u8; 8192]>) -> Self {
-        Page(heap_array)
-    }
-}
-
-impl AsRef<[u8; 8192]> for Page {
-    fn as_ref(&self) -> &[u8; 8192] {
-        self.0.as_ref()
-    }
-}
-
-impl AsMut<[u8; 8192]> for Page {
-    fn as_mut(&mut self) -> &mut [u8; 8192] {
-        self.0.as_mut()
     }
 }
 
@@ -106,19 +46,19 @@ impl SnapFile {
     pub fn new(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mut book = Book::new(file)?;
-        if book.magic() != SNAPFILE_MAGIC {
+        if book.magic() != versioned::SNAPFILE_MAGIC {
             bail!("bad magic number");
         }
 
         // Read the page index into memory.
         let chapter_num = book
-            .find_chapter(CHAPTER_PAGE_INDEX)
+            .find_chapter(versioned::CHAPTER_PAGE_INDEX)
             .ok_or_else(|| anyhow!("snapfile missing index chapter"))?;
         let chapter_reader = book.chapter_reader(chapter_num)?;
         let mut source = CborData::new(chapter_reader);
         let page_index: PageIndex = source.expect_message()?;
         let page_chapter_num = book
-            .find_chapter(CHAPTER_PAGES)
+            .find_chapter(versioned::CHAPTER_PAGES)
             .ok_or_else(|| anyhow!("snapfile missing pages chapter"))?;
         Ok(SnapFile {
             book,
@@ -176,8 +116,8 @@ impl SnapWriter {
     /// Create a new `SnapWriter`
     pub fn new(path: &Path) -> Result<Self> {
         let file = File::create(path)?;
-        let book = BookWriter::new(file, SNAPFILE_MAGIC)?;
-        let writer = book.new_chapter(CHAPTER_PAGES);
+        let book = BookWriter::new(file, versioned::SNAPFILE_MAGIC)?;
+        let writer = book.new_chapter(versioned::CHAPTER_PAGES);
         Ok(SnapWriter {
             writer,
             page_index: PageIndex::default(),
@@ -211,7 +151,7 @@ impl SnapWriter {
         // necessary file metadata.
         // FIXME: these 3 lines could be combined into a single function
         // that means "serialize this data structure with this format into this chapter".
-        let writer = book.new_chapter(CHAPTER_PAGE_INDEX);
+        let writer = book.new_chapter(versioned::CHAPTER_PAGE_INDEX);
         let mut sink = CborData::new(writer);
         sink.write_message(&self.page_index)?;
 
