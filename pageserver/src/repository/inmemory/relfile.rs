@@ -6,18 +6,22 @@
 //! old page versions in on-disk snapshot files and read them back as needed.
 
 use crate::repository::{BufferTag, RelTag, WALRecord};
+use crate::repository::inmemory::InMemoryTimeline;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use anyhow::{bail, Result};
 use bytes::Bytes;
+use lazy_static::lazy_static;
 use log::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use zenith_utils::lsn::Lsn;
 use zenith_utils::bin_ser::BeSer;
@@ -31,6 +35,9 @@ pub struct RelFileEntry {
     conf: &'static PageServerConf,
     timelineid: ZTimelineId,
     tag: RelTag,
+
+    ancestor_timeline: Option<Arc<InMemoryTimeline>>,
+    ancestor_lsn: Lsn,
 
     ///
     /// All versions of all pages in the file are are kept here.
@@ -108,12 +115,19 @@ impl RelFileEntry {
 
         // If we needed a base image to apply the WAL records against, we should have found it in memory.
         if let Some(lsn) = need_base_image_lsn {
-            bail!("No base image found for page {} blk {} at {}", self.tag, blknum, lsn);
+            if let Some(ancestor) = &self.ancestor_timeline {
+                trace!("found {} WAL records, but need base image of blk {} in {} at {}/{}, checking parent at {}", records.len(), blknum, self.tag, self.timelineid, lsn, self.ancestor_lsn);
+                let x = ancestor.get_relfile_at(self.tag, self.ancestor_lsn)?;
+                page_img = Some(x.get_page_at_lsn(walredo_mgr, blknum, self.ancestor_lsn)?);
+            } else {
+                bail!("No base image found for page {} blk {} at {}", self.tag, blknum, lsn);
+            }
         }
 
         // If we have a page image, and no WAL, we're all set
         if records.is_empty() {
             if let Some(img) = page_img {
+                trace!("found page image for blk {} in {} at {}/{}, no WAL redo required", blknum, self.tag, self.timelineid, lsn);
                 Ok(img)
             } else {
                 // FIXME: this ought to be an error?
@@ -136,6 +150,11 @@ impl RelFileEntry {
                 );
                 Ok(ZERO_PAGE.clone())
             } else {
+                if page_img.is_some() {
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.tag, self.timelineid, lsn);
+                } else {
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.tag, self.timelineid, lsn);
+                }
                 let img = walredo_mgr.request_redo(
                     BufferTag {
                         rel: self.tag,
@@ -160,9 +179,14 @@ impl RelFileEntry {
         let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         if let Some((_entry_lsn, entry)) = iter.next_back() {
-            info!("get_relsize: {} at {} -> {}", self.tag, lsn, *entry);
+            trace!("get_relsize: {} at {} -> {}", self.tag, lsn, *entry);
             Ok(*entry)
         } else {
+            if let Some(ancestor) = &self.ancestor_timeline {
+                trace!("need relsize of {} at {}/{}, checking parent at {}", self.tag, self.timelineid, lsn, self.ancestor_lsn);
+                let x = ancestor.get_relfile_at(self.tag, self.ancestor_lsn)?;
+                return x.get_relsize(self.ancestor_lsn);
+            }
             bail!("No size found for relfile {:?} at {} in memory", self.tag, lsn);
         }
     }
@@ -177,10 +201,13 @@ impl RelFileEntry {
         let result = if let Some((_entry_lsn, _entry)) = iter.next_back() {
             true
         } else {
-            false
+            if let Some(ancestor) = &self.ancestor_timeline {
+                let x = ancestor.get_relfile_at(self.tag, self.ancestor_lsn)?;
+                x.exists(self.ancestor_lsn)?
+            } else {
+                false
+            }
         };
-        info!("exists: {} at {} -> {}", self.tag, lsn, result);
-
         Ok(result)
     }
 
@@ -194,8 +221,7 @@ impl RelFileEntry {
                 page_image: None,
                 record: Some(rec),
             },
-        );
-        Ok(())
+        )
     }
 
     /// Remember new page version, as a full page image
@@ -208,13 +234,18 @@ impl RelFileEntry {
                 page_image: Some(img),
                 record: None,
             },
-        );
-        Ok(())
+        )
     }
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) {
+    fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()> {
+        info!(
+            "put_page_version blk {} of {} at {}/{}",
+            blknum,
+            self.tag,
+            self.timelineid,
+            lsn);
         {
             let mut page_versions = self.page_versions.lock().unwrap();
             let old = page_versions.insert((blknum, lsn), pv);
@@ -239,11 +270,20 @@ impl RelFileEntry {
             if let Some((_entry_lsn, entry)) = iter.next_back() {
                 oldsize = *entry;
             } else {
-                oldsize = 0;
+                if let Some(ancestor) = &self.ancestor_timeline {
+                    let x = ancestor.get_relfile_at(self.tag, self.ancestor_lsn)?;
+                    if x.exists(self.ancestor_lsn)? {
+                        oldsize = x.get_relsize(self.ancestor_lsn)?;
+                    } else {
+                        oldsize = 0;
+                    }
+                } else {
+                    oldsize = 0;
+                }
             }
             if blknum >= oldsize {
-                debug!(
-                    "enlarging relation {:?} from {} to {} blocks",
+                info!(
+                    "enlarging relation {} from {} to {} blocks",
                     self.tag,
                     oldsize,
                     blknum + 1
@@ -251,6 +291,8 @@ impl RelFileEntry {
                 relsizes.insert(lsn, blknum + 1);
             }
         }
+
+        Ok(())
     }
 
     /// Remember that the relation was truncated at given LSN
@@ -296,7 +338,7 @@ impl RelFileEntry {
     ///
     /// Load the state for one relation back into memory.
     ///
-    pub fn load(conf: &'static PageServerConf, timelineid: ZTimelineId, tag: RelTag) -> Result<RelFileEntry> {
+    pub fn load_or_create(conf: &'static PageServerConf, timelineid: ZTimelineId, tag: RelTag, ancestor_timeline: Option<Arc<InMemoryTimeline>>, ancestor_lsn: Lsn) -> Result<RelFileEntry> {
         let fname = Self::fname(tag);
         let path = conf.timeline_path(timelineid).join("inmemory-storage").join(&fname);
 
@@ -311,19 +353,51 @@ impl RelFileEntry {
             let path = conf.timeline_path(timelineid).join("inmemory-storage").join(fname + "_relsizes");
             let content = std::fs::read(path)?;
             relsizes = BTreeMap::des(&content)?;
-
         } else {
-            debug!("initializing new rel {}", &path.display());
+            debug!("initializing new rel {} on timeline {}", tag, timelineid);
             page_versions = BTreeMap::new();
             relsizes = BTreeMap::new();
         }
-
         Ok(RelFileEntry {
             conf,
             timelineid,
             tag,
             page_versions: Mutex::new(page_versions),
             relsizes: Mutex::new(relsizes),
+            ancestor_timeline,
+            ancestor_lsn,
         })
     }
+
+    pub fn list_rels(conf: &'static PageServerConf, timelineid: ZTimelineId, spcnode: u32, dbnode: u32) -> Result<HashSet<RelTag>> {
+        lazy_static! {
+            static ref RE: Regex =
+                Regex::new(r"^(?P<spcnode>\d+)_(?P<dbnode>\d+)_(?P<relnode>\d+)_(?P<forknum>\d+)$").unwrap();
+        }
+        let mut rels: HashSet<RelTag> = HashSet::new();
+
+        // Scan the 'inmemory-storage' directory to get all rels in this timeline.
+        let path = conf.timeline_path(timelineid).join("inmemory-storage");
+        for direntry in fs::read_dir(path)? {
+            let direntry = direntry?;
+
+            let fname = direntry.file_name();
+            let fname = fname.to_str().unwrap();
+            if let Some(caps) = RE.captures(&fname) {
+                let reltag = RelTag {
+                    spcnode: caps.name("spcnode").unwrap().as_str().parse::<u32>()?,
+                    dbnode: caps.name("dbnode").unwrap().as_str().parse::<u32>()?,
+                    relnode: caps.name("relnode").unwrap().as_str().parse::<u32>()?,
+                    forknum: caps.name("forknum").unwrap().as_str().parse::<u8>()?,
+                };
+                if (spcnode == 0 || reltag.spcnode == spcnode) &&
+                    (dbnode == 0 || reltag.dbnode == dbnode) {
+                        rels.insert(reltag);
+                    }
+            }
+        }
+        Ok(rels)
+    }
+
+
 }

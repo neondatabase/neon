@@ -48,10 +48,74 @@ impl Repository for InMemoryRepository {
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
+        Ok(self.get_timeline_locked(timelineid, &mut timelines)?)
+    }
+
+    fn create_empty_timeline(&self, timelineid: ZTimelineId, start_lsn: Lsn) -> Result<Arc<dyn Timeline>> {
+        let mut timelines = self.timelines.lock().unwrap();
+
+        std::fs::create_dir_all(self.conf.timeline_path(timelineid))?;
+        //std::fs::create_dir(self.conf.snapshots_path(timelineid))?;
+        //std::fs::create_dir(self.conf.timeline_path(timelineid).join("wal"))?;
+        std::fs::create_dir_all(self.conf.timeline_path(timelineid).join("inmemory-storage"))?;
+
+        // Write initial metadata.
+        let metadata = TimelineMetadata {
+            last_valid_lsn: start_lsn,
+            last_record_lsn: start_lsn,
+            ancestor_timeline: None,
+            ancestor_lsn: start_lsn,
+        };
+        Self::save_metadata(self.conf, timelineid, &metadata)?;
+
+        let timeline = InMemoryTimeline::new(self.conf, metadata, None, timelineid, self.walredo_mgr.clone())?;
+
+        let timeline_rc = Arc::new(timeline);
+        let r = timelines.insert(timelineid, timeline_rc.clone());
+        assert!(r.is_none());
+        Ok(timeline_rc)
+    }
+
+    /// Branch a timeline
+    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
+        // just to check the source timeline exists XXX
+        let src_timeline = self.get_timeline(src)?;
+        src_timeline.checkpoint()?;
+
+        // Create the metadata file, noting the ancestor of th new timeline. There is initially
+        // no data in it, but all the read-calls know to look into the ancestor.
+        let metadata = TimelineMetadata {
+            last_valid_lsn: start_lsn,
+            last_record_lsn: start_lsn,
+            ancestor_timeline: Some(src),
+            ancestor_lsn: start_lsn,
+        };
+        std::fs::create_dir_all(self.conf.timeline_path(dst).join("inmemory-storage"))?;
+        Self::save_metadata(self.conf, dst, &metadata)?;
+
+        info!("branched timeline {} from {} at {}", dst, src, start_lsn);
+
+        Ok(())
+    }
+}
+
+/// Private functions
+impl InMemoryRepository {
+
+    fn get_timeline_locked(&self, timelineid: ZTimelineId, timelines: &mut HashMap<ZTimelineId, Arc<InMemoryTimeline>>) -> Result<Arc<InMemoryTimeline>> {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let timeline = InMemoryTimeline::open(self.conf, timelineid, self.walredo_mgr.clone())?;
+                let metadata = Self::load_metadata(self.conf, timelineid)?;
+
+                let ancestor =
+                    if let Some(ancestor_timelineid) = metadata.ancestor_timeline {
+                        Some(self.get_timeline_locked(ancestor_timelineid, timelines)?)
+                    } else {
+                        None
+                    };
+
+                let timeline = InMemoryTimeline::new(self.conf, metadata, ancestor, timelineid, self.walredo_mgr.clone())?;
 
                 // Load any new WAL after the last checkpoint into memory.
                 info!(
@@ -69,39 +133,6 @@ impl Repository for InMemoryRepository {
         }
     }
 
-    fn create_empty_timeline(&self, timelineid: ZTimelineId, start_lsn: Lsn) -> Result<Arc<dyn Timeline>> {
-        let mut timelines = self.timelines.lock().unwrap();
-
-        std::fs::create_dir_all(self.conf.timeline_path(timelineid))?;
-        //std::fs::create_dir(self.conf.snapshots_path(timelineid))?;
-        //std::fs::create_dir(self.conf.timeline_path(timelineid).join("wal"))?;
-        std::fs::create_dir(self.conf.timeline_path(timelineid).join("inmemory-storage"))?;
-
-        // Write initial metadata.
-        let metadata = TimelineMetadata {
-            last_valid_lsn: start_lsn,
-            last_record_lsn: start_lsn,
-            ancestor_timeline: None,
-            ancestor_lsn: start_lsn,
-        };
-        Self::save_metadata(self.conf, timelineid, &metadata)?;
-
-        let timeline = InMemoryTimeline::open(self.conf, timelineid, self.walredo_mgr.clone())?;
-
-        let timeline_rc = Arc::new(timeline);
-        let r = timelines.insert(timelineid, timeline_rc.clone());
-        assert!(r.is_none());
-        Ok(timeline_rc)
-    }
-
-    /// Branch a timeline
-    fn branch_timeline(&self, _src: ZTimelineId, _dst: ZTimelineId, _start_lsn: Lsn) -> Result<()> {
-        todo!();
-    }
-}
-
-/// Private functions
-impl InMemoryRepository {
     pub fn new(conf: &'static PageServerConf, walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>) -> InMemoryRepository {
         InMemoryRepository {
             conf: conf,
@@ -165,7 +196,7 @@ pub struct InMemoryTimeline {
     last_valid_lsn: SeqWait<Lsn>,
     last_record_lsn: AtomicLsn,
 
-    ancestor_timeline: Option<ZTimelineId>,
+    ancestor_timeline: Option<Arc<InMemoryTimeline>>,
     ancestor_lsn: Lsn,
 
     // Counters, for metrics collection.
@@ -199,9 +230,29 @@ impl Timeline for InMemoryTimeline {
         result
     }
 
-    fn list_rels(&self, _spcnode: u32, _dbnode: u32, _lsn: Lsn) -> Result<HashSet<RelTag>> {
-        // TODO
-        todo!();
+    fn list_rels(&self, spcnode: u32, dbnode: u32, _lsn: Lsn) -> Result<HashSet<RelTag>> {
+        // RelFileEntry::list_rels works by scanning the directory on disk. Make sure
+        // we have a file on disk for each relation.
+        self.checkpoint()?;
+
+        // List all rels in this timeline, and all its ancestors.
+        let mut all_rels = HashSet::new();
+        let mut timeline = self;
+        loop {
+            let rels = RelFileEntry::list_rels(self.conf, timeline.timelineid, spcnode, dbnode)?;
+
+            // FIXME: We should filter out relations that don't exist at the given LSN.
+            all_rels.extend(rels.iter());
+
+            if let Some(ancestor) = timeline.ancestor_timeline.as_ref() {
+                timeline = ancestor;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        Ok(all_rels)
     }
 
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
@@ -249,10 +300,16 @@ impl Timeline for InMemoryTimeline {
         }
 
         // Also save last_valid_lsn and last_record_lsn to file in the timeline dir
+        let ancestor_timelineid =
+            if let Some(x) = &self.ancestor_timeline {
+                Some(x.timelineid)
+            } else {
+                None
+            };
         let metadata = TimelineMetadata {
             last_valid_lsn: self.last_valid_lsn.load(),
             last_record_lsn: self.last_record_lsn.load(),
-            ancestor_timeline: self.ancestor_timeline,
+            ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
         InMemoryRepository::save_metadata(self.conf, self.timelineid, &metadata)?;
@@ -314,9 +371,7 @@ impl InMemoryTimeline {
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory.
-    fn open(conf: &'static PageServerConf, timelineid: ZTimelineId, walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>) -> Result<InMemoryTimeline> {
-
-        let metadata = InMemoryRepository::load_metadata(conf, timelineid)?;
+    fn new(conf: &'static PageServerConf, metadata: TimelineMetadata, ancestor: Option<Arc<InMemoryTimeline>>, timelineid: ZTimelineId, walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>) -> Result<InMemoryTimeline> {
 
         let timeline = InMemoryTimeline {
             conf,
@@ -328,7 +383,7 @@ impl InMemoryTimeline {
             last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
             last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
 
-            ancestor_timeline: metadata.ancestor_timeline,
+            ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn,
 
             num_entries: AtomicU64::new(0),
@@ -349,7 +404,7 @@ impl InMemoryTimeline {
             Ok(relentry.clone())
         } else {
             // No RelFileEntry for this relation yet. Create one.
-            let relentry = RelFileEntry::load(self.conf, self.timelineid, tag)?;
+            let relentry = RelFileEntry::load_or_create(self.conf, self.timelineid, tag, self.ancestor_timeline.clone(), self.ancestor_lsn)?;
 
             let relentry = Arc::new(relentry);
 
@@ -357,6 +412,15 @@ impl InMemoryTimeline {
 
             Ok(relentry)
         }
+    }
+
+    fn get_relfile_at(&self, tag: RelTag, lsn: Lsn) -> Result<Arc<RelFileEntry>> {
+        // Dig the right ancestor timeline
+        let mut timeline = self;
+        while lsn <= timeline.ancestor_lsn {
+            timeline = &self.ancestor_timeline.as_ref().unwrap();
+        }
+        return self.get_relfile(tag);
     }
 
     ///
