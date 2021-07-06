@@ -375,7 +375,6 @@ impl Timeline for ObjectTimeline {
     /// Memorize a full image of a page version
     ///
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
-
         self.put_page_entry(&tag, lsn, PageEntry::Page(img))?;
 
         debug!(
@@ -1034,7 +1033,6 @@ impl ObjectValue {
         }
     }
 }
-
 
 ///
 /// Iterator for `object_versions`. Returns all page versions of a given block, in
