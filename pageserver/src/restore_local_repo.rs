@@ -27,26 +27,25 @@ use zenith_utils::lsn::Lsn;
 ///
 /// Find latest snapshot in a timeline's 'snapshots' directory
 ///
-pub fn find_latest_snapshot(conf: &PageServerConf, timeline: ZTimelineId, maxlsn: Lsn) -> Option<Lsn> {
-    let snapshotspath = conf.snapshots_path(timeline);
+pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<Lsn> {
+    let snapshotspath = format!("timelines/{}/snapshots", timeline);
 
     let mut last_snapshot_lsn = Lsn(0);
     for direntry in fs::read_dir(&snapshotspath).unwrap() {
         let filename = direntry.unwrap().file_name();
 
         if let Ok(lsn) = Lsn::from_filename(&filename) {
-            if lsn <= maxlsn || maxlsn == Lsn(0) {
-                last_snapshot_lsn = max(lsn, last_snapshot_lsn);
-            }
+            last_snapshot_lsn = max(lsn, last_snapshot_lsn);
         } else {
             error!("unrecognized file in snapshots directory: {:?}", filename);
         }
     }
 
     if last_snapshot_lsn == Lsn(0) {
-        return None;
+        error!("could not find valid snapshot in {}", &snapshotspath);
+        // TODO return error?
     }
-    Some(last_snapshot_lsn)
+    Ok(last_snapshot_lsn)
 }
 
 ///
@@ -112,12 +111,7 @@ pub fn import_timeline_from_postgres_datadir(
     Ok(())
 }
 
-///
-/// Scan one relfile from a snapshot, loading all pages into the given Timeline
-///
-/// The relfile is just a flat file in the same format used by PostgreSQL. There
-/// is no version information in it.
-///
+// subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
 fn import_relfile(
     path: &Path,
     timeline: &dyn Timeline,

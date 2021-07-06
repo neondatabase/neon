@@ -291,7 +291,7 @@ impl PageServerHandler {
 
         // find latest snapshot
         let snapshot_lsn =
-            restore_local_repo::find_latest_snapshot(self.conf, timelineid, lsn.unwrap_or(Lsn(0))).unwrap();
+            restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
         let req_lsn = lsn.unwrap_or(snapshot_lsn);
         basebackup::send_tarball_at_lsn(
             &mut CopyDataSink { pgb },
