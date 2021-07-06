@@ -420,7 +420,7 @@ impl InMemoryTimeline {
         while lsn <= timeline.ancestor_lsn {
             timeline = &self.ancestor_timeline.as_ref().unwrap();
         }
-        return self.get_relfile(tag);
+        return timeline.get_relfile(tag);
     }
 
     ///
