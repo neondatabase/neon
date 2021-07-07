@@ -1,19 +1,40 @@
 //!
-//! Zenith repository implementation that stores all the page versions in memory.
+//! Zenith repository implementation based on "snapshot files"
+//!
+//! This is based on the design at https://github.com/zenithdb/rfcs/pull/8.
+//! Some notable differences and details not covered by the RFC:
+//!
+//! - a snapshot file doesn't contain a snapshot at a specific LSN, but all page
+//!   versions in a range of LSNs. So each snapshot file has a start and end LSN.
+//!
+//! - A snapshot file is actually a pair of files: one contains the page versions,
+//!   and the other the relsizes.
+//!
+//!
+//! The files are stored in .zenith/timelines/<timelineid>/inmemory-storage/ directory.
+//! Currently, there are no subdirectories, and each snapshot file is named like this:
+//!
+//!    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
+//!
+//! And the corresponding file containing the relation size information has _relsizes
+//! suffix. For example:
+//!
+//!    1663_13990_2609_0_000000000169C348_000000000169C349
+//!    1663_13990_2609_0_000000000169C348_000000000169C349_relsizes
 //!
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::ops::Bound::Included;
 
 use crate::repository::{BufferTag, GcResult, History, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
@@ -25,9 +46,9 @@ use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 
-mod relfile;
+mod snapshotfile;
 
-use relfile::RelFileEntry;
+use snapshotfile::SnapshotFile;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -78,9 +99,8 @@ impl Repository for InMemoryRepository {
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
-        // just to check the source timeline exists XXX
-        let src_timeline = self.get_timeline(src)?;
-        src_timeline.checkpoint()?;
+        // just to check the source timeline exists
+        let _src_timeline = self.get_timeline(src)?;
 
         // Create the metadata file, noting the ancestor of th new timeline. There is initially
         // no data in it, but all the read-calls know to look into the ancestor.
@@ -102,6 +122,8 @@ impl Repository for InMemoryRepository {
 /// Private functions
 impl InMemoryRepository {
 
+    // Implementation of the public `get_timeline` function. This differs from the public
+    // interface in that the caller must already hold the mutex on the 'timelines' hashmap.
     fn get_timeline_locked(&self, timelineid: ZTimelineId, timelines: &mut HashMap<ZTimelineId, Arc<InMemoryTimeline>>) -> Result<Arc<InMemoryTimeline>> {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
@@ -141,6 +163,7 @@ impl InMemoryRepository {
         }
     }
 
+    /// Save metadata to file
     fn save_metadata(conf: &'static PageServerConf, timelineid: ZTimelineId, data: &TimelineMetadata) -> Result<()> {
         let path = conf.timeline_path(timelineid).join("metadata");
         let mut file = File::create(&path)?;
@@ -158,6 +181,47 @@ impl InMemoryRepository {
      }
 }
 
+/// SnapshotFileMap is a BTreeMap keyed by RelTag and the snapshot file's start LSN.
+///
+/// This provides a couple of convenience functions over a plain BTreeMap.
+struct SnapshotFileMap (BTreeMap<(RelTag, Lsn), Arc<SnapshotFile>>);
+
+impl SnapshotFileMap {
+    ///
+    /// Look up using the given rel tag and LSN. This differs from a plain
+    /// key-value lookup in that if there is any snapshot file that covers the
+    /// given LSN, it is returned.
+    ///
+    fn get(&self, tag: RelTag, lsn: Lsn) -> Option<Arc<SnapshotFile>> {
+        let startkey = (tag, Lsn(0));
+        let endkey = (tag, lsn);
+
+        if let Some((_k, v)) = self.0.range((Included(startkey), Included(endkey))).next_back() {
+            Some(Arc::clone(v))
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, snapfile: SnapshotFile) -> Arc<SnapshotFile> {
+        let tag = snapfile.tag;
+        let start_lsn = snapfile.start_lsn;
+        let snapfile_rc = Arc::new(snapfile);
+
+        self.0.insert((tag, start_lsn), Arc::clone(&snapfile_rc));
+
+        snapfile_rc
+    }
+}
+
+impl Default for SnapshotFileMap {
+    fn default() -> Self {
+        SnapshotFileMap(BTreeMap::new())
+    }
+}
+
+
+/// Metadata stored on disk for each timeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineMetadata {
     last_valid_lsn: Lsn,
@@ -171,7 +235,7 @@ pub struct InMemoryTimeline {
 
     timelineid: ZTimelineId,
 
-    relfiles: Mutex<HashMap<RelTag, Arc<RelFileEntry>>>,
+    snapshot_files: Mutex<SnapshotFileMap>,
 
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
@@ -196,42 +260,55 @@ pub struct InMemoryTimeline {
     last_valid_lsn: SeqWait<Lsn>,
     last_record_lsn: AtomicLsn,
 
+    // Parent timeline that this timeline was branched from, and the LSN
+    // of the branch point.
     ancestor_timeline: Option<Arc<InMemoryTimeline>>,
     ancestor_lsn: Lsn,
-
-    // Counters, for metrics collection.
-    pub num_entries: AtomicU64,
-    pub num_page_images: AtomicU64,
-    pub num_wal_records: AtomicU64,
-    pub num_getpage_requests: AtomicU64,
 }
 
+/// Public interface functions
 impl Timeline for InMemoryTimeline {
     /// Look up given page in the cache.
     fn get_page_at_lsn(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes> {
-        debug!("get_page_at_lsn: {:?} at {}", tag, lsn);
+        info!("get_page_at_lsn: {:?} at {}", tag, lsn);
         let lsn = self.wait_lsn(lsn)?;
 
-        self.get_relfile(tag.rel)?
-            .get_page_at_lsn(&*self.walredo_mgr, tag.blknum, lsn)
+        if let Some(snapfile) = self.get_snapshot_file_for_read(tag.rel, lsn)? {
+            snapfile.get_page_at_lsn(&*self.walredo_mgr, tag.blknum, lsn)
+        } else {
+            bail!("relation {} not found at {}", tag.rel, lsn);
+        }
     }
 
     fn get_rel_size(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
         let lsn = self.wait_lsn(lsn)?;
-        let result = self.get_relfile(rel)?.get_relsize(lsn);
-        debug!("get_relsize: {:?} at {} -> {:?}", rel, lsn, result);
-        result
+
+        if let Some(snapfile) = self.get_snapshot_file_for_read(rel, lsn)? {
+            let result = snapfile.get_relsize(lsn);
+            info!("get_relsize: {:?} at {} -> {:?}", rel, lsn, result);
+            result
+        } else {
+            info!("get_relsize: {:?} at {} -> not found", rel, lsn);
+            bail!("relation {} not found at {}", rel, lsn);
+        }
     }
+
     fn get_rel_exists(&self, rel: RelTag, lsn: Lsn) -> Result<bool> {
         let lsn = self.wait_lsn(lsn)?;
-        let result = self.get_relfile(rel)?.exists(lsn);
 
-        debug!("get_relsize_exists: {:?} at {} -> {:?}", rel, lsn, result);
-        result
+        let result;
+        if let Some(snapfile) = self.get_snapshot_file_for_read(rel, lsn)? {
+            result = snapfile.exists(lsn)?;
+        } else {
+            result = false;
+        }
+
+        info!("get_relsize_exists: {:?} at {} -> {:?}", rel, lsn, result);
+        Ok(result)
     }
 
     fn list_rels(&self, spcnode: u32, dbnode: u32, _lsn: Lsn) -> Result<HashSet<RelTag>> {
-        // RelFileEntry::list_rels works by scanning the directory on disk. Make sure
+        // SnapshotFile::list_rels works by scanning the directory on disk. Make sure
         // we have a file on disk for each relation.
         self.checkpoint()?;
 
@@ -239,7 +316,7 @@ impl Timeline for InMemoryTimeline {
         let mut all_rels = HashSet::new();
         let mut timeline = self;
         loop {
-            let rels = RelFileEntry::list_rels(self.conf, timeline.timelineid, spcnode, dbnode)?;
+            let rels = SnapshotFile::list_rels(self.conf, timeline.timelineid, spcnode, dbnode)?;
 
             // FIXME: We should filter out relations that don't exist at the given LSN.
             all_rels.extend(rels.iter());
@@ -267,18 +344,23 @@ impl Timeline for InMemoryTimeline {
 
     fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()> {
         debug!("put_wal_record: {:?} at {}", tag, rec.lsn);
-        self.get_relfile(tag.rel)?.put_wal_record(tag.blknum, rec)
+
+        let snapfile = self.get_snapshot_file_for_write(tag.rel, rec.lsn)?;
+        snapfile.put_wal_record(tag.blknum, rec)
     }
 
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
         debug!("put_truncation: {:?} at {}", relsize, lsn);
-        self.get_relfile(rel)?.put_truncation(lsn, relsize)
+
+        let snapfile = self.get_snapshot_file_for_write(rel, lsn)?;
+        snapfile.put_truncation(lsn, relsize)
     }
 
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
         debug!("put_page_image: {:?} at {}", tag, lsn);
-        self.get_relfile(tag.rel)?
-            .put_page_image(tag.blknum, lsn, img)
+
+        let snapfile = self.get_snapshot_file_for_write(tag.rel, lsn)?;
+        snapfile.put_page_image(tag.blknum, lsn, img)
     }
 
     fn put_unlink(&self, _tag: RelTag, _lsn: Lsn) -> Result<()> {
@@ -293,19 +375,34 @@ impl Timeline for InMemoryTimeline {
     /// know anything about them here in the repository.
     fn checkpoint(&self) -> Result<()> {
 
-        let relfiles = self.relfiles.lock().unwrap();
+        let last_valid_lsn = self.last_valid_lsn.load();
 
-        for relentry in relfiles.values() {
-            relentry.save()?;
+        let mut snapfiles = self.snapshot_files.lock().unwrap();
+
+        // Walk through each SnapshotFile in memory, and write any
+        // dirty ones to disk.
+        //
+        // Note: We release all the in-memory SnapshotFile entries, and
+        // start fresh with an empty map. This keeps memory usage in check,
+        // but is perhaps too aggressive.
+        //
+        let snapfiles = std::mem::take(&mut *snapfiles);
+        for snapfile in snapfiles.0.values() {
+            if !snapfile.frozen {
+                let frozen_file = snapfile.freeze(last_valid_lsn + 1);
+                frozen_file.save()?;
+            }
         }
 
-        // Also save last_valid_lsn and last_record_lsn to file in the timeline dir
+        // Also save the metadata, with updated last_valid_lsn and last_record_lsn, to a
+        // file in the timeline dir
         let ancestor_timelineid =
             if let Some(x) = &self.ancestor_timeline {
                 Some(x.timelineid)
             } else {
                 None
             };
+
         let metadata = TimelineMetadata {
             last_valid_lsn: self.last_valid_lsn.load(),
             last_record_lsn: self.last_record_lsn.load(),
@@ -313,6 +410,12 @@ impl Timeline for InMemoryTimeline {
             ancestor_lsn: self.ancestor_lsn,
         };
         InMemoryRepository::save_metadata(self.conf, self.timelineid, &metadata)?;
+
+        // If there were any concurrent updates on the timeline, we would have to work
+        // harder to make sure we don't lose the new updates. Currently, that shouldn't
+        // happen, because the WAL receiver process is responsible for both updating
+        // the timeline and calling checkpoint()
+        assert!(self.last_valid_lsn.load() == last_valid_lsn);
 
         Ok(())
     }
@@ -376,7 +479,7 @@ impl InMemoryTimeline {
         let timeline = InMemoryTimeline {
             conf,
             timelineid,
-            relfiles: Mutex::new(HashMap::new()),
+            snapshot_files: Mutex::new(SnapshotFileMap::default()),
 
             walredo_mgr,
 
@@ -385,42 +488,99 @@ impl InMemoryTimeline {
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn,
-
-            num_entries: AtomicU64::new(0),
-            num_page_images: AtomicU64::new(0),
-            num_wal_records: AtomicU64::new(0),
-            num_getpage_requests: AtomicU64::new(0),
         };
         Ok(timeline)
     }
 
     ///
-    /// Get a handle to a RelFileEntry
+    /// Get a handle to a SnapshotFile for reading.
     ///
-    fn get_relfile(&self, tag: RelTag) -> Result<Arc<RelFileEntry>> {
-        // First, look up the relfile
-        let mut relfiles = self.relfiles.lock().unwrap();
-        if let Some(relentry) = relfiles.get(&tag) {
-            Ok(relentry.clone())
-        } else {
-            // No RelFileEntry for this relation yet. Create one.
-            let relentry = RelFileEntry::load_or_create(self.conf, self.timelineid, tag, self.ancestor_timeline.clone(), self.ancestor_lsn)?;
+    /// The returned SnapshotFile might be from an ancestor timeline, if the
+    /// relation hasn't been updated on this timeline yet.
+    ///
+    fn get_snapshot_file_for_read(&self, tag: RelTag, lsn: Lsn) -> Result<Option<Arc<SnapshotFile>>> {
+        // First dig the right ancestor timeline
+        let mut timeline = self;
+        let mut lsn = lsn;
+        while lsn < timeline.ancestor_lsn {
+            timeline = &timeline.ancestor_timeline.as_ref().unwrap();
+        }
+        loop {
+            // Then look up the snapshot file
+            let mut snapfiles = timeline.snapshot_files.lock().unwrap();
 
-            let relentry = Arc::new(relentry);
+            // FIXME: If there is an entry in memory for an older snapshot file,
+            // but there is a newere snapshot file on disk, this will incorrectly
+            // return the older entry from memory.
+            if let Some(snapfile) = snapfiles.get(tag, lsn) {
+                return Ok(Some(snapfile.clone()))
+            } else {
+                // No SnaphotFile in memory for this relation yet. Read it from disk.
+                if let Some(snapfile) = SnapshotFile::load(timeline.conf, timeline.timelineid, tag, lsn)? {
+                    let snapfile_rc = snapfiles.insert(snapfile);
 
-            relfiles.insert(tag, relentry.clone());
-
-            Ok(relentry)
+                    return Ok(Some(snapfile_rc))
+                } else {
+                    // No snapshot files for this relation on this timeline. But there might still
+                    // be one on the ancestor timeline
+                    if let Some(ancestor) = &timeline.ancestor_timeline {
+                        lsn = timeline.ancestor_lsn;
+                        timeline = &ancestor.as_ref();
+                        continue;
+                    }
+                    return Ok(None);
+                }
+            }
         }
     }
 
-    fn get_relfile_at(&self, tag: RelTag, lsn: Lsn) -> Result<Arc<RelFileEntry>> {
-        // Dig the right ancestor timeline
-        let mut timeline = self;
-        while lsn <= timeline.ancestor_lsn {
-            timeline = &self.ancestor_timeline.as_ref().unwrap();
+    ///
+    /// Get a handle to the latest SnapshotFile for appending.
+    ///
+    fn get_snapshot_file_for_write(&self, tag: RelTag, lsn: Lsn) -> Result<Arc<SnapshotFile>> {
+
+        if lsn < self.last_valid_lsn.load() {
+            bail!("cannot modify relation after advancing last_valid_lsn");
         }
-        return timeline.get_relfile(tag);
+
+        // Look up the snapshot file
+        let snapfiles = self.snapshot_files.lock().unwrap();
+        if let Some(snapfile) = snapfiles.get(tag, lsn) {
+            assert!(!snapfile.frozen);
+            Ok(Arc::clone(&snapfile))
+        } else {
+            // No SnapshotFile for this relation yet. Create one.
+            //
+            // Is this a completely new relation? Or the first modification after branching?
+            //
+            let snapfile;
+
+            // FIXME: race condition, if another thread creates the SnapshotFile while
+            // we're busy looking up the previous one. We should hold the mutex throughout
+            // this operation, but for that we'll need a versio of get_snapshot_file_for_read()
+            // that doesn't try to also grab the mutex.
+            drop(snapfiles);
+
+            if let Some(prev_snapfile) = self.get_snapshot_file_for_read(tag, lsn)? {
+                // Create new entry after the previous one.
+                let lsn;
+                if prev_snapfile.timelineid != self.timelineid {
+                    // First modification on this timeline
+                    lsn = self.ancestor_lsn;
+                } else {
+                    lsn = prev_snapfile.end_lsn;
+                }
+                snapfile = SnapshotFile::copy_snapshot(self.conf, &*self.walredo_mgr, &prev_snapfile, self.timelineid, lsn)?;
+            } else {
+                // New relation.
+                snapfile = SnapshotFile::create(self.conf, self.timelineid, tag, lsn)?;
+            }
+
+            let mut snapfiles = self.snapshot_files.lock().unwrap();
+            let snapfile_rc = snapfiles.insert(snapfile);
+
+            Ok(snapfile_rc)
+        }
     }
 
     ///

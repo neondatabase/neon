@@ -456,7 +456,7 @@ mod tests {
 
         tline.init_valid_lsn(Lsn(1));
 
-        let mut lsn = 0;
+        let mut lsn = 1;
         for i in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", i, Lsn(lsn)));
             lsn += 1;
