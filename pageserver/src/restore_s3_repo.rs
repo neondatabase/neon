@@ -6,9 +6,8 @@ use log::*;
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::repository::{
-    BufferTag, DatabaseTag, ObjectTag, PrepareTag, RelTag, SlruBufferTag, Timeline,
-};
+use crate::repository::{Timeline, BufferTag, RelTag};
+use crate::object_key::{DatabaseTag, ObjectTag, PrepareTag, SlruBufferTag};
 
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;

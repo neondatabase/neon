@@ -17,9 +17,8 @@ use std::time::SystemTime;
 use tar::{Builder, Header};
 use std::fs;
 
-use crate::object_key::*;
-use postgres_ffi::relfile_utils::*;
-use crate::repository::{DatabaseTag, ObjectTag, Timeline, BufferTag};
+use crate::object_key::{ObjectTag, DatabaseTag};
+use crate::repository::{Timeline, BufferTag};
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
@@ -248,12 +247,7 @@ impl<'a> Basebackup<'a> {
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
         // add zenith.signal file
-<<<<<<< HEAD
-        self.ar
-            .append(&new_tar_header("zenith.signal", 0)?, &b""[..])?;
-=======
         self.ar.append(&new_tar_header("zenith.signal", 0)?, &b""[..])?;
->>>>>>> f86e9c0... Implement export to s3 in pgdata compatible format.
 
         //send pg_control
         let pg_control_bytes = pg_control.encode();
