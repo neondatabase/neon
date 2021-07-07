@@ -546,41 +546,42 @@ impl InMemoryTimeline {
         // Look up the snapshot file
         let snapfiles = self.snapshot_files.lock().unwrap();
         if let Some(snapfile) = snapfiles.get(tag, lsn) {
-            assert!(!snapfile.frozen);
-            Ok(Arc::clone(&snapfile))
-        } else {
-            // No SnapshotFile for this relation yet. Create one.
-            //
-            // Is this a completely new relation? Or the first modification after branching?
-            //
-            let snapfile;
-
-            // FIXME: race condition, if another thread creates the SnapshotFile while
-            // we're busy looking up the previous one. We should hold the mutex throughout
-            // this operation, but for that we'll need a versio of get_snapshot_file_for_read()
-            // that doesn't try to also grab the mutex.
-            drop(snapfiles);
-
-            if let Some(prev_snapfile) = self.get_snapshot_file_for_read(tag, lsn)? {
-                // Create new entry after the previous one.
-                let lsn;
-                if prev_snapfile.timelineid != self.timelineid {
-                    // First modification on this timeline
-                    lsn = self.ancestor_lsn;
-                } else {
-                    lsn = prev_snapfile.end_lsn;
-                }
-                snapfile = SnapshotFile::copy_snapshot(self.conf, &*self.walredo_mgr, &prev_snapfile, self.timelineid, lsn)?;
-            } else {
-                // New relation.
-                snapfile = SnapshotFile::create(self.conf, self.timelineid, tag, lsn)?;
+            if !snapfile.frozen {
+                return Ok(Arc::clone(&snapfile))
             }
-
-            let mut snapfiles = self.snapshot_files.lock().unwrap();
-            let snapfile_rc = snapfiles.insert(snapfile);
-
-            Ok(snapfile_rc)
         }
+
+        // No SnapshotFile for this relation yet. Create one.
+        //
+        // Is this a completely new relation? Or the first modification after branching?
+        //
+
+        // FIXME: race condition, if another thread creates the SnapshotFile while
+        // we're busy looking up the previous one. We should hold the mutex throughout
+        // this operation, but for that we'll need a versio of get_snapshot_file_for_read()
+        // that doesn't try to also grab the mutex.
+        drop(snapfiles);
+
+        let snapfile;
+        if let Some(prev_snapfile) = self.get_snapshot_file_for_read(tag, lsn)? {
+            // Create new entry after the previous one.
+            let lsn;
+            if prev_snapfile.timelineid != self.timelineid {
+                // First modification on this timeline
+                lsn = self.ancestor_lsn;
+            } else {
+                lsn = prev_snapfile.end_lsn;
+            }
+            snapfile = SnapshotFile::copy_snapshot(self.conf, &*self.walredo_mgr, &prev_snapfile, self.timelineid, lsn)?;
+        } else {
+            // New relation.
+            snapfile = SnapshotFile::create(self.conf, self.timelineid, tag, lsn)?;
+        }
+
+        let mut snapfiles = self.snapshot_files.lock().unwrap();
+        let snapfile_rc = snapfiles.insert(snapfile);
+
+        Ok(snapfile_rc)
     }
 
     ///
