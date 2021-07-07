@@ -18,14 +18,44 @@ pub(crate) const SNAPFILE_MAGIC: u32 = 0x7fb8_38a8;
 // Constant chapter numbers
 // FIXME: the bookfile crate should use something better to index, e.g. strings.
 /// Snapshot-specific file metadata
-#[allow(dead_code)] // FIXME: this is a placeholder for future functionality.
 pub(crate) const CHAPTER_SNAP_META: u64 = 1;
 /// A packed set of 8KB pages.
 pub(crate) const CHAPTER_PAGES: u64 = 2;
 /// An index of pages.
 pub(crate) const CHAPTER_PAGE_INDEX: u64 = 3;
 
-// FIXME: move serialized data structs to a separate file.
+/// Information about the predecessor snapshot.
+///
+/// It contains the snap_id of the predecessor snapshot, and the LSN
+/// of that snapshot.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Predecessor {
+    /// This is the id number of the previous snapshot.
+    ///
+    /// This must match the snap_id of the previous snapshot.
+    pub id: u64,
+
+    /// This is the LSN of the previous snapshot.
+    pub lsn: u64,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Versioned, UpgradeLatest)]
+pub struct SnapFileMetaV1 {
+    /// This is a unique ID number for this snapshot.
+    ///
+    /// This number guarantees that snapshot history is unique.
+    pub snap_id: u64,
+
+    /// Information about the predecessor snapshot.
+    ///
+    /// If `None`, this snapshot is the start of a new database.
+    pub predecessor: Option<Predecessor>,
+
+    /// This is the last LSN stored in this snapshot.
+    pub lsn: u64,
+}
+
+pub type SnapFileMeta = SnapFileMetaV1;
 
 /// An index from page number to offset within the pages chapter.
 #[derive(Debug, Default, Serialize, Deserialize, Versioned, UpgradeLatest)]
@@ -40,4 +70,5 @@ pub type PageIndex = PageIndexV1;
 // Each message gets a unique message id, for tracking by the aversion traits.
 assign_message_ids! {
     PageIndex: 100,
+    SnapFileMeta: 101,
 }

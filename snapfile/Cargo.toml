@@ -10,6 +10,8 @@ anyhow = "1.0"
 aversion = "0.2"
 bookfile = "^0.2"
 serde = { version = "1.0", features = ["derive"] }
+rand = "0.8.3"
+zenith_utils = { path = "../zenith_utils" }
 
 [dev-dependencies]
 tempfile = "3.2"

@@ -1951,8 +1951,10 @@ dependencies = [
  "anyhow",
  "aversion",
  "bookfile 0.2.0",
+ "rand",
  "serde",
  "tempfile",
+ "zenith_utils",
 ]
 
 [[package]]
