@@ -28,13 +28,13 @@ use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 
-use std::collections::{BTreeMap, HashMap};
 use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Write;
+use std::ops::Bound::Included;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::ops::Bound::Included;
 
 use crate::repository::{BufferTag, GcResult, History, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
@@ -65,14 +65,17 @@ pub struct InMemoryRepository {
 
 /// Public interface
 impl Repository for InMemoryRepository {
-
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
         Ok(self.get_timeline_locked(timelineid, &mut timelines)?)
     }
 
-    fn create_empty_timeline(&self, timelineid: ZTimelineId, start_lsn: Lsn) -> Result<Arc<dyn Timeline>> {
+    fn create_empty_timeline(
+        &self,
+        timelineid: ZTimelineId,
+        start_lsn: Lsn,
+    ) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
         std::fs::create_dir_all(self.conf.timeline_path(timelineid))?;
@@ -89,7 +92,13 @@ impl Repository for InMemoryRepository {
         };
         Self::save_metadata(self.conf, timelineid, &metadata)?;
 
-        let timeline = InMemoryTimeline::new(self.conf, metadata, None, timelineid, self.walredo_mgr.clone())?;
+        let timeline = InMemoryTimeline::new(
+            self.conf,
+            metadata,
+            None,
+            timelineid,
+            self.walredo_mgr.clone(),
+        )?;
 
         let timeline_rc = Arc::new(timeline);
         let r = timelines.insert(timelineid, timeline_rc.clone());
@@ -121,23 +130,31 @@ impl Repository for InMemoryRepository {
 
 /// Private functions
 impl InMemoryRepository {
-
     // Implementation of the public `get_timeline` function. This differs from the public
     // interface in that the caller must already hold the mutex on the 'timelines' hashmap.
-    fn get_timeline_locked(&self, timelineid: ZTimelineId, timelines: &mut HashMap<ZTimelineId, Arc<InMemoryTimeline>>) -> Result<Arc<InMemoryTimeline>> {
+    fn get_timeline_locked(
+        &self,
+        timelineid: ZTimelineId,
+        timelines: &mut HashMap<ZTimelineId, Arc<InMemoryTimeline>>,
+    ) -> Result<Arc<InMemoryTimeline>> {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let metadata = Self::load_metadata(self.conf, timelineid)?;
 
-                let ancestor =
-                    if let Some(ancestor_timelineid) = metadata.ancestor_timeline {
-                        Some(self.get_timeline_locked(ancestor_timelineid, timelines)?)
-                    } else {
-                        None
-                    };
+                let ancestor = if let Some(ancestor_timelineid) = metadata.ancestor_timeline {
+                    Some(self.get_timeline_locked(ancestor_timelineid, timelines)?)
+                } else {
+                    None
+                };
 
-                let timeline = InMemoryTimeline::new(self.conf, metadata, ancestor, timelineid, self.walredo_mgr.clone())?;
+                let timeline = InMemoryTimeline::new(
+                    self.conf,
+                    metadata,
+                    ancestor,
+                    timelineid,
+                    self.walredo_mgr.clone(),
+                )?;
 
                 // Load any new WAL after the last checkpoint into memory.
                 info!(
@@ -155,7 +172,10 @@ impl InMemoryRepository {
         }
     }
 
-    pub fn new(conf: &'static PageServerConf, walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>) -> InMemoryRepository {
+    pub fn new(
+        conf: &'static PageServerConf,
+        walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+    ) -> InMemoryRepository {
         InMemoryRepository {
             conf: conf,
             timelines: Mutex::new(HashMap::new()),
@@ -164,27 +184,34 @@ impl InMemoryRepository {
     }
 
     /// Save metadata to file
-    fn save_metadata(conf: &'static PageServerConf, timelineid: ZTimelineId, data: &TimelineMetadata) -> Result<()> {
+    fn save_metadata(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        data: &TimelineMetadata,
+    ) -> Result<()> {
         let path = conf.timeline_path(timelineid).join("metadata");
         let mut file = File::create(&path)?;
 
         file.write_all(&TimelineMetadata::ser(data)?)?;
 
         Ok(())
-     }
+    }
 
-    fn load_metadata(conf: &'static PageServerConf, timelineid: ZTimelineId) -> Result<TimelineMetadata> {
+    fn load_metadata(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+    ) -> Result<TimelineMetadata> {
         let path = conf.timeline_path(timelineid).join("metadata");
         let data = std::fs::read(&path)?;
 
         Ok(TimelineMetadata::des(&data)?)
-     }
+    }
 }
 
 /// SnapshotFileMap is a BTreeMap keyed by RelTag and the snapshot file's start LSN.
 ///
 /// This provides a couple of convenience functions over a plain BTreeMap.
-struct SnapshotFileMap (BTreeMap<(RelTag, Lsn), Arc<SnapshotFile>>);
+struct SnapshotFileMap(BTreeMap<(RelTag, Lsn), Arc<SnapshotFile>>);
 
 impl SnapshotFileMap {
     ///
@@ -196,7 +223,11 @@ impl SnapshotFileMap {
         let startkey = (tag, Lsn(0));
         let endkey = (tag, lsn);
 
-        if let Some((_k, v)) = self.0.range((Included(startkey), Included(endkey))).next_back() {
+        if let Some((_k, v)) = self
+            .0
+            .range((Included(startkey), Included(endkey)))
+            .next_back()
+        {
             Some(Arc::clone(v))
         } else {
             None
@@ -219,7 +250,6 @@ impl Default for SnapshotFileMap {
         SnapshotFileMap(BTreeMap::new())
     }
 }
-
 
 /// Metadata stored on disk for each timeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,10 +315,16 @@ impl Timeline for InMemoryTimeline {
 
         if let Some((snapfile, lsn)) = self.get_snapshot_file_for_read(rel, lsn)? {
             let result = snapfile.get_relsize(lsn);
-            info!("get_relsize: rel {} at {}/{} -> {:?}", rel, self.timelineid, lsn, result);
+            info!(
+                "get_relsize: rel {} at {}/{} -> {:?}",
+                rel, self.timelineid, lsn, result
+            );
             result
         } else {
-            info!("get_relsize: rel {} at {}/{} -> not found", rel, self.timelineid, lsn);
+            info!(
+                "get_relsize: rel {} at {}/{} -> not found",
+                rel, self.timelineid, lsn
+            );
             bail!("relation {} not found at {}", rel, lsn);
         }
     }
@@ -374,7 +410,6 @@ impl Timeline for InMemoryTimeline {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self) -> Result<()> {
-
         let last_valid_lsn = self.last_valid_lsn.load();
 
         let mut snapfiles = self.snapshot_files.lock().unwrap();
@@ -396,12 +431,11 @@ impl Timeline for InMemoryTimeline {
 
         // Also save the metadata, with updated last_valid_lsn and last_record_lsn, to a
         // file in the timeline dir
-        let ancestor_timelineid =
-            if let Some(x) = &self.ancestor_timeline {
-                Some(x.timelineid)
-            } else {
-                None
-            };
+        let ancestor_timelineid = if let Some(x) = &self.ancestor_timeline {
+            Some(x.timelineid)
+        } else {
+            None
+        };
 
         let metadata = TimelineMetadata {
             last_valid_lsn: self.last_valid_lsn.load(),
@@ -474,8 +508,13 @@ impl InMemoryTimeline {
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory.
-    fn new(conf: &'static PageServerConf, metadata: TimelineMetadata, ancestor: Option<Arc<InMemoryTimeline>>, timelineid: ZTimelineId, walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>) -> Result<InMemoryTimeline> {
-
+    fn new(
+        conf: &'static PageServerConf,
+        metadata: TimelineMetadata,
+        ancestor: Option<Arc<InMemoryTimeline>>,
+        timelineid: ZTimelineId,
+        walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+    ) -> Result<InMemoryTimeline> {
         let timeline = InMemoryTimeline {
             conf,
             timelineid,
@@ -498,11 +537,20 @@ impl InMemoryTimeline {
     /// The returned SnapshotFile might be from an ancestor timeline, if the
     /// relation hasn't been updated on this timeline yet.
     ///
-    fn get_snapshot_file_for_read(&self, tag: RelTag, lsn: Lsn) -> Result<Option<(Arc<SnapshotFile>, Lsn)>> {
+    fn get_snapshot_file_for_read(
+        &self,
+        tag: RelTag,
+        lsn: Lsn,
+    ) -> Result<Option<(Arc<SnapshotFile>, Lsn)>> {
         // First dig the right ancestor timeline
         let mut timeline = self;
         let mut lsn = lsn;
-        trace!("get_snapshot_file_for_read called for {} at {}/{}", tag, self.timelineid, lsn);
+        trace!(
+            "get_snapshot_file_for_read called for {} at {}/{}",
+            tag,
+            self.timelineid,
+            lsn
+        );
         while lsn < timeline.ancestor_lsn {
             trace!("going into ancestor {} ", timeline.ancestor_lsn);
             timeline = &timeline.ancestor_timeline.as_ref().unwrap();
@@ -516,14 +564,20 @@ impl InMemoryTimeline {
             // return the older entry from memory.
             if let Some(snapfile) = snapfiles.get(tag, lsn) {
                 trace!("found snapshot file in memory: {}", snapfile.start_lsn);
-                return Ok(Some((snapfile.clone(), lsn)))
+                return Ok(Some((snapfile.clone(), lsn)));
             } else {
                 // No SnaphotFile in memory for this relation yet. Read it from disk.
-                if let Some(snapfile) = SnapshotFile::load(timeline.conf, timeline.timelineid, tag, lsn)? {
-                    trace!("found snapshot file on disk: {}-{}", snapfile.start_lsn, snapfile.end_lsn);
+                if let Some(snapfile) =
+                    SnapshotFile::load(timeline.conf, timeline.timelineid, tag, lsn)?
+                {
+                    trace!(
+                        "found snapshot file on disk: {}-{}",
+                        snapfile.start_lsn,
+                        snapfile.end_lsn
+                    );
                     let snapfile_rc = snapfiles.insert(snapfile);
 
-                    return Ok(Some((snapfile_rc, lsn)))
+                    return Ok(Some((snapfile_rc, lsn)));
                 } else {
                     // No snapshot files for this relation on this timeline. But there might still
                     // be one on the ancestor timeline
@@ -543,7 +597,6 @@ impl InMemoryTimeline {
     /// Get a handle to the latest SnapshotFile for appending.
     ///
     fn get_snapshot_file_for_write(&self, tag: RelTag, lsn: Lsn) -> Result<Arc<SnapshotFile>> {
-
         if lsn < self.last_valid_lsn.load() {
             bail!("cannot modify relation after advancing last_valid_lsn");
         }
@@ -552,7 +605,7 @@ impl InMemoryTimeline {
         let snapfiles = self.snapshot_files.lock().unwrap();
         if let Some(snapfile) = snapfiles.get(tag, lsn) {
             if !snapfile.frozen {
-                return Ok(Arc::clone(&snapfile))
+                return Ok(Arc::clone(&snapfile));
             }
         }
 
@@ -574,16 +627,42 @@ impl InMemoryTimeline {
             if prev_snapfile.timelineid != self.timelineid {
                 // First modification on this timeline
                 lsn = self.ancestor_lsn;
-                trace!("creating file for write for {} at branch point {}/{}", tag, self.timelineid, lsn);
+                trace!(
+                    "creating file for write for {} at branch point {}/{}",
+                    tag,
+                    self.timelineid,
+                    lsn
+                );
             } else {
                 lsn = prev_snapfile.end_lsn;
-                trace!("creating file for write for {} after previous snapfile {}/{}", tag, self.timelineid, lsn);
+                trace!(
+                    "creating file for write for {} after previous snapfile {}/{}",
+                    tag,
+                    self.timelineid,
+                    lsn
+                );
             }
-            trace!("prev snapfile is at {}/{} - {}", prev_snapfile.timelineid, prev_snapfile.start_lsn, prev_snapfile.end_lsn);
-            snapfile = SnapshotFile::copy_snapshot(self.conf, &*self.walredo_mgr, &prev_snapfile, self.timelineid, lsn)?;
+            trace!(
+                "prev snapfile is at {}/{} - {}",
+                prev_snapfile.timelineid,
+                prev_snapfile.start_lsn,
+                prev_snapfile.end_lsn
+            );
+            snapfile = SnapshotFile::copy_snapshot(
+                self.conf,
+                &*self.walredo_mgr,
+                &prev_snapfile,
+                self.timelineid,
+                lsn,
+            )?;
         } else {
             // New relation.
-            trace!("creating file for write for new rel {} at {}/{}", tag, self.timelineid, lsn);
+            trace!(
+                "creating file for write for new rel {} at {}/{}",
+                tag,
+                self.timelineid,
+                lsn
+            );
             snapfile = SnapshotFile::create(self.conf, self.timelineid, tag, lsn)?;
         }
 

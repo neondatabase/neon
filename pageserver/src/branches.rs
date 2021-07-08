@@ -102,7 +102,9 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // server quickly.
     let walredo_mgr = std::sync::Arc::new(crate::walredo::DummyRedoManager {});
     let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
-        crate::RepositoryFormat::InMemory => Box::new(crate::repository::inmemory::InMemoryRepository::new(conf, walredo_mgr)),
+        crate::RepositoryFormat::InMemory => Box::new(
+            crate::repository::inmemory::InMemoryRepository::new(conf, walredo_mgr),
+        ),
         crate::RepositoryFormat::RocksDb => {
             let storage = crate::rocksdb_storage::RocksObjectStore::create(conf)?;
 
@@ -113,7 +115,6 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
             ))
         }
     };
-
 
     let timeline = repo.create_empty_timeline(tli, Lsn(lsn))?;
 

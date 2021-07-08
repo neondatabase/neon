@@ -36,8 +36,8 @@ use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use zenith_utils::lsn::Lsn;
 use zenith_utils::bin_ser::BeSer;
+use zenith_utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -56,7 +56,6 @@ pub struct SnapshotFile {
     //
     // This entry contains all the changes from 'start_lsn' to 'end_lsn'. The
     // start is inclusive, and end is exclusive.
-    
     pub start_lsn: Lsn,
     pub end_lsn: Lsn,
 
@@ -88,7 +87,6 @@ struct PageVersion {
 }
 
 impl SnapshotFile {
-
     /// Look up given page in the cache.
     pub fn get_page_at_lsn(
         &self,
@@ -131,13 +129,25 @@ impl SnapshotFile {
 
         // If we needed a base image to apply the WAL records against, we should have found it in memory.
         if let Some(lsn) = need_base_image_lsn {
-            bail!("No base image found for page {} blk {} at {}/{}", self.tag, blknum, self.timelineid, lsn);
+            bail!(
+                "No base image found for page {} blk {} at {}/{}",
+                self.tag,
+                blknum,
+                self.timelineid,
+                lsn
+            );
         }
 
         // If we have a page image, and no WAL, we're all set
         if records.is_empty() {
             if let Some(img) = page_img {
-                trace!("found page image for blk {} in {} at {}/{}, no WAL redo required", blknum, self.tag, self.timelineid, lsn);
+                trace!(
+                    "found page image for blk {} in {} at {}/{}, no WAL redo required",
+                    blknum,
+                    self.tag,
+                    self.timelineid,
+                    lsn
+                );
                 Ok(img)
             } else {
                 // FIXME: this ought to be an error?
@@ -192,7 +202,11 @@ impl SnapshotFile {
             trace!("get_relsize: {} at {} -> {}", self.tag, lsn, *entry);
             Ok(*entry)
         } else {
-            bail!("No size found for relfile {:?} at {} in memory", self.tag, lsn);
+            bail!(
+                "No size found for relfile {:?} at {} in memory",
+                self.tag,
+                lsn
+            );
         }
     }
 
@@ -241,10 +255,8 @@ impl SnapshotFile {
     fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()> {
         info!(
             "put_page_version blk {} of {} at {}/{}",
-            blknum,
-            self.tag,
-            self.timelineid,
-            lsn);
+            blknum, self.tag, self.timelineid, lsn
+        );
         {
             let mut page_versions = self.page_versions.lock().unwrap();
             let old = page_versions.insert((blknum, lsn), pv);
@@ -300,17 +312,37 @@ impl SnapshotFile {
     }
 
     fn path(&self) -> PathBuf {
-        Self::path_for(self.conf, self.timelineid, self.tag, self.start_lsn, self.end_lsn)
+        Self::path_for(
+            self.conf,
+            self.timelineid,
+            self.tag,
+            self.start_lsn,
+            self.end_lsn,
+        )
     }
 
-    fn path_for(conf: &'static PageServerConf, timelineid: ZTimelineId, tag: RelTag, start_lsn: Lsn, end_lsn: Lsn) -> PathBuf {
-        let fname = format!("{}_{}_{}_{}_{:016X}_{:016X}",
-                            tag.spcnode, tag.dbnode, tag.relnode, tag.forknum,
-                            u64::from(start_lsn), u64::from(end_lsn));
+    fn path_for(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tag: RelTag,
+        start_lsn: Lsn,
+        end_lsn: Lsn,
+    ) -> PathBuf {
+        let fname = format!(
+            "{}_{}_{}_{}_{:016X}_{:016X}",
+            tag.spcnode,
+            tag.dbnode,
+            tag.relnode,
+            tag.forknum,
+            u64::from(start_lsn),
+            u64::from(end_lsn)
+        );
 
-        conf.timeline_path(timelineid).join("inmemory-storage").join(&fname)
+        conf.timeline_path(timelineid)
+            .join("inmemory-storage")
+            .join(&fname)
     }
-    
+
     fn relsizes_path(path: &Path) -> PathBuf {
         let mut fname = path.file_name().unwrap().to_os_string();
         fname.push("_relsizes");
@@ -324,7 +356,6 @@ impl SnapshotFile {
     /// The file will include all page versions, all the history. Overwrites any existing file.
     ///
     pub fn save(&self) -> Result<()> {
-
         let path = self.path();
 
         let page_versions = self.page_versions.lock().unwrap();
@@ -346,7 +377,6 @@ impl SnapshotFile {
     }
 
     pub fn freeze(&self, end_lsn: Lsn) -> SnapshotFile {
-
         let page_versions = self.page_versions.lock().unwrap();
         let relsizes = self.relsizes.lock().unwrap();
 
@@ -368,7 +398,12 @@ impl SnapshotFile {
         }
     }
 
-    pub fn find_latest_snapshot_file(conf: &'static PageServerConf, timelineid: ZTimelineId, tag: RelTag, lsn: Lsn) -> Result<Option<(Lsn, Lsn)>> {
+    pub fn find_latest_snapshot_file(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tag: RelTag,
+        lsn: Lsn,
+    ) -> Result<Option<(Lsn, Lsn)>> {
         // Scan the 'inmemory-storage' directory to get all rels in this timeline.
         let path = conf.timeline_path(timelineid).join("inmemory-storage");
         let mut result_start_lsn = Lsn(0);
@@ -396,11 +431,18 @@ impl SnapshotFile {
     ///
     /// Load the state for one relation back into memory.
     ///
-    pub fn load(conf: &'static PageServerConf, timelineid: ZTimelineId, tag: RelTag, lsn: Lsn) -> Result<Option<SnapshotFile>> {
+    pub fn load(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tag: RelTag,
+        lsn: Lsn,
+    ) -> Result<Option<SnapshotFile>> {
         let page_versions;
         let relsizes;
 
-        if let Some((start_lsn, end_lsn)) = Self::find_latest_snapshot_file(conf, timelineid, tag, lsn)? {
+        if let Some((start_lsn, end_lsn)) =
+            Self::find_latest_snapshot_file(conf, timelineid, tag, lsn)?
+        {
             let path = Self::path_for(conf, timelineid, tag, start_lsn, end_lsn);
             let content = std::fs::read(&path)?;
             page_versions = BTreeMap::des(&content)?;
@@ -426,10 +468,17 @@ impl SnapshotFile {
     ///
     /// Load the state for one relation back into memory.
     ///
-    pub fn create(conf: &'static PageServerConf, timelineid: ZTimelineId, tag: RelTag, ancestor_lsn: Lsn) -> Result<SnapshotFile> {
+    pub fn create(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tag: RelTag,
+        ancestor_lsn: Lsn,
+    ) -> Result<SnapshotFile> {
         // Scan the directory for latest existing file
         let startlsn;
-        if let Some((_start, end)) = Self::find_latest_snapshot_file(conf, timelineid, tag, Lsn(u64::MAX))? {
+        if let Some((_start, end)) =
+            Self::find_latest_snapshot_file(conf, timelineid, tag, Lsn(u64::MAX))?
+        {
             startlsn = end;
         } else {
             startlsn = ancestor_lsn;
@@ -438,7 +487,10 @@ impl SnapshotFile {
         let page_versions;
         let relsizes;
 
-        debug!("initializing new SnapshotFile for writing {} on timeline {}", tag, timelineid);
+        debug!(
+            "initializing new SnapshotFile for writing {} on timeline {}",
+            tag, timelineid
+        );
         page_versions = BTreeMap::new();
         relsizes = BTreeMap::new();
 
@@ -454,14 +506,20 @@ impl SnapshotFile {
         })
     }
 
-
     ///
     /// Initialize new SnapshotFile for writing, copying from given previous SnapshotFile
     ///
-    pub fn copy_snapshot(conf: &'static PageServerConf,
-                         walredo_mgr: &dyn WalRedoManager,
-                         src: &SnapshotFile, timelineid: ZTimelineId, lsn: Lsn) -> Result<SnapshotFile> {
-        debug!("initializing new SnapshotFile for writing {} on timeline {}", src.tag, timelineid);
+    pub fn copy_snapshot(
+        conf: &'static PageServerConf,
+        walredo_mgr: &dyn WalRedoManager,
+        src: &SnapshotFile,
+        timelineid: ZTimelineId,
+        lsn: Lsn,
+    ) -> Result<SnapshotFile> {
+        debug!(
+            "initializing new SnapshotFile for writing {} on timeline {}",
+            src.tag, timelineid
+        );
         let mut page_versions = BTreeMap::new();
         let mut relsizes = BTreeMap::new();
 
@@ -489,7 +547,12 @@ impl SnapshotFile {
         })
     }
 
-    pub fn list_rels(conf: &'static PageServerConf, timelineid: ZTimelineId, spcnode: u32, dbnode: u32) -> Result<HashSet<RelTag>> {
+    pub fn list_rels(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        spcnode: u32,
+        dbnode: u32,
+    ) -> Result<HashSet<RelTag>> {
         let mut rels: HashSet<RelTag> = HashSet::new();
 
         // Scan the 'inmemory-storage' directory to get all rels in this timeline.
@@ -501,10 +564,11 @@ impl SnapshotFile {
             let fname = fname.to_str().unwrap();
 
             if let Ok((reltag, _start_lsn, _end_lsn)) = Self::fname_to_tag(fname) {
-                if (spcnode == 0 || reltag.spcnode == spcnode) &&
-                    (dbnode == 0 || reltag.dbnode == dbnode) {
-                        rels.insert(reltag);
-                    }
+                if (spcnode == 0 || reltag.spcnode == spcnode)
+                    && (dbnode == 0 || reltag.dbnode == dbnode)
+                {
+                    rels.insert(reltag);
+                }
             }
         }
         Ok(rels)
@@ -525,7 +589,7 @@ impl SnapshotFile {
             let start_lsn = Lsn::from_hex(caps.name("startlsn").unwrap().as_str())?;
             let end_lsn = Lsn::from_hex(caps.name("endlsn").unwrap().as_str())?;
 
-            Ok ((reltag, start_lsn, end_lsn))
+            Ok((reltag, start_lsn, end_lsn))
         } else {
             bail!("unexpected filename");
         }

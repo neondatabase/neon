@@ -36,7 +36,7 @@ struct CfgFileParams {
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     pg_distrib_dir: Option<String>,
-    repository_format: Option<String>
+    repository_format: Option<String>,
 }
 
 impl CfgFileParams {
@@ -102,7 +102,10 @@ impl CfgFileParams {
         let repository_format = match self.repository_format.as_ref() {
             Some(repo_format_str) if repo_format_str == "rocksdb" => RepositoryFormat::RocksDb,
             Some(repo_format_str) if repo_format_str == "inmemory" => RepositoryFormat::InMemory,
-            Some(repo_format_str) => anyhow::bail!("invalid --repository-format '{}', must be 'rocksdb' or 'inmemory'", repo_format_str),
+            Some(repo_format_str) => anyhow::bail!(
+                "invalid --repository-format '{}', must be 'rocksdb' or 'inmemory'",
+                repo_format_str
+            ),
             None => RepositoryFormat::InMemory, // default
         };
 

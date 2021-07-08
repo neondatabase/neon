@@ -24,11 +24,17 @@ pub fn init(conf: &'static PageServerConf) {
 
     // we have already changed current dir to the repository.
     let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
-        RepositoryFormat::InMemory => Arc::new(InMemoryRepository::new(conf, Arc::new(walredo_mgr))),
+        RepositoryFormat::InMemory => {
+            Arc::new(InMemoryRepository::new(conf, Arc::new(walredo_mgr)))
+        }
         RepositoryFormat::RocksDb => {
             let obj_store = RocksObjectStore::open(conf).unwrap();
 
-            Arc::new(ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr)))
+            Arc::new(ObjectRepository::new(
+                conf,
+                Arc::new(obj_store),
+                Arc::new(walredo_mgr),
+            ))
         }
     };
 

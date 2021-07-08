@@ -303,7 +303,10 @@ mod tests {
         buf.freeze()
     }
 
-    fn get_test_repo(test_name: &str, repository_format: RepositoryFormat) -> Result<Box<dyn Repository>> {
+    fn get_test_repo(
+        test_name: &str,
+        repository_format: RepositoryFormat,
+    ) -> Result<Box<dyn Repository>> {
         let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
         let _ = fs::remove_dir_all(&repo_dir);
         fs::create_dir_all(&repo_dir)?;
@@ -326,11 +329,18 @@ mod tests {
         let walredo_mgr = TestRedoManager {};
 
         let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
-            RepositoryFormat::InMemory => Box::new(inmemory::InMemoryRepository::new(conf, Arc::new(walredo_mgr))),
+            RepositoryFormat::InMemory => Box::new(inmemory::InMemoryRepository::new(
+                conf,
+                Arc::new(walredo_mgr),
+            )),
             RepositoryFormat::RocksDb => {
                 let obj_store = RocksObjectStore::create(conf)?;
 
-                Box::new(ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr)))
+                Box::new(ObjectRepository::new(
+                    conf,
+                    Arc::new(obj_store),
+                    Arc::new(walredo_mgr),
+                ))
             }
         };
 
@@ -518,7 +528,7 @@ mod tests {
         // Create another relation
         let buftag2 = BufferTag {
             rel: TESTREL_B,
-            blknum : 0,
+            blknum: 0,
         };
         tline.put_page_image(buftag2, Lsn(2), TEST_IMG("foobar blk 0 at 2"))?;
 
@@ -548,10 +558,7 @@ mod tests {
             TEST_IMG("foobar blk 0 at 2")
         );
 
-        assert_eq!(
-            newtline.get_rel_size(TESTREL_B, Lsn(4))?,
-            1
-        );
+        assert_eq!(newtline.get_rel_size(TESTREL_B, Lsn(4))?, 1);
 
         Ok(())
     }
