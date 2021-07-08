@@ -1,3 +1,11 @@
+# Seccomp BPF is only available for Linux
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+	SECCOMP = --with-libseccomp
+else
+	SECCOMP =
+endif
+
 #
 # Top level Makefile to build Zenith and PostgreSQL
 #
@@ -21,8 +29,12 @@ tmp_install/build/config.status:
 	+@echo "Configuring postgres build"
 	mkdir -p tmp_install/build
 	(cd tmp_install/build && \
-	../../vendor/postgres/configure CFLAGS='-O0 $(CFLAGS)' --enable-debug --enable-cassert \
-	    --enable-depend --prefix=$(abspath tmp_install) > configure.log)
+	../../vendor/postgres/configure CFLAGS='-O0 -g3 $(CFLAGS)' \
+		--enable-cassert \
+		--enable-debug \
+		--enable-depend \
+		$(SECCOMP) \
+		--prefix=$(abspath tmp_install) > configure.log)
 
 # nicer alias for running 'configure'
 postgres-configure: tmp_install/build/config.status
