@@ -6,22 +6,18 @@ use log::*;
 use serde::{Deserialize, Serialize};
 use std::{
     env,
-    fs::{File, OpenOptions},
-    io,
-    net::TcpListener,
+    net::{TcpListener},
     path::{Path, PathBuf},
     process::exit,
     thread,
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use slog::{Drain, FnValue};
-
-use pageserver::{branches, page_cache, page_service, tui, PageServerConf};
+use pageserver::{branches, page_cache, page_service, tui, logger, PageServerConf};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 
@@ -219,18 +215,9 @@ fn main() -> Result<()> {
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
-    let log_filename = "pageserver.log";
-    // Don't open the same file for output multiple times;
-    // the different fds could overwrite each other's output.
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_filename)
-        .with_context(|| format!("failed to open {:?}", &log_filename))?;
 
     // Initialize logger
-    let logger_file = log_file.try_clone().unwrap();
-    let _scope_guard = init_logging(&conf, logger_file)?;
+    let (_scope_guard, log_file) = logger::init_logging(&conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;
 
     // Note: this `info!(...)` macro comes from `log` crate
@@ -296,56 +283,4 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn init_logging(
-    conf: &PageServerConf,
-    log_file: File,
-) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
-    if conf.interactive {
-        Ok(tui::init_logging())
-    } else if conf.daemonize {
-        let decorator = slog_term::PlainSyncDecorator::new(log_file);
-        let drain = slog_term::FullFormat::new(decorator).build();
-        let drain = slog::Filter::new(drain, |record: &slog::Record| {
-            if record.level().is_at_least(slog::Level::Info) {
-                return true;
-            }
-            false
-        });
-        let drain = std::sync::Mutex::new(drain).fuse();
-        let logger = slog::Logger::root(
-            drain,
-            slog::o!(
-                "location" =>
-                FnValue(move |record| {
-                    format!("{}, {}:{}",
-                            record.module(),
-                            record.file(),
-                            record.line()
-                            )
-                    }
-                )
-            ),
-        );
-        Ok(slog_scope::set_global_logger(logger))
-    } else {
-        let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
-        let drain = slog::Filter::new(drain, |record: &slog::Record| {
-            if record.level().is_at_least(slog::Level::Info) {
-                return true;
-            }
-            if record.level().is_at_least(slog::Level::Debug)
-                && record.module().starts_with("pageserver")
-            {
-                return true;
-            }
-            false
-        })
-        .fuse();
-        let logger = slog::Logger::root(drain, slog::o!());
-        Ok(slog_scope::set_global_logger(logger))
-    }
 }

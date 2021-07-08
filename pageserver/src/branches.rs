@@ -19,6 +19,9 @@ use std::{
 };
 use zenith_utils::lsn::Lsn;
 
+use log::*;
+
+use crate::logger;
 use crate::page_cache;
 use crate::restore_local_repo;
 use crate::{repository::Repository, PageServerConf, ZTimelineId};
@@ -44,6 +47,13 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
 
     env::set_current_dir(repo_dir)?;
+
+    // Initialize logger
+    let (_scope_guard, _log_file) = logger::init_logging(&conf, "pageserver.log")?;
+    let _log_guard = slog_stdlog::init()?;
+
+    // Note: this `info!(...)` macro comes from `log` crate
+    info!("standard logging redirected to slog");
 
     fs::create_dir(std::path::Path::new("timelines"))?;
     fs::create_dir(std::path::Path::new("refs"))?;
