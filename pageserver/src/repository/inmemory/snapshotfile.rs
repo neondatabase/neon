@@ -131,7 +131,7 @@ impl SnapshotFile {
 
         // If we needed a base image to apply the WAL records against, we should have found it in memory.
         if let Some(lsn) = need_base_image_lsn {
-            bail!("No base image found for page {} blk {} at {}", self.tag, blknum, lsn);
+            bail!("No base image found for page {} blk {} at {}/{}", self.tag, blknum, self.timelineid, lsn);
         }
 
         // If we have a page image, and no WAL, we're all set

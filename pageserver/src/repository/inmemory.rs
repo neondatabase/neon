@@ -273,7 +273,7 @@ impl Timeline for InMemoryTimeline {
         info!("get_page_at_lsn: {:?} at {}", tag, lsn);
         let lsn = self.wait_lsn(lsn)?;
 
-        if let Some(snapfile) = self.get_snapshot_file_for_read(tag.rel, lsn)? {
+        if let Some((snapfile, lsn)) = self.get_snapshot_file_for_read(tag.rel, lsn)? {
             snapfile.get_page_at_lsn(&*self.walredo_mgr, tag.blknum, lsn)
         } else {
             bail!("relation {} not found at {}", tag.rel, lsn);
@@ -283,12 +283,12 @@ impl Timeline for InMemoryTimeline {
     fn get_rel_size(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
         let lsn = self.wait_lsn(lsn)?;
 
-        if let Some(snapfile) = self.get_snapshot_file_for_read(rel, lsn)? {
+        if let Some((snapfile, lsn)) = self.get_snapshot_file_for_read(rel, lsn)? {
             let result = snapfile.get_relsize(lsn);
-            info!("get_relsize: {:?} at {} -> {:?}", rel, lsn, result);
+            info!("get_relsize: rel {} at {}/{} -> {:?}", rel, self.timelineid, lsn, result);
             result
         } else {
-            info!("get_relsize: {:?} at {} -> not found", rel, lsn);
+            info!("get_relsize: rel {} at {}/{} -> not found", rel, self.timelineid, lsn);
             bail!("relation {} not found at {}", rel, lsn);
         }
     }
@@ -297,7 +297,7 @@ impl Timeline for InMemoryTimeline {
         let lsn = self.wait_lsn(lsn)?;
 
         let result;
-        if let Some(snapfile) = self.get_snapshot_file_for_read(rel, lsn)? {
+        if let Some((snapfile, lsn)) = self.get_snapshot_file_for_read(rel, lsn)? {
             result = snapfile.exists(lsn)?;
         } else {
             result = false;
@@ -498,11 +498,13 @@ impl InMemoryTimeline {
     /// The returned SnapshotFile might be from an ancestor timeline, if the
     /// relation hasn't been updated on this timeline yet.
     ///
-    fn get_snapshot_file_for_read(&self, tag: RelTag, lsn: Lsn) -> Result<Option<Arc<SnapshotFile>>> {
+    fn get_snapshot_file_for_read(&self, tag: RelTag, lsn: Lsn) -> Result<Option<(Arc<SnapshotFile>, Lsn)>> {
         // First dig the right ancestor timeline
         let mut timeline = self;
         let mut lsn = lsn;
+        trace!("get_snapshot_file_for_read called for {} at {}/{}", tag, self.timelineid, lsn);
         while lsn < timeline.ancestor_lsn {
+            trace!("going into ancestor {} ", timeline.ancestor_lsn);
             timeline = &timeline.ancestor_timeline.as_ref().unwrap();
         }
         loop {
@@ -513,19 +515,22 @@ impl InMemoryTimeline {
             // but there is a newere snapshot file on disk, this will incorrectly
             // return the older entry from memory.
             if let Some(snapfile) = snapfiles.get(tag, lsn) {
-                return Ok(Some(snapfile.clone()))
+                trace!("found snapshot file in memory: {}", snapfile.start_lsn);
+                return Ok(Some((snapfile.clone(), lsn)))
             } else {
                 // No SnaphotFile in memory for this relation yet. Read it from disk.
                 if let Some(snapfile) = SnapshotFile::load(timeline.conf, timeline.timelineid, tag, lsn)? {
+                    trace!("found snapshot file on disk: {}-{}", snapfile.start_lsn, snapfile.end_lsn);
                     let snapfile_rc = snapfiles.insert(snapfile);
 
-                    return Ok(Some(snapfile_rc))
+                    return Ok(Some((snapfile_rc, lsn)))
                 } else {
                     // No snapshot files for this relation on this timeline. But there might still
                     // be one on the ancestor timeline
                     if let Some(ancestor) = &timeline.ancestor_timeline {
                         lsn = timeline.ancestor_lsn;
                         timeline = &ancestor.as_ref();
+                        trace!("recursing into ancestor at {}/{}", timeline.timelineid, lsn);
                         continue;
                     }
                     return Ok(None);
@@ -563,18 +568,22 @@ impl InMemoryTimeline {
         drop(snapfiles);
 
         let snapfile;
-        if let Some(prev_snapfile) = self.get_snapshot_file_for_read(tag, lsn)? {
+        if let Some((prev_snapfile, _prev_lsn)) = self.get_snapshot_file_for_read(tag, lsn)? {
             // Create new entry after the previous one.
             let lsn;
             if prev_snapfile.timelineid != self.timelineid {
                 // First modification on this timeline
                 lsn = self.ancestor_lsn;
+                trace!("creating file for write for {} at branch point {}/{}", tag, self.timelineid, lsn);
             } else {
                 lsn = prev_snapfile.end_lsn;
+                trace!("creating file for write for {} after previous snapfile {}/{}", tag, self.timelineid, lsn);
             }
+            trace!("prev snapfile is at {}/{} - {}", prev_snapfile.timelineid, prev_snapfile.start_lsn, prev_snapfile.end_lsn);
             snapfile = SnapshotFile::copy_snapshot(self.conf, &*self.walredo_mgr, &prev_snapfile, self.timelineid, lsn)?;
         } else {
             // New relation.
+            trace!("creating file for write for new rel {} at {}/{}", tag, self.timelineid, lsn);
             snapfile = SnapshotFile::create(self.conf, self.timelineid, tag, lsn)?;
         }
 
