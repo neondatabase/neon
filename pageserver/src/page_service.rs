@@ -601,8 +601,6 @@ impl postgres_backend::Handler for PageServerHandler {
             let mut it = query_str.split(' ');
             it.next().unwrap();
 
-            println!("request_export query {}", query_str);
-
             let timelineid_str = it
                 .next()
                 .ok_or_else(|| anyhow!("missing timeline id"))?;
@@ -641,13 +639,12 @@ impl postgres_backend::Handler for PageServerHandler {
                         bucket_name: bucket_name.to_string(),
                     };
         
-                    println!("request_export {} {} {} {} {}",
+                    trace!("request_export {} {} {} {}",
                     bucket_name,
                     s3_region, s3_endpoint, 
-                    s3_accesskey, s3_secret
-                    );
+                    s3_accesskey);
         
-                    basebackup::send_files_to_s3(s3_storage, timeline_id).unwrap();
+                    basebackup::send_files_to_s3(s3_storage, timeline_id)?;
         
                 },
                 "fs" => bail!("fs snapshot is not implemented yet"),

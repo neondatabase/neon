@@ -496,15 +496,7 @@ fn handle_export(export_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> 
         "s3" => {
             let bucket_name = s.next().unwrap();
 
-            let s3_storage = S3Storage::new_from_env(bucket_name).unwrap();
-
-            println!("send request_export {} {} {} {} {} {}",
-                timeline_id,
-                snapshot_path,
-                s3_storage.region,
-                s3_storage.endpoint,
-                s3_storage.access_key,
-                s3_storage.secret_key);
+            let s3_storage = S3Storage::new_from_env(bucket_name)?;
 
             client.simple_query(&format!("request_export {} {} {} {} {} {}",
                 timeline_id,
@@ -526,9 +518,6 @@ fn handle_export(export_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> 
         },
         _ => bail!("unknown snaphot-path prefix: {}", prefix)
     }
-
-
-
 
     Ok(())
 }

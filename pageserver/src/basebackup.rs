@@ -364,13 +364,13 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
         .get_timeline(timeline_id)?
         .get_last_record_lsn();
 
-    println!("pushing at end of WAL: {}", end_of_wal_lsn);
+    info!("pushing at end of WAL: {}", end_of_wal_lsn);
 
      // Create pgdata subdirs structure
      for i in 0..pg_constants::PGDATA_SUBDIRS.len() {
         let relative_path = format!("{}/",pg_constants::PGDATA_SUBDIRS[i]);
 
-        s3_storage.put_object(relative_path.to_string(), &[]);
+        s3_storage.put_object(relative_path.to_string(), &[])?;
 
     }
 
@@ -379,13 +379,13 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
     {
         let (_, snapshotdir) = branches::find_latest_snapshot(repo.get_conf(), timeline_id)?;
 
-        println!("get config from timelinedir {:?}", snapshotdir);
+        trace!("get config from timelinedir {:?}", snapshotdir);
         let relative_path = pg_constants::PGDATA_SPECIAL_FILES[i];
         let mut file = File::open(&snapshotdir.join(relative_path))?;
         let mut content = Vec::new();
         file.read_to_end(&mut content)?;
 
-        s3_storage.put_object(relative_path.to_string(), &content[..]);
+        s3_storage.put_object(relative_path.to_string(), &content[..])?;
 
     }
 
@@ -399,8 +399,8 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
     };
 
     for rel in rels {
-        let nblocks = timeline.get_rel_size(rel, end_of_wal_lsn)?;
-        println!("relation {} has nblocks {}. segsize {}", rel, nblocks,
+        let nblocks = timeline.get_rel_size(rel, end_of_wal_lsn).unwrap_or(0);
+        trace!("relation {} has nblocks {}. segsize {}", rel, nblocks,
          (pg_constants::RELSEG_SIZE * pg_constants::BLCKSZ as u32));
 
         for blknum in 0..nblocks {
@@ -424,7 +424,7 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
 
                 debug!("writing segno {} segname {} ", segno, segname);
                 
-                s3_storage.put_object(segname, &state.buf.as_slice());
+                s3_storage.put_object(segname, &state.buf.as_slice())?;
 
                 state.buf = Vec::new();
             }
@@ -462,7 +462,7 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
                         // send block to s3
                         trace!("send segname {}", segname);
 
-                        s3_storage.put_object(segname, &state.buf.as_slice());
+                        s3_storage.put_object(segname, &state.buf.as_slice())?;
                         state.buf = Vec::new();
                     }
 
@@ -483,22 +483,22 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
                     format!("base/{}/pg_filenode.map", db.dbnode)
                 };
                 assert!(img.len() == 512);
-                s3_storage.put_object(path, &img[..]);
+                s3_storage.put_object(path, &img[..])?;
 
                 const MESSAGE: &str = "14";
 
                 if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
                     let pg_version_path = "PG_VERSION";
-                    s3_storage.put_object(pg_version_path.to_string(), MESSAGE.as_bytes());
+                    s3_storage.put_object(pg_version_path.to_string(), MESSAGE.as_bytes())?;
 
                     let pg_version_path = "global/PG_VERSION";
-                    s3_storage.put_object(pg_version_path.to_string(), MESSAGE.as_bytes());
+                    s3_storage.put_object(pg_version_path.to_string(), MESSAGE.as_bytes())?;
 
                 } else {
                     // User defined tablespaces are not supported
                     assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
                     let pg_version_path = format!("base/{}/PG_VERSION", db.dbnode);
-                    s3_storage.put_object(pg_version_path, MESSAGE.as_bytes());
+                    s3_storage.put_object(pg_version_path, MESSAGE.as_bytes())?;
                 };
 
             },
@@ -513,7 +513,7 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
                     let crc = crc32c::crc32c(&img[..]);
                     buf.put_u32_le(crc);
                     let path = format!("pg_twophase/{:>08X}", prepare.xid);
-                    s3_storage.put_object(path, &buf[..]);
+                    s3_storage.put_object(path, &buf[..])?;
                 }
             }
             _ => {}
@@ -524,7 +524,7 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
         // is there is some incompleted segment
         let segname = format!("{}/{:>04X}", state.path, state.segno);
         // send block to s3
-        s3_storage.put_object(segname, &state.buf[..]);
+        s3_storage.put_object(segname, &state.buf[..])?;
     }
 
     let checkpoint_bytes = timeline
@@ -564,7 +564,7 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
     let pg_control_bytes = pg_control.encode();
     let pg_control_path = "global/pg_control";
 
-    s3_storage.put_object(pg_control_path.to_string(), &pg_control_bytes[..]);
+    s3_storage.put_object(pg_control_path.to_string(), &pg_control_bytes[..])?;
 
     //send wal segment
     let wal_file_name = XLogFileName(
@@ -574,7 +574,7 @@ pub fn send_files_to_s3(s3_storage: S3Storage, timeline_id: ZTimelineId) -> anyh
     );
     let wal_file_path = format!("pg_wal/{}", wal_file_name);
     let wal_seg = generate_wal_segment(&pg_control);
-    s3_storage.put_object(wal_file_path, &wal_seg[..]);
+    s3_storage.put_object(wal_file_path, &wal_seg[..])?;
     Ok(())
 }
 

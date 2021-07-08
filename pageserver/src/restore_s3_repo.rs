@@ -23,10 +23,10 @@ pub fn import_timeline_from_postgres_s3(
     timeline: &dyn Timeline,
     lsn: Lsn,
 ) -> Result<()> {
-    let s3_storage = S3Storage::new_from_env(bucket_name).unwrap();
+    let s3_storage = S3Storage::new_from_env(bucket_name)?;
 
     // List out contents of directory
-    let results = s3_storage.list_bucket("global/".to_string()).unwrap();
+    let results = s3_storage.list_bucket("global/".to_string())?;
 
     for result in results {
         for object in result.contents {
@@ -60,10 +60,10 @@ pub fn import_timeline_from_postgres_s3(
                 )?,
 
                 // Load any relation files into the page server
-                _ => import_relfile_from_s3(
+                Some(relpath) => import_relfile_from_s3(
                     &s3_storage,
                     &key,
-                    &relpath.unwrap(),
+                    &relpath,
                     timeline,
                     lsn,
                     pg_constants::GLOBALTABLESPACE_OID,
@@ -75,13 +75,13 @@ pub fn import_timeline_from_postgres_s3(
 
     // // Scan 'base'. It contains database dirs, the database OID is the filename.
     // // E.g. 'base/12345', where 12345 is the database OID.
-    let results = s3_storage.list_bucket("base/".to_string()).unwrap();
+    let results = s3_storage.list_bucket("base/".to_string())?;
     for result in results {
         for object in result.contents {
             // Download every relation file, slurping them into memory
 
             let key = object.key;
-            let dbpath = key.strip_prefix("base/").unwrap();
+            let dbpath = key.strip_prefix("base/").ok_or(FilePathError::InvalidFileName)?;
 
             let mut s = dbpath.split('/');
             let dboid_str = s.next().ok_or(FilePathError::InvalidFileName)?;
@@ -106,10 +106,10 @@ pub fn import_timeline_from_postgres_s3(
                 )?,
 
                 // Load any relation files into the page server
-                _ => import_relfile_from_s3(
+                Some(relpath) => import_relfile_from_s3(
                     &s3_storage,
                     &key,
-                    &relpath.unwrap(),
+                    &relpath,
                     timeline,
                     lsn,
                     pg_constants::DEFAULTTABLESPACE_OID,
@@ -119,7 +119,7 @@ pub fn import_timeline_from_postgres_s3(
         }
     }
 
-    let results = s3_storage.list_bucket("pg_xact/".to_string()).unwrap();
+    let results = s3_storage.list_bucket("pg_xact/".to_string())?;
     for result in results {
         for object in result.contents {
             let key = object.key;
@@ -137,8 +137,7 @@ pub fn import_timeline_from_postgres_s3(
     }
 
     let results = s3_storage
-        .list_bucket("pg_multixact/members/".to_string())
-        .unwrap();
+        .list_bucket("pg_multixact/members/".to_string())?;
     for result in results {
         for object in result.contents {
             let key = object.key;
@@ -156,8 +155,7 @@ pub fn import_timeline_from_postgres_s3(
     }
 
     let results = s3_storage
-        .list_bucket("pg_multixact/offsets/".to_string())
-        .unwrap();
+        .list_bucket("pg_multixact/offsets/".to_string())?;
     for result in results {
         for object in result.contents {
             let key = object.key;
@@ -174,7 +172,7 @@ pub fn import_timeline_from_postgres_s3(
         }
     }
 
-    let results = s3_storage.list_bucket("pg_twophase/".to_string()).unwrap();
+    let results = s3_storage.list_bucket("pg_twophase/".to_string())?;
     for result in results {
         for object in result.contents {
             let key = object.key;
@@ -212,10 +210,10 @@ fn import_relfile_from_s3(
         warn!("unrecognized file in snapshot: {:?} ({})", path, e);
         return Err(e.into());
     }
-    let (relnode, forknum, segno) = p.unwrap();
+    let (relnode, forknum, segno) = p?;
 
     //Retrieve file from s3
-    let data = s3_storage.get_object(path).unwrap();
+    let data = s3_storage.get_object(path)?;
     let mut bytes = BytesMut::from(data.as_slice()).freeze();
 
     let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
@@ -245,7 +243,7 @@ fn import_nonrel_file_from_s3(
     path: &str,
 ) -> Result<()> {
     // read the whole file
-    let data = s3_storage.get_object(path).unwrap();
+    let data = s3_storage.get_object(path)?;
 
     timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&data[..]))?;
     Ok(())
@@ -259,7 +257,7 @@ fn import_slru_file_from_s3(
     path: &str,
     filename: &str,
 ) -> Result<()> {
-    let data = s3_storage.get_object(path).unwrap();
+    let data = s3_storage.get_object(path)?;
     let mut bytes = BytesMut::from(data.as_slice()).freeze();
 
     let segno = u32::from_str_radix(filename, 16)?;
@@ -275,10 +273,10 @@ fn import_slru_file_from_s3(
 
 // Returns checkpoint LSN from controlfile
 pub fn get_lsn_from_controlfile_s3(bucket_name: &str) -> Result<Lsn> {
-    let s3_storage = S3Storage::new_from_env(bucket_name).unwrap();
+    let s3_storage = S3Storage::new_from_env(bucket_name)?;
     let path = "global/pg_control";
 
-    let controlfile = ControlFileData::decode(&s3_storage.get_object(path).unwrap())?;
+    let controlfile = ControlFileData::decode(&s3_storage.get_object(path)?)?;
     let lsn = controlfile.checkPoint;
 
     Ok(Lsn(lsn))
