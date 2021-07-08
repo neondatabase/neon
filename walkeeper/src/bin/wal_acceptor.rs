@@ -8,7 +8,6 @@ use log::*;
 use parse_duration::parse;
 use slog::Drain;
 use std::io;
-use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -74,7 +73,7 @@ fn main() -> Result<()> {
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
-        listen_addr: "127.0.0.1:5454".parse()?,
+        listen_addr: "localhost:5454".to_string(),
         ttl: None,
         recall_period: None,
     };
@@ -95,17 +94,11 @@ fn main() -> Result<()> {
     }
 
     if let Some(addr) = arg_matches.value_of("listen") {
-        // TODO: keep addr vector in config and listen them all
-        // XXX: with our callmemaybe approach we need to set 'advertised address'
-        // as it is not always possible to listen it. Another reason to ditch callmemaybe.
-        let addrs: Vec<_> = addr.to_socket_addrs().unwrap().collect();
-        conf.listen_addr = addrs[0];
+        conf.listen_addr = addr.to_owned();
     }
 
     if let Some(addr) = arg_matches.value_of("pageserver") {
-        // TODO: keep addr vector in config and check them all while connecting
-        let addrs: Vec<_> = addr.to_socket_addrs().unwrap().collect();
-        conf.pageserver_addr = Some(addrs[0]);
+        conf.pageserver_addr = Some(addr.to_owned());
     }
 
     if let Some(ttl) = arg_matches.value_of("ttl") {

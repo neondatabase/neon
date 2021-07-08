@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
@@ -8,10 +8,11 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use postgres::{Client, NoTls};
+use postgres::{Config, NoTls};
 
 use crate::local_env::LocalEnv;
 use crate::read_pidfile;
+use zenith_utils::connstring::connection_address;
 use pageserver::branches::BranchInfo;
 
 //
@@ -21,7 +22,7 @@ use pageserver::branches::BranchInfo;
 //
 pub struct PageServerNode {
     pub kill_on_exit: bool,
-    pub listen_address: Option<SocketAddr>,
+    pub connection_config: Option<Config>,
     pub env: LocalEnv,
 }
 
@@ -29,15 +30,19 @@ impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
         PageServerNode {
             kill_on_exit: false,
-            listen_address: None, // default
+            connection_config: None, // default
             env: env.clone(),
         }
     }
 
-    pub fn address(&self) -> SocketAddr {
-        match self.listen_address {
-            Some(addr) => addr,
-            None => "127.0.0.1:64000".parse().unwrap(),
+    fn default_config() -> Config {
+        "postgresql://no_user@localhost:64000/no_db".parse().unwrap()
+    }
+
+    pub fn connection_config(&self) -> Config {
+        match &self.connection_config {
+            Some(config) => config.clone(),
+            None => Self::default_config(),
         }
     }
 
@@ -74,7 +79,7 @@ impl PageServerNode {
     pub fn start(&self) -> Result<()> {
         println!(
             "Starting pageserver at '{}' in {}",
-            self.address(),
+            connection_address(&self.connection_config()),
             self.repo_path().display()
         );
 
@@ -116,42 +121,29 @@ impl PageServerNode {
         }
 
         // wait for pageserver stop
+        let address = connection_address(&self.connection_config());
         for _ in 0..5 {
-            let stream = TcpStream::connect(self.address());
+            let stream = TcpStream::connect(&address);
             thread::sleep(Duration::from_secs(1));
             if let Err(_e) = stream {
                 println!("Pageserver stopped");
                 return Ok(());
             }
-            println!("Stopping pageserver on {}", self.address());
+            println!("Stopping pageserver on {}", address);
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        let connstring = format!(
-            "host={} port={} dbname={} user={}",
-            self.address().ip(),
-            self.address().port(),
-            "no_db",
-            "no_user",
-        );
-        let mut client = Client::connect(connstring.as_str(), NoTls).unwrap();
+        let mut client = self.connection_config().connect(NoTls).unwrap();
 
         println!("Pageserver query: '{}'", sql);
         client.simple_query(sql).unwrap()
     }
 
     pub fn page_server_psql_client(&self) -> Result<postgres::Client, postgres::Error> {
-        let connstring = format!(
-            "host={} port={} dbname={} user={}",
-            self.address().ip(),
-            self.address().port(),
-            "no_db",
-            "no_user",
-        );
-        Client::connect(connstring.as_str(), NoTls)
+        self.connection_config().connect(NoTls)
     }
 
     pub fn branches_list(&self) -> Result<Vec<BranchInfo>> {
