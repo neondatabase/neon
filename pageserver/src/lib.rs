@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use std::fmt;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -27,7 +26,7 @@ pub mod walredo;
 pub struct PageServerConf {
     pub daemonize: bool,
     pub interactive: bool,
-    pub listen_addr: SocketAddr,
+    pub listen_addr: String,
     pub gc_horizon: u64,
     pub gc_period: Duration,
 

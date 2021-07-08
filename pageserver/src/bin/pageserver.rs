@@ -8,7 +8,7 @@ use std::{
     env,
     fs::{File, OpenOptions},
     io,
-    net::{SocketAddr, TcpListener},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::exit,
     thread,
@@ -65,11 +65,10 @@ impl CfgFileParams {
 
     /// Create a PageServerConf from these string parameters
     fn try_into_config(&self) -> Result<PageServerConf> {
-        let listen_addr: SocketAddr = self
-            .listen_addr
-            .as_deref()
-            .unwrap_or(DEFAULT_LISTEN_ADDR)
-            .parse()?;
+        let listen_addr = match self.listen_addr.as_ref() {
+            Some(addr) => addr.clone(),
+            None => DEFAULT_LISTEN_ADDR.to_owned(),
+        };
 
         let gc_horizon: u64 = match self.gc_horizon.as_ref() {
             Some(horizon_str) => horizon_str.parse()?,
@@ -272,7 +271,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
     // Check that we can bind to address before further initialization
     info!("Starting pageserver on {}", conf.listen_addr);
-    let pageserver_listener = TcpListener::bind(conf.listen_addr)?;
+    let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
 
     // Initialize page cache, this will spawn walredo_thread
     page_cache::init(conf);

@@ -305,7 +305,7 @@ mod tests {
             interactive: false,
             gc_horizon: 64 * 1024 * 1024,
             gc_period: Duration::from_secs(10),
-            listen_addr: "127.0.0.1:5430".parse().unwrap(),
+            listen_addr: "127.0.0.1:5430".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),
         };

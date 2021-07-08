@@ -14,6 +14,7 @@ use std::{
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
+use zenith_utils::connstring::connection_host_port;
 
 use crate::local_env::LocalEnv;
 use pageserver::ZTimelineId;
@@ -289,14 +290,15 @@ impl PostgresNode {
         // Connect it to the page server.
 
         // Configure that node to take pages from pageserver
+        let (host, port) = connection_host_port(&self.pageserver.connection_config());
         self.append_conf(
             "postgresql.conf",
             &format!(
                 "shared_preload_libraries = zenith \n\
                  zenith.page_server_connstring = 'host={} port={}'\n\
                  zenith.zenith_timeline='{}'\n",
-                self.pageserver.address().ip(),
-                self.pageserver.address().port(),
+                host,
+                port,
                 self.timelineid
             ),
         )?;

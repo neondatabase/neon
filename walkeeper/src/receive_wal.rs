@@ -4,8 +4,9 @@
 
 use anyhow::{bail, Result};
 use log::*;
-use postgres::{Client, NoTls};
+use postgres::{Client, Config, NoTls};
 use serde::{Deserialize, Serialize};
+use zenith_utils::connstring::connection_host_port;
 use std::cmp::{max, min};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -149,19 +150,18 @@ pub struct ReceiveWalConn {
 /// If pageserver already has replication channel, it will just ignore this request
 ///
 fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId) {
-    let addr = conf.pageserver_addr.unwrap();
-    let ps_connstr = format!(
-        "host={} port={} dbname={} user={}",
-        addr.ip(),
-        addr.port(),
-        "no_db",
-        "no_user",
-    );
+    let ps_addr = conf.pageserver_addr.unwrap();
+    let ps_connstr = format!("postgresql://no_user@{}/no_db", ps_addr);
+
+    // use Config parsing because SockAddr parsing doesnt allow to use host names instead of ip addresses
+    let me_connstr = format!("postgresql://no_user@{}/no_db", conf.listen_addr);
+    let me_conf: Config = me_connstr.parse().unwrap();
+    let (host, port) = connection_host_port(&me_conf);
     let callme = format!(
         "callmemaybe {} host={} port={} options='-c ztimelineid={}'",
         timelineid,
-        conf.listen_addr.ip(),
-        conf.listen_addr.port(),
+        host,
+        port,
         timelineid
     );
     loop {

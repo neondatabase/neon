@@ -16,7 +16,7 @@ use zenith_utils::postgres_backend::PostgresBackend;
 /// Accept incoming TCP connections and spawn them into a background thread.
 pub fn thread_main(conf: WalAcceptorConf) -> Result<()> {
     info!("Starting wal acceptor on {}", conf.listen_addr);
-    let listener = TcpListener::bind(conf.listen_addr).map_err(|e| {
+    let listener = TcpListener::bind(conf.listen_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_addr, e);
         e
     })?;
