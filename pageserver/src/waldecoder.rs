@@ -731,7 +731,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     // 5. Handle a few special record types that modify blocks without registering
     // them with the standard mechanism.
     if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
         if info == pg_constants::XLOG_HEAP_INSERT {
             let xlrec = XlHeapInsert::decode(&mut buf);
@@ -785,7 +785,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             }
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
             let xlrec = XlHeapMultiInsert::decode(&mut buf);
             if (xlrec.flags
