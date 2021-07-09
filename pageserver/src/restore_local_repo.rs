@@ -289,6 +289,8 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
 
     let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
+    // get_page_at_lsn_nowait returns pages with zeros when object is not found in the storage.
+    // nextXid can not be zero, so this check is used to detect situation when checkpoint record needs to be initialized.
     if checkpoint.nextXid.value == 0 {
         let pg_control_bytes =
             timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, startpoint)?;
@@ -505,9 +507,7 @@ pub fn save_decoded_record(
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_NEXTOID {
             let next_oid = buf.get_u32_le();
-            if next_oid > checkpoint.nextOid {
-                checkpoint.nextOid = next_oid;
-            }
+            checkpoint.nextOid = next_oid;
         } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
             || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
         {
@@ -764,10 +764,13 @@ fn save_multixact_create_record(
     if xlrec.moff + xlrec.nmembers > checkpoint.nextMultiOffset {
         checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
     }
-    let max_mbr_xid = xlrec
-        .members
-        .iter()
-        .fold(0u32, |acc, mbr| if mbr.xid > acc { mbr.xid } else { acc });
+    let max_mbr_xid = xlrec.members.iter().fold(0u32, |acc, mbr| {
+        if mbr.xid.wrapping_sub(acc) as i32 > 0 {
+            mbr.xid
+        } else {
+            acc
+        }
+    });
     checkpoint.update_next_xid(max_mbr_xid);
     Ok(())
 }

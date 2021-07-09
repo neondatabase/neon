@@ -190,6 +190,7 @@ fn walreceiver_main(
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                    // Save old checkpoint value to compare with it after decoding WAL record
                     let old_checkpoint_bytes = checkpoint.encode();
                     let decoded = decode_wal_record(recdata.clone());
                     restore_local_repo::save_decoded_record(
@@ -202,6 +203,7 @@ fn walreceiver_main(
                     last_rec_lsn = lsn;
 
                     let new_checkpoint_bytes = checkpoint.encode();
+                    // Check if checkpoint data was updated by save_decoded_record
                     if new_checkpoint_bytes != old_checkpoint_bytes {
                         timeline.put_page_image(
                             ObjectTag::Checkpoint,
