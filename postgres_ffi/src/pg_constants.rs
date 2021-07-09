@@ -42,6 +42,7 @@ pub const XLOG_XACT_ABORT_PREPARED: u8 = 0x40;
 
 /* mask for filtering opcodes out of xl_info */
 pub const XLOG_XACT_OPMASK: u8 = 0x70;
+pub const XLOG_HEAP_OPMASK: u8 = 0x70;
 /* does this record have a 'xinfo' field or not */
 pub const XLOG_XACT_HAS_INFO: u8 = 0x80;
 
