@@ -390,6 +390,13 @@ impl CheckPoint {
     }
 }
 
+//
+// Generate new WAL segment with single XLOG_CHECKPOINT_SHUTDOWN record.
+// We need this segment to start compute node.
+// In order to minimize changes in Postgres core, we prefer to
+// provide WAL segment from which is can extract checkpoint record in standard way,
+// rather then implement some alternative mechanism.
+//
 pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
     let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
 
