@@ -599,16 +599,16 @@ impl Timeline for ObjectTimeline {
 }
 
 impl ObjectTimeline {
-    fn get_page_at_lsn_nowait(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes> {
+    fn get_page_at_lsn_nowait(&self, tag: BufferTag, req_lsn: Lsn) -> Result<Bytes> {
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
         let searchkey = ObjectKey {
             timeline: self.timelineid,
             tag: ObjectTag::RelationBuffer(tag),
         };
-        let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
+        let mut iter = self.object_versions(&*self.obj_store, &searchkey, req_lsn)?;
 
-        if let Some((version_lsn, value)) = iter.next().transpose()? {
+        if let Some((lsn, value)) = iter.next().transpose()? {
             let page_img: Bytes;
 
             match ObjectValue::des_page(&value)? {
@@ -636,13 +636,13 @@ impl ObjectTimeline {
                 page_lsn_lo,
                 tag.rel,
                 tag.blknum,
-                version_lsn,
-                lsn
+                lsn,
+                req_lsn
             );
             return Ok(page_img);
         }
         static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-        trace!("page {} blk {} at {} not found", tag.rel, tag.blknum, lsn);
+        trace!("page {} blk {} at {} not found", tag.rel, tag.blknum, req_lsn);
         Ok(Bytes::from_static(&ZERO_PAGE))
         /* return Err("could not find page image")?; */
     }
