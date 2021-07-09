@@ -195,12 +195,19 @@ fn init_logging(
     if conf.daemonize {
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = slog::Filter::new(drain, |record: &slog::Record| {
+            record.level().is_at_least(slog::Level::Info)
+        });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());
         Ok(slog_scope::set_global_logger(logger))
     } else {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog::Filter::new(drain, |record: &slog::Record| {
+            record.level().is_at_least(slog::Level::Info)
+        })
+        .fuse();
         let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
         let logger = slog::Logger::root(drain, slog::o!());
         Ok(slog_scope::set_global_logger(logger))
