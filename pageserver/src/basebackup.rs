@@ -4,8 +4,8 @@
 //! TODO: this module has nothing to do with PostgreSQL pg_basebackup.
 //! It could use a better name.
 //!
-//! Stateless Postgres compute node is lauched by sending taball which contains on-relational data (multixacts, clog, filenodemaps, twophase files)
-//! and generate pg_control and dummy segment of WAL. This module is responsible for creation of such tarball from snapshot directry and
+//! Stateless Postgres compute node is launched by sending tarball which contains non-relational data (multixacts, clog, filenodemaps, twophase files)
+//! and generate pg_control and dummy segment of WAL. This module is responsible for creation of such tarball from snapshot directory and
 //! data stored in object storage.
 //!
 use crate::ZTimelineId;

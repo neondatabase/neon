@@ -317,9 +317,9 @@ impl PostgresRedoManagerInternal {
                         ObjectTag::Clog(slru) => slru.blknum,
                         ObjectTag::TwoPhase(_) => {
                             assert!(info == pg_constants::XLOG_XACT_PREPARE);
-							trace!("Apply prepare {} record", xlogrec.xl_xid);
-							page.clear();
-							page.extend_from_slice(&buf[..]);
+                            trace!("Apply prepare {} record", xlogrec.xl_xid);
+                            page.clear();
+                            page.extend_from_slice(&buf[..]);
                             continue;
                         }
                         _ => panic!("Not valid XACT object tag {:?}", tag),
@@ -371,7 +371,7 @@ impl PostgresRedoManagerInternal {
                     if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE
                         || info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE
                     {
-                        // Just need to ero page
+                        // Just need to zero page
                         page.copy_from_slice(&ZERO_PAGE);
                     } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                         let xlrec = XlMultiXactCreate::decode(&mut buf);
