@@ -303,8 +303,8 @@ impl Timeline for ObjectTimeline {
                 page_lsn_hi,
                 page_lsn_lo,
                 tag,
-                version_lsn,
-                lsn
+                lsn,
+                req_lsn
             );
             return Ok(page_img);
         }
