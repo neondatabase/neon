@@ -254,7 +254,7 @@ fn walreceiver_main(
                         tenantid,
                     )?;
 
-                    if newest_segno - oldest_segno >= 10 {
+                    if newest_segno - oldest_segno >= 1 {
                         timeline.checkpoint()?;
 
                         // TODO: This is where we could remove WAL older than last_rec_lsn.
