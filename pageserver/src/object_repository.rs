@@ -290,7 +290,7 @@ impl Timeline for ObjectTimeline {
                     // version. Otherwise we could opt to not do it, with the downside that
                     // the next GetPage@LSN call of the same page version would have to
                     // redo the WAL again.
-                    self.put_page_image(tag, lsn, page_img.clone())?;
+                    self.put_page_image(tag, lsn, page_img.clone(), false)?;
                 }
                 ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
                 _ => bail!("Invalid object kind, expected a page entry or SRLU truncate"),
@@ -469,11 +469,14 @@ impl Timeline for ObjectTimeline {
     ///
     /// Memorize a full image of a page version
     ///
-    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes) -> Result<()> {
+    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes, update_meta: bool) -> Result<()> {
         self.put_page_entry(&tag, lsn, PageEntry::Page(img))?;
 
         debug!("put_page_image rel {:?} at {}", tag, lsn);
 
+        if !update_meta {
+            return Ok(());
+        }
         if let ObjectTag::RelationBuffer(tag) = tag {
             // Also check if this created or extended the file
             let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
@@ -684,7 +687,7 @@ impl Timeline for ObjectTimeline {
                             if last_version {
                                 result.truncated += 1;
                                 last_version = false;
-                                if let Some(rel_size) = self.relsize_get_nowait(tag.rel, lsn)? {
+                                if let Some(rel_size) = self.relsize_get_nowait(tag.rel, last_lsn)? {
                                     if rel_size > tag.blknum {
                                         // preserve and materialize last version before deleting all preceeding
                                         self.get_page_at_lsn_nowait(obj, lsn)?;

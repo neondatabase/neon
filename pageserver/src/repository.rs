@@ -89,7 +89,7 @@ pub trait Timeline: Send + Sync {
     fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes) -> Result<()>;
+    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes, update_meta: bool) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
@@ -367,11 +367,11 @@ mod tests {
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
-        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"))?;
-        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
+        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
+        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"), true)?;
+        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"), true)?;
 
         tline.advance_last_valid_lsn(Lsn(5));
 
@@ -458,7 +458,7 @@ mod tests {
         for i in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", i, Lsn(lsn)));
             lsn += 1;
-            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img)?;
+            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img, true)?;
         }
         tline.advance_last_valid_lsn(Lsn(lsn));
 
@@ -502,7 +502,7 @@ mod tests {
         // add a page and advance the last valid LSN
         let rel = TESTREL_A;
         let tag = TEST_BUF(1);
-        tline.put_page_image(tag, Lsn(1), TEST_IMG("blk 1 @ lsn 1"))?;
+        tline.put_page_image(tag, Lsn(1), TEST_IMG("blk 1 @ lsn 1"), true)?;
         tline.advance_last_valid_lsn(Lsn(1));
         let mut snapshot = tline.history()?;
         assert_eq!(snapshot.lsn(), Lsn(1));
