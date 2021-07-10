@@ -203,7 +203,7 @@ fn import_relfile(
                     },
                     blknum,
                 });
-                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf), true)?;
             }
 
             // TODO: UnexpectedEof is expected
@@ -236,7 +236,7 @@ fn import_nonrel_file(
     // read the whole file
     file.read_to_end(&mut buffer)?;
 
-    timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]))?;
+    timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buffer[..]), false)?;
     Ok(())
 }
 
@@ -256,7 +256,7 @@ fn import_slru_file(
         let r = file.read_exact(&mut buf);
         match r {
             Ok(_) => {
-                timeline.put_page_image(gen_tag(blknum), lsn, Bytes::copy_from_slice(&buf))?;
+                timeline.put_page_image(gen_tag(blknum), lsn, Bytes::copy_from_slice(&buf), false)?;
             }
 
             // TODO: UnexpectedEof is expected
@@ -360,7 +360,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     }
     info!("reached end of WAL at {}", last_lsn);
     let checkpoint_bytes = checkpoint.encode();
-    timeline.put_page_image(ObjectTag::Checkpoint, last_lsn, checkpoint_bytes)?;
+    timeline.put_page_image(ObjectTag::Checkpoint, last_lsn, checkpoint_bytes, false)?;
     Ok(())
 }
 
@@ -579,7 +579,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
             debug!("copying block {:?} to {:?}", src_key, dst_key);
 
-            timeline.put_page_image(dst_key, lsn, content)?;
+            timeline.put_page_image(dst_key, lsn, content, false)?;
             num_blocks_copied += 1;
         }
 
@@ -600,7 +600,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
                         spcnode: tablespace_id,
                         dbnode: db_id,
                     });
-                    timeline.put_page_image(new_tag, lsn, img)?;
+                    timeline.put_page_image(new_tag, lsn, img, false)?;
                     break;
                 }
             }

@@ -209,6 +209,7 @@ fn walreceiver_main(
                             ObjectTag::Checkpoint,
                             lsn,
                             new_checkpoint_bytes,
+                            false,
                         )?;
                     }
                 }
