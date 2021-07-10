@@ -374,7 +374,7 @@ impl Timeline for ObjectTimeline {
     ///
     /// Memorize a full image of a page version
     ///
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
+    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes, update_meta: bool) -> Result<()> {
         self.put_page_entry(&tag, lsn, PageEntry::Page(img))?;
 
         debug!(
@@ -382,6 +382,9 @@ impl Timeline for ObjectTimeline {
             tag.rel, tag.blknum, lsn
         );
 
+        if !update_meta {
+            return Ok(());
+        }
         // Also check if this created or extended the file
         let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
 
@@ -624,7 +627,7 @@ impl ObjectTimeline {
                     // version. Otherwise we could opt to not do it, with the downside that
                     // the next GetPage@LSN call of the same page version would have to
                     // redo the WAL again.
-                    self.put_page_image(tag, lsn, page_img.clone())?;
+                    self.put_page_image(tag, lsn, page_img.clone(), false)?;
                 }
             }
             // FIXME: assumes little-endian. Only used for the debugging log though

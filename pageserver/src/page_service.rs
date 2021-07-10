@@ -417,7 +417,7 @@ impl postgres_backend::Handler for PageServerHandler {
                                     blknum,
                                 };
 
-                                timeline.put_page_image(tag, relation_update.lsn, img)?;
+                                timeline.put_page_image(tag, relation_update.lsn, img, true)?;
                             }
                             Update::WALRecord { blknum, rec } => {
                                 let tag = BufferTag {

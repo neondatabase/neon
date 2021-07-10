@@ -145,7 +145,7 @@ fn import_relfile(
                     },
                     blknum,
                 };
-                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf))?;
+                timeline.put_page_image(tag, lsn, Bytes::copy_from_slice(&buf), true)?;
                 /*
                 if oldest_lsn == 0 || p.lsn < oldest_lsn {
                     oldest_lsn = p.lsn;
@@ -357,7 +357,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
             info!("copying block {:?} to {:?}", src_key, dst_key);
 
-            timeline.put_page_image(dst_key, lsn, content)?;
+            timeline.put_page_image(dst_key, lsn, content, true)?;
             num_blocks_copied += 1;
         }
 
