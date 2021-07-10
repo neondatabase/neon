@@ -579,7 +579,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
             debug!("copying block {:?} to {:?}", src_key, dst_key);
 
-            timeline.put_page_image(dst_key, lsn, content, false)?;
+            timeline.put_page_image(dst_key, lsn, content, true)?;
             num_blocks_copied += 1;
         }
 
