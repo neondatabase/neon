@@ -17,29 +17,25 @@
 //! When a snapshot file needs to be accessed, we slurp the whole file into memory, into
 //! a SnapshotLayer struct.
 //!
-//! On disk, a snapshot file is actually two files: one containing all the page versions,
-//! and another containing the relation size information. That's just for the convenience
-//! of serializing the two objects.
-//!
-//! The files are stored in .zenith/timelines/<timelineid> directory.
+//! On disk, the snapshot files are stored in .zenith/timelines/<timelineid> directory.
 //! Currently, there are no subdirectories, and each snapshot file is named like this:
 //!
 //!    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
 //!
-//! And the corresponding file containing the relation size information has _relsizes
-//! suffix. For example:
+//! For example:
 //!
 //!    1663_13990_2609_0_000000000169C348_000000000169C349
-//!    1663_13990_2609_0_000000000169C348_000000000169C349_relsizes
 //!
-
+//! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
+//! parts: the page versions and the relation sizes. They are stored as separate chapters.
+//!
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::PageVersion;
 use crate::repository::{RelTag, WALRecord};
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use log::*;
 use std::collections::{BTreeMap, HashSet};
@@ -47,13 +43,21 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
+
+use bookfile::{Book, BookWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+
+// Magic constant to identify a Zenith snapshot file
+static SNAPSHOT_FILE_MAGIC: u32 = 0x5A616E01;
+
+static PAGE_VERSIONS_CHAPTER: u64 = 1;
+static REL_SIZES_CHAPTER: u64 = 2;
 
 ///
 /// SnapshotLayer is the in-memory data structure associated with an on-disk snapshot file.
@@ -297,13 +301,6 @@ impl SnapshotLayer {
         conf.timeline_path(timelineid).join(&fname)
     }
 
-    fn relsizes_path(path: &Path) -> PathBuf {
-        let mut fname = path.file_name().unwrap().to_os_string();
-        fname.push("_relsizes");
-
-        path.with_file_name(fname)
-    }
-
     /// Create a new snapshot file, using the given btreemaps containing the page versions and
     /// relsizes.
     ///
@@ -343,15 +340,22 @@ impl SnapshotLayer {
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
 
-        // Write out page versions
-        let mut file = File::create(&path)?;
-        let buf = BTreeMap::ser(&page_versions)?;
-        file.write_all(&buf)?;
+        let file = File::create(&path)?;
+        let book = BookWriter::new(file, SNAPSHOT_FILE_MAGIC)?;
 
-        // and relsizes to separate file
-        let mut file = File::create(Self::relsizes_path(&path))?;
+        // Write out page versions
+        let mut chapter = book.new_chapter(PAGE_VERSIONS_CHAPTER);
+        let buf = BTreeMap::ser(&page_versions)?;
+        chapter.write_all(&buf)?;
+        let book = chapter.close()?;
+
+        // and relsizes to separate chapter
+        let mut chapter = book.new_chapter(REL_SIZES_CHAPTER);
         let buf = BTreeMap::ser(&relsizes)?;
-        file.write_all(&buf)?;
+        chapter.write_all(&buf)?;
+        let book = chapter.close()?;
+
+        book.close()?;
 
         debug!("saved {}", &path.display());
 
@@ -421,12 +425,23 @@ impl SnapshotLayer {
     ) -> Result<SnapshotLayer> {
         let path = Self::path_for(conf, timelineid, tag, start_lsn, end_lsn);
 
-        let content = std::fs::read(&path)?;
-        let page_versions = BTreeMap::des(&content)?;
+        let file = File::open(&path)?;
+        let mut book = Book::new(file)?;
+
+        let chapter_index = book
+            .find_chapter(PAGE_VERSIONS_CHAPTER)
+            .ok_or_else(|| anyhow!("could not find page versions chapter in {}", path.display()))?;
+        let chapter = book.read_chapter(chapter_index)?;
+        let page_versions = BTreeMap::des(&chapter)?;
+
+        let chapter_index = book
+            .find_chapter(REL_SIZES_CHAPTER)
+            .ok_or_else(|| anyhow!("could not find relsizes chapter in {}", path.display()))?;
+        let chapter = book.read_chapter(chapter_index)?;
+        let relsizes = BTreeMap::des(&chapter)?;
+
         debug!("loaded from {}", &path.display());
 
-        let content = std::fs::read(Self::relsizes_path(&path))?;
-        let relsizes = BTreeMap::des(&content)?;
         Ok(SnapshotLayer {
             conf,
             timelineid,

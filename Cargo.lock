@@ -81,6 +81,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 
 [[package]]
+name = "aversion"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25b49482974b90e9f36c5adcc50acde2e27e806ac269ff32758d700432782bc0"
+dependencies = [
+ "aversion-macros",
+ "byteorder",
+ "serde",
+ "serde_cbor",
+ "thiserror",
+]
+
+[[package]]
+name = "aversion-macros"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3009cf133dbd82459e96cf46bb24c8e6ad5c02c387ddb21d0f2c4c781a5394"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "aws-creds"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -156,6 +180,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4152116fd6e9dadb291ae18fc1ec3575ed6d84c29642d97890f4b4a3417297e4"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "bookfile"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7db391acd99b8bdce5d5a66ca28530761affec9a407df91aee668fc318e3db71"
+dependencies = [
+ "aversion",
+ "byteorder",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -639,6 +675,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "half"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62aca2aba2d62b4a7f5b33f3712cb1b0692779a56fb510499d5c0aa594daeaf3"
+
+[[package]]
 name = "hashbrown"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1106,6 +1148,7 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bookfile",
  "byteorder",
  "bytes",
  "chrono",
@@ -1650,6 +1693,16 @@ dependencies = [
  "serde",
  "thiserror",
  "xml-rs",
+]
+
+[[package]]
+name = "serde_cbor"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e18acfa2f90e8b735b2836ab8d538de304cbb6729a7360729ea5a895d15a622"
+dependencies = [
+ "half",
+ "serde",
 ]
 
 [[package]]
