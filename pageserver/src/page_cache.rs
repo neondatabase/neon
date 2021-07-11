@@ -2,11 +2,12 @@
 //! page server.
 
 use crate::branches;
+use crate::layered_repository::LayeredRepository;
 use crate::object_repository::ObjectRepository;
 use crate::repository::Repository;
 use crate::rocksdb_storage::RocksObjectStore;
 use crate::walredo::PostgresRedoManager;
-use crate::{PageServerConf, ZTenantId};
+use crate::{PageServerConf, RepositoryFormat, ZTenantId};
 use anyhow::{anyhow, bail, Result};
 use lazy_static::lazy_static;
 use log::info;
@@ -23,6 +24,7 @@ lazy_static! {
 pub fn init(conf: &'static PageServerConf) {
     let mut m = REPOSITORY.lock().unwrap();
 
+
     for dir_entry in fs::read_dir(conf.tenants_path()).unwrap() {
         let tenantid =
             ZTenantId::from_str(dir_entry.unwrap().file_name().to_str().unwrap()).unwrap();
@@ -32,8 +34,20 @@ pub fn init(conf: &'static PageServerConf) {
         let walredo_mgr = PostgresRedoManager::new(conf, tenantid);
 
         // Set up an object repository, for actual data storage.
-        let repo =
-            ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr), tenantid);
+        let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
+            RepositoryFormat::Layered => Arc::new(LayeredRepository::new(conf, Arc::new(walredo_mgr))),
+            RepositoryFormat::RocksDb => {
+                let obj_store = RocksObjectStore::open(conf).unwrap();
+
+                Arc::new(ObjectRepository::new(
+                    conf,
+                    Arc::new(obj_store),
+                    Arc::new(walredo_mgr),
+                    tenantid
+                ))
+            }
+        };
+
         info!("initialized storage for tenant: {}", &tenantid);
         m.insert(tenantid, Arc::new(repo));
     }

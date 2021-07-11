@@ -249,11 +249,12 @@ impl WALRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layered_repository::LayeredRepository;
     use crate::object_repository::ObjectRepository;
     use crate::object_repository::{ObjectValue, PageEntry, RelationSizeEntry};
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
-    use crate::{PageServerConf, ZTenantId};
+    use crate::{PageServerConf, RepositoryFormat, ZTenantId};
     use postgres_ffi::pg_constants;
     use std::fs;
     use std::path::PathBuf;
@@ -285,10 +286,14 @@ mod tests {
         buf.freeze()
     }
 
-    fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
+    fn get_test_repo(
+        test_name: &str,
+        repository_format: RepositoryFormat,
+    ) -> Result<Box<dyn Repository>> {
         let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
         let _ = fs::remove_dir_all(&repo_dir);
-        fs::create_dir_all(&repo_dir).unwrap();
+        fs::create_dir_all(&repo_dir)?;
+        fs::create_dir_all(&repo_dir.join("timelines"))?;
 
         let conf = PageServerConf {
             daemonize: false,
@@ -298,6 +303,7 @@ mod tests {
             superuser: "zenith_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),
+            repository_format,
         };
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
@@ -305,24 +311,45 @@ mod tests {
         let tenantid = ZTenantId::generate();
         fs::create_dir_all(conf.tenant_path(&tenantid)).unwrap();
 
-        let obj_store = RocksObjectStore::create(conf, &tenantid)?;
-
         let walredo_mgr = TestRedoManager {};
 
-        let repo =
-            ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr), tenantid);
+        let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
+            RepositoryFormat::Layered => {
+                Box::new(LayeredRepository::new(conf, Arc::new(walredo_mgr)))
+            }
+            RepositoryFormat::RocksDb => {
+                let obj_store = RocksObjectStore::create(conf, &tenantid)?;
 
-        Ok(Box::new(repo))
+                Box::new(ObjectRepository::new(
+                    conf,
+                    Arc::new(obj_store),
+                    Arc::new(walredo_mgr),
+                    tenantid
+                ))
+            }
+        };
+
+        Ok(repo)
     }
 
     /// Test get_relsize() and truncation.
     #[test]
-    fn test_relsize() -> Result<()> {
+    fn test_relsize_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_relsize_rocksdb", RepositoryFormat::RocksDb)?;
+        test_relsize(&*repo)
+    }
+
+    #[test]
+    fn test_relsize_layered() -> Result<()> {
+        let repo = get_test_repo("test_relsize_layered", RepositoryFormat::Layered)?;
+        test_relsize(&*repo)
+    }
+
+    fn test_relsize(repo: &dyn Repository) -> Result<()> {
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
         // Create timeline to work on
-        let repo = get_test_repo("test_relsize")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
@@ -407,14 +434,24 @@ mod tests {
     /// This isn't very interesting with the RocksDb implementation, as we don't pay
     /// any attention to Postgres segment boundaries there.
     #[test]
-    fn test_large_rel() -> Result<()> {
-        let repo = get_test_repo("test_large_rel")?;
+    fn test_large_rel_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_large_rel_rocksdb", RepositoryFormat::RocksDb)?;
+        test_large_rel(&*repo)
+    }
+
+    #[test]
+    fn test_large_rel_layered() -> Result<()> {
+        let repo = get_test_repo("test_large_rel_layered", RepositoryFormat::Layered)?;
+        test_large_rel(&*repo)
+    }
+
+    fn test_large_rel(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
 
-        let mut lsn = 0;
+        let mut lsn = 1;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 1;
@@ -460,12 +497,22 @@ mod tests {
         }))
     }
 
+    #[test]
+    fn test_branch_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_branch_rocksdb", RepositoryFormat::RocksDb)?;
+        test_branch(&*repo)
+    }
+
+    #[test]
+    fn test_branch_layered() -> Result<()> {
+        let repo = get_test_repo("test_branch_layered", RepositoryFormat::Layered)?;
+        test_branch(&*repo)
+    }
+
     ///
     /// Test branch creation
     ///
-    #[test]
-    fn test_branch() -> Result<()> {
-        let repo = get_test_repo("test_branch")?;
+    fn test_branch(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
@@ -510,8 +557,16 @@ mod tests {
     }
 
     #[test]
-    fn test_history() -> Result<()> {
-        let repo = get_test_repo("test_snapshot")?;
+    fn test_history_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_history_rocksdb", RepositoryFormat::RocksDb)?;
+        test_history(&*repo)
+    }
+    #[test]
+    fn test_history_layered() -> Result<()> {
+        let repo = get_test_repo("test_history_layered", RepositoryFormat::Layered)?;
+        test_history(&*repo)
+    }
+    fn test_history(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 pub mod basebackup;
 pub mod branches;
+pub mod layered_repository;
 pub mod logger;
 pub mod object_key;
 pub mod object_repository;
@@ -40,6 +41,14 @@ pub struct PageServerConf {
     pub workdir: PathBuf,
 
     pub pg_distrib_dir: PathBuf,
+
+    pub repository_format: RepositoryFormat,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepositoryFormat {
+    Layered,
+    RocksDb,
 }
 
 impl PageServerConf {

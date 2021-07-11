@@ -17,7 +17,10 @@ use anyhow::Result;
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{branches, logger, page_cache, page_service, PageServerConf};
+use slog::{Drain, FnValue};
+
+use pageserver::{branches, page_cache, page_service};
+use pageserver::{PageServerConf, RepositoryFormat};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 
@@ -33,6 +36,7 @@ struct CfgFileParams {
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     pg_distrib_dir: Option<String>,
+    repository_format: Option<String>,
 }
 
 impl CfgFileParams {
@@ -47,6 +51,7 @@ impl CfgFileParams {
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
             pg_distrib_dir: get_arg("postgres-distrib"),
+            repository_format: get_arg("repository-format"),
         }
     }
 
@@ -58,6 +63,7 @@ impl CfgFileParams {
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
+            repository_format: self.repository_format.or(other.repository_format),
         }
     }
 
@@ -86,6 +92,21 @@ impl CfgFileParams {
             anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
         }
 
+        //
+        // FIXME: This pageserver --repository-format option is pretty useless as it
+        // isn't exposed as an option to "zenith init". But you can change the default
+        // here if you want to test the rocksdb implementation:
+        //
+        let repository_format = match self.repository_format.as_ref() {
+            Some(repo_format_str) if repo_format_str == "rocksdb" => RepositoryFormat::RocksDb,
+            Some(repo_format_str) if repo_format_str == "layered" => RepositoryFormat::Layered,
+            Some(repo_format_str) => anyhow::bail!(
+                "invalid --repository-format '{}', must be 'rocksdb' or 'layered'",
+                repo_format_str
+            ),
+            None => RepositoryFormat::Layered, // default
+        };
+
         Ok(PageServerConf {
             daemonize: false,
 
@@ -98,6 +119,7 @@ impl CfgFileParams {
             workdir: PathBuf::from("."),
 
             pg_distrib_dir,
+            repository_format,
         })
     }
 }
@@ -156,6 +178,12 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Create tenant during init")
                 .requires("init"),
+        )
+        .arg(
+            Arg::with_name("repository-format")
+                .long("repository-format")
+                .takes_value(true)
+                .help("Which repository implementation to use, 'rocksdb' or 'layered'"),
         )
         .get_matches();
 
