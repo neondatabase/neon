@@ -472,11 +472,11 @@ impl Timeline for ObjectTimeline {
     fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes, update_meta: bool) -> Result<()> {
         self.put_page_entry(&tag, lsn, PageEntry::Page(img))?;
 
+		if !update_meta {
+			return Ok(());
+		}
         debug!("put_page_image rel {:?} at {}", tag, lsn);
 
-        if !update_meta {
-            return Ok(());
-        }
         if let ObjectTag::RelationBuffer(tag) = tag {
             // Also check if this created or extended the file
             let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);

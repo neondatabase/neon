@@ -15,6 +15,7 @@ pub mod page_service;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod rocksdb_storage;
+pub mod inmem_storage;
 pub mod tui;
 pub mod tui_event;
 mod tui_logger;
@@ -103,7 +104,7 @@ impl PageServerConf {
 /// is separate from PostgreSQL timelines, and doesn't have those
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ZTimelineId([u8; 16]);
 
 impl FromStr for ZTimelineId {

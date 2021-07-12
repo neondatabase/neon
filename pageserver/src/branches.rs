@@ -100,7 +100,8 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // and we failed to run initdb again in the same directory. This has been solved for the
     // rapid init+start case now, but the general race condition remains if you restart the
     // server quickly.
-    let storage = crate::rocksdb_storage::RocksObjectStore::create(conf)?;
+    //let storage = crate::rocksdb_storage::RocksObjectStore::create(conf)?;
+    let storage = crate::inmem_storage::InmemObjectStore::create(conf)?;
 
     let repo = crate::object_repository::ObjectRepository::new(
         conf,
