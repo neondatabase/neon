@@ -120,8 +120,8 @@ impl<'a> Basebackup<'a> {
     }
 
     //
-    // Generate SRLU segment files from repository. Path identifiers SLRU kind (pg_xact, pg_multixact/members, ...).
-    // Intiallly pass is empty string.
+    // Generate SLRU segment files from repository. Path identifies SLRU kind (pg_xact, pg_multixact/members, ...).
+    // Intially pass an empty string.
     //
     fn add_slru_segment(
         &mut self,
