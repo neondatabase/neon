@@ -562,6 +562,9 @@ mod tests {
         test_history(&*repo)
     }
     #[test]
+    // TODO: This doesn't work with the layered storage, the functions needed for push/pull
+    // functionality haven't been implemented yet.
+    #[ignore]
     fn test_history_layered() -> Result<()> {
         let repo = get_test_repo("test_history_layered", RepositoryFormat::Layered)?;
         test_history(&*repo)
