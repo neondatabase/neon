@@ -293,7 +293,7 @@ impl Timeline for ObjectTimeline {
                     self.put_page_image(tag, lsn, page_img.clone(), false)?;
                 }
                 ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
-                _ => bail!("Invalid object kind, expected a page entry or SRLU truncate"),
+                _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),
             }
             // FIXME: assumes little-endian. Only used for the debugging log though
             let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
@@ -434,7 +434,7 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
-    /// Truncate SRLU segment
+    /// Truncate SLRU segment
     fn put_slru_truncate(&self, tag: ObjectTag, lsn: Lsn) -> Result<()> {
         let key = ObjectKey {
             timeline: self.timelineid,

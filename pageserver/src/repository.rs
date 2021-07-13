@@ -97,7 +97,7 @@ pub trait Timeline: Send + Sync {
     /// Unlink relation. This method is used for marking dropped relations.
     fn put_unlink(&self, tag: RelTag, lsn: Lsn) -> Result<()>;
 
-    /// Truncate SRLU segment
+    /// Truncate SLRU segment
     fn put_slru_truncate(&self, tag: ObjectTag, lsn: Lsn) -> Result<()>;
 
     // Get object tag greater or equal than specified

@@ -447,7 +447,7 @@ pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
     seg_buf.extend_from_slice(&rec_shord_hdr_bytes);
     seg_buf.extend_from_slice(&checkpoint_bytes);
 
-    //zero out remainig file
+    //zero out the rest of the file
     seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
     seg_buf.freeze()
 }
