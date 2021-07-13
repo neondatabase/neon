@@ -26,6 +26,14 @@
 //!
 //!    1663_13990_2609_0_000000000169C348_000000000169C349
 //!
+//! If a relation is dropped, we add a '_DROPPED' to the end of the filename to indicate that.
+//! So the above example would become:
+//!
+//!    1663_13990_2609_0_000000000169C348_000000000169C349_DROPPED
+//!
+//! The end LSN indicates when it was dropped in that case, we don't store it in the
+//! file contents in any way.
+//!
 //! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
 //!
@@ -75,6 +83,8 @@ pub struct SnapshotLayer {
     // start is inclusive, and end is exclusive.
     pub start_lsn: Lsn,
     pub end_lsn: Lsn,
+
+    dropped: bool,
 
     ///
     /// All versions of all pages in the file are are kept here.
@@ -266,6 +276,10 @@ impl Layer for SnapshotLayer {
         bail!("cannot modify historical snapshot file");
     }
 
+    fn put_unlink(&self, _lsn: Lsn) -> anyhow::Result<()> {
+        bail!("cannot modify historical snapshot file");
+    }
+
     fn freeze(&self, _end_lsn: Lsn) -> Result<()> {
         bail!("cannot freeze historical snapshot file");
     }
@@ -279,6 +293,7 @@ impl SnapshotLayer {
             self.tag,
             self.start_lsn,
             self.end_lsn,
+            self.dropped,
         )
     }
 
@@ -288,15 +303,17 @@ impl SnapshotLayer {
         tag: RelTag,
         start_lsn: Lsn,
         end_lsn: Lsn,
+        dropped: bool
     ) -> PathBuf {
         let fname = format!(
-            "{}_{}_{}_{}_{:016X}_{:016X}",
+            "{}_{}_{}_{}_{:016X}_{:016X}{}",
             tag.spcnode,
             tag.dbnode,
             tag.relnode,
             tag.forknum,
             u64::from(start_lsn),
-            u64::from(end_lsn)
+            u64::from(end_lsn),
+            if dropped { "_DROPPED" } else { "" },
         );
 
         conf.timeline_path(timelineid).join(&fname)
@@ -314,6 +331,7 @@ impl SnapshotLayer {
         tag: RelTag,
         start_lsn: Lsn,
         end_lsn: Lsn,
+        dropped: bool,
         page_versions: BTreeMap<(u32, Lsn), PageVersion>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<SnapshotLayer> {
@@ -323,6 +341,7 @@ impl SnapshotLayer {
             tag: tag,
             start_lsn: start_lsn,
             end_lsn,
+            dropped,
             page_versions: Mutex::new(page_versions),
             relsizes: Mutex::new(relsizes),
         };
@@ -371,26 +390,28 @@ impl SnapshotLayer {
         timelineid: ZTimelineId,
         tag: RelTag,
         lsn: Lsn,
-    ) -> Result<Option<(Lsn, Lsn)>> {
+    ) -> Result<Option<(Lsn, Lsn, bool)>> {
         // Scan the timeline directory to get all rels in this timeline.
         let path = conf.timeline_path(timelineid);
         let mut result_start_lsn = Lsn(0);
         let mut result_end_lsn = Lsn(0);
+        let mut result_dropped = false;
         for direntry in fs::read_dir(path)? {
             let direntry = direntry?;
 
             let fname = direntry.file_name();
             let fname = fname.to_str().unwrap();
 
-            if let Some((reltag, start_lsn, end_lsn)) = Self::fname_to_tag(fname) {
+            if let Some((reltag, start_lsn, end_lsn, dropped)) = Self::fname_to_tag(fname) {
                 if reltag == tag && start_lsn <= lsn && start_lsn > result_start_lsn {
                     result_start_lsn = start_lsn;
                     result_end_lsn = end_lsn;
+                    result_dropped = dropped;
                 }
             }
         }
         if result_start_lsn != Lsn(0) {
-            Ok(Some((result_start_lsn, result_end_lsn)))
+            Ok(Some((result_start_lsn, result_end_lsn, result_dropped)))
         } else {
             Ok(None)
         }
@@ -407,10 +428,10 @@ impl SnapshotLayer {
         tag: RelTag,
         lsn: Lsn,
     ) -> Result<Option<SnapshotLayer>> {
-        if let Some((start_lsn, end_lsn)) =
+        if let Some((start_lsn, end_lsn, dropped)) =
             Self::find_latest_snapshot_file(conf, timelineid, tag, lsn)?
         {
-            let snap = Self::load_path(conf, timelineid, tag, start_lsn, end_lsn)?;
+            let snap = Self::load_path(conf, timelineid, tag, start_lsn, end_lsn, dropped)?;
             Ok(Some(snap))
         } else {
             Ok(None)
@@ -423,8 +444,9 @@ impl SnapshotLayer {
         tag: RelTag,
         start_lsn: Lsn,
         end_lsn: Lsn,
+        dropped: bool,
     ) -> Result<SnapshotLayer> {
-        let path = Self::path_for(conf, timelineid, tag, start_lsn, end_lsn);
+        let path = Self::path_for(conf, timelineid, tag, start_lsn, end_lsn, dropped);
 
         let file = File::open(&path)?;
         let mut book = Book::new(file)?;
@@ -449,6 +471,7 @@ impl SnapshotLayer {
             tag,
             start_lsn,
             end_lsn,
+            dropped,
             page_versions: Mutex::new(page_versions),
             relsizes: Mutex::new(relsizes),
         })
@@ -470,7 +493,11 @@ impl SnapshotLayer {
             let fname = direntry.file_name();
             let fname = fname.to_str().unwrap();
 
-            if let Some((reltag, _start_lsn, _end_lsn)) = Self::fname_to_tag(fname) {
+            if let Some((reltag, _start_lsn, _end_lsn, _dropped)) = Self::fname_to_tag(fname) {
+
+                // FIXME: skip if it was dropped before the requested LSN. But there is no
+                // LSN argument
+
                 if (spcnode == 0 || reltag.spcnode == spcnode)
                     && (dbnode == 0 || reltag.dbnode == dbnode)
                 {
@@ -481,10 +508,14 @@ impl SnapshotLayer {
         Ok(rels)
     }
 
-    fn fname_to_tag(fname: &str) -> Option<(RelTag, Lsn, Lsn)> {
+    fn fname_to_tag(fname: &str) -> Option<(RelTag, Lsn, Lsn, bool)> {
         // Split the filename into parts
         //
         //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
+        //
+        // or if it was dropped:
+        //
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>_DROPPED
         //
         let mut parts = fname.split('_');
 
@@ -497,7 +528,21 @@ impl SnapshotLayer {
         let start_lsn = Lsn::from_hex(parts.next()?).ok()?;
         let end_lsn = Lsn::from_hex(parts.next()?).ok()?;
 
-        Some((reltag, start_lsn, end_lsn))
+        let mut dropped = false;
+        if let Some(suffix) = parts.next() {
+            if suffix == "DROPPED" {
+                dropped = true;
+            } else {
+                warn!("unrecognized filename in timeline dir: {}", fname);
+                return None;
+            }
+        }
+        if parts.next().is_some() {
+            warn!("unrecognized filename in timeline dir: {}", fname);
+            return None;
+        }
+
+        Some((reltag, start_lsn, end_lsn, dropped))
     }
 
 
@@ -535,7 +580,7 @@ impl SnapshotLayer {
         // exists, we can remove the old one.
 
         // For convenience and speed, slurp the list of files in the directoy into memory first.
-        let mut snapfiles: BTreeSet<(RelTag, Lsn, Lsn)> = BTreeSet::new();
+        let mut snapfiles: BTreeSet<(RelTag, Lsn, Lsn, bool)> = BTreeSet::new();
 
         let timeline_path = conf.timeline_path(timelineid);
         for direntry in fs::read_dir(timeline_path)? {
@@ -543,17 +588,17 @@ impl SnapshotLayer {
             let fname = direntry.file_name();
             let fname = fname.to_str().unwrap();
 
-            if let Some((reltag, start_lsn, end_lsn)) = Self::fname_to_tag(fname) {
-                snapfiles.insert((reltag, start_lsn, end_lsn));
+            if let Some((reltag, start_lsn, end_lsn, dropped)) = Self::fname_to_tag(fname) {
+                snapfiles.insert((reltag, start_lsn, end_lsn, dropped));
             }
             result.snapshot_files_total += 1;
         }
 
         // Now determine for each file if it needs to be retained
-        'outer: for (reltag, start_lsn, end_lsn) in &snapfiles {
+        'outer: for (reltag, start_lsn, end_lsn, dropped) in &snapfiles {
 
             // Is it newer than cutoff point?
-            if *end_lsn >= cutoff {
+            if *end_lsn > cutoff {
                 result.snapshot_files_needed_by_cutoff += 1;
                 continue 'outer;
             }
@@ -567,20 +612,25 @@ impl SnapshotLayer {
                 }
             }
 
-            // Is there a later snapshot file for this relation?
-            if snapfiles.range(
-                (Included((*reltag, *end_lsn, Lsn(0))),
-                 Included((*reltag, Lsn(u64::MAX), Lsn(0))))).next().is_none() {
+            // Unless the relation was dropped, is there a later snapshot file for this relation?
+            if !dropped && snapfiles.range(
+                (Included((*reltag, *end_lsn, Lsn(0), false)),
+                 Included((*reltag, Lsn(u64::MAX), Lsn(0), true)))).next().is_none() {
                 // there is no later file, so keep it
                 result.snapshot_files_not_updated += 1;
                 continue 'outer;
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            let path = Self::path_for(conf, timelineid, *reltag, *start_lsn, *end_lsn);
+            let path = Self::path_for(conf, timelineid, *reltag, *start_lsn, *end_lsn, *dropped);
             info!("garbage collecting {}", path.display());
             fs::remove_file(path)?;
-            result.snapshot_files_removed += 1;
+
+            if *dropped {
+                result.snapshot_files_dropped += 1;
+            } else {
+                result.snapshot_files_removed += 1;
+            }
         }
 
         result.elapsed = now.elapsed();

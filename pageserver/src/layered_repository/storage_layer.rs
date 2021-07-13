@@ -46,6 +46,8 @@ pub trait Layer: Send + Sync {
 
     fn put_truncation(&self, lsn: Lsn, relsize: u32) -> anyhow::Result<()>;
 
+    fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()>;
+
     /// Remember new page version, as a WAL record over previous version
     fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> Result<()> {
         // FIXME: If this is the first version of this page, reconstruct the image

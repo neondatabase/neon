@@ -556,6 +556,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"snapshot_files_needed_by_branches"),
                 RowDescriptor::int8_col(b"snapshot_files_not_updated"),
                 RowDescriptor::int8_col(b"snapshot_files_removed"),
+                RowDescriptor::int8_col(b"snapshot_files_dropped"),
 
                 RowDescriptor::int8_col(b"elapsed"),
             ]))?
@@ -573,6 +574,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(&result.snapshot_files_needed_by_branches.to_string().as_bytes()),
                 Some(&result.snapshot_files_not_updated.to_string().as_bytes()),
                 Some(&result.snapshot_files_removed.to_string().as_bytes()),
+                Some(&result.snapshot_files_dropped.to_string().as_bytes()),
 
                 Some(&result.elapsed.as_millis().to_string().as_bytes()),
             ]))?

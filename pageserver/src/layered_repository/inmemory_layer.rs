@@ -33,6 +33,13 @@ pub struct InMemoryLayer {
     ///
     start_lsn: Lsn,
 
+    // FIXME: the three mutex-protected fields below should probably be protected
+    // by a single mutex.
+
+    /// If this relation was dropped, remember when that happened. Lsn(0) means
+    /// it hasn't been dropped
+    drop_lsn: Mutex<Lsn>,
+
     ///
     /// All versions of all pages in the layer are are kept here.
     /// Indexed by block number and LSN.
@@ -276,12 +283,26 @@ impl Layer for InMemoryLayer {
         Ok(())
     }
 
+    /// Remember that the relation was truncated at given LSN
+    fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()> {
+
+        let mut drop_lsn = self.drop_lsn.lock().unwrap();
+
+        assert!(*drop_lsn == Lsn(0));
+        *drop_lsn = lsn;
+
+        info!("dropped relation {} at {}", self.tag, lsn);
+
+        Ok(())
+    }
+
     ///
     /// Write the this in-memory layer to disk, as a snapshot layer.
     ///
     fn freeze(&self, end_lsn: Lsn) -> Result<()> {
         let page_versions = self.page_versions.lock().unwrap();
         let relsizes = self.relsizes.lock().unwrap();
+        let drop_lsn = self.drop_lsn.lock().unwrap();
 
         // FIXME: we assume there are no modification in-flight, and that there are no
         // changes past 'lsn'.
@@ -289,12 +310,23 @@ impl Layer for InMemoryLayer {
         let page_versions = page_versions.clone();
         let relsizes = relsizes.clone();
 
+        let dropped = *drop_lsn != Lsn(0);
+
+        let end_lsn =
+            if dropped {
+                assert!(*drop_lsn < end_lsn);
+                *drop_lsn
+            } else {
+                end_lsn
+            };
+
         let _snapfile = SnapshotLayer::create(
             self.conf,
             self.timelineid,
             self.tag,
             self.start_lsn,
             end_lsn,
+            dropped,
             page_versions,
             relsizes,
         )?;
@@ -323,6 +355,7 @@ impl InMemoryLayer {
             timelineid,
             tag,
             start_lsn,
+            drop_lsn: Mutex::new(Lsn(0)),
             page_versions: Mutex::new(BTreeMap::new()),
             relsizes: Mutex::new(BTreeMap::new()),
         })
@@ -364,6 +397,7 @@ impl InMemoryLayer {
             timelineid,
             tag: src.get_tag(),
             start_lsn: lsn,
+            drop_lsn: Mutex::new(Lsn(0)),
             page_versions: Mutex::new(page_versions),
             relsizes: Mutex::new(relsizes),
         })

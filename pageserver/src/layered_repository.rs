@@ -484,9 +484,11 @@ impl Timeline for LayeredTimeline {
         snapfile.put_page_image(tag.blknum, lsn, img)
     }
 
-    fn put_unlink(&self, _tag: RelTag, _lsn: Lsn) -> Result<()> {
-        // TODO
-        Ok(())
+    fn put_unlink(&self, rel: RelTag, lsn: Lsn) -> Result<()> {
+        debug!("put_unlink: {} at {}", rel, lsn);
+
+        let snapfile = self.get_snapshot_file_for_write(rel, lsn)?;
+        snapfile.put_unlink(lsn)
     }
 
     ///
@@ -651,6 +653,12 @@ impl LayeredTimeline {
             // FIXME: If there is an entry in memory for an older snapshot file,
             // but there is a newere snapshot file on disk, this will incorrectly
             // return the older entry from memory.
+            //
+            // FIXME: If the relation has been dropped, does this return the right
+            // thing? The compute node should not normally request dropped relations,
+            // but if OID wraparound happens the same relfilenode might get reused
+            // for an unrelated relation.
+            //
             if let Some(layer) = layers.get(tag, lsn) {
                 trace!("found snapshot file in memory: {}", layer.get_start_lsn());
                 return Ok(Some((layer.clone(), lsn)));
@@ -757,13 +765,17 @@ impl LayeredTimeline {
             // Scan the directory for latest existing file.
             // FIXME: if this is truly a new rel, none should exist right?
             let start_lsn;
-            if let Some((_start, end)) = SnapshotLayer::find_latest_snapshot_file(
+            if let Some((_start, end, dropped)) = SnapshotLayer::find_latest_snapshot_file(
                 self.conf,
                 self.timelineid,
                 tag,
                 Lsn(u64::MAX),
             )? {
-                start_lsn = end;
+                if dropped {
+                    start_lsn = lsn;
+                } else {
+                    start_lsn = end;
+                }
             } else {
                 start_lsn = lsn;
             }

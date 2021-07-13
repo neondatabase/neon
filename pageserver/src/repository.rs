@@ -57,7 +57,8 @@ pub struct GcResult {
     pub snapshot_files_needed_by_cutoff: u64,
     pub snapshot_files_needed_by_branches: u64,
     pub snapshot_files_not_updated: u64,
-    pub snapshot_files_removed: u64,
+    pub snapshot_files_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
+    pub snapshot_files_dropped: u64,  // # of snapshot files removed because the relation was dropped
 
     pub elapsed: Duration,
 }
@@ -75,6 +76,7 @@ impl AddAssign for GcResult {
         self.snapshot_files_needed_by_branches += other.snapshot_files_needed_by_branches;
         self.snapshot_files_not_updated += other.snapshot_files_not_updated;
         self.snapshot_files_removed += other.snapshot_files_removed;
+        self.snapshot_files_dropped += other.snapshot_files_dropped;
 
         self.elapsed += other.elapsed;
     }
