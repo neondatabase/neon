@@ -274,6 +274,12 @@ mod tests {
         relnode: 1000,
         forknum: 0,
     };
+    const TESTREL_B: RelTag = RelTag {
+        spcnode: 0,
+        dbnode: 111,
+        relnode: 1001,
+        forknum: 0,
+    };
 
     /// Convenience function to create a BufferTag for testing.
     /// Helps to keeps the tests shorter.
@@ -455,10 +461,65 @@ mod tests {
         Ok(())
     }
 
+    ///
+    /// Test branch creation
+    ///
+    #[test]
+    fn test_branch() -> Result<()> {
+        let repo = get_test_repo("test_branch")?;
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
+
+        // Create a relation on the timeline
+        tline.init_valid_lsn(Lsn(1));
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("foo blk 0 at 4"))?;
+
+        // Create another relation
+        let buftag2 = BufferTag {
+            rel: TESTREL_B,
+            blknum : 0,
+        };
+        tline.put_page_image(buftag2, Lsn(2), TEST_IMG("foobar blk 0 at 2"))?;
+
+        tline.advance_last_valid_lsn(Lsn(4));
+
+        // Branch the history, modify relation differently on the new timeline
+        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
+        repo.branch_timeline(timelineid, newtimelineid, Lsn(3))?;
+        let newtline = repo.get_timeline(newtimelineid)?;
+
+        newtline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("bar blk 0 at 4"))?;
+        newtline.advance_last_valid_lsn(Lsn(4));
+
+        // Check page contents on both branches
+        assert_eq!(
+            tline.get_page_at_lsn(TEST_BUF(0), Lsn(4))?,
+            TEST_IMG("foo blk 0 at 4")
+        );
+
+        assert_eq!(
+            newtline.get_page_at_lsn(TEST_BUF(0), Lsn(4))?,
+            TEST_IMG("bar blk 0 at 4")
+        );
+
+        assert_eq!(
+            newtline.get_page_at_lsn(buftag2, Lsn(4))?,
+            TEST_IMG("foobar blk 0 at 2")
+        );
+
+        assert_eq!(
+            newtline.get_rel_size(TESTREL_B, Lsn(4))?,
+            1
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn test_history() -> Result<()> {
         let repo = get_test_repo("test_snapshot")?;
-
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
