@@ -41,7 +41,7 @@ pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
-pub type TimestampTz = u64;
+pub type TimestampTz = i64;
 pub type XLogSegNo = u64;
 
 const XID_CHECKPOINT_INTERVAL: u32 = 1024;
@@ -95,9 +95,9 @@ pub fn get_current_timestamp() -> TimestampTz {
     const USECS_PER_SEC: u64 = 1000000;
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(n) => {
-            (n.as_secs() - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY))
-                * USECS_PER_SEC
-                + n.subsec_micros() as u64
+            ((n.as_secs() - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY))
+             * USECS_PER_SEC
+             + n.subsec_micros() as u64) as i64
         }
         Err(_) => panic!("SystemTime before UNIX EPOCH!"),
     }
