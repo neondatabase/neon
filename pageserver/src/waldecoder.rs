@@ -428,7 +428,7 @@ impl XlXactParsedRecord {
     pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
-        let xact_time = buf.get_u64_le();
+        let xact_time = buf.get_i64_le();
         let xinfo;
         if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
             xinfo = buf.get_u32_le();
