@@ -7,7 +7,7 @@ executors:
   zenith-build-executor:
     resource_class: xlarge
     docker:
-      - image: cimg/rust:1.51.0
+      - image: cimg/rust:1.52.0
 
 jobs:
 
