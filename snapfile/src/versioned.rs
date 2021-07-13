@@ -55,16 +55,29 @@ pub struct SnapFileMetaV1 {
     pub lsn: u64,
 }
 
+/// A type alias for the latest version of `SnapFileMeta`.
 pub type SnapFileMeta = SnapFileMetaV1;
+
+/// A page location within a file.
+///
+/// Note: this is an opaque value that may not be the true byte offset;
+/// it may be relative to some other location or measured in units other
+/// than bytes.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PageLocationV1(pub(crate) u64);
+
+/// A type alias for the latest version of `PageLocation`.
+pub type PageLocation = PageLocationV1;
 
 /// An index from page number to offset within the pages chapter.
 #[derive(Debug, Default, Serialize, Deserialize, Versioned, UpgradeLatest)]
 pub struct PageIndexV1 {
     /// A map from page number to file offset.
-    pub(crate) map: BTreeMap<u64, u64>,
+    pub(crate) map: BTreeMap<u64, PageLocationV1>,
 }
 
-// A placeholder type, that will always point to the latest version.
+/// A type alias for the latest version of `PageIndex`.
 pub type PageIndex = PageIndexV1;
 
 // Each message gets a unique message id, for tracking by the aversion traits.

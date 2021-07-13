@@ -3,14 +3,17 @@ name = "snapfile"
 version = "0.1.0"
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[bin]]
+name = "snaptool"
+path = "snaptool/main.rs"
 
 [dependencies]
 anyhow = "1.0"
 aversion = "0.2"
-bookfile = "^0.2"
+bookfile = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.8.3"
+structopt = "0.3"
 zenith_utils = { path = "../zenith_utils" }
 
 [dev-dependencies]
