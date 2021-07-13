@@ -543,54 +543,21 @@ impl postgres_backend::Handler for PageServerHandler {
             let result = timeline.gc_iteration(gc_horizon, true)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor {
-                    name: b"n_relations",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
-                RowDescriptor {
-                    name: b"truncated",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
-                RowDescriptor {
-                    name: b"deleted",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
-                RowDescriptor {
-                    name: b"prep_deleted",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
-                RowDescriptor {
-                    name: b"slru_deleted",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
-                RowDescriptor {
-                    name: b"chkp_deleted",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
-                RowDescriptor {
-                    name: b"dropped",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
-                RowDescriptor {
-                    name: b"elapsed",
-                    typoid: 20,
-                    typlen: 8,
-                    ..Default::default()
-                },
+                RowDescriptor::int8_col(b"n_relations"),
+                RowDescriptor::int8_col(b"truncated"),
+                RowDescriptor::int8_col(b"deleted"),
+                RowDescriptor::int8_col(b"prep_deleted"),
+                RowDescriptor::int8_col(b"slru_deleted"),
+                RowDescriptor::int8_col(b"chkp_deleted"),
+                RowDescriptor::int8_col(b"dropped"),
+
+                RowDescriptor::int8_col(b"snapshot_files_total"),
+                RowDescriptor::int8_col(b"snapshot_files_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"snapshot_files_needed_by_branches"),
+                RowDescriptor::int8_col(b"snapshot_files_not_updated"),
+                RowDescriptor::int8_col(b"snapshot_files_removed"),
+
+                RowDescriptor::int8_col(b"elapsed"),
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
                 Some(&result.n_relations.to_string().as_bytes()),
@@ -600,6 +567,13 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(&result.slru_deleted.to_string().as_bytes()),
                 Some(&result.chkp_deleted.to_string().as_bytes()),
                 Some(&result.dropped.to_string().as_bytes()),
+
+                Some(&result.snapshot_files_total.to_string().as_bytes()),
+                Some(&result.snapshot_files_needed_by_cutoff.to_string().as_bytes()),
+                Some(&result.snapshot_files_needed_by_branches.to_string().as_bytes()),
+                Some(&result.snapshot_files_not_updated.to_string().as_bytes()),
+                Some(&result.snapshot_files_removed.to_string().as_bytes()),
+
                 Some(&result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;

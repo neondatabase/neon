@@ -22,13 +22,14 @@ use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashSet;
+use std::collections::{HashSet, BTreeSet};
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::repository::{GcResult, History, RelTag, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
@@ -201,6 +202,83 @@ impl LayeredRepository {
 
         Ok(TimelineMetadata::des(&data)?)
     }
+
+    //
+    // How garbage collection works
+    // --------
+    //
+    //                    +--bar------------->
+    //                   /
+    //             +----+-----foo---------------->
+    //            /
+    // ----main--+-------------------------->
+    //                \
+    //                 +-----baz-------->
+    //
+    //
+    // 1. Grab a mutex to prevent new timelines from being created
+    // 2. Scan all timelines, and on each timeline, make note of the
+    //    all the points where other timelines have been branched off.
+    //    We will refrain from removing page versions at those LSNs.
+    // 3. For each timeline, scan all snapshot files on the timeline.
+    //    Remove all files for which a newer file exists and which
+    //    don't cover any branch point LSNs.
+    //
+    // TODO:
+    // - if a relation has been modified on a child branch, then we
+    //   we don't need to keep that in the parent anymore.
+    //
+    // - Currently, this is only triggered manually by the 'do_gc' command.
+    //   There is no background thread to do it automatically.
+    fn gc_iteration(conf: &'static PageServerConf, horizon: u64) -> Result<GcResult> {
+
+        let mut totals: GcResult = Default::default();
+        let now = Instant::now();
+
+        // TODO: grab mutex to prevent new timelines from being created here.
+
+        // Scan all timelines for the branch points.
+        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
+
+        // Remember timelineid and its last_record_lsn for each timeline
+        let mut timelines: Vec<(ZTimelineId, Lsn)> = Vec::new();
+
+        let timelines_path = conf.workdir.join("timelines");
+        for direntry in fs::read_dir(timelines_path)? {
+            let direntry = direntry?;
+            if let Some(fname) = direntry.file_name().to_str() {
+                if let Ok(timelineid) = fname.parse::<ZTimelineId>() {
+
+                    // Read the metadata of this timeline to get its parent timeline.
+                    let metadata = Self::load_metadata(conf, timelineid)?;
+
+                    timelines.push((timelineid, metadata.last_record_lsn));
+
+                    if let Some(ancestor_timeline) = metadata.ancestor_timeline {
+                        all_branchpoints.insert((ancestor_timeline, metadata.ancestor_lsn));
+                    }
+                }
+            }
+        }
+
+        // Ok, we now know all the branch points. Iterate through them.
+        for (timelineid, last_lsn) in timelines {
+            let branchpoints: Vec<Lsn> = all_branchpoints.range(
+                (Included((timelineid, Lsn(0))),
+                 Included((timelineid, Lsn(u64::MAX)))))
+                .map(|&x| x.1)
+                .collect();
+
+            if let Some(cutoff) = last_lsn.checked_sub(horizon) {
+                let result = SnapshotLayer::gc_timeline(conf, timelineid, branchpoints, cutoff)?;
+
+                totals += result;
+            }
+        }
+
+        totals.elapsed = now.elapsed();
+        Ok(totals)
+    }
 }
 
 /// LayerMap is a BTreeMap keyed by RelTag and the snapshot file's start LSN.
@@ -368,9 +446,21 @@ impl Timeline for LayeredTimeline {
         todo!();
     }
 
-    fn gc_iteration(&self, _horizon: u64) -> Result<GcResult> {
-        //TODO
-        Ok(Default::default())
+    fn gc_iteration(&self, horizon: u64) -> Result<GcResult> {
+        // In the layered repository, event to GC a single timeline,
+        // we have to scan all the timelines to determine what child
+        // timelines there are, so that we know to retain snapshot
+        // files that are still needed by the children. So we just do
+        // GC on the whole repository.
+        //
+        // FIXME: This makes writing repeatable tests harder, if
+        // activity on other timelines can affect the counters that
+        // we return
+
+        // But do flush the in-memory layers to disk first.
+        self.checkpoint()?;
+
+        LayeredRepository::gc_iteration(self.conf, horizon)
     }
 
     fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()> {

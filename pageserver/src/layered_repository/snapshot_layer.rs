@@ -31,20 +31,21 @@
 //!
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::PageVersion;
-use crate::repository::{RelTag, WALRecord};
+use crate::repository::{GcResult, RelTag, WALRecord};
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::ZTimelineId;
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use log::*;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, BTreeSet};
 use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use bookfile::{Book, BookWriter};
 
@@ -497,5 +498,92 @@ impl SnapshotLayer {
         let end_lsn = Lsn::from_hex(parts.next()?).ok()?;
 
         Some((reltag, start_lsn, end_lsn))
+    }
+
+
+    ///
+    /// Garbage collect snapshot files on a timeline that are no longer needed.
+    ///
+    /// The caller specifies how much history is needed with the two arguments:
+    ///
+    /// retain_lsns: keep page a version of each page at these LSNs
+    /// cutoff: also keep everything newer than this LSN
+    ///
+    /// The 'retain_lsns' lists is currently used to prevent removing files that
+    /// are needed by child timelines. In the future, the user might be able to
+    /// name additional points in time to retain. The caller is responsible for
+    /// collecting that information.
+    ///
+    /// The 'cutoff' point is used to retain recent versions that might still be
+    /// needed by read-only nodes. (As of this writing, the caller just passes
+    /// the latest LSN subtracted by a constant, and doesn't do anything smart
+    /// to figure out what read-only nodes might actually need.)
+    ///
+    /// Currently, we don't make any attempt at removing unneeded page versions
+    /// within a snapshot file. We can only remove the whole file if it's fully
+    /// obsolete.
+    ///
+    pub fn gc_timeline(conf: &'static PageServerConf,
+                       timelineid: ZTimelineId,
+                       retain_lsns: Vec<Lsn>,
+                       cutoff: Lsn) -> Result<GcResult> {
+
+        let now = Instant::now();
+        let mut result: GcResult = Default::default();
+
+        // Scan all snapshot files in the directory. For each file, if a newer file
+        // exists, we can remove the old one.
+
+        // For convenience and speed, slurp the list of files in the directoy into memory first.
+        let mut snapfiles: BTreeSet<(RelTag, Lsn, Lsn)> = BTreeSet::new();
+
+        let timeline_path = conf.timeline_path(timelineid);
+        for direntry in fs::read_dir(timeline_path)? {
+            let direntry = direntry?;
+            let fname = direntry.file_name();
+            let fname = fname.to_str().unwrap();
+
+            if let Some((reltag, start_lsn, end_lsn)) = Self::fname_to_tag(fname) {
+                snapfiles.insert((reltag, start_lsn, end_lsn));
+            }
+            result.snapshot_files_total += 1;
+        }
+
+        // Now determine for each file if it needs to be retained
+        'outer: for (reltag, start_lsn, end_lsn) in &snapfiles {
+
+            // Is it newer than cutoff point?
+            if *end_lsn >= cutoff {
+                result.snapshot_files_needed_by_cutoff += 1;
+                continue 'outer;
+            }
+
+            // Is it needed by a child branch?
+            for retain_lsn in &retain_lsns {
+                // FIXME: are the bounds inclusive or exclusive?
+                if *start_lsn <= *retain_lsn && *retain_lsn <= *end_lsn {
+                    result.snapshot_files_needed_by_branches += 1;
+                    continue 'outer;
+                }
+            }
+
+            // Is there a later snapshot file for this relation?
+            if snapfiles.range(
+                (Included((*reltag, *end_lsn, Lsn(0))),
+                 Included((*reltag, Lsn(u64::MAX), Lsn(0))))).next().is_none() {
+                // there is no later file, so keep it
+                result.snapshot_files_not_updated += 1;
+                continue 'outer;
+            }
+
+            // We didn't find any reason to keep this file, so remove it.
+            let path = Self::path_for(conf, timelineid, *reltag, *start_lsn, *end_lsn);
+            info!("garbage collecting {}", path.display());
+            fs::remove_file(path)?;
+            result.snapshot_files_removed += 1;
+        }
+
+        result.elapsed = now.elapsed();
+        Ok(result)
     }
 }

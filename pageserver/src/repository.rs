@@ -9,6 +9,8 @@ use postgres_ffi::TransactionId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::iter::Iterator;
+use std::fmt;
+use std::ops::AddAssign;
 use std::sync::Arc;
 use std::time::Duration;
 use zenith_utils::lsn::Lsn;
@@ -39,6 +41,8 @@ pub trait Repository: Send + Sync {
 ///
 #[derive(Default)]
 pub struct GcResult {
+    // FIXME: These counters make sense for the ObjectRepository. They are not used
+    // by the LayeredRepository.
     pub n_relations: u64,
     pub inspected: u64,
     pub truncated: u64,
@@ -47,7 +51,33 @@ pub struct GcResult {
     pub slru_deleted: u64, // SLRU (clog, multixact)
     pub chkp_deleted: u64, // Checkpoints
     pub dropped: u64,
+
+    // These are used for the LayeredRepository instead
+    pub snapshot_files_total: u64,
+    pub snapshot_files_needed_by_cutoff: u64,
+    pub snapshot_files_needed_by_branches: u64,
+    pub snapshot_files_not_updated: u64,
+    pub snapshot_files_removed: u64,
+
     pub elapsed: Duration,
+}
+
+
+impl AddAssign for GcResult {
+    fn add_assign(&mut self, other: Self) {
+        self.n_relations += other.n_relations;
+        self.truncated += other.truncated;
+        self.deleted += other.deleted;
+        self.dropped += other.dropped;
+
+        self.snapshot_files_total += other.snapshot_files_total;
+        self.snapshot_files_needed_by_cutoff += other.snapshot_files_needed_by_cutoff;
+        self.snapshot_files_needed_by_branches += other.snapshot_files_needed_by_branches;
+        self.snapshot_files_not_updated += other.snapshot_files_not_updated;
+        self.snapshot_files_removed += other.snapshot_files_removed;
+
+        self.elapsed += other.elapsed;
+    }
 }
 
 pub trait Timeline: Send + Sync {
