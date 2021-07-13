@@ -278,17 +278,17 @@ impl PostgresRedoManagerInternal {
             // Relational WAL records are applied using wal-redo-postgres
             apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
         } else {
-            // Non-relational WAL records we will aply ourselves.
+            // Non-relational WAL records we apply ourselves.
             const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
             let mut page = BytesMut::new();
             if let Some(fpi) = base_img {
                 // If full-page image is provided, then use it...
                 page.extend_from_slice(&fpi[..]);
             } else {
-                //  otherwise initialize page with zeros
+                // otherwise initialize page with zeros
                 page.extend_from_slice(&ZERO_PAGE);
             }
-            // Apply all callected WAL records
+            // Apply all collected WAL records
             for record in records {
                 let mut buf = record.rec.clone();
 
