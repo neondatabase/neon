@@ -1,3 +1,4 @@
+import pytest
 from contextlib import closing
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 import psycopg2.extras
@@ -10,6 +11,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # This test is pretty tightly coupled with the current implementation of page version storage
 # and garbage collection in object_repository.rs.
 #
+@pytest.mark.skip(reason="This test only works with the RocksDB implementation")
 def test_gc(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
     zenith_cli.run(["branch", "test_gc", "empty"])
     pg = postgres.create_start('test_gc')
