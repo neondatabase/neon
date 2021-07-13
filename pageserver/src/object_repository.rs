@@ -621,7 +621,7 @@ impl Timeline for ObjectTimeline {
         if let Some(horizon) = last_lsn.checked_sub(horizon) {
             // WAL is large enough to perform GC
             let now = Instant::now();
-
+            let mut prepared_horizon = Lsn(u64::MAX);
             // Iterate through all objects in timeline
             for obj in self
                 .obj_store
@@ -636,10 +636,11 @@ impl Timeline for ObjectTimeline {
                             tag: obj,
                         };
                         for vers in self.obj_store.object_versions(&key, horizon)? {
+                            let lsn = vers.0;
+                            prepared_horizon = Lsn::min(lsn, prepared_horizon);
                             if self.get_tx_status(prepare.xid, horizon)?
                                 != pg_constants::TRANSACTION_STATUS_IN_PROGRESS
                             {
-                                let lsn = vers.0;
                                 self.obj_store.unlink(&key, lsn)?;
                                 result.prep_deleted += 1;
                             }
@@ -687,7 +688,9 @@ impl Timeline for ObjectTimeline {
                             if last_version {
                                 result.truncated += 1;
                                 last_version = false;
-                                if let Some(rel_size) = self.relsize_get_nowait(tag.rel, last_lsn)? {
+                                if let Some(rel_size) =
+                                    self.relsize_get_nowait(tag.rel, last_lsn)?
+                                {
                                     if rel_size > tag.blknum {
                                         // preserve and materialize last version before deleting all preceeding
                                         self.get_page_at_lsn_nowait(obj, lsn)?;
@@ -719,7 +722,10 @@ impl Timeline for ObjectTimeline {
                             timeline: self.timelineid,
                             tag: obj,
                         };
-                        for vers in self.obj_store.object_versions(&key, horizon)? {
+                        for vers in self
+                            .obj_store
+                            .object_versions(&key, Lsn::min(prepared_horizon, horizon))?
+                        {
                             let lsn = vers.0;
                             if last_version {
                                 let content = vers.1;
