@@ -89,7 +89,8 @@ pub trait Timeline: Send + Sync {
     fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes, update_meta: bool) -> Result<()>;
+    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes, update_meta: bool)
+        -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
@@ -119,6 +120,9 @@ pub trait Timeline: Send + Sync {
     /// valid LSN, so that the WAL receiver knows where to restart streaming.
     fn advance_last_record_lsn(&self, lsn: Lsn);
     fn get_last_record_lsn(&self) -> Lsn;
+
+    // Like `advance_last_record_lsn`, but points to the start position of last record
+    fn get_prev_record_lsn(&self) -> Lsn;
 
     ///
     /// Flush to disk all data that was written with the put_* functions

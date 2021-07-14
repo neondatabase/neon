@@ -31,6 +31,7 @@ pub struct Basebackup<'a> {
     ar: Builder<&'a mut dyn Write>,
     timeline: &'a Arc<dyn Timeline>,
     lsn: Lsn,
+    prev_record_lsn: Lsn,
     snappath: String,
     slru_buf: [u8; pg_constants::SLRU_SEG_SIZE],
     slru_segno: u32,
@@ -43,12 +44,14 @@ impl<'a> Basebackup<'a> {
         timelineid: ZTimelineId,
         timeline: &'a Arc<dyn Timeline>,
         lsn: Lsn,
+        prev_record_lsn: Lsn,
         snapshot_lsn: Lsn,
     ) -> Basebackup<'a> {
         Basebackup {
             ar: Builder::new(write),
             timeline,
             lsn,
+            prev_record_lsn,
             snappath: format!("timelines/{}/snapshots/{:016X}", timelineid, snapshot_lsn.0),
             slru_path: "",
             slru_segno: u32::MAX,
@@ -239,8 +242,10 @@ impl<'a> Basebackup<'a> {
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
         // add zenith.signal file
-        self.ar
-            .append(&new_tar_header("zenith.signal", 0)?, &b""[..])?;
+        self.ar.append(
+            &new_tar_header("zenith.signal", 8)?,
+            &self.prev_record_lsn.0.to_le_bytes()[..],
+        )?;
 
         //send pg_control
         let pg_control_bytes = pg_control.encode();
