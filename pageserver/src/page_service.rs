@@ -303,6 +303,7 @@ impl PageServerHandler {
                 timelineid,
                 &timeline,
                 req_lsn,
+                timeline.get_prev_record_lsn(),
                 snapshot_lsn,
             );
             basebackup.send_tarball()?;

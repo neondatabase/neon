@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{TcpStream};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
@@ -12,8 +12,8 @@ use postgres::{Config, NoTls};
 
 use crate::local_env::LocalEnv;
 use crate::read_pidfile;
-use zenith_utils::connstring::connection_address;
 use pageserver::branches::BranchInfo;
+use zenith_utils::connstring::connection_address;
 
 //
 // Control routines for pageserver.
@@ -36,7 +36,9 @@ impl PageServerNode {
     }
 
     fn default_config() -> Config {
-        "postgresql://no_user@localhost:64000/no_db".parse().unwrap()
+        "postgresql://no_user@localhost:64000/no_db"
+            .parse()
+            .unwrap()
     }
 
     pub fn connection_config(&self) -> Config {
