@@ -1,6 +1,16 @@
 /// A single 8KB page.
 pub struct Page(pub Box<[u8; 8192]>);
 
+impl Page {
+    /// Create a page by copying bytes from another slice.
+    ///
+    /// This is a copy, not a move. If the caller already has
+    /// an owned array then `From<[u8; 8192]>` can be used instead.
+    pub fn copy_slice(x: &[u8; 8192]) -> Self {
+        Page(Box::new(x.clone()))
+    }
+}
+
 impl Default for Page {
     fn default() -> Self {
         Page(Box::new([0u8; 8192]))
