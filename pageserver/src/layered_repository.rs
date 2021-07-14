@@ -501,12 +501,26 @@ impl Timeline for LayeredTimeline {
 
         let mut layers = self.layers.lock().unwrap();
 
-        // Walk through each SnapshotFile in memory, and write any
-        // dirty ones to disk.
+        // Walk through each in-memory, and write any dirty data to disk,
+        // as snapshot files.
         //
-        // Note: We release all the in-memory SnapshotFile entries, and
-        // start fresh with an empty map. This keeps memory usage in check,
-        // but is perhaps too aggressive.
+        // We currently write a new snapshot file for every relation
+        // that was modified, if there has been any changes at all.
+        // It would be smarter to only flush out in-memory layers that
+        // have accumulated a fair amount of changes. Note that the
+        // start and end LSNs of snapshot files belonging to different
+        // relations don't have to line up, although currently they do
+        // because of the way this works. So you could have a snapshot
+        // file covering LSN range 100-200 for one relation, and a
+        // snapshot file covering 150-250 for another relation. The
+        // read functions should even cope with snapshot files
+        // covering overlapping ranges for the same relation, although
+        // that situation never arises currently.
+        //
+        // Note: We release all the layer structs, and start fresh
+        // with an empty map. This keeps memory usage in check, but is
+        // probably too aggressive. Some kind of LRU policy would be
+        // appropriate.
         //
         let snapfiles = std::mem::take(&mut *layers);
         for snapfile in snapfiles.0.values() {
