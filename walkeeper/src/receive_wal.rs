@@ -6,7 +6,6 @@ use anyhow::{bail, Result};
 use log::*;
 use postgres::{Client, Config, NoTls};
 use serde::{Deserialize, Serialize};
-use zenith_utils::connstring::connection_host_port;
 use std::cmp::{max, min};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -16,6 +15,7 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::sleep;
 use zenith_utils::bin_ser::LeSer;
+use zenith_utils::connstring::connection_host_port;
 use zenith_utils::lsn::Lsn;
 
 use crate::replication::HotStandbyFeedback;
@@ -159,10 +159,7 @@ fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId) {
     let (host, port) = connection_host_port(&me_conf);
     let callme = format!(
         "callmemaybe {} host={} port={} options='-c ztimelineid={}'",
-        timelineid,
-        host,
-        port,
-        timelineid
+        timelineid, host, port, timelineid
     );
     loop {
         info!(

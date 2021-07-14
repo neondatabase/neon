@@ -297,9 +297,7 @@ impl PostgresNode {
                 "shared_preload_libraries = zenith \n\
                  zenith.page_server_connstring = 'host={} port={}'\n\
                  zenith.zenith_timeline='{}'\n",
-                host,
-                port,
-                self.timelineid
+                host, port, self.timelineid
             ),
         )?;
 

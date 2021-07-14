@@ -479,7 +479,7 @@ mod tests {
         // Create another relation
         let buftag2 = BufferTag {
             rel: TESTREL_B,
-            blknum : 0,
+            blknum: 0,
         };
         tline.put_page_image(buftag2, Lsn(2), TEST_IMG("foobar blk 0 at 2"))?;
 
@@ -509,10 +509,7 @@ mod tests {
             TEST_IMG("foobar blk 0 at 2")
         );
 
-        assert_eq!(
-            newtline.get_rel_size(TESTREL_B, Lsn(4))?,
-            1
-        );
+        assert_eq!(newtline.get_rel_size(TESTREL_B, Lsn(4))?, 1);
 
         Ok(())
     }

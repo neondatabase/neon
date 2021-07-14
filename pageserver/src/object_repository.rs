@@ -642,7 +642,12 @@ impl ObjectTimeline {
             return Ok(page_img);
         }
         static ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-        trace!("page {} blk {} at {} not found", tag.rel, tag.blknum, req_lsn);
+        trace!(
+            "page {} blk {} at {} not found",
+            tag.rel,
+            tag.blknum,
+            req_lsn
+        );
         Ok(Bytes::from_static(&ZERO_PAGE))
         /* return Err("could not find page image")?; */
     }
