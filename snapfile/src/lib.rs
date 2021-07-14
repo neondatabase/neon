@@ -27,23 +27,27 @@ pub use versioned::{PageIndex, PageLocation, Predecessor, SnapFileMeta};
 use zenith_utils::lsn::Lsn;
 
 impl SnapFileMeta {
-    pub fn new(previous: Option<SnapFileMeta>, lsn: Lsn) -> Self {
+    pub fn new(previous: Option<SnapFileMeta>, timeline: [u8; 16], lsn: Lsn) -> Self {
         // Store the metadata of the predecessor snapshot, if there is one.
         let predecessor = previous.map(|prev| Predecessor {
-            id: prev.snap_id,
+            timeline: prev.timeline,
             lsn: prev.lsn,
         });
 
-        let snap_id: u64 = rand::random();
         SnapFileMeta {
-            snap_id,
+            timeline,
             predecessor,
             lsn: lsn.into(),
         }
     }
 
     fn to_filename(&self) -> OsString {
-        format!("{:x}.zdb", self.snap_id).into()
+        let timeline_string = hex::encode(self.timeline);
+        let pred_lsn = match &self.predecessor {
+            None => 0,
+            Some(pred) => pred.lsn,
+        };
+        format!("{}_{:x}_{:x}.zdb", timeline_string, pred_lsn, self.lsn).into()
     }
 }
 
@@ -266,13 +270,15 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    const TEST_TIMELINE: [u8; 16] = [99u8; 16];
+
     #[test]
     fn snap_two_pages() {
         // When `dir` goes out of scope the directory will be unlinked.
         let dir = TempDir::new().unwrap();
         let snap_meta = {
             // Write out a new snapshot file with two pages.
-            let meta = SnapFileMeta::new(None, Lsn(1234));
+            let meta = SnapFileMeta::new(None, TEST_TIMELINE, Lsn(1234));
             let mut snap = SnapWriter::new(dir.path(), meta).unwrap();
             // Write the pages out of order, because why not?
             let page99 = [99u8; 8192];
@@ -313,7 +319,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let snap_meta = {
             // Write out a new snapshot file with no pages.
-            let meta = SnapFileMeta::new(None, Lsn(1234));
+            let meta = SnapFileMeta::new(None, TEST_TIMELINE, Lsn(1234));
             let snap = SnapWriter::new(dir.path(), meta).unwrap();
             snap.finish().unwrap()
         };

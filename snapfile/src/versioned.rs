@@ -30,21 +30,22 @@ pub(crate) const CHAPTER_PAGE_INDEX: u64 = 3;
 /// of that snapshot.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Predecessor {
-    /// This is the id number of the previous snapshot.
+    /// This is the ID number of the predecessor timeline.
     ///
-    /// This must match the snap_id of the previous snapshot.
-    pub id: u64,
+    /// This may match the current snapshot's timeline id, but
+    /// it may not (if the precessor was the branch point).
+    pub timeline: [u8; 16],
 
-    /// This is the LSN of the previous snapshot.
+    /// This is the LSN of the predecessor snapshot.
     pub lsn: u64,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Versioned, UpgradeLatest)]
 pub struct SnapFileMetaV1 {
-    /// This is a unique ID number for this snapshot.
+    /// This is a unique ID number for this timeline.
     ///
     /// This number guarantees that snapshot history is unique.
-    pub snap_id: u64,
+    pub timeline: [u8; 16],
 
     /// Information about the predecessor snapshot.
     ///

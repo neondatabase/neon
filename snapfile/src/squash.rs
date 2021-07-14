@@ -42,7 +42,7 @@ pub fn squash(older: &Path, newer: &Path, out_dir: &Path) -> Result<()> {
 
     // Check that snap1 is the predecessor of snap2.
     match meta2.predecessor {
-        Some(pred) if pred.id == meta1.snap_id => {}
+        Some(pred) if pred.timeline == meta1.timeline => {}
         _ => {
             bail!(
                 "snap file {:?} is not the predecessor of {:?}",
@@ -55,11 +55,12 @@ pub fn squash(older: &Path, newer: &Path, out_dir: &Path) -> Result<()> {
     // The new combined snapshot will have most fields from meta2 (the later
     // snapshot), but will have the predecessor from meta1.
     let new_meta = SnapFileMeta {
-        // FIXME: Wow, this seems wrong. Need to sort out what to do here.
-        // should snap_id even exist? The fact that we plan on squashing
-        // snapshots often implies that maybe they shouldn't.
-        // How do we identify predecessor? timeline_id + lsn?
-        snap_id: meta2.snap_id,
+        // There is some danger in squashing snapshots across two timelines,
+        // in that it's possible to get confused about what the history
+        // looks like. Ultimately, it should be possible to squash our way
+        // to a "complete" snapshot (that contains all pages), so this must
+        // be possible.
+        timeline: meta2.timeline,
         predecessor: meta1.predecessor,
         lsn: meta2.lsn,
     };

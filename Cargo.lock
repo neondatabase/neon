@@ -1972,6 +1972,7 @@ dependencies = [
  "anyhow",
  "aversion",
  "bookfile",
+ "hex",
  "rand",
  "serde",
  "structopt",

@@ -15,6 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 rand = "0.8.3"
 structopt = "0.3"
 zenith_utils = { path = "../zenith_utils" }
+hex = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3.2"
