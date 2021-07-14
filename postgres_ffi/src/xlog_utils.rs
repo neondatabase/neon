@@ -96,8 +96,8 @@ pub fn get_current_timestamp() -> TimestampTz {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(n) => {
             ((n.as_secs() - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY))
-             * USECS_PER_SEC
-             + n.subsec_micros() as u64) as i64
+                * USECS_PER_SEC
+                + n.subsec_micros() as u64) as i64
         }
         Err(_) => panic!("SystemTime before UNIX EPOCH!"),
     }

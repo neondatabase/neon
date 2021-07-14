@@ -110,6 +110,7 @@ impl Repository for ObjectRepository {
         let metadata = MetadataEntry {
             last_valid_lsn: start_lsn,
             last_record_lsn: start_lsn,
+            prev_record_lsn: Lsn(0),
             ancestor_timeline: None,
             ancestor_lsn: start_lsn,
         };
@@ -146,6 +147,7 @@ impl Repository for ObjectRepository {
         let metadata = MetadataEntry {
             last_valid_lsn: at_lsn,
             last_record_lsn: at_lsn,
+            prev_record_lsn: src_timeline.get_prev_record_lsn(),
             ancestor_timeline: Some(src),
             ancestor_lsn: at_lsn,
         };
@@ -216,6 +218,7 @@ pub struct ObjectTimeline {
     //
     last_valid_lsn: SeqWait<Lsn>,
     last_record_lsn: AtomicLsn,
+    prev_record_lsn: AtomicLsn,
 
     ancestor_timeline: Option<ZTimelineId>,
     ancestor_lsn: Lsn,
@@ -244,6 +247,7 @@ impl ObjectTimeline {
             walredo_mgr,
             last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
             last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
+            prev_record_lsn: AtomicLsn::new(metadata.prev_record_lsn.0),
             ancestor_timeline: metadata.ancestor_timeline,
             ancestor_lsn: metadata.ancestor_lsn,
             rel_meta: RwLock::new(BTreeMap::new()),
@@ -469,7 +473,13 @@ impl Timeline for ObjectTimeline {
     ///
     /// Memorize a full image of a page version
     ///
-    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes, update_meta: bool) -> Result<()> {
+    fn put_page_image(
+        &self,
+        tag: ObjectTag,
+        lsn: Lsn,
+        img: Bytes,
+        update_meta: bool,
+    ) -> Result<()> {
         self.put_page_entry(&tag, lsn, PageEntry::Page(img))?;
 
         debug!("put_page_image rel {:?} at {}", tag, lsn);
@@ -552,6 +562,7 @@ impl Timeline for ObjectTimeline {
         assert!(old == Lsn(0));
         let old = self.last_record_lsn.fetch_max(lsn);
         assert!(old == Lsn(0));
+        self.prev_record_lsn.store(Lsn(0));
     }
 
     /// Like `advance_last_valid_lsn`, but this always points to the end of
@@ -565,6 +576,8 @@ impl Timeline for ObjectTimeline {
         // Can't move backwards.
         let old = self.last_record_lsn.fetch_max(lsn);
         assert!(old <= lsn);
+
+        self.prev_record_lsn.fetch_max(old);
 
         // Also advance last_valid_lsn
         let old = self.last_valid_lsn.advance(lsn);
@@ -580,6 +593,10 @@ impl Timeline for ObjectTimeline {
         self.last_record_lsn.load()
     }
 
+    fn get_prev_record_lsn(&self) -> Lsn {
+        self.prev_record_lsn.load()
+    }
+
     ///
     /// Flush to disk all data that was written with the put_* functions
     ///
@@ -593,6 +610,7 @@ impl Timeline for ObjectTimeline {
         let metadata = MetadataEntry {
             last_valid_lsn: self.last_valid_lsn.load(),
             last_record_lsn: self.last_record_lsn.load(),
+            prev_record_lsn: self.prev_record_lsn.load(),
             ancestor_timeline: self.ancestor_timeline,
             ancestor_lsn: self.ancestor_lsn,
         };
@@ -1120,6 +1138,7 @@ const fn relation_size_key(timelineid: ZTimelineId, rel: RelTag) -> ObjectKey {
 pub struct MetadataEntry {
     last_valid_lsn: Lsn,
     last_record_lsn: Lsn,
+    prev_record_lsn: Lsn,
     ancestor_timeline: Option<ZTimelineId>,
     ancestor_lsn: Lsn,
 }

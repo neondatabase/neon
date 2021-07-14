@@ -256,7 +256,12 @@ fn import_slru_file(
         let r = file.read_exact(&mut buf);
         match r {
             Ok(_) => {
-                timeline.put_page_image(gen_tag(blknum), lsn, Bytes::copy_from_slice(&buf), false)?;
+                timeline.put_page_image(
+                    gen_tag(blknum),
+                    lsn,
+                    Bytes::copy_from_slice(&buf),
+                    false,
+                )?;
             }
 
             // TODO: UnexpectedEof is expected
