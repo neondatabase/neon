@@ -74,9 +74,8 @@ impl CfgFileParams {
             Some(horizon_str) => horizon_str.parse()?,
             None => DEFAULT_GC_HORIZON,
         };
-
-        let gc_period: Duration = match self.gc_period.as_ref() {
-            Some(period_str) => parse_duration::parse(period_str)?,
+        let gc_period = match self.gc_period.as_ref() {
+            Some(period_str) => humantime::parse_duration(period_str)?,
             None => DEFAULT_GC_PERIOD,
         };
 

@@ -5,12 +5,10 @@ use anyhow::{Context, Result};
 use clap::{App, Arg};
 use daemonize::Daemonize;
 use log::*;
-use parse_duration::parse;
 use slog::Drain;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
 use std::{fs::File, fs::OpenOptions};
 
 use walkeeper::s3_offload;
@@ -102,11 +100,11 @@ fn main() -> Result<()> {
     }
 
     if let Some(ttl) = arg_matches.value_of("ttl") {
-        conf.ttl = Some::<Duration>(parse(ttl)?);
+        conf.ttl = Some(humantime::parse_duration(ttl)?);
     }
 
     if let Some(recall) = arg_matches.value_of("recall") {
-        conf.recall_period = Some::<Duration>(parse(recall)?);
+        conf.recall_period = Some(humantime::parse_duration(recall)?);
     }
 
     start_wal_acceptor(conf)
