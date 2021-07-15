@@ -64,7 +64,7 @@ pub struct PostgresBackend {
 }
 
 // TODO: call shutdown() manually.
-// into_shtm() methods do not work with types implementing Drop
+// into_smth() methods do not work with types implementing Drop
 
 // // In replication.rs a separate thread is reading keepalives from the
 // // socket. When main one finishes, tell it to get down by shutdowning the
@@ -190,7 +190,7 @@ impl PostgresBackend {
                                 }
                                 AuthType::MD5 => {
                                     rand::thread_rng().fill(&mut self.md5_salt);
-                                    let md5_salt = self.md5_salt.clone();
+                                    let md5_salt = self.md5_salt;
                                     self.write_message(&BeMessage::AuthenticationMD5Password(
                                         &md5_salt,
                                     ))?;

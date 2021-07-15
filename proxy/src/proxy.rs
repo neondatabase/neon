@@ -39,7 +39,6 @@ pub fn thread_main(
 struct ProxyConnection {
     state: &'static ProxyState,
 
-    existing_user: bool,
     cplane: CPlaneApi,
 
     user: String,
@@ -57,7 +56,6 @@ pub fn proxy_conn_main(
 ) -> anyhow::Result<()> {
     let mut conn = ProxyConnection {
         state,
-        existing_user: false,
         cplane: CPlaneApi::new(&state.conf.cplane_address),
         user: "".into(),
         database: "".into(),
@@ -71,7 +69,7 @@ pub fn proxy_conn_main(
     conn.handle_startup()?;
 
     // both scenarious here should end up producing database connection string
-    let db_info = if conn.existing_user {
+    let db_info = if conn.is_existing_user() {
         conn.handle_existing_user()?
     } else {
         conn.handle_new_user()?
@@ -91,6 +89,10 @@ pub fn proxy_conn_main(
 }
 
 impl ProxyConnection {
+    fn is_existing_user(&self) -> bool {
+        self.user.ends_with("@zenith")
+    }
+
     fn handle_startup(&mut self) -> anyhow::Result<()> {
         loop {
             let msg = self.pgb.read_message()?;
@@ -119,8 +121,6 @@ impl ProxyConnection {
                                     anyhow::Error::msg("database is required in startup packet")
                                 })?
                                 .into();
-
-                            self.existing_user = self.user.ends_with("@zenith");
 
                             break;
                         }
@@ -152,7 +152,7 @@ impl ProxyConnection {
         if let Some(FeMessage::PasswordMessage(m)) = msg {
             println!("got password message '{:?}'", m);
 
-            assert!(self.existing_user);
+            assert!(self.is_existing_user());
 
             let (_trailing_null, md5_response) = m
                 .split_last()
@@ -196,7 +196,7 @@ databases without opening the browser.
         self.pgb
             .write_message_noflush(&BeMessage::ParameterStatus)?;
         self.pgb
-            .write_message(&BeMessage::NoticeResponse(hello_message.to_string()))?;
+            .write_message(&BeMessage::NoticeResponse(hello_message))?;
 
         // await for database creation
         let (tx, rx) = channel::<anyhow::Result<DatabaseInfo>>();
@@ -220,7 +220,7 @@ databases without opening the browser.
     }
 
     fn check_auth_md5(&self, md5_response: &[u8]) -> anyhow::Result<()> {
-        assert!(self.existing_user);
+        assert!(self.is_existing_user());
         self.cplane
             .check_auth(self.user.as_str(), md5_response, &self.md5_salt)
     }

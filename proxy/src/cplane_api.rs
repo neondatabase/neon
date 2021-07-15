@@ -70,7 +70,7 @@ impl CPlaneApi {
         }
     }
 
-    pub fn get_database_uri(&self, _user: &String, _database: &String) -> Result<DatabaseInfo> {
+    pub fn get_database_uri(&self, _user: &str, _database: &str) -> Result<DatabaseInfo> {
         Ok(DatabaseInfo {
             host: "127.0.0.1".parse()?,
             port: 5432,
