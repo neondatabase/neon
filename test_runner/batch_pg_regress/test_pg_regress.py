@@ -1,11 +1,12 @@
 import os
 
 from fixtures.utils import mkdir_if_needed
+from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_pg_regress(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir,
+def test_pg_regress(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir,
                     base_dir, capsys):
 
     # Create a branch for us

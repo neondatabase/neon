@@ -1,4 +1,5 @@
 from contextlib import closing
+from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -6,7 +7,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test restarting and recreating a postgres instance
 #
-def test_restart_compute(zenith_cli, pageserver, postgres, pg_bin):
+def test_restart_compute(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
     zenith_cli.run(["branch", "test_restart_compute", "empty"])
 
     pg = postgres.create_start('test_restart_compute')

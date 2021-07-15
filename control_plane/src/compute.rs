@@ -17,7 +17,7 @@ use regex::Regex;
 use zenith_utils::connstring::connection_host_port;
 
 use crate::local_env::LocalEnv;
-use pageserver::ZTimelineId;
+use pageserver::{ZTenantId, ZTimelineId};
 
 use crate::storage::PageServerNode;
 
@@ -27,27 +27,36 @@ use crate::storage::PageServerNode;
 pub struct ComputeControlPlane {
     base_port: u16,
     pageserver: Arc<PageServerNode>,
-    pub nodes: BTreeMap<String, Arc<PostgresNode>>,
+    pub nodes: BTreeMap<(ZTenantId, String), Arc<PostgresNode>>,
     env: LocalEnv,
 }
 
 impl ComputeControlPlane {
     // Load current nodes with ports from data directories on disk
+    // Directory structure has the following layout:
+    // pgdatadirs
+    // |- tenants
+    // |  |- <tenant_id>
+    // |  |   |- <branch name>
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
         // TODO: since pageserver do not have config file yet we believe here that
         // it is running on default port. Change that when pageserver will have config.
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
+        let mut nodes = BTreeMap::default();
         let pgdatadirspath = &env.pg_data_dirs_path();
-        let nodes: Result<BTreeMap<_, _>> = fs::read_dir(&pgdatadirspath)
+
+        for tenant_dir in fs::read_dir(&pgdatadirspath)
             .with_context(|| format!("failed to list {}", pgdatadirspath.display()))?
-            .into_iter()
-            .map(|f| {
-                PostgresNode::from_dir_entry(f?, &env, &pageserver)
-                    .map(|node| (node.name.clone(), Arc::new(node)))
-            })
-            .collect();
-        let nodes = nodes?;
+        {
+            let tenant_dir = tenant_dir?;
+            for timeline_dir in fs::read_dir(tenant_dir.path())
+                .with_context(|| format!("failed to list {}", tenant_dir.path().display()))?
+            {
+                let node = PostgresNode::from_dir_entry(timeline_dir?, &env, &pageserver)?;
+                nodes.insert((node.tenantid, node.name.clone()), Arc::new(node));
+            }
+        }
 
         Ok(ComputeControlPlane {
             base_port: 55431,
@@ -82,6 +91,7 @@ impl ComputeControlPlane {
         is_test: bool,
         timelineid: ZTimelineId,
         name: &str,
+        tenantid: ZTenantId,
     ) -> Result<Arc<PostgresNode>> {
         let node = Arc::new(PostgresNode {
             name: name.to_owned(),
@@ -90,19 +100,26 @@ impl ComputeControlPlane {
             pageserver: Arc::clone(&self.pageserver),
             is_test,
             timelineid,
+            tenantid,
         });
 
         node.init_from_page_server()?;
-        self.nodes.insert(node.name.clone(), Arc::clone(&node));
+        self.nodes
+            .insert((tenantid, node.name.clone()), Arc::clone(&node));
 
         Ok(node)
     }
 
-    pub fn new_node(&mut self, branch_name: &str) -> Result<Arc<PostgresNode>> {
-        let timeline_id = self.pageserver.branch_get_by_name(branch_name)?.timeline_id;
-
-        let node = self.new_from_page_server(false, timeline_id, branch_name)?;
-
+    pub fn new_node(
+        &mut self,
+        tenantid: ZTenantId,
+        branch_name: &str,
+    ) -> Result<Arc<PostgresNode>> {
+        let timeline_id = self
+            .pageserver
+            .branch_get_by_name(&tenantid, branch_name)?
+            .timeline_id;
+        let node = self.new_from_page_server(false, timeline_id, branch_name, tenantid)?;
         // Configure the node to stream WAL directly to the pageserver
         node.append_conf(
             "postgresql.conf",
@@ -112,7 +129,7 @@ impl ComputeControlPlane {
                     "synchronous_standby_names = 'pageserver'\n", // TODO: add a new function arg?
                     "zenith.callmemaybe_connstring = '{}'\n",     // FIXME escaping
                 ),
-                node.connstr()
+                node.connstr(),
             )
             .as_str(),
         )?;
@@ -123,6 +140,7 @@ impl ComputeControlPlane {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+#[derive(Debug)]
 pub struct PostgresNode {
     pub address: SocketAddr,
     name: String,
@@ -130,6 +148,7 @@ pub struct PostgresNode {
     pageserver: Arc<PageServerNode>,
     is_test: bool,
     pub timelineid: ZTimelineId,
+    pub tenantid: ZTenantId,
 }
 
 impl PostgresNode {
@@ -149,6 +168,8 @@ impl PostgresNode {
             static ref CONF_PORT_RE: Regex = Regex::new(r"(?m)^\s*port\s*=\s*(\d+)\s*$").unwrap();
             static ref CONF_TIMELINE_RE: Regex =
                 Regex::new(r"(?m)^\s*zenith.zenith_timeline\s*=\s*'(\w+)'\s*$").unwrap();
+            static ref CONF_TENANT_RE: Regex =
+                Regex::new(r"(?m)^\s*zenith.zenith_tenant\s*=\s*'(\w+)'\s*$").unwrap();
         }
 
         // parse data directory name
@@ -196,6 +217,22 @@ impl PostgresNode {
             .parse()
             .with_context(|| err_msg)?;
 
+        // parse tenant
+        let err_msg = format!(
+            "failed to find tenant definition in config file {}",
+            cfg_path.to_str().unwrap()
+        );
+        let tenantid = CONF_TENANT_RE
+            .captures(config.as_str())
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 1"))?
+            .iter()
+            .last()
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 2"))?
+            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 3"))?
+            .as_str()
+            .parse()
+            .with_context(|| err_msg)?;
+
         // ok now
         Ok(PostgresNode {
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
@@ -204,6 +241,7 @@ impl PostgresNode {
             pageserver: Arc::clone(pageserver),
             is_test: false,
             timelineid,
+            tenantid,
         })
     }
 
@@ -223,7 +261,7 @@ impl PostgresNode {
             fs::remove_dir_all(&pgdata).ok();
         }
 
-        let sql = format!("basebackup {}", self.timelineid);
+        let sql = format!("basebackup {} {}", self.tenantid, self.timelineid);
         let mut client = self
             .pageserver
             .page_server_psql_client()
@@ -293,12 +331,16 @@ impl PostgresNode {
         let (host, port) = connection_host_port(&self.pageserver.connection_config());
         self.append_conf(
             "postgresql.conf",
-            &format!(
-                "shared_preload_libraries = zenith \n\
-                 zenith.page_server_connstring = 'host={} port={}'\n\
-                 zenith.zenith_timeline='{}'\n",
-                host, port, self.timelineid
-            ),
+            format!(
+                concat!(
+                    "shared_preload_libraries = zenith\n",
+                    "zenith.page_server_connstring = 'host={} port={}'\n",
+                    "zenith.zenith_timeline='{}'\n",
+                    "zenith.zenith_tenant='{}'\n",
+                ),
+                host, port, self.timelineid, self.tenantid,
+            )
+            .as_str(),
         )?;
 
         fs::create_dir_all(self.pgdata().join("pg_wal"))?;
@@ -307,7 +349,7 @@ impl PostgresNode {
     }
 
     pub fn pgdata(&self) -> PathBuf {
-        self.env.pg_data_dir(&self.name)
+        self.env.pg_data_dir(&self.tenantid, &self.name)
     }
 
     pub fn status(&self) -> &str {

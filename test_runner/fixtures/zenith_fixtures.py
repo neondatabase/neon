@@ -1,5 +1,7 @@
 import getpass
 import os
+import pathlib
+import uuid
 import psycopg2
 import pytest
 import shutil
@@ -169,16 +171,15 @@ class ZenithPageserver(PgProtocol):
     """ An object representing a running pageserver. """
     def __init__(self, zenith_cli: ZenithCli):
         super().__init__(host='localhost', port=DEFAULT_PAGESERVER_PORT)
-
         self.zenith_cli = zenith_cli
         self.running = False
+        self.initial_tenant = None
 
     def init(self) -> 'ZenithPageserver':
         """
         Initialize the repository, i.e. run "zenith init".
         Returns self.
         """
-
         self.zenith_cli.run(['init'])
         return self
 
@@ -190,6 +191,8 @@ class ZenithPageserver(PgProtocol):
 
         self.zenith_cli.run(['start'])
         self.running = True
+        # get newly created tenant id
+        self.initial_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.strip()
         return self
 
     def stop(self) -> 'ZenithPageserver':
@@ -232,7 +235,7 @@ def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, instance_num: int):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, instance_num: int, tenant_id: str):
         super().__init__(host='localhost', port=55431 + instance_num)
 
         self.zenith_cli = zenith_cli
@@ -240,12 +243,15 @@ class Postgres(PgProtocol):
         self.running = False
         self.repo_dir = repo_dir
         self.branch: Optional[str] = None  # dubious, see asserts below
-        # path to conf is <repo_dir>/pgdatadirs/<branch_name>/postgresql.conf
+        self.tenant_id = tenant_id
+        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<branch_name>/postgresql.conf
 
-    def create(self,
-               branch: str,
-               wal_acceptors: Optional[str] = None,
-               config_lines: Optional[List[str]] = None) -> 'Postgres':
+    def create(
+        self,
+        branch: str,
+        wal_acceptors: Optional[str] = None,
+        config_lines: Optional[List[str]] = None,
+    ) -> 'Postgres':
         """
         Create the pg data directory.
         If wal_acceptors is not None, node will use wal acceptors; config is
@@ -256,7 +262,7 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        self.zenith_cli.run(['pg', 'create', branch])
+        self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
         self.branch = branch
         if wal_acceptors is not None:
             self.adjust_for_wal_acceptors(wal_acceptors)
@@ -273,14 +279,14 @@ class Postgres(PgProtocol):
         """
 
         assert self.branch is not None
-        self.zenith_cli.run(['pg', 'start', self.branch])
+        self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}'])
         self.running = True
 
         return self
 
     def config_file_path(self) -> str:
         """ Path to postgresql.conf """
-        filename = f'pgdatadirs/{self.branch}/postgresql.conf'
+        filename = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'postgresql.conf'
         return os.path.join(self.repo_dir, filename)
 
     def adjust_for_wal_acceptors(self, wal_acceptors: str) -> 'Postgres':
@@ -326,7 +332,7 @@ class Postgres(PgProtocol):
 
         if self.running:
             assert self.branch is not None
-            self.zenith_cli.run(['pg', 'stop', self.branch])
+            self.zenith_cli.run(['pg', 'stop', self.branch, f'--tenantid={self.tenant_id}'])
             self.running = False
 
         return self
@@ -338,42 +344,57 @@ class Postgres(PgProtocol):
         """
 
         assert self.branch is not None
-        self.zenith_cli.run(['pg', 'stop', '--destroy', self.branch])
+        assert self.tenant_id is not None
+        self.zenith_cli.run(['pg', 'stop', '--destroy', self.branch, f'--tenantid={self.tenant_id}'])
 
         return self
 
-    def create_start(self,
-                     branch: str,
-                     wal_acceptors: Optional[str] = None,
-                     config_lines: Optional[List[str]] = None) -> 'Postgres':
+    def create_start(
+        self,
+        branch: str,
+        wal_acceptors: Optional[str] = None,
+        config_lines: Optional[List[str]] = None,
+    ) -> 'Postgres':
         """
         Create a Postgres instance, then start it.
         Returns self.
         """
 
-        self.create(branch, wal_acceptors, config_lines).start()
+        self.create(
+            branch=branch,
+            wal_acceptors=wal_acceptors,
+            config_lines=config_lines,
+        ).start()
 
         return self
 
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, initial_tenant: str):
         self.zenith_cli = zenith_cli
         self.repo_dir = repo_dir
         self.num_instances = 0
         self.instances: List[Postgres] = []
+        self.initial_tenant: str = initial_tenant
 
-    def create_start(self,
-                     branch: str = "main",
-                     wal_acceptors: Optional[str] = None,
-                     config_lines: Optional[List[str]] = None) -> Postgres:
+    def create_start(
+        self,
+        branch: str = "main",
+        tenant_id: Optional[str] = None,
+        wal_acceptors: Optional[str] = None,
+        config_lines: Optional[List[str]] = None
+    ) -> Postgres:
 
-        pg = Postgres(self.zenith_cli, self.repo_dir, self.num_instances + 1)
+        pg = Postgres(self.zenith_cli, self.repo_dir, self.num_instances + 1, tenant_id=tenant_id or self.initial_tenant)
         self.num_instances += 1
         self.instances.append(pg)
 
-        return pg.create_start(branch, wal_acceptors, config_lines)
+        return pg.create_start(
+            branch=branch,
+            wal_acceptors=wal_acceptors,
+            config_lines=config_lines,
+        )
 
     def stop_all(self) -> 'PostgresFactory':
         for pg in self.instances:
@@ -381,10 +402,14 @@ class PostgresFactory:
 
         return self
 
+@zenfixture
+def initial_tenant(pageserver: ZenithPageserver):
+    return pageserver.initial_tenant
+
 
 @zenfixture
-def postgres(zenith_cli: ZenithCli, repo_dir: str) -> Iterator[PostgresFactory]:
-    pgfactory = PostgresFactory(zenith_cli, repo_dir)
+def postgres(zenith_cli: ZenithCli, initial_tenant: str, repo_dir: str) -> Iterator[PostgresFactory]:
+    pgfactory = PostgresFactory(zenith_cli, repo_dir, initial_tenant=initial_tenant)
 
     yield pgfactory
 
@@ -636,3 +661,20 @@ def pg_distrib_dir(base_dir: str) -> str:
     if not os.path.exists(os.path.join(pg_dir, 'bin/postgres')):
         raise Exception('postgres not found at "{}"'.format(pg_dir))
     return pg_dir
+
+
+class TenantFactory:
+    def __init__(self, cli: ZenithCli):
+        self.cli = cli
+
+    def create(self, tenant_id: Optional[str] = None):
+        if tenant_id is None:
+            tenant_id = uuid.uuid4().hex
+        res = self.cli.run(['tenant', 'create', tenant_id])
+        res.check_returncode()
+        return tenant_id
+
+
+@zenfixture
+def tenant_factory(zenith_cli: ZenithCli):
+    return TenantFactory(zenith_cli)

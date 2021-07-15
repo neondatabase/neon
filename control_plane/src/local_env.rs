@@ -5,6 +5,8 @@
 // script which will use local paths.
 //
 use anyhow::{anyhow, Result};
+use hex;
+use pageserver::ZTenantId;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -16,7 +18,7 @@ pub type Remotes = BTreeMap<String, String>;
 //
 // This data structures represent deserialized zenith CLI config
 //
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LocalEnv {
     // Pageserver connection strings
     pub pageserver_connstring: String,
@@ -32,6 +34,10 @@ pub struct LocalEnv {
 
     // Path to pageserver binary. Empty for remote pageserver.
     pub zenith_distrib_dir: Option<PathBuf>,
+
+    // keeping tenant id in config to reduce copy paste when running zenith locally with single tenant
+    #[serde(with = "hex")]
+    pub tenantid: ZTenantId,
 
     pub remotes: Remotes,
 }
@@ -54,11 +60,13 @@ impl LocalEnv {
     }
 
     pub fn pg_data_dirs_path(&self) -> PathBuf {
-        self.base_data_dir.join("pgdatadirs")
+        self.base_data_dir.join("pgdatadirs").join("tenants")
     }
 
-    pub fn pg_data_dir(&self, name: &str) -> PathBuf {
-        self.pg_data_dirs_path().join(name)
+    pub fn pg_data_dir(&self, tenantid: &ZTenantId, branch_name: &str) -> PathBuf {
+        self.pg_data_dirs_path()
+            .join(tenantid.to_string())
+            .join(branch_name)
     }
 
     // TODO: move pageserver files into ./pageserver
@@ -77,7 +85,7 @@ fn base_path() -> PathBuf {
 //
 // Initialize a new Zenith repository
 //
-pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
+pub fn init(remote_pageserver: Option<&str>, tenantid: ZTenantId) -> Result<()> {
     // check if config already exists
     let base_path = base_path();
     if base_path.exists() {
@@ -102,9 +110,6 @@ pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
         anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
     }
 
-    fs::create_dir(&base_path)?;
-    fs::create_dir(base_path.join("pgdatadirs"))?;
-
     let conf = if let Some(addr) = remote_pageserver {
         // check that addr is parsable
         let _uri = Url::parse(addr).map_err(|e| anyhow!("{}: {}", addr, e))?;
@@ -115,6 +120,7 @@ pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
             zenith_distrib_dir: None,
             base_data_dir: base_path,
             remotes: BTreeMap::default(),
+            tenantid,
         }
     } else {
         // Find zenith binaries.
@@ -129,8 +135,11 @@ pub fn init(remote_pageserver: Option<&str>) -> Result<()> {
             zenith_distrib_dir: Some(zenith_distrib_dir),
             base_data_dir: base_path,
             remotes: BTreeMap::default(),
+            tenantid,
         }
     };
+
+    fs::create_dir_all(conf.pg_data_dirs_path())?;
 
     let toml = toml::to_string_pretty(&conf)?;
     fs::write(conf.base_data_dir.join("config"), toml)?;

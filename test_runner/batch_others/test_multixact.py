@@ -1,3 +1,5 @@
+from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -7,7 +9,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # it only checks next_multixact_id field in restored pg_control,
 # since we don't have functions to check multixact internals.
 #
-def test_multixact(pageserver, postgres, pg_bin, zenith_cli, base_dir):
+def test_multixact(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli, base_dir):
     # Create a branch for us
     zenith_cli.run(["branch", "test_multixact", "empty"])
     pg = postgres.create_start('test_multixact')

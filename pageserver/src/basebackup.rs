@@ -8,10 +8,11 @@
 //! and generate pg_control and dummy segment of WAL. This module is responsible for creation of such tarball from snapshot directory and
 //! data stored in object storage.
 //!
-use crate::ZTimelineId;
+use crate::{PageServerConf, ZTenantId, ZTimelineId};
 use bytes::{BufMut, BytesMut};
 use log::*;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, Header};
@@ -32,7 +33,7 @@ pub struct Basebackup<'a> {
     timeline: &'a Arc<dyn Timeline>,
     lsn: Lsn,
     prev_record_lsn: Lsn,
-    snappath: String,
+    snappath: PathBuf,
     slru_buf: [u8; pg_constants::SLRU_SEG_SIZE],
     slru_segno: u32,
     slru_path: &'static str,
@@ -40,7 +41,9 @@ pub struct Basebackup<'a> {
 
 impl<'a> Basebackup<'a> {
     pub fn new(
+        conf: &PageServerConf,
         write: &'a mut dyn Write,
+        tenantid: ZTenantId,
         timelineid: ZTimelineId,
         timeline: &'a Arc<dyn Timeline>,
         lsn: Lsn,
@@ -52,7 +55,9 @@ impl<'a> Basebackup<'a> {
             timeline,
             lsn,
             prev_record_lsn,
-            snappath: format!("timelines/{}/snapshots/{:016X}", timelineid, snapshot_lsn.0),
+            snappath: conf
+                .snapshots_path(&timelineid, &tenantid)
+                .join(format!("{:016X}", snapshot_lsn.0)),
             slru_path: "",
             slru_segno: u32::MAX,
             slru_buf: [0u8; pg_constants::SLRU_SEG_SIZE],
@@ -60,7 +65,7 @@ impl<'a> Basebackup<'a> {
     }
 
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
-        debug!("sending tarball of snapshot in {}", self.snappath);
+        debug!("sending tarball of snapshot in {}", self.snappath.display());
         for entry in WalkDir::new(&self.snappath) {
             let entry = entry?;
             let fullpath = entry.path();
@@ -179,7 +184,7 @@ impl<'a> Basebackup<'a> {
         } else {
             // User defined tablespaces are not supported
             assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
-            let src_path = format!("{}/base/1/PG_VERSION", self.snappath);
+            let src_path = self.snappath.join("base/1/PG_VERSION");
             let dst_path = format!("base/{}/PG_VERSION", db.dbnode);
             self.ar.append_path_with_name(&src_path, &dst_path)?;
             format!("base/{}/pg_filenode.map", db.dbnode)

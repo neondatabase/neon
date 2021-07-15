@@ -31,6 +31,7 @@ pub trait Repository: Send + Sync {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
+    // TODO get timelines?
     //fn get_stats(&self) -> RepositoryStats;
 }
 
@@ -144,13 +145,13 @@ pub trait Timeline: Send + Sync {
     /// but it can be explicitly requested through page server API.
     ///
     /// `horizon` specifies delta from last LSN to preserve all object versions (PITR interval).
-	/// `compact` parameter is used to force compaction of storage.
-	/// Some storage implementation are based on LSM tree and require periodic merge (compaction).
-	/// Usually storage implementation determines itself when compaction should be performed.
-	/// But for GC tests it way be useful to force compaction just after completion of GC iteration
-	/// to make sure that all detected garbage is removed.
-	/// So right now `compact` is set to true when GC explicitly requested through page srver API,
-	/// and is st to false in GC threads which infinitely repeats GC iterations in loop.
+    /// `compact` parameter is used to force compaction of storage.
+    /// Some storage implementation are based on LSM tree and require periodic merge (compaction).
+    /// Usually storage implementation determines itself when compaction should be performed.
+    /// But for GC tests it way be useful to force compaction just after completion of GC iteration
+    /// to make sure that all detected garbage is removed.
+    /// So right now `compact` is set to true when GC explicitly requested through page srver API,
+    /// and is st to false in GC threads which infinitely repeats GC iterations in loop.
     fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult>;
 
     // Check transaction status
@@ -311,7 +312,7 @@ mod tests {
     use crate::object_repository::{ObjectValue, PageEntry, RelationSizeEntry};
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
-    use crate::PageServerConf;
+    use crate::{PageServerConf, ZTenantId};
     use postgres_ffi::pg_constants;
     use std::fs;
     use std::path::PathBuf;
@@ -356,7 +357,7 @@ mod tests {
     fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
         let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
         let _ = fs::remove_dir_all(&repo_dir);
-        fs::create_dir_all(&repo_dir)?;
+        fs::create_dir_all(&repo_dir).unwrap();
 
         let conf = PageServerConf {
             daemonize: false,
@@ -371,12 +372,15 @@ mod tests {
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));
+        let tenantid = ZTenantId::generate();
+        fs::create_dir_all(conf.tenant_path(&tenantid)).unwrap();
 
-        let obj_store = RocksObjectStore::create(conf)?;
+        let obj_store = RocksObjectStore::create(conf, &tenantid)?;
 
         let walredo_mgr = TestRedoManager {};
 
-        let repo = ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr));
+        let repo =
+            ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr), tenantid);
 
         Ok(Box::new(repo))
     }

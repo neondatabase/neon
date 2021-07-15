@@ -42,6 +42,7 @@ use crate::repository::WALRecord;
 use crate::waldecoder::XlXactParsedRecord;
 use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
+use crate::ZTenantId;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::XLogRecord;
@@ -100,6 +101,8 @@ struct PostgresRedoManagerInternal {
     conf: &'static PageServerConf,
 
     request_rx: mpsc::Receiver<WalRedoRequest>,
+
+    tenantid: ZTenantId,
 }
 
 #[derive(Debug)]
@@ -131,7 +134,7 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     /// This launches a new thread to handle the requests.
-    pub fn new(conf: &'static PageServerConf) -> PostgresRedoManager {
+    pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
         let (tx, rx) = mpsc::channel();
 
         //
@@ -146,7 +149,11 @@ impl PostgresRedoManager {
         let _walredo_thread = std::thread::Builder::new()
             .name("WAL redo thread".into())
             .spawn(move || {
-                let mut internal = PostgresRedoManagerInternal { conf, request_rx };
+                let mut internal = PostgresRedoManagerInternal {
+                    conf,
+                    request_rx,
+                    tenantid,
+                };
                 internal.wal_redo_main();
             })
             .unwrap();
@@ -219,7 +226,7 @@ impl PostgresRedoManagerInternal {
     // Main entry point for the WAL applicator thread.
     //
     fn wal_redo_main(&mut self) {
-        info!("WAL redo thread started");
+        info!("WAL redo thread started for tenant: {}", self.tenantid);
 
         // We block on waiting for requests on the walredo request channel, but
         // use async I/O to communicate with the child process. Initialize the
@@ -231,10 +238,13 @@ impl PostgresRedoManagerInternal {
 
         let process: PostgresRedoProcess;
 
-        info!("launching WAL redo postgres process");
+        info!(
+            "launching WAL redo postgres process for tenant: {}",
+            self.tenantid
+        );
 
         process = runtime
-            .block_on(PostgresRedoProcess::launch(self.conf))
+            .block_on(PostgresRedoProcess::launch(self.conf, &self.tenantid))
             .unwrap();
 
         // Loop forever, handling requests as they come.
@@ -454,11 +464,14 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    async fn launch(conf: &PageServerConf) -> Result<PostgresRedoProcess, Error> {
+    async fn launch(
+        conf: &PageServerConf,
+        tenantid: &ZTenantId,
+    ) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
-        let datadir = conf.workdir.join("wal-redo-datadir");
+        let datadir = conf.tenant_path(&tenantid).join("wal-redo-datadir");
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {

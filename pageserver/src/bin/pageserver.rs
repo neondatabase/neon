@@ -6,18 +6,18 @@ use log::*;
 use serde::{Deserialize, Serialize};
 use std::{
     env,
-    net::{TcpListener},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::exit,
     thread,
     time::Duration,
 };
 
-use anyhow::{Result};
+use anyhow::Result;
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{branches, page_cache, page_service, tui, logger, PageServerConf};
+use pageserver::{branches, logger, page_cache, page_service, tui, PageServerConf};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 
@@ -158,6 +158,13 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Postgres distribution directory"),
         )
+        .arg(
+            Arg::with_name("create-tenant")
+                .long("create-tenant")
+                .takes_value(true)
+                .help("Create tenant during init")
+                .requires("init"),
+        )
         .get_matches();
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
@@ -166,6 +173,8 @@ fn main() -> Result<()> {
     let args_params = CfgFileParams::from_args(&arg_matches);
 
     let init = arg_matches.is_present("init");
+    let create_tenant = arg_matches.value_of("create-tenant");
+
     let params = if init {
         // We're initializing the repo, so there's no config file yet
         args_params
@@ -199,8 +208,7 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_repo(conf, &workdir)?;
-
+        branches::init_pageserver(conf, workdir, create_tenant)?;
         // write the config file
         let cfg_file_contents = toml::to_string_pretty(&params)?;
         std::fs::write(&cfg_file_path, cfg_file_contents)?;
@@ -215,7 +223,6 @@ fn main() -> Result<()> {
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
-
     // Initialize logger
     let (_scope_guard, log_file) = logger::init_logging(&conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;

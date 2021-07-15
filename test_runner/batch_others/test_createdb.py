@@ -1,4 +1,5 @@
 from contextlib import closing
+from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory, ZenithCli
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -6,7 +7,12 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test CREATE DATABASE when there have been relmapper changes
 #
-def test_createdb(zenith_cli, pageserver, postgres, pg_bin):
+def test_createdb(
+    zenith_cli: ZenithCli,
+    pageserver: ZenithPageserver,
+    postgres: PostgresFactory,
+    pg_bin,
+):
     zenith_cli.run(["branch", "test_createdb", "empty"])
 
     pg = postgres.create_start('test_createdb')

@@ -1,8 +1,9 @@
+from fixtures.zenith_fixtures import PostgresFactory
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_pgbench(pageserver, postgres, pg_bin, zenith_cli):
-
+def test_pgbench(postgres: PostgresFactory, pg_bin, zenith_cli):
     # Create a branch for us
     zenith_cli.run(["branch", "test_pgbench", "empty"])
 

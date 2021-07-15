@@ -10,13 +10,14 @@
 //     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use regex::Regex;
 use std::io::Write;
 use std::net::TcpListener;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::thread;
 use std::{io, net::TcpStream};
 use zenith_utils::postgres_backend::PostgresBackend;
@@ -33,7 +34,9 @@ use crate::page_cache;
 use crate::repository::{BufferTag, Modification, RelTag};
 use crate::restore_local_repo;
 use crate::walreceiver;
+use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
+use crate::ZTenantId;
 use crate::ZTimelineId;
 
 // Wrapped in libpq CopyData
@@ -180,9 +183,10 @@ impl PageServerHandler {
         &self,
         pgb: &mut PostgresBackend,
         timelineid: ZTimelineId,
+        tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
         // Check that the timeline exists
-        let repository = page_cache::get_repository();
+        let repository = page_cache::get_repository_for_tenant(&tenantid)?;
         let timeline = repository.get_timeline(timelineid).map_err(|_| {
             anyhow!(
                 "client requested pagestream on timeline {} which does not exist in page server",
@@ -274,9 +278,10 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend,
         timelineid: ZTimelineId,
         lsn: Option<Lsn>,
+        tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let repository = page_cache::get_repository();
+        let repository = page_cache::get_repository_for_tenant(&tenantid)?;
         let timeline = repository.get_timeline(timelineid).map_err(|e| {
             error!("error fetching timeline: {:?}", e);
             anyhow!(
@@ -292,14 +297,16 @@ impl PageServerHandler {
 
         // find latest snapshot
         let snapshot_lsn =
-            restore_local_repo::find_latest_snapshot(&self.conf, timelineid).unwrap();
+            restore_local_repo::find_latest_snapshot(&self.conf, &timelineid, &tenantid).unwrap();
 
         let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
 
         {
             let mut writer = CopyDataSink { pgb };
             let mut basebackup = basebackup::Basebackup::new(
+                self.conf,
                 &mut writer,
+                tenantid,
                 timelineid,
                 &timeline,
                 req_lsn,
@@ -328,84 +335,102 @@ impl postgres_backend::Handler for PageServerHandler {
         if query_string.last() == Some(&0) {
             query_string.truncate(query_string.len() - 1);
         }
+        let query_string = std::str::from_utf8(&query_string)?;
 
-        if query_string.starts_with(b"controlfile") {
+        if query_string.starts_with("controlfile") {
             self.handle_controlfile(pgb)?;
-        } else if query_string.starts_with(b"pagestream ") {
-            let (_l, r) = query_string.split_at("pagestream ".len());
-            let timelineid_str = String::from_utf8(r.to_vec())?;
-            let timelineid = ZTimelineId::from_str(&timelineid_str)?;
+        } else if query_string.starts_with("pagestream ") {
+            let (_, params_raw) = query_string.split_at("pagestream ".len());
+            let params = params_raw.split(" ").collect::<Vec<_>>();
+            ensure!(
+                params.len() == 2,
+                "invalid param number for pagestream command"
+            );
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
 
-            self.handle_pagerequests(pgb, timelineid)?;
-        } else if query_string.starts_with(b"basebackup ") {
-            let (_l, r) = query_string.split_at("basebackup ".len());
-            let r = r.to_vec();
-            let basebackup_args = String::from(String::from_utf8(r)?.trim_end());
-            let args: Vec<&str> = basebackup_args.rsplit(' ').collect();
-            let timelineid_str = args[0];
-            info!("got basebackup command: \"{}\"", timelineid_str);
-            let timelineid = ZTimelineId::from_str(&timelineid_str)?;
-            let lsn = if args.len() > 1 {
-                Some(Lsn::from_str(args[1])?)
+            self.handle_pagerequests(pgb, timelineid, tenantid)?;
+        } else if query_string.starts_with("basebackup ") {
+            let (_, params_raw) = query_string.split_at("basebackup ".len());
+            let params = params_raw.split(" ").collect::<Vec<_>>();
+            ensure!(
+                params.len() == 2,
+                "invalid param number for basebackup command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
+
+            // TODO are there any tests with lsn option?
+            let lsn = if params.len() == 3 {
+                Some(Lsn::from_str(params[2])?)
             } else {
                 None
             };
+            info!(
+                "got basebackup command. tenantid=\"{}\" timelineid=\"{}\" lsn=\"{:#?}\"",
+                tenantid, timelineid, lsn
+            );
+
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn)?;
+            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with(b"callmemaybe ") {
-            let query_str = String::from_utf8(query_string.to_vec())?;
-
-            // callmemaybe <zenith timelineid as hex string> <connstr>
+        } else if query_string.starts_with("callmemaybe ") {
+            // callmemaybe <zenith tenantid as hex string> <zenith timelineid as hex string> <connstr>
             // TODO lazy static
-            let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) (.*)$").unwrap();
+            let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
             let caps = re
-                .captures(&query_str)
-                .ok_or_else(|| anyhow!("invalid callmemaybe: '{}'", query_str))?;
+                .captures(query_string)
+                .ok_or_else(|| anyhow!("invalid callmemaybe: '{}'", query_string))?;
 
-            let timelineid = ZTimelineId::from_str(caps.get(1).unwrap().as_str())?;
-            let connstr: String = String::from(caps.get(2).unwrap().as_str());
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let connstr = caps.get(3).unwrap().as_str().to_owned();
 
             // Check that the timeline exists
-            let repository = page_cache::get_repository();
+            let repository = page_cache::get_repository_for_tenant(&tenantid)?;
             if repository.get_timeline(timelineid).is_err() {
                 bail!("client requested callmemaybe on timeline {} which does not exist in page server", timelineid);
             }
 
-            walreceiver::launch_wal_receiver(&self.conf, timelineid, &connstr);
+            walreceiver::launch_wal_receiver(&self.conf, timelineid, &connstr, tenantid.to_owned());
 
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with(b"branch_create ") {
-            let query_str = String::from_utf8(query_string.to_vec())?;
-            let err = || anyhow!("invalid branch_create: '{}'", query_str);
+        } else if query_string.starts_with("branch_create ") {
+            let err = || anyhow!("invalid branch_create: '{}'", query_string);
 
-            // branch_create <branchname> <startpoint>
+            // branch_create <tenantid> <branchname> <startpoint>
             // TODO lazy static
             // TOOD: escaping, to allow branch names with spaces
-            let re = Regex::new(r"^branch_create (\S+) ([^\r\n\s;]+)[\r\n\s;]*;?$").unwrap();
-            let caps = re.captures(&query_str).ok_or_else(err)?;
+            let re = Regex::new(r"^branch_create ([[:xdigit:]]+) (\S+) ([^\r\n\s;]+)[\r\n\s;]*;?$")
+                .unwrap();
+            let caps = re.captures(&query_string).ok_or_else(err)?;
 
-            let branchname: String = String::from(caps.get(1).ok_or_else(err)?.as_str());
-            let startpoint_str: String = String::from(caps.get(2).ok_or_else(err)?.as_str());
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let branchname = caps.get(2).ok_or_else(err)?.as_str().to_owned();
+            let startpoint_str = caps.get(3).ok_or_else(err)?.as_str().to_owned();
 
-            let branch = branches::create_branch(&self.conf, &branchname, &startpoint_str)?;
+            let branch =
+                branches::create_branch(&self.conf, &branchname, &startpoint_str, &tenantid)?;
             let branch = serde_json::to_vec(&branch)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(&branch)]))?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with(b"push ") {
-            let query_str = std::str::from_utf8(&query_string)?;
-            let mut it = query_str.split(' ');
-            it.next().unwrap();
-            let timeline_id: ZTimelineId = it
-                .next()
-                .ok_or_else(|| anyhow!("missing timeline id"))?
-                .parse()?;
+        } else if query_string.starts_with("push ") {
+            // push <zenith tenantid as hex string> <zenith timelineid as hex string>
+            let re = Regex::new(r"^push ([[:xdigit:]]+) ([[:xdigit:]]+)$").unwrap();
+
+            let caps = re
+                .captures(query_string)
+                .ok_or_else(|| anyhow!("invalid push: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
             let start_lsn = Lsn(0); // TODO this needs to come from the repo
-            let timeline =
-                page_cache::get_repository().create_empty_timeline(timeline_id, start_lsn)?;
+            let timeline = page_cache::get_repository_for_tenant(&tenantid)?
+                .create_empty_timeline(timelineid, start_lsn)?;
 
             pgb.write_message(&BeMessage::CopyInResponse)?;
 
@@ -433,22 +458,23 @@ impl postgres_backend::Handler for PageServerHandler {
             }
 
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with(b"request_push ") {
-            let query_str = std::str::from_utf8(&query_string)?;
-            let mut it = query_str.split(' ');
-            it.next().unwrap();
+        } else if query_string.starts_with("request_push ") {
+            // request_push <zenith tenantid as hex string> <zenith timelineid as hex string> <postgres_connection_uri>
+            let re = Regex::new(r"^request_push ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
 
-            let timeline_id: ZTimelineId = it
-                .next()
-                .ok_or_else(|| anyhow!("missing timeline id"))?
-                .parse()?;
-            let timeline = page_cache::get_repository().get_timeline(timeline_id)?;
+            let caps = re
+                .captures(query_string)
+                .ok_or_else(|| anyhow!("invalid request_push: '{}'", query_string))?;
 
-            let postgres_connection_uri =
-                it.next().ok_or_else(|| anyhow!("missing postgres uri"))?;
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let postgres_connection_uri = caps.get(3).unwrap().as_str();
+
+            let timeline =
+                page_cache::get_repository_for_tenant(&tenantid)?.get_timeline(timelineid)?;
 
             let mut conn = postgres::Client::connect(postgres_connection_uri, postgres::NoTls)?;
-            let mut copy_in = conn.copy_in(format!("push {}", timeline_id.to_string()).as_str())?;
+            let mut copy_in = conn.copy_in(format!("push {}", timelineid.to_string()).as_str())?;
 
             let history = timeline.history()?;
             for update_res in history {
@@ -461,44 +487,76 @@ impl postgres_backend::Handler for PageServerHandler {
             copy_in.finish()?;
 
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with(b"branch_list") {
-            let branches = crate::branches::get_branches(&self.conf)?;
+        } else if query_string.starts_with("branch_list ") {
+            // branch_list <zenith tenantid as hex string>
+            let re = Regex::new(r"^branch_list ([[:xdigit:]]+)$").unwrap();
+            let caps = re
+                .captures(query_string)
+                .ok_or_else(|| anyhow!("invalid branch_list: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+
+            let branches = crate::branches::get_branches(&self.conf, &tenantid)?;
             let branches_buf = serde_json::to_vec(&branches)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(&branches_buf)]))?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with(b"status") {
+        } else if query_string.starts_with("tenant_list") {
+            let tenants = crate::branches::get_tenants(&self.conf)?;
+            let tenants_buf = serde_json::to_vec(&tenants)?;
+
+            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
+                .write_message_noflush(&BeMessage::DataRow(&[Some(&tenants_buf)]))?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("tenant_create") {
+            let err = || anyhow!("invalid tenant_create: '{}'", query_string);
+
+            // tenant_create <tenantid>
+            let re = Regex::new(r"^tenant_create ([[:xdigit:]]+)$").unwrap();
+            let caps = re.captures(&query_string).ok_or_else(err)?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let wal_redo_manager = Arc::new(PostgresRedoManager::new(self.conf, tenantid));
+            let repo = branches::create_repo(self.conf, tenantid, wal_redo_manager)?;
+            page_cache::insert_repository_for_tenant(tenantid, Arc::new(repo));
+
+            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("status") {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&HELLO_WORLD_ROW)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.to_ascii_lowercase().starts_with(b"set ") {
+        } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with(b"do_gc ") {
+        } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
             // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
             // This probably should require special authentication or a global flag to
             // enable, I don't think we want to or need to allow regular clients to invoke
             // GC.
-            let query_str = std::str::from_utf8(&query_string)?;
 
-            let mut it = query_str.split(' ');
-            it.next().unwrap();
+            // do_gc <tenant_id> <timeline_id> <gc_horizon>
+            let re = Regex::new(r"^do_gc ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)([[:digit:]]+)?")
+                .unwrap();
 
-            let timeline_id: ZTimelineId = it
-                .next()
-                .ok_or_else(|| anyhow!("missing timeline id"))?
-                .parse()?;
-            let timeline = page_cache::get_repository().get_timeline(timeline_id)?;
+            let caps = re
+                .captures(query_string)
+                .ok_or_else(|| anyhow!("invalid do_gc: '{}'", query_string))?;
 
-            let horizon: u64 = it
-                .next()
-                .unwrap_or(&self.conf.gc_horizon.to_string())
-                .parse()?;
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let gc_horizon: u64 = caps
+                .get(4)
+                .map(|h| h.as_str().parse())
+                .unwrap_or(Ok(self.conf.gc_horizon))?;
 
-            let result = timeline.gc_iteration(horizon, true)?;
+            let timeline =
+                page_cache::get_repository_for_tenant(&tenantid)?.get_timeline(timelineid)?;
+
+            let result = timeline.gc_iteration(gc_horizon, true)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor {
