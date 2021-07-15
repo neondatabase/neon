@@ -1,4 +1,5 @@
 from contextlib import closing
+from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 import psycopg2.extras
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -9,7 +10,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # This test is pretty tightly coupled with the current implementation of page version storage
 # and garbage collection in object_repository.rs.
 #
-def test_gc(zenith_cli, pageserver, postgres, pg_bin):
+def test_gc(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
     zenith_cli.run(["branch", "test_gc", "empty"])
     pg = postgres.create_start('test_gc')
 
@@ -30,7 +31,7 @@ def test_gc(zenith_cli, pageserver, postgres, pg_bin):
                     # before running the actual tests below, otherwise the counts won't match
                     # what we expect.
                     print("Running GC before test")
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     # remember the number of relations
@@ -42,7 +43,7 @@ def test_gc(zenith_cli, pageserver, postgres, pg_bin):
                     n_relations += 1;
                     print("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
@@ -55,7 +56,7 @@ def test_gc(zenith_cli, pageserver, postgres, pg_bin):
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
@@ -68,7 +69,7 @@ def test_gc(zenith_cli, pageserver, postgres, pg_bin):
                     print("Inserting one more row")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
@@ -77,7 +78,7 @@ def test_gc(zenith_cli, pageserver, postgres, pg_bin):
                     assert row['deleted'] == 1
 
                     # Run GC again, with no changes in the database. Should not remove anything.
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
@@ -90,7 +91,7 @@ def test_gc(zenith_cli, pageserver, postgres, pg_bin):
                     #
                     cur.execute("DROP TABLE foo")
 
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     # Each relation fork is counted separately, hence 3.

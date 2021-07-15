@@ -13,11 +13,11 @@
 //! until we find the page we're looking for, making a separate lookup into the
 //! key-value store for each timeline.
 
-use crate::object_key::*;
 use crate::object_store::ObjectStore;
 use crate::repository::*;
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
+use crate::{object_key::*, ZTenantId};
 use crate::{PageServerConf, ZTimelineId};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -42,6 +42,7 @@ pub struct ObjectRepository {
     conf: &'static PageServerConf,
     timelines: Mutex<HashMap<ZTimelineId, Arc<ObjectTimeline>>>,
     walredo_mgr: Arc<dyn WalRedoManager>,
+    tenantid: ZTenantId,
 }
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
@@ -52,12 +53,14 @@ impl ObjectRepository {
         conf: &'static PageServerConf,
         obj_store: Arc<dyn ObjectStore>,
         walredo_mgr: Arc<dyn WalRedoManager>,
+        tenantid: ZTenantId,
     ) -> ObjectRepository {
         ObjectRepository {
             conf,
             obj_store,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
+            tenantid,
         }
     }
 }
@@ -82,7 +85,7 @@ impl Repository for ObjectRepository {
                     timelineid,
                     timeline.get_last_record_lsn()
                 );
-                let wal_dir = self.conf.timeline_path(timelineid).join("wal");
+                let wal_dir = self.conf.wal_dir_path(&timelineid, &self.tenantid);
                 import_timeline_wal(&wal_dir, &timeline, timeline.get_last_record_lsn())?;
 
                 let timeline_rc = Arc::new(timeline);

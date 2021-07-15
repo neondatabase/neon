@@ -24,7 +24,7 @@ pip install pytest psycopg2
 
 2. Build zenith and patched postgres
 ```sh
-git clone --recursive https://github.com/libzenith/zenith.git
+git clone --recursive https://github.com/zenithdb/zenith.git
 cd zenith
 make -j5
 ```
@@ -34,8 +34,7 @@ make -j5
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/zenith init
-<...>
-new zenith repository was created in .zenith
+pageserver init succeeded
 
 # start pageserver
 > ./target/debug/zenith start
@@ -87,7 +86,7 @@ waiting for server to start.... done
 # but all modifications would not affect data in original postgres
 > psql -p55433 -h 127.0.0.1 postgres
 postgres=# select * from t;
- key | value 
+ key | value
 -----+-------
    1 | 1
 (1 row)

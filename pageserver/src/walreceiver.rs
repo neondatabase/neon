@@ -9,6 +9,7 @@ use crate::page_cache;
 use crate::restore_local_repo;
 use crate::waldecoder::*;
 use crate::PageServerConf;
+use crate::ZTenantId;
 use crate::ZTimelineId;
 use anyhow::{Error, Result};
 use lazy_static::lazy_static;
@@ -25,7 +26,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
@@ -50,6 +50,7 @@ pub fn launch_wal_receiver(
     conf: &'static PageServerConf,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
+    tenantid: ZTenantId,
 ) {
     let mut receivers = WAL_RECEIVERS.lock().unwrap();
 
@@ -67,7 +68,7 @@ pub fn launch_wal_receiver(
             let _walreceiver_thread = thread::Builder::new()
                 .name("WAL receiver thread".into())
                 .spawn(move || {
-                    thread_main(conf, timelineid);
+                    thread_main(conf, timelineid, &tenantid);
                 })
                 .unwrap();
         }
@@ -88,7 +89,7 @@ fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
 //
 // This is the entry point for the WAL receiver thread.
 //
-fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId) {
+fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid: &ZTenantId) {
     info!(
         "WAL receiver thread started for timeline : '{}'",
         timelineid
@@ -102,7 +103,7 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId) {
         // Look up the current WAL producer address
         let wal_producer_connstr = get_wal_producer_connstr(timelineid);
 
-        let res = walreceiver_main(conf, timelineid, &wal_producer_connstr);
+        let res = walreceiver_main(conf, timelineid, &wal_producer_connstr, tenantid);
 
         if let Err(e) = res {
             info!(
@@ -115,9 +116,10 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId) {
 }
 
 fn walreceiver_main(
-    _conf: &PageServerConf,
+    conf: &PageServerConf,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
+    tenantid: &ZTenantId,
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
@@ -134,7 +136,7 @@ fn walreceiver_main(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
-    let repository = page_cache::get_repository();
+    let repository = page_cache::get_repository_for_tenant(tenantid)?;
     let timeline = repository.get_timeline(timelineid).unwrap();
 
     //
@@ -183,7 +185,14 @@ fn walreceiver_main(
                 let endlsn = startlsn + data.len() as u64;
                 let prev_last_rec_lsn = last_rec_lsn;
 
-                write_wal_file(startlsn, timelineid, pg_constants::WAL_SEGMENT_SIZE, data)?;
+                write_wal_file(
+                    conf,
+                    startlsn,
+                    &timelineid,
+                    pg_constants::WAL_SEGMENT_SIZE,
+                    data,
+                    tenantid,
+                )?;
 
                 trace!("received XLogData between {} and {}", startlsn, endlsn);
 
@@ -237,9 +246,11 @@ fn walreceiver_main(
                 {
                     info!("switched segment {} to {}", prev_last_rec_lsn, last_rec_lsn);
                     let (oldest_segno, newest_segno) = find_wal_file_range(
-                        timelineid,
+                        conf,
+                        &timelineid,
                         pg_constants::WAL_SEGMENT_SIZE,
                         last_rec_lsn,
+                        tenantid,
                     )?;
 
                     if newest_segno - oldest_segno >= 10 {
@@ -296,16 +307,18 @@ fn walreceiver_main(
 }
 
 fn find_wal_file_range(
-    timeline: ZTimelineId,
+    conf: &PageServerConf,
+    timeline: &ZTimelineId,
     wal_seg_size: usize,
     written_upto: Lsn,
+    tenant: &ZTenantId,
 ) -> Result<(u64, u64)> {
     let written_upto_segno = written_upto.segment_number(wal_seg_size);
 
     let mut oldest_segno = written_upto_segno;
     let mut newest_segno = written_upto_segno;
     // Scan the wal directory, and count how many WAL filed we could remove
-    let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
+    let wal_dir = conf.wal_dir_path(timeline, tenant);
     for entry in fs::read_dir(wal_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -382,10 +395,12 @@ pub fn identify_system(client: &mut Client) -> Result<IdentifySystem, Error> {
 }
 
 fn write_wal_file(
+    conf: &PageServerConf,
     startpos: Lsn,
-    timeline: ZTimelineId,
+    timelineid: &ZTimelineId,
     wal_seg_size: usize,
     buf: &[u8],
+    tenantid: &ZTenantId,
 ) -> anyhow::Result<()> {
     let mut bytes_left: usize = buf.len();
     let mut bytes_written: usize = 0;
@@ -393,7 +408,7 @@ fn write_wal_file(
     let mut start_pos = startpos;
     const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
-    let wal_dir = PathBuf::from(format!("timelines/{}/wal", timeline));
+    let wal_dir = conf.wal_dir_path(timelineid, tenantid);
 
     /* Extract WAL location for this block */
     let mut xlogoff = start_pos.segment_offset(wal_seg_size);

@@ -1,12 +1,14 @@
 from contextlib import closing
 
+from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 #
 # Test CREATE USER to check shared catalog restore
 #
-def test_createuser(zenith_cli, pageserver, postgres, pg_bin):
+def test_createuser(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
     zenith_cli.run(["branch", "test_createuser", "empty"])
 
     pg = postgres.create_start('test_createuser')

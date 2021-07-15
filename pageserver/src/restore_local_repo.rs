@@ -18,6 +18,7 @@ use crate::object_key::*;
 use crate::repository::*;
 use crate::waldecoder::*;
 use crate::PageServerConf;
+use crate::ZTenantId;
 use crate::ZTimelineId;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
@@ -30,9 +31,12 @@ const MAX_MBR_BLKNO: u32 =
 ///
 /// Find latest snapshot in a timeline's 'snapshots' directory
 ///
-pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Result<Lsn> {
-    let snapshotspath = format!("timelines/{}/snapshots", timeline);
-
+pub fn find_latest_snapshot(
+    conf: &PageServerConf,
+    timelineid: &ZTimelineId,
+    tenantid: &ZTenantId,
+) -> Result<Lsn> {
+    let snapshotspath = conf.snapshots_path(timelineid, tenantid);
     let mut last_snapshot_lsn = Lsn(0);
     for direntry in fs::read_dir(&snapshotspath).unwrap() {
         let filename = direntry.unwrap().file_name();
@@ -45,7 +49,10 @@ pub fn find_latest_snapshot(_conf: &PageServerConf, timeline: ZTimelineId) -> Re
     }
 
     if last_snapshot_lsn == Lsn(0) {
-        error!("could not find valid snapshot in {}", &snapshotspath);
+        error!(
+            "could not find valid snapshot in {}",
+            snapshotspath.display()
+        );
         // TODO return error?
     }
     Ok(last_snapshot_lsn)

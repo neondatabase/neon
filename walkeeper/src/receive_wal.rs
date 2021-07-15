@@ -21,7 +21,7 @@ use zenith_utils::lsn::Lsn;
 use crate::replication::HotStandbyFeedback;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
-use pageserver::ZTimelineId;
+use pageserver::{ZTenantId, ZTimelineId};
 use postgres_ffi::xlog_utils::{TimeLineID, XLogFileName, MAX_SEND_SIZE, XLOG_BLCKSZ};
 use zenith_utils::pq_proto::SystemId;
 
@@ -52,6 +52,7 @@ pub struct ServerInfo {
     pub wal_end: Lsn,
     pub timeline: TimeLineID,
     pub wal_seg_size: u32,
+    pub tenant_id: ZTenantId,
 }
 
 /// Vote request sent from proposer to safekeepers
@@ -101,6 +102,7 @@ impl SafeKeeperInfo {
                 wal_end: Lsn(0),
                 timeline: 0,
                 wal_seg_size: 0,
+                tenant_id: ZTenantId::from([0u8; 16]),
             },
             commit_lsn: Lsn(0),  /* part of WAL acknowledged by quorum */
             flush_lsn: Lsn(0),   /* locally flushed part of WAL */
@@ -149,7 +151,7 @@ pub struct ReceiveWalConn {
 /// Periodically request pageserver to call back.
 /// If pageserver already has replication channel, it will just ignore this request
 ///
-fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId) {
+fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
     let ps_addr = conf.pageserver_addr.unwrap();
     let ps_connstr = format!("postgresql://no_user@{}/no_db", ps_addr);
 
@@ -158,9 +160,10 @@ fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId) {
     let me_conf: Config = me_connstr.parse().unwrap();
     let (host, port) = connection_host_port(&me_conf);
     let callme = format!(
-        "callmemaybe {} host={} port={} options='-c ztimelineid={}'",
-        timelineid, host, port, timelineid
+        "callmemaybe {} {} host={} port={} options='-c ztimelineid={}'",
+        tenantid, timelineid, host, port, timelineid,
     );
+
     loop {
         info!(
             "requesting page server to connect to us: start {} {}",
@@ -206,8 +209,8 @@ impl ReceiveWalConn {
         // Receive information about server
         let server_info = self.read_req::<ServerInfo>()?;
         info!(
-            "Start handshake with wal_proposer {} sysid {} timeline {}",
-            self.peer_addr, server_info.system_id, server_info.timeline_id,
+            "Start handshake with wal_proposer {} sysid {} timeline {} tenant {}",
+            self.peer_addr, server_info.system_id, server_info.timeline_id, server_info.tenant_id,
         );
         // FIXME: also check that the system identifier matches
         self.timeline.set(server_info.timeline_id)?;
@@ -274,14 +277,15 @@ impl ReceiveWalConn {
             // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
             let conf = self.conf.clone();
             let timelineid = self.timeline.get().timelineid;
+            let tenantid = server_info.tenant_id;
             thread::spawn(move || {
-                request_callback(conf, timelineid);
+                request_callback(conf, timelineid, tenantid);
             });
         }
 
         info!(
-            "Start streaming from timeline {} address {:?}",
-            server_info.timeline_id, self.peer_addr,
+            "Start streaming from timeline {} tenant {} address {:?}",
+            server_info.timeline_id, server_info.tenant_id, self.peer_addr,
         );
 
         // Main loop

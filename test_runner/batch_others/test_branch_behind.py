@@ -1,10 +1,13 @@
+from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 #
 # Create a couple of branches off the main branch, at a historical point in time.
 #
-def test_branch_behind(zenith_cli, pageserver, postgres, pg_bin):
+def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
     # Branch at the point where only 100 rows were inserted
     zenith_cli.run(["branch", "test_branch_behind", "empty"])
 

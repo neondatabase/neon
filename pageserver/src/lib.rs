@@ -1,3 +1,5 @@
+use hex::FromHex;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use std::fmt;
@@ -48,24 +50,48 @@ impl PageServerConf {
     // Repository paths, relative to workdir.
     //
 
-    fn tag_path(&self, name: &str) -> PathBuf {
-        self.workdir.join("refs").join("tags").join(name)
+    fn tenants_path(&self) -> PathBuf {
+        self.workdir.join("tenants")
     }
 
-    fn branch_path(&self, name: &str) -> PathBuf {
-        self.workdir.join("refs").join("branches").join(name)
+    fn tenant_path(&self, tenantid: &ZTenantId) -> PathBuf {
+        self.tenants_path().join(tenantid.to_string())
     }
 
-    fn timeline_path(&self, timelineid: ZTimelineId) -> PathBuf {
-        self.workdir.join("timelines").join(timelineid.to_string())
+    fn tags_path(&self, tenantid: &ZTenantId) -> PathBuf {
+        self.tenant_path(tenantid).join("refs").join("tags")
     }
 
-    fn snapshots_path(&self, timelineid: ZTimelineId) -> PathBuf {
-        self.timeline_path(timelineid).join("snapshots")
+    fn tag_path(&self, tag_name: &str, tenantid: &ZTenantId) -> PathBuf {
+        self.tags_path(tenantid).join(tag_name)
     }
 
-    fn ancestor_path(&self, timelineid: ZTimelineId) -> PathBuf {
-        self.timeline_path(timelineid).join("ancestor")
+    fn branches_path(&self, tenantid: &ZTenantId) -> PathBuf {
+        self.tenant_path(tenantid).join("refs").join("branches")
+    }
+
+    fn branch_path(&self, branch_name: &str, tenantid: &ZTenantId) -> PathBuf {
+        self.branches_path(tenantid).join(branch_name)
+    }
+
+    fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
+        self.tenant_path(tenantid).join("timelines")
+    }
+
+    fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
+        self.timelines_path(tenantid).join(timelineid.to_string())
+    }
+
+    fn snapshots_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
+        self.timeline_path(timelineid, tenantid).join("snapshots")
+    }
+
+    fn ancestor_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
+        self.timeline_path(timelineid, tenantid).join("ancestor")
+    }
+
+    fn wal_dir_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
+        self.timeline_path(timelineid, tenantid).join("wal")
     }
 
     //
@@ -81,8 +107,67 @@ impl PageServerConf {
     }
 }
 
-/// Zenith Timeline ID is a 128-bit random ID.
-///
+// Zenith ID is a 128-bit random ID.
+// Used to represent various identifiers. Provides handy utility methods and impls.
+// TODO (LizardWizzard) figure out best way to remove boiler plate with trait impls caused by newtype pattern
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+struct ZId([u8; 16]);
+
+impl ZId {
+    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZId {
+        let mut arr = [0u8; 16];
+        buf.copy_to_slice(&mut arr);
+        ZId::from(arr)
+    }
+
+    pub fn as_arr(&self) -> [u8; 16] {
+        self.0
+    }
+
+    pub fn generate() -> Self {
+        let mut tli_buf = [0u8; 16];
+        rand::thread_rng().fill(&mut tli_buf);
+        ZId::from(tli_buf)
+    }
+}
+
+impl FromStr for ZId {
+    type Err = hex::FromHexError;
+
+    fn from_str(s: &str) -> Result<ZId, Self::Err> {
+        Self::from_hex(s)
+    }
+}
+
+// this is needed for pretty serialization and deserialization of ZId's using serde integration with hex crate
+impl FromHex for ZId {
+    type Error = hex::FromHexError;
+
+    fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
+        let mut buf: [u8; 16] = [0u8; 16];
+        hex::decode_to_slice(hex, &mut buf)?;
+        Ok(ZId(buf))
+    }
+}
+
+impl AsRef<[u8]> for ZId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<[u8; 16]> for ZId {
+    fn from(b: [u8; 16]) -> Self {
+        ZId(b)
+    }
+}
+
+impl fmt::Display for ZId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
+
 /// Zenith timeline IDs are different from PostgreSQL timeline
 /// IDs. They serve a similar purpose though: they differentiate
 /// between different "histories" of the same cluster.  However,
@@ -106,38 +191,93 @@ impl PageServerConf {
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ZTimelineId([u8; 16]);
+pub struct ZTimelineId(ZId);
 
 impl FromStr for ZTimelineId {
     type Err = hex::FromHexError;
 
     fn from_str(s: &str) -> Result<ZTimelineId, Self::Err> {
-        let timelineid = hex::decode(s)?;
+        let value = ZId::from_str(s)?;
+        Ok(ZTimelineId(value))
+    }
+}
 
-        let mut buf: [u8; 16] = [0u8; 16];
-        buf.copy_from_slice(timelineid.as_slice());
-        Ok(ZTimelineId(buf))
+impl From<[u8; 16]> for ZTimelineId {
+    fn from(b: [u8; 16]) -> Self {
+        ZTimelineId(ZId::from(b))
     }
 }
 
 impl ZTimelineId {
-    pub fn from(b: [u8; 16]) -> ZTimelineId {
-        ZTimelineId(b)
-    }
-
     pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZTimelineId {
-        let mut arr = [0u8; 16];
-        buf.copy_to_slice(&mut arr);
-        ZTimelineId::from(arr)
+        ZTimelineId(ZId::get_from_buf(buf))
     }
 
     pub fn as_arr(&self) -> [u8; 16] {
-        self.0
+        self.0.as_arr()
+    }
+
+    pub fn generate() -> Self {
+        ZTimelineId(ZId::generate())
     }
 }
 
 impl fmt::Display for ZTimelineId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
+        self.0.fmt(f)
+    }
+}
+
+// Zenith Tenant Id represents identifiar of a particular tenant.
+// Is used for distinguishing requests and data belonging to different users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct ZTenantId(ZId);
+
+impl FromStr for ZTenantId {
+    type Err = hex::FromHexError;
+
+    fn from_str(s: &str) -> Result<ZTenantId, Self::Err> {
+        let value = ZId::from_str(s)?;
+        Ok(ZTenantId(value))
+    }
+}
+
+impl From<[u8; 16]> for ZTenantId {
+    fn from(b: [u8; 16]) -> Self {
+        ZTenantId(ZId::from(b))
+    }
+}
+
+impl FromHex for ZTenantId {
+    type Error = hex::FromHexError;
+
+    fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
+        Ok(ZTenantId(ZId::from_hex(hex)?))
+    }
+}
+
+impl AsRef<[u8]> for ZTenantId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0 .0
+    }
+}
+
+impl ZTenantId {
+    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZTenantId {
+        ZTenantId(ZId::get_from_buf(buf))
+    }
+
+    pub fn as_arr(&self) -> [u8; 16] {
+        self.0.as_arr()
+    }
+
+    pub fn generate() -> Self {
+        ZTenantId(ZId::generate())
+    }
+}
+
+impl fmt::Display for ZTenantId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }

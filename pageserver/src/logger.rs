@@ -1,14 +1,13 @@
 use crate::{tui, PageServerConf};
 
-use std::fs::{OpenOptions, File};
 use anyhow::{Context, Result};
 use slog::{Drain, FnValue};
+use std::fs::{File, OpenOptions};
 
 pub fn init_logging(
     conf: &PageServerConf,
-    log_filename: &str
+    log_filename: &str,
 ) -> Result<(slog_scope::GlobalLoggerGuard, File)> {
-
     // Don't open the same file for output multiple times;
     // the different fds could overwrite each other's output.
     let log_file = OpenOptions::new()

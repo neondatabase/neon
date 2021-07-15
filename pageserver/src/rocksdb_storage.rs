@@ -5,6 +5,7 @@ use crate::object_key::*;
 use crate::object_store::ObjectStore;
 use crate::repository::RelTag;
 use crate::PageServerConf;
+use crate::ZTenantId;
 use crate::ZTimelineId;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -241,26 +242,30 @@ impl ObjectStore for RocksObjectStore {
 
 impl RocksObjectStore {
     /// Open a RocksDB database.
-    pub fn open(conf: &'static PageServerConf) -> Result<RocksObjectStore> {
+    pub fn open(conf: &'static PageServerConf, tenantid: &ZTenantId) -> Result<RocksObjectStore> {
         let opts = Self::get_rocksdb_opts();
-        let obj_store = Self::new(conf, opts)?;
+        let obj_store = Self::new(conf, opts, tenantid)?;
         Ok(obj_store)
     }
 
     /// Create a new, empty RocksDB database.
-    pub fn create(conf: &'static PageServerConf) -> Result<RocksObjectStore> {
-        let path = conf.workdir.join("rocksdb-storage");
+    pub fn create(conf: &'static PageServerConf, tenantid: &ZTenantId) -> Result<RocksObjectStore> {
+        let path = conf.tenant_path(&tenantid).join("rocksdb-storage");
         std::fs::create_dir(&path)?;
 
         let mut opts = Self::get_rocksdb_opts();
         opts.create_if_missing(true);
         opts.set_error_if_exists(true);
-        let obj_store = Self::new(conf, opts)?;
+        let obj_store = Self::new(conf, opts, tenantid)?;
         Ok(obj_store)
     }
 
-    fn new(conf: &'static PageServerConf, mut opts: rocksdb::Options) -> Result<RocksObjectStore> {
-        let path = conf.workdir.join("rocksdb-storage");
+    fn new(
+        conf: &'static PageServerConf,
+        mut opts: rocksdb::Options,
+        tenantid: &ZTenantId,
+    ) -> Result<RocksObjectStore> {
+        let path = conf.tenant_path(&tenantid).join("rocksdb-storage");
         let gc = Arc::new(GarbageCollector::new());
         let gc_ref = gc.clone();
         opts.set_compaction_filter("ttl", move |_level: u32, key: &[u8], _val: &[u8]| {

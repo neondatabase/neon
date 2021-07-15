@@ -4,15 +4,15 @@
 // TODO: move all paths construction to conf impl
 //
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use fs::File;
 use postgres_ffi::{pg_constants, xlog_utils, ControlFileData};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::{Read, Write};
+use std::io::Read;
+use std::sync::Arc;
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
@@ -22,8 +22,11 @@ use zenith_utils::lsn::Lsn;
 use log::*;
 
 use crate::logger;
+use crate::object_repository::ObjectRepository;
 use crate::page_cache;
 use crate::restore_local_repo;
+use crate::walredo::WalRedoManager;
+use crate::ZTenantId;
 use crate::{repository::Repository, PageServerConf, ZTimelineId};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -41,35 +44,61 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
-    // top-level dir may exist if we are creating it through CLI
-    fs::create_dir_all(repo_dir)
-        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
-
-    env::set_current_dir(repo_dir)?;
-
+pub fn init_pageserver(
+    conf: &'static PageServerConf,
+    workdir: &Path,
+    create_tenant: Option<&str>,
+) -> Result<()> {
     // Initialize logger
     let (_scope_guard, _log_file) = logger::init_logging(&conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;
 
+    env::set_current_dir(workdir)?;
+    if let Some(tenantid) = create_tenant {
+        let tenantid = ZTenantId::from_str(tenantid)?;
+        println!("initializing tenantid {}", tenantid);
+        create_repo(
+            conf,
+            tenantid,
+            Arc::new(crate::walredo::DummyRedoManager {}),
+        )
+        .with_context(|| "failed to create repo")?;
+    }
+    fs::create_dir_all(conf.tenants_path())?;
+    println!("pageserver init succeeded");
+    Ok(())
+}
+
+pub fn create_repo(
+    conf: &'static PageServerConf,
+    tenantid: ZTenantId,
+    wal_redo_manager: Arc<dyn WalRedoManager>,
+) -> Result<ObjectRepository> {
+    let repo_dir = conf.tenant_path(&tenantid);
+    if repo_dir.exists() {
+        bail!("repo for {} already exists", tenantid)
+    }
+
+    // top-level dir may exist if we are creating it through CLI
+    fs::create_dir_all(&repo_dir)
+        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
+
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
 
-    fs::create_dir(std::path::Path::new("timelines"))?;
-    fs::create_dir(std::path::Path::new("refs"))?;
-    fs::create_dir(std::path::Path::new("refs").join("branches"))?;
-    fs::create_dir(std::path::Path::new("refs").join("tags"))?;
+    fs::create_dir(conf.timelines_path(&tenantid))?;
+    fs::create_dir_all(conf.branches_path(&tenantid))?;
+    fs::create_dir_all(conf.tags_path(&tenantid))?;
 
-    println!("created directory structure in {}", repo_dir.display());
+    info!("created directory structure in {}", repo_dir.display());
 
     // Run initdb
     //
     // We create the cluster temporarily in a "tmp" directory inside the repository,
     // and move it to the right location from there.
-    let tmppath = std::path::Path::new("tmp");
+    let tmppath = conf.tenant_path(&tenantid).join("tmp");
 
-    print!("running initdb... ");
-    io::stdout().flush()?;
+    info!("running initdb... ");
 
     let initdb_path = conf.pg_bin_dir().join("initdb");
     let initdb_otput = Command::new(initdb_path)
@@ -88,7 +117,7 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
             String::from_utf8_lossy(&initdb_otput.stderr)
         );
     }
-    println!("initdb succeeded");
+    info!("initdb succeeded");
 
     // Read control file to extract the LSN and system id
     let controlfile_path = tmppath.join("global").join("pg_control");
@@ -98,8 +127,8 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     let lsnstr = format!("{:016X}", lsn);
 
     // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
-    let tli = create_timeline(conf, None)?;
-    let timelinedir = conf.timeline_path(tli);
+    let tli = create_timeline(conf, None, &tenantid)?;
+    let timelinedir = conf.timeline_path(&tli, &tenantid);
 
     // We don't use page_cache here, because we don't want to spawn the WAL redo thread during
     // repository initialization.
@@ -110,12 +139,13 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     // and we failed to run initdb again in the same directory. This has been solved for the
     // rapid init+start case now, but the general race condition remains if you restart the
     // server quickly.
-    let storage = crate::rocksdb_storage::RocksObjectStore::create(conf)?;
+    let storage = crate::rocksdb_storage::RocksObjectStore::create(conf, &tenantid)?;
 
     let repo = crate::object_repository::ObjectRepository::new(
         conf,
         std::sync::Arc::new(storage),
-        std::sync::Arc::new(crate::walredo::DummyRedoManager {}),
+        wal_redo_manager,
+        tenantid,
     );
     let timeline = repo.create_empty_timeline(tli, Lsn(lsn))?;
 
@@ -128,11 +158,11 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
             .join("wal")
             .join("000000010000000000000001.partial"),
     )?;
-    println!("created initial timeline {}", tli);
+    info!("created initial timeline {}", tli);
 
     let data = tli.to_string();
-    fs::write(conf.branch_path("main"), data)?;
-    println!("created main branch");
+    fs::write(conf.branch_path("main", &tenantid), data)?;
+    info!("created main branch");
 
     // Remove pg_wal
     fs::remove_dir_all(tmppath.join("pg_wal"))?;
@@ -143,20 +173,32 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     let target = timelinedir.join("snapshots").join(&lsnstr);
     fs::rename(tmppath, &target)?;
 
-    println!(
+    info!(
         "new zenith repository was created in {}",
         repo_dir.display()
     );
 
-    Ok(())
+    Ok(repo)
 }
 
-pub(crate) fn get_branches(conf: &PageServerConf) -> Result<Vec<BranchInfo>> {
-    let repo = page_cache::get_repository();
+pub(crate) fn get_tenants(conf: &PageServerConf) -> Result<Vec<String>> {
+    let tenants_dir = conf.tenants_path();
+
+    std::fs::read_dir(&tenants_dir)?
+        .map(|dir_entry_res| {
+            let dir_entry = dir_entry_res?;
+            ensure!(dir_entry.file_type()?.is_dir());
+            Ok(dir_entry.file_name().to_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
+    let repo = page_cache::get_repository_for_tenant(tenantid)?;
 
     // Each branch has a corresponding record (text file) in the refs/branches
     // with timeline_id.
-    let branches_dir = std::path::Path::new("refs").join("branches");
+    let branches_dir = conf.branches_path(tenantid);
 
     std::fs::read_dir(&branches_dir)?
         .map(|dir_entry_res| {
@@ -169,7 +211,7 @@ pub(crate) fn get_branches(conf: &PageServerConf) -> Result<Vec<BranchInfo>> {
                 .map(|timeline| timeline.get_last_valid_lsn())
                 .ok();
 
-            let ancestor_path = conf.ancestor_path(timeline_id);
+            let ancestor_path = conf.ancestor_path(&timeline_id, tenantid);
             let mut ancestor_id: Option<String> = None;
             let mut ancestor_lsn: Option<String> = None;
 
@@ -206,14 +248,15 @@ pub(crate) fn create_branch(
     conf: &PageServerConf,
     branchname: &str,
     startpoint_str: &str,
+    tenantid: &ZTenantId,
 ) -> Result<BranchInfo> {
-    let repo = page_cache::get_repository();
+    let repo = page_cache::get_repository_for_tenant(tenantid)?;
 
-    if conf.branch_path(&branchname).exists() {
+    if conf.branch_path(branchname, tenantid).exists() {
         anyhow::bail!("branch {} already exists", branchname);
     }
 
-    let mut startpoint = parse_point_in_time(conf, startpoint_str)?;
+    let mut startpoint = parse_point_in_time(conf, startpoint_str, tenantid)?;
 
     if startpoint.lsn == Lsn(0) {
         // Find end of WAL on the old timeline
@@ -225,19 +268,20 @@ pub(crate) fn create_branch(
     }
 
     // create a new timeline directory for it
-    let newtli = create_timeline(conf, Some(startpoint))?;
-    let newtimelinedir = conf.timeline_path(newtli);
+    let newtli = create_timeline(conf, Some(startpoint), tenantid)?;
+    let newtimelinedir = conf.timeline_path(&newtli, tenantid);
 
     // Let the Repository backend do its initialization
     repo.branch_timeline(startpoint.timelineid, newtli, startpoint.lsn)?;
 
     // Copy the latest snapshot (TODO: before the startpoint) and all WAL
     // TODO: be smarter and avoid the copying...
-    let (_maxsnapshot, oldsnapshotdir) = find_latest_snapshot(conf, startpoint.timelineid)?;
+    let (_maxsnapshot, oldsnapshotdir) =
+        find_latest_snapshot(conf, &startpoint.timelineid, tenantid)?;
     let copy_opts = fs_extra::dir::CopyOptions::new();
     fs_extra::dir::copy(oldsnapshotdir, newtimelinedir.join("snapshots"), &copy_opts)?;
 
-    let oldtimelinedir = conf.timeline_path(startpoint.timelineid);
+    let oldtimelinedir = conf.timeline_path(&startpoint.timelineid, tenantid);
     copy_wal(
         &oldtimelinedir.join("wal"),
         &newtimelinedir.join("wal"),
@@ -249,7 +293,7 @@ pub(crate) fn create_branch(
     // FIXME: there's a race condition, if you create a branch with the same
     // name concurrently.
     let data = newtli.to_string();
-    fs::write(conf.branch_path(&branchname), data)?;
+    fs::write(conf.branch_path(&branchname, tenantid), data)?;
 
     Ok(BranchInfo {
         name: branchname.to_string(),
@@ -279,7 +323,11 @@ pub(crate) fn create_branch(
 //    mytag
 //
 //
-fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
+fn parse_point_in_time(
+    conf: &PageServerConf,
+    s: &str,
+    tenantid: &ZTenantId,
+) -> Result<PointInTime> {
     let mut strings = s.split('@');
     let name = strings.next().unwrap();
 
@@ -294,21 +342,21 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
 
     // Check if it's a tag
     if lsn.is_none() {
-        let tagpath = conf.tag_path(name);
+        let tagpath = conf.tag_path(name, &tenantid);
         if tagpath.exists() {
             let pointstr = fs::read_to_string(tagpath)?;
 
-            return parse_point_in_time(conf, &pointstr);
+            return parse_point_in_time(conf, &pointstr, &tenantid);
         }
     }
 
     // Check if it's a branch
     // Check if it's branch @ LSN
-    let branchpath = conf.branch_path(name);
+    let branchpath = conf.branch_path(name, &tenantid);
     if branchpath.exists() {
         let pointstr = fs::read_to_string(branchpath)?;
 
-        let mut result = parse_point_in_time(conf, &pointstr)?;
+        let mut result = parse_point_in_time(conf, &pointstr, &tenantid)?;
 
         result.lsn = lsn.unwrap_or(Lsn(0));
         return Ok(result);
@@ -317,7 +365,7 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
     // Check if it's a timelineid
     // Check if it's timelineid @ LSN
     if let Ok(timelineid) = ZTimelineId::from_str(name) {
-        let tlipath = conf.timeline_path(timelineid);
+        let tlipath = conf.timeline_path(&timelineid, &tenantid);
         if tlipath.exists() {
             return Ok(PointInTime {
                 timelineid,
@@ -329,13 +377,16 @@ fn parse_point_in_time(conf: &PageServerConf, s: &str) -> Result<PointInTime> {
     bail!("could not parse point-in-time {}", s);
 }
 
-fn create_timeline(conf: &PageServerConf, ancestor: Option<PointInTime>) -> Result<ZTimelineId> {
+fn create_timeline(
+    conf: &PageServerConf,
+    ancestor: Option<PointInTime>,
+    tenantid: &ZTenantId,
+) -> Result<ZTimelineId> {
     // Create initial timeline
-    let mut tli_buf = [0u8; 16];
-    rand::thread_rng().fill(&mut tli_buf);
-    let timelineid = ZTimelineId::from(tli_buf);
 
-    let timelinedir = conf.timeline_path(timelineid);
+    let timelineid = ZTimelineId::generate();
+
+    let timelinedir = conf.timeline_path(&timelineid, tenantid);
 
     fs::create_dir(&timelinedir)?;
     fs::create_dir(&timelinedir.join("snapshots"))?;
@@ -397,8 +448,12 @@ fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: usize) -> R
 }
 
 // Find the latest snapshot for a timeline
-fn find_latest_snapshot(conf: &PageServerConf, timeline: ZTimelineId) -> Result<(Lsn, PathBuf)> {
-    let snapshotsdir = conf.snapshots_path(timeline);
+fn find_latest_snapshot(
+    conf: &PageServerConf,
+    timelineid: &ZTimelineId,
+    tenantid: &ZTenantId,
+) -> Result<(Lsn, PathBuf)> {
+    let snapshotsdir = conf.snapshots_path(timelineid, tenantid);
     let paths = fs::read_dir(&snapshotsdir)?;
     let mut maxsnapshot = Lsn(0);
     let mut snapshotdir: Option<PathBuf> = None;

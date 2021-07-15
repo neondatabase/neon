@@ -4,6 +4,7 @@ use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env::{self, LocalEnv};
 use control_plane::storage::PageServerNode;
+use pageserver::ZTenantId;
 use std::collections::btree_map::Entry;
 use std::collections::HashMap;
 use std::process::exit;
@@ -33,8 +34,14 @@ fn main() -> Result<()> {
     let timeline_arg = Arg::with_name("timeline")
         .short("n")
         .index(1)
-        .help("timeline name")
+        .help("Timeline name")
         .required(true);
+
+    let tenantid_arg = Arg::with_name("tenantid")
+        .long("tenantid")
+        .help("Tenant id. Represented as a hexadecimal string 32 symbols length")
+        .takes_value(true)
+        .required(false);
 
     let matches = App::new("Zenith CLI")
         .setting(AppSettings::ArgRequiredElseHelp)
@@ -52,7 +59,14 @@ fn main() -> Result<()> {
             SubCommand::with_name("branch")
                 .about("Create a new branch")
                 .arg(Arg::with_name("branchname").required(false).index(1))
-                .arg(Arg::with_name("start-point").required(false).index(2)),
+                .arg(Arg::with_name("start-point").required(false).index(2))
+                .arg(tenantid_arg.clone()),
+        ).subcommand(
+            SubCommand::with_name("tenant")
+            .setting(AppSettings::ArgRequiredElseHelp)
+            .about("Manage tenants")
+            .subcommand(SubCommand::with_name("list"))
+            .subcommand(SubCommand::with_name("create").arg(Arg::with_name("tenantid").required(false).index(1)))
         )
         .subcommand(SubCommand::with_name("status"))
         .subcommand(SubCommand::with_name("start").about("Start local pageserver"))
@@ -62,12 +76,13 @@ fn main() -> Result<()> {
             SubCommand::with_name("pg")
                 .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage postgres instances")
-                .subcommand(SubCommand::with_name("list"))
-                .subcommand(SubCommand::with_name("create").arg(timeline_arg.clone()))
-                .subcommand(SubCommand::with_name("start").arg(timeline_arg.clone()))
+                .subcommand(SubCommand::with_name("list").arg(tenantid_arg.clone()))
+                .subcommand(SubCommand::with_name("create").arg(timeline_arg.clone()).arg(tenantid_arg.clone()))
+                .subcommand(SubCommand::with_name("start").arg(timeline_arg.clone()).arg(tenantid_arg.clone()))
                 .subcommand(
                     SubCommand::with_name("stop")
                         .arg(timeline_arg.clone())
+                        .arg(tenantid_arg.clone())
                         .arg(
                             Arg::with_name("destroy")
                                 .help("Also delete data directory (now optional, should be default in future)")
@@ -101,8 +116,10 @@ fn main() -> Result<()> {
 
     // Create config file
     if let ("init", Some(sub_args)) = matches.subcommand() {
+        let tenantid = ZTenantId::generate();
         let pageserver_uri = sub_args.value_of("pageserver-url");
-        local_env::init(pageserver_uri).with_context(|| "Failed to create config file")?;
+        local_env::init(pageserver_uri, tenantid)
+            .with_context(|| "Failed to create config file")?;
     }
 
     // all other commands would need config
@@ -117,8 +134,14 @@ fn main() -> Result<()> {
     match matches.subcommand() {
         ("init", Some(_)) => {
             let pageserver = PageServerNode::from_env(&env);
-            if let Err(e) = pageserver.init() {
+            if let Err(e) = pageserver.init(Some(&env.tenantid.to_string())) {
                 eprintln!("pageserver init failed: {}", e);
+                exit(1);
+            }
+        }
+        ("tenant", Some(args)) => {
+            if let Err(e) = handle_tenant(args, &env) {
+                eprintln!("tenant command failed: {}", e);
                 exit(1);
             }
         }
@@ -308,9 +331,12 @@ fn print_branch(
 
 /// Returns a map of timeline IDs to branch_name@lsn strings.
 /// Connects to the pageserver to query this information.
-fn get_branch_infos(env: &local_env::LocalEnv) -> Result<HashMap<ZTimelineId, BranchInfo>> {
+fn get_branch_infos(
+    env: &local_env::LocalEnv,
+    tenantid: &ZTenantId,
+) -> Result<HashMap<ZTimelineId, BranchInfo>> {
     let page_server = PageServerNode::from_env(env);
-    let branch_infos: Vec<BranchInfo> = page_server.branches_list()?;
+    let branch_infos: Vec<BranchInfo> = page_server.branches_list(tenantid)?;
     let branch_infos: HashMap<ZTimelineId, BranchInfo> = branch_infos
         .into_iter()
         .map(|branch_info| (branch_info.timeline_id, branch_info))
@@ -319,23 +345,51 @@ fn get_branch_infos(env: &local_env::LocalEnv) -> Result<HashMap<ZTimelineId, Br
     Ok(branch_infos)
 }
 
+fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+    let pageserver = PageServerNode::from_env(&env);
+    match tenant_match.subcommand() {
+        ("list", Some(_)) => {
+            for tenant in pageserver.tenants_list()? {
+                println!("{}", tenant);
+            }
+        }
+        ("create", Some(create_match)) => {
+            let tenantid = match create_match.value_of("tenantid") {
+                Some(tenantid) => ZTenantId::from_str(tenantid)?,
+                None => ZTenantId::generate(),
+            };
+            println!("using tenant id {}", tenantid);
+            pageserver.tenant_create(&tenantid)?;
+            println!("tenant successfully created on the pageserver");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let pageserver = PageServerNode::from_env(&env);
 
     if let Some(branchname) = branch_match.value_of("branchname") {
-        if let Some(startpoint_str) = branch_match.value_of("start-point") {
-            let branch = pageserver.branch_create(branchname, startpoint_str)?;
-            println!(
-                "Created branch '{}' at {:?}",
-                branch.name,
-                branch.latest_valid_lsn.unwrap_or(Lsn(0))
-            );
-        } else {
-            bail!("Missing start-point");
-        }
+        let startpoint_str = branch_match
+            .value_of("start-point")
+            .ok_or(anyhow!("Missing start-point"))?;
+        let tenantid: ZTenantId = branch_match
+            .value_of("tenantid")
+            .map_or(Ok(env.tenantid), |value| value.parse())?;
+        let branch = pageserver.branch_create(branchname, startpoint_str, &tenantid)?;
+        println!(
+            "Created branch '{}' at {:?} for tenant: {}",
+            branch.name,
+            branch.latest_valid_lsn.unwrap_or(Lsn(0)),
+            tenantid,
+        );
     } else {
-        // No arguments, list branches
-        let branches = pageserver.branches_list()?;
+        let tenantid: ZTenantId = branch_match
+            .value_of("tenantid")
+            .map_or(Ok(env.tenantid), |value| value.parse())?;
+        // No arguments, list branches for tenant
+        let branches = pageserver.branches_list(&tenantid)?;
         print_branches_tree(branches)?;
     }
 
@@ -346,14 +400,21 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
     match pg_match.subcommand() {
-        ("list", Some(_sub_m)) => {
-            let branch_infos = get_branch_infos(env).unwrap_or_else(|e| {
+        ("list", Some(list_match)) => {
+            let tenantid: ZTenantId = list_match
+                .value_of("tenantid")
+                .map_or(Ok(env.tenantid), |value| value.parse())?;
+            let branch_infos = get_branch_infos(env, &tenantid).unwrap_or_else(|e| {
                 eprintln!("Failed to load branch info: {}", e);
                 HashMap::new()
             });
 
             println!("BRANCH\tADDRESS\t\tLSN\t\tSTATUS");
-            for (timeline_name, node) in cplane.nodes.iter() {
+            for ((_, timeline_name), node) in cplane
+                .nodes
+                .iter()
+                .filter(|((node_tenantid, _), _)| node_tenantid == &tenantid)
+            {
                 println!(
                     "{}\t{}\t{}\t{}",
                     timeline_name,
@@ -368,30 +429,42 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 );
             }
         }
-        ("create", Some(sub_m)) => {
-            let timeline_name = sub_m.value_of("timeline").unwrap_or("main");
-            cplane.new_node(timeline_name)?;
-        }
-        ("start", Some(sub_m)) => {
-            let timeline_name = sub_m.value_of("timeline").unwrap_or("main");
+        ("create", Some(create_match)) => {
+            let tenantid: ZTenantId = create_match
+                .value_of("tenantid")
+                .map_or(Ok(env.tenantid), |value| value.parse())?;
+            let timeline_name = create_match.value_of("timeline").unwrap_or("main");
+            // check is that timeline doesnt already exist
+            // this check here is because it
 
-            let node = cplane.nodes.get(timeline_name);
+            cplane.new_node(tenantid, timeline_name)?;
+        }
+        ("start", Some(start_match)) => {
+            let tenantid: ZTenantId = start_match
+                .value_of("tenantid")
+                .map_or(Ok(env.tenantid), |value| value.parse())?;
+            let timeline_name = start_match.value_of("timeline").unwrap_or("main");
+
+            let node = cplane.nodes.get(&(tenantid, timeline_name.to_owned()));
 
             println!("Starting postgres on timeline {}...", timeline_name);
             if let Some(node) = node {
                 node.start()?;
             } else {
-                let node = cplane.new_node(timeline_name)?;
+                let node = cplane.new_node(tenantid, timeline_name)?;
                 node.start()?;
             }
         }
-        ("stop", Some(sub_m)) => {
-            let timeline_name = sub_m.value_of("timeline").unwrap_or("main");
-            let destroy = sub_m.is_present("destroy");
+        ("stop", Some(stop_match)) => {
+            let timeline_name = stop_match.value_of("timeline").unwrap_or("main");
+            let destroy = stop_match.is_present("destroy");
+            let tenantid: ZTenantId = stop_match
+                .value_of("tenantid")
+                .map_or(Ok(env.tenantid), |value| value.parse())?;
 
             let node = cplane
                 .nodes
-                .get(timeline_name)
+                .get(&(tenantid, timeline_name.to_owned()))
                 .ok_or_else(|| anyhow!("postgres {} is not found", timeline_name))?;
             node.stop(destroy)?;
         }
