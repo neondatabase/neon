@@ -11,6 +11,7 @@ use log::*;
 use rand::Rng;
 use std::io;
 use std::io::{BufReader, Write};
+use std::net::Shutdown;
 use std::net::TcpStream;
 
 pub trait Handler {
@@ -140,7 +141,14 @@ impl PostgresBackend {
         self.flush()
     }
 
+    // wrapper for run_internal() that shuts down socket when we are done
     pub fn run(&mut self, handler: &mut impl Handler) -> Result<()> {
+        let ret = self.run_internal(handler);
+        let _res = self.stream_out.shutdown(Shutdown::Both);
+        ret
+    }
+
+    fn run_internal(&mut self, handler: &mut impl Handler) -> Result<()> {
         let peer_addr = self.stream_out.peer_addr()?;
         info!("postgres backend to {:?} started", peer_addr);
         let mut unnamed_query_string = Bytes::new();
