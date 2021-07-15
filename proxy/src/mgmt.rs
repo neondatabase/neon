@@ -7,7 +7,7 @@ use anyhow::bail;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use zenith_utils::{
-    postgres_backend::{self, PostgresBackend},
+    postgres_backend::{self, query_from_cstring, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
 };
 
@@ -78,12 +78,7 @@ impl postgres_backend::Handler for MgmtHandler {
         pgb: &mut PostgresBackend,
         query_string: Bytes,
     ) -> anyhow::Result<()> {
-        let mut query_string = query_string.to_vec();
-        if let Some(ch) = query_string.last() {
-            if *ch == 0 {
-                query_string.pop();
-            }
-        }
+        let query_string = query_from_cstring(query_string);
 
         println!("Got mgmt query: '{}'", std::str::from_utf8(&query_string)?);
 

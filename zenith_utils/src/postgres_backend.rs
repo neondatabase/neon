@@ -63,17 +63,15 @@ pub struct PostgresBackend {
     auth_type: AuthType,
 }
 
-// TODO: call shutdown() manually.
-// into_smth() methods do not work with types implementing Drop
-
-// // In replication.rs a separate thread is reading keepalives from the
-// // socket. When main one finishes, tell it to get down by shutdowning the
-// // socket.
-// impl Drop for PostgresBackend {
-//     fn drop(&mut self) {
-//         let _res = self.stream_out.shutdown(Shutdown::Both);
-//     }
-// }
+pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
+    let mut query_string = query_string.to_vec();
+    if let Some(ch) = query_string.last() {
+        if *ch == 0 {
+            query_string.pop();
+        }
+    }
+    query_string
+}
 
 impl PostgresBackend {
     pub fn new(socket: TcpStream, auth_type: AuthType) -> Result<Self, std::io::Error> {

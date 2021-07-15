@@ -268,7 +268,8 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         }
     }
 
-    // Check that we can bind to address before further initialization
+    // Check that we can bind to address before starting threads to simplify shutdown
+    // sequence if port is occupied.
     info!("Starting pageserver on {}", conf.listen_addr);
     let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
 
