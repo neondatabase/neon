@@ -314,13 +314,7 @@ impl PostgresRedoManagerInternal {
                     buf.advance(skip);
                 }
 
-                if xlogrec.xl_rmid == pg_constants::RM_CLOG_ID {
-                    let info = xlogrec.xl_info & !pg_constants::XLR_INFO_MASK;
-                    if info == pg_constants::CLOG_ZEROPAGE {
-                        // The only operation we need to implement is CLOG_ZEROPAGE
-                        page.copy_from_slice(&ZERO_PAGE);
-                    }
-                } else if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
+                if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
                     // Transaction manager stuff
                     let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
                     let tag_blknum = match tag {
@@ -376,14 +370,9 @@ impl PostgresRedoManagerInternal {
                         }
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
-                    // Multiexact operations
+                    // Multixact operations
                     let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-                    if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE
-                        || info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE
-                    {
-                        // Just need to zero page
-                        page.copy_from_slice(&ZERO_PAGE);
-                    } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
+                    if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                         let xlrec = XlMultiXactCreate::decode(&mut buf);
                         if let ObjectTag::MultiXactMembers(slru) = tag {
                             for i in 0..xlrec.nmembers {

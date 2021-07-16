@@ -25,6 +25,8 @@ use zenith_utils::lsn::Lsn;
 const MAX_MBR_BLKNO: u32 =
     pg_constants::MAX_MULTIXACT_ID / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
 
+const ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+
 ///
 /// Import all relation data pages from local disk into the repository.
 ///
@@ -415,7 +417,7 @@ pub fn save_decoded_record(
                 rec: recdata.clone(),
                 main_data_offset: decoded.main_data_offset as u32,
             };
-            timeline.put_wal_record(tag, rec)?;
+            timeline.put_page_image(tag, lsn, ZERO_PAGE, false)?;
         } else {
             assert!(info == pg_constants::CLOG_TRUNCATE);
             checkpoint.oldestXid = buf.get_u32_le();
@@ -477,7 +479,7 @@ pub fn save_decoded_record(
             } else {
                 ObjectTag::MultiXactMembers(SlruBufferTag { blknum })
             };
-            timeline.put_wal_record(tag, rec)?;
+            timeline.put_page_image(tag, lsn, ZERO_PAGE, false)?;
         } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
             let xlrec = XlMultiXactCreate::decode(&mut buf);
             save_multixact_create_record(checkpoint, timeline, lsn, &xlrec, decoded)?;
