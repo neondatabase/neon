@@ -327,29 +327,6 @@ impl XLogLongPageHeaderData {
 pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
 
 impl CheckPoint {
-    pub fn new(lsn: u64, timeline: u32) -> CheckPoint {
-        CheckPoint {
-            redo: lsn,
-            ThisTimeLineID: timeline,
-            PrevTimeLineID: timeline,
-            fullPageWrites: true, // TODO: get actual value of full_page_writes
-            nextXid: FullTransactionId {
-                value: pg_constants::FIRST_NORMAL_TRANSACTION_ID as u64,
-            }, // TODO: handle epoch?
-            nextOid: pg_constants::FIRST_BOOTSTRAP_OBJECT_ID,
-            nextMulti: 1,
-            nextMultiOffset: 0,
-            oldestXid: pg_constants::FIRST_NORMAL_TRANSACTION_ID,
-            oldestXidDB: 0,
-            oldestMulti: 1,
-            oldestMultiDB: 0,
-            time: 0,
-            oldestCommitTsXid: 0,
-            newestCommitTsXid: 0,
-            oldestActiveXid: pg_constants::INVALID_TRANSACTION_ID,
-        }
-    }
-
     pub fn encode(&self) -> Bytes {
         let b: [u8; SIZEOF_CHECKPOINT];
         b = unsafe { std::mem::transmute::<CheckPoint, [u8; SIZEOF_CHECKPOINT]>(*self) };
