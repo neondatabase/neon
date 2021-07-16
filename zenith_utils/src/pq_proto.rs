@@ -360,7 +360,7 @@ impl Default for RowDescriptor<'_> {
 pub struct XLogDataBody<'a> {
     pub wal_start: u64,
     pub wal_end: u64,
-    pub timestamp: u64,
+    pub timestamp: i64,
     pub data: &'a [u8],
 }
 
@@ -626,7 +626,7 @@ impl<'a> BeMessage<'a> {
                     buf.put_u8(b'w');
                     buf.put_u64(body.wal_start);
                     buf.put_u64(body.wal_end);
-                    buf.put_u64(body.timestamp);
+                    buf.put_i64(body.timestamp);
                     buf.put_slice(body.data);
                     Ok::<_, io::Error>(())
                 })

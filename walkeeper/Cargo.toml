@@ -27,7 +27,7 @@ postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 anyhow = "1.0"
 crc32c = "0.6.0"
-parse_duration = "2.1.1"
+humantime = "2.1.0"
 walkdir = "2"
 serde = { version = "1.0", features = ["derive"] }
 hex = "0.4.3"

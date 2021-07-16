@@ -13,3 +13,6 @@ pub mod bin_ser;
 
 pub mod postgres_backend;
 pub mod pq_proto;
+
+// dealing with connstring parsing and handy access to it's parts
+pub mod connstring;

@@ -94,6 +94,21 @@ impl ObjectStore for RocksObjectStore {
         }
     }
 
+    fn get_next_key(&self, key: &ObjectKey) -> Result<Option<ObjectKey>> {
+        let mut iter = self.db.raw_iterator();
+        let search_key = StorageKey {
+            obj_key: key.clone(),
+            lsn: Lsn(0),
+        };
+        iter.seek(search_key.ser()?);
+        if !iter.valid() {
+            Ok(None)
+        } else {
+            let key = StorageKey::des(iter.key().unwrap())?;
+            Ok(Some(key.obj_key.clone()))
+        }
+    }
+
     fn put(&self, key: &ObjectKey, lsn: Lsn, value: &[u8]) -> Result<()> {
         self.db.put(
             StorageKey::ser(&StorageKey {
@@ -121,6 +136,17 @@ impl ObjectStore for RocksObjectStore {
         lsn: Lsn,
     ) -> Result<Box<dyn Iterator<Item = (Lsn, Vec<u8>)> + 'a>> {
         let iter = RocksObjectVersionIter::new(&self.db, key, lsn)?;
+        Ok(Box::new(iter))
+    }
+
+    /// Iterate through all timeline objects
+    fn list_objects<'a>(
+        &'a self,
+        timeline: ZTimelineId,
+        nonrel_only: bool,
+        lsn: Lsn,
+    ) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>> {
+        let iter = RocksObjectIter::new(&self.db, timeline, nonrel_only, lsn)?;
         Ok(Box::new(iter))
     }
 
@@ -168,7 +194,7 @@ impl ObjectStore for RocksObjectStore {
                 {
                     break;
                 }
-                if key.lsn < lsn {
+                if key.lsn <= lsn {
                     // visible in this snapshot
                     rels.insert(rel_tag);
                 }
@@ -347,5 +373,71 @@ impl<'r> RocksObjects<'r> {
         }
 
         Ok(None)
+    }
+}
+
+///
+/// Iterator for `list_objects`. Returns all objects preceeding specified LSN
+///
+struct RocksObjectIter<'a> {
+    timeline: ZTimelineId,
+    key: StorageKey,
+    nonrel_only: bool,
+    lsn: Lsn,
+    dbiter: rocksdb::DBRawIterator<'a>,
+}
+impl<'a> RocksObjectIter<'a> {
+    fn new(
+        db: &'a rocksdb::DB,
+        timeline: ZTimelineId,
+        nonrel_only: bool,
+        lsn: Lsn,
+    ) -> Result<RocksObjectIter<'a>> {
+        let key = StorageKey {
+            obj_key: ObjectKey {
+                timeline,
+                tag: ObjectTag::FirstTag,
+            },
+            lsn: Lsn(0),
+        };
+        let dbiter = db.raw_iterator();
+        Ok(RocksObjectIter {
+            key,
+            timeline,
+            nonrel_only,
+            lsn,
+            dbiter,
+        })
+    }
+}
+impl<'a> Iterator for RocksObjectIter<'a> {
+    type Item = ObjectTag;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        loop {
+            self.dbiter.seek(StorageKey::ser(&self.key).unwrap());
+            if !self.dbiter.valid() {
+                return None;
+            }
+            let key = StorageKey::des(self.dbiter.key().unwrap()).unwrap();
+            if key.obj_key.timeline != self.timeline {
+                // End of this timeline
+                return None;
+            }
+            self.key = key.clone();
+            self.key.lsn = Lsn(u64::MAX); // next seek should skip all versions
+            if key.lsn <= self.lsn {
+                // visible in this snapshot
+                if self.nonrel_only {
+                    match key.obj_key.tag {
+                        ObjectTag::RelationMetadata(_) => return None,
+                        ObjectTag::RelationBuffer(_) => return None,
+                        _ => return Some(key.obj_key.tag),
+                    }
+                } else {
+                    return Some(key.obj_key.tag);
+                }
+            }
+        }
     }
 }

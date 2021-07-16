@@ -5,13 +5,10 @@ use anyhow::{Context, Result};
 use clap::{App, Arg};
 use daemonize::Daemonize;
 use log::*;
-use parse_duration::parse;
 use slog::Drain;
 use std::io;
-use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
 use std::{fs::File, fs::OpenOptions};
 
 use walkeeper::s3_offload;
@@ -74,7 +71,7 @@ fn main() -> Result<()> {
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
-        listen_addr: "127.0.0.1:5454".parse()?,
+        listen_addr: "localhost:5454".to_string(),
         ttl: None,
         recall_period: None,
     };
@@ -95,25 +92,19 @@ fn main() -> Result<()> {
     }
 
     if let Some(addr) = arg_matches.value_of("listen") {
-        // TODO: keep addr vector in config and listen them all
-        // XXX: with our callmemaybe approach we need to set 'advertised address'
-        // as it is not always possible to listen it. Another reason to ditch callmemaybe.
-        let addrs: Vec<_> = addr.to_socket_addrs().unwrap().collect();
-        conf.listen_addr = addrs[0];
+        conf.listen_addr = addr.to_owned();
     }
 
     if let Some(addr) = arg_matches.value_of("pageserver") {
-        // TODO: keep addr vector in config and check them all while connecting
-        let addrs: Vec<_> = addr.to_socket_addrs().unwrap().collect();
-        conf.pageserver_addr = Some(addrs[0]);
+        conf.pageserver_addr = Some(addr.to_owned());
     }
 
     if let Some(ttl) = arg_matches.value_of("ttl") {
-        conf.ttl = Some::<Duration>(parse(ttl)?);
+        conf.ttl = Some(humantime::parse_duration(ttl)?);
     }
 
     if let Some(recall) = arg_matches.value_of("recall") {
-        conf.recall_period = Some::<Duration>(parse(recall)?);
+        conf.recall_period = Some(humantime::parse_duration(recall)?);
     }
 
     start_wal_acceptor(conf)
@@ -195,12 +186,19 @@ fn init_logging(
     if conf.daemonize {
         let decorator = slog_term::PlainSyncDecorator::new(log_file);
         let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = slog::Filter::new(drain, |record: &slog::Record| {
+            record.level().is_at_least(slog::Level::Info)
+        });
         let drain = std::sync::Mutex::new(drain).fuse();
         let logger = slog::Logger::root(drain, slog::o!());
         Ok(slog_scope::set_global_logger(logger))
     } else {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog::Filter::new(drain, |record: &slog::Record| {
+            record.level().is_at_least(slog::Level::Info)
+        })
+        .fuse();
         let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
         let logger = slog::Logger::root(drain, slog::o!());
         Ok(slog_scope::set_global_logger(logger))

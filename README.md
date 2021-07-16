@@ -8,7 +8,7 @@ Zenith substitutes PostgreSQL storage layer and redistributes data across a clus
 
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
 ```text
-apt install build-essential libtool libreadline-dev zlib1g-dev flex bison \
+apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang
 ```
 

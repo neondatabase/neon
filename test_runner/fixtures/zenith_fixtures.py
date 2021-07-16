@@ -472,11 +472,11 @@ class WalAcceptor:
 
         cmd = [self.wa_binpath]
         cmd.extend(["-D", self.data_dir])
-        cmd.extend(["-l", "127.0.0.1:{}".format(self.port)])
+        cmd.extend(["-l", "localhost:{}".format(self.port)])
         cmd.append("--daemonize")
         cmd.append("--no-sync")
         # Tell page server it can receive WAL from this WAL safekeeper
-        cmd.extend(["--pageserver", "127.0.0.1:{}".format(DEFAULT_PAGESERVER_PORT)])
+        cmd.extend(["--pageserver", "localhost:{}".format(DEFAULT_PAGESERVER_PORT)])
         cmd.extend(["--recall", "1 second"])
         print('Running command "{}"'.format(' '.join(cmd)))
         subprocess.run(cmd, check=True)
@@ -543,7 +543,7 @@ class WalAcceptorFactory:
 
     def get_connstrs(self) -> str:
         """ Get list of wal acceptor endpoints suitable for wal_acceptors GUC  """
-        return ','.join(["127.0.0.1:{}".format(wa.port) for wa in self.instances])
+        return ','.join(["localhost:{}".format(wa.port) for wa in self.instances])
 
 
 @zenfixture

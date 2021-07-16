@@ -9,7 +9,6 @@ use postgres_ffi::xlog_utils::*;
 use postgres_ffi::XLogLongPageHeaderData;
 use postgres_ffi::XLogPageHeaderData;
 use postgres_ffi::XLogRecord;
-
 use std::cmp::min;
 use thiserror::Error;
 use zenith_utils::lsn::Lsn;
@@ -18,7 +17,9 @@ pub type Oid = u32;
 pub type TransactionId = u32;
 pub type BlockNumber = u32;
 pub type OffsetNumber = u16;
-pub type TimestampTz = i64;
+pub type MultiXactId = TransactionId;
+pub type MultiXactOffset = u32;
+pub type MultiXactStatus = u32;
 
 #[allow(dead_code)]
 pub struct WalStreamDecoder {
@@ -245,6 +246,7 @@ impl DecodedBkpBlock {
 }
 
 pub struct DecodedWALRecord {
+    pub xl_xid: TransactionId,
     pub xl_info: u8,
     pub xl_rmid: u8,
     pub record: Bytes, // raw XLogRecord
@@ -263,6 +265,24 @@ pub struct RelFileNode {
 
 #[repr(C)]
 #[derive(Debug)]
+pub struct XlRelmapUpdate {
+    pub dbid: Oid,   /* database ID, or 0 for shared map */
+    pub tsid: Oid,   /* database's tablespace, or pg_global */
+    pub nbytes: i32, /* size of relmap data */
+}
+
+impl XlRelmapUpdate {
+    pub fn decode(buf: &mut Bytes) -> XlRelmapUpdate {
+        XlRelmapUpdate {
+            dbid: buf.get_u32_le(),
+            tsid: buf.get_u32_le(),
+            nbytes: buf.get_i32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
 pub struct XlSmgrTruncate {
     pub blkno: BlockNumber,
     pub rnode: RelFileNode,
@@ -270,9 +290,7 @@ pub struct XlSmgrTruncate {
 }
 
 impl XlSmgrTruncate {
-    pub fn decode(decoded: &DecodedWALRecord) -> XlSmgrTruncate {
-        let mut buf = decoded.record.clone();
-        buf.advance((XLOG_SIZE_OF_XLOG_RECORD + 2) as usize);
+    pub fn decode(buf: &mut Bytes) -> XlSmgrTruncate {
         XlSmgrTruncate {
             blkno: buf.get_u32_le(),
             rnode: RelFileNode {
@@ -295,9 +313,7 @@ pub struct XlCreateDatabase {
 }
 
 impl XlCreateDatabase {
-    pub fn decode(decoded: &DecodedWALRecord) -> XlCreateDatabase {
-        let mut buf = decoded.record.clone();
-        buf.advance((XLOG_SIZE_OF_XLOG_RECORD + 2) as usize);
+    pub fn decode(buf: &mut Bytes) -> XlCreateDatabase {
         XlCreateDatabase {
             db_id: buf.get_u32_le(),
             tablespace_id: buf.get_u32_le(),
@@ -392,6 +408,7 @@ impl XlHeapUpdate {
 ///
 #[derive(Debug)]
 pub struct XlXactParsedRecord {
+    pub xid: TransactionId,
     pub info: u8,
     pub xact_time: TimestampTz,
     pub xinfo: u32,
@@ -408,15 +425,12 @@ impl XlXactParsedRecord {
     /// Decode a XLOG_XACT_COMMIT/ABORT/COMMIT_PREPARED/ABORT_PREPARED
     /// record. This should agree with the ParseCommitRecord and ParseAbortRecord
     /// functions in PostgreSQL (in src/backend/access/rmgr/xactdesc.c)
-    pub fn decode(decoded: &DecodedWALRecord) -> XlXactParsedRecord {
-        let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
-        let mut buf = decoded.record.clone();
-        buf.advance(decoded.main_data_offset);
-
+    pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
+        let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
         let xact_time = buf.get_i64_le();
         let xinfo;
-        if decoded.xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
             xinfo = buf.get_u32_le();
         } else {
             xinfo = 0;
@@ -466,10 +480,11 @@ impl XlXactParsedRecord {
             }
         }
         if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
-            let _xid = buf.get_u32_le();
+            xid = buf.get_u32_le();
             trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
         }
         XlXactParsedRecord {
+            xid,
             info,
             xact_time,
             xinfo,
@@ -477,6 +492,74 @@ impl XlXactParsedRecord {
             ts_id,
             subxacts,
             xnodes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct MultiXactMember {
+    pub xid: TransactionId,
+    pub status: MultiXactStatus,
+}
+
+impl MultiXactMember {
+    pub fn decode(buf: &mut Bytes) -> MultiXactMember {
+        MultiXactMember {
+            xid: buf.get_u32_le(),
+            status: buf.get_u32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlMultiXactCreate {
+    pub mid: MultiXactId,      /* new MultiXact's ID */
+    pub moff: MultiXactOffset, /* its starting offset in members file */
+    pub nmembers: u32,         /* number of member XIDs */
+    pub members: Vec<MultiXactMember>,
+}
+
+impl XlMultiXactCreate {
+    pub fn decode(buf: &mut Bytes) -> XlMultiXactCreate {
+        let mid = buf.get_u32_le();
+        let moff = buf.get_u32_le();
+        let nmembers = buf.get_u32_le();
+        let mut members = Vec::new();
+        for _ in 0..nmembers {
+            members.push(MultiXactMember::decode(buf));
+        }
+        XlMultiXactCreate {
+            mid,
+            moff,
+            nmembers,
+            members,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlMultiXactTruncate {
+    pub oldest_multi_db: Oid,
+    /* to-be-truncated range of multixact offsets */
+    pub start_trunc_off: MultiXactId, /* just for completeness' sake */
+    pub end_trunc_off: MultiXactId,
+
+    /* to-be-truncated range of multixact members */
+    pub start_trunc_memb: MultiXactOffset,
+    pub end_trunc_memb: MultiXactOffset,
+}
+
+impl XlMultiXactTruncate {
+    pub fn decode(buf: &mut Bytes) -> XlMultiXactTruncate {
+        XlMultiXactTruncate {
+            oldest_multi_db: buf.get_u32_le(),
+            start_trunc_off: buf.get_u32_le(),
+            end_trunc_off: buf.get_u32_le(),
+            start_trunc_memb: buf.get_u32_le(),
+            end_trunc_memb: buf.get_u32_le(),
         }
     }
 }
@@ -731,7 +814,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     // 5. Handle a few special record types that modify blocks without registering
     // them with the standard mechanism.
     if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK;
         let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
         if info == pg_constants::XLOG_HEAP_INSERT {
             let xlrec = XlHeapInsert::decode(&mut buf);
@@ -785,7 +868,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             }
         }
     } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
+        let info = xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK;
         if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
             let xlrec = XlHeapMultiInsert::decode(&mut buf);
             if (xlrec.flags
@@ -806,6 +889,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     }
 
     DecodedWALRecord {
+        xl_xid: xlogrec.xl_xid,
         xl_info: xlogrec.xl_info,
         xl_rmid: xlogrec.xl_rmid,
         record,

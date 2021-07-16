@@ -37,7 +37,7 @@ jobs:
           command: |
             if [ ! -e tmp_install/bin/postgres ]; then
               sudo apt update
-              sudo apt install build-essential libreadline-dev zlib1g-dev flex bison
+              sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev
             fi
 
         # Build postgres if the restore_cache didn't find a build.
