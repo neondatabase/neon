@@ -509,16 +509,16 @@ mod tests {
 
         // Create a relation on the timeline
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
-        tline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("foo blk 0 at 4"))?;
+        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
+        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
+        tline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("foo blk 0 at 4"), true)?;
 
         // Create another relation
-        let buftag2 = BufferTag {
+        let buftag2 = ObjectTag::RelationBuffer(BufferTag {
             rel: TESTREL_B,
             blknum: 0,
-        };
-        tline.put_page_image(buftag2, Lsn(2), TEST_IMG("foobar blk 0 at 2"))?;
+        });
+        tline.put_page_image(buftag2, Lsn(2), TEST_IMG("foobar blk 0 at 2"), true)?;
 
         tline.advance_last_valid_lsn(Lsn(4));
 
@@ -527,7 +527,7 @@ mod tests {
         repo.branch_timeline(timelineid, newtimelineid, Lsn(3))?;
         let newtline = repo.get_timeline(newtimelineid)?;
 
-        newtline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("bar blk 0 at 4"))?;
+        newtline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("bar blk 0 at 4"), true)?;
         newtline.advance_last_valid_lsn(Lsn(4));
 
         // Check page contents on both branches

@@ -67,7 +67,13 @@ pub fn import_timeline_from_postgres_datadir(
 
             // These special files appear in the snapshot, but are not needed by the page server
             Some("pg_control") => {
-                import_nonrel_file(timeline, lsn, ObjectTag::ControlFile, &direntry.path())?
+                import_nonrel_file(timeline, lsn, ObjectTag::ControlFile, &direntry.path())?;
+                // Extract checkpoint record from pg_control and store is as separate object
+                let pg_control_bytes =
+                    timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, lsn)?;
+                let pg_control = ControlFileData::decode(&pg_control_bytes)?;
+                let checkpoint_bytes = pg_control.checkPointCopy.encode();
+                timeline.put_page_image(ObjectTag::Checkpoint, lsn, checkpoint_bytes, false)?;
             }
             Some("pg_filenode.map") => import_nonrel_file(
                 timeline,
@@ -294,14 +300,6 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
 
     let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
-    // get_page_at_lsn_nowait returns pages with zeros when object is not found in the storage.
-    // nextXid can not be zero, so this check is used to detect situation when checkpoint record needs to be initialized.
-    if checkpoint.nextXid.value == 0 {
-        let pg_control_bytes =
-            timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, startpoint)?;
-        let pg_control = ControlFileData::decode(&pg_control_bytes)?;
-        checkpoint = pg_control.checkPointCopy;
-    }
 
     loop {
         // FIXME: assume postgresql tli 1 for now
