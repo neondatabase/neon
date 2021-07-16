@@ -532,7 +532,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .unwrap_or(&self.conf.gc_horizon.to_string())
                 .parse()?;
 
-            let result = timeline.gc_iteration(horizon)?;
+            let result = timeline.gc_iteration(horizon, true)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor {

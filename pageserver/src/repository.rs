@@ -144,7 +144,7 @@ pub trait Timeline: Send + Sync {
     /// but it can be explicitly requested through page server API.
     ///
     /// `horizon` specifies delta from last LSN to preserve all object versions (PITR interval).
-    fn gc_iteration(&self, horizon: u64) -> Result<GcResult>;
+    fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult>;
 
     // Check transaction status
     fn get_tx_status(&self, xid: TransactionId, lsn: Lsn) -> anyhow::Result<u8> {
