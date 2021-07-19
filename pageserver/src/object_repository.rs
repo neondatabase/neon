@@ -145,7 +145,8 @@ impl Repository for ObjectRepository {
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, at_lsn: Lsn) -> Result<()> {
         let src_timeline = self.get_timeline(src)?;
 
-        // Write a metadata key, noting the ancestor of th new timeline. There is initially
+        trace!("branch_timeline at lsn {}", at_lsn);
+        // Write a metadata key, noting the ancestor of the new timeline. There is initially
         // no data in it, but all the read-calls know to look into the ancestor.
         let metadata = MetadataEntry {
             last_valid_lsn: at_lsn,

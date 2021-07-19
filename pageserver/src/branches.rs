@@ -5,21 +5,19 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
-use fs::File;
-use postgres_ffi::{pg_constants, xlog_utils, ControlFileData};
+use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::Read;
-use std::sync::Arc;
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     str::FromStr,
+    sync::Arc,
 };
-use zenith_utils::lsn::Lsn;
 
 use log::*;
+use zenith_utils::lsn::Lsn;
 
 use crate::logger;
 use crate::object_repository::ObjectRepository;
@@ -65,6 +63,7 @@ pub fn init_pageserver(
         .with_context(|| "failed to create repo")?;
     }
     fs::create_dir_all(conf.tenants_path())?;
+
     println!("pageserver init succeeded");
     Ok(())
 }
@@ -92,43 +91,7 @@ pub fn create_repo(
 
     info!("created directory structure in {}", repo_dir.display());
 
-    // Run initdb
-    //
-    // We create the cluster temporarily in a "tmp" directory inside the repository,
-    // and move it to the right location from there.
-    let tmppath = conf.tenant_path(&tenantid).join("tmp");
-
-    info!("running initdb... ");
-
-    let initdb_path = conf.pg_bin_dir().join("initdb");
-    let initdb_otput = Command::new(initdb_path)
-        .args(&["-D", tmppath.to_str().unwrap()])
-        .args(&["-U", &conf.superuser])
-        .arg("--no-instructions")
-        .env_clear()
-        .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-        .stdout(Stdio::null())
-        .output()
-        .with_context(|| "failed to execute initdb")?;
-    if !initdb_otput.status.success() {
-        anyhow::bail!(
-            "initdb failed: '{}'",
-            String::from_utf8_lossy(&initdb_otput.stderr)
-        );
-    }
-    info!("initdb succeeded");
-
-    // Read control file to extract the LSN and system id
-    let controlfile_path = tmppath.join("global").join("pg_control");
-    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
-    // let systemid = controlfile.system_identifier;
-    let lsn = controlfile.checkPoint;
-    let lsnstr = format!("{:016X}", lsn);
-
-    // Bootstrap the repository by loading the newly-initdb'd cluster into 'main' branch.
     let tli = create_timeline(conf, None, &tenantid)?;
-    let timelinedir = conf.timeline_path(&tli, &tenantid);
 
     // We don't use page_cache here, because we don't want to spawn the WAL redo thread during
     // repository initialization.
@@ -147,38 +110,93 @@ pub fn create_repo(
         wal_redo_manager,
         tenantid,
     );
-    let timeline = repo.create_empty_timeline(tli, Lsn(lsn))?;
 
-    restore_local_repo::import_timeline_from_postgres_datadir(&tmppath, &*timeline, Lsn(lsn))?;
+    // Load data into pageserver
+    // TODO To implement zenith import we need to
+    //      move data loading out of create_repo()
+    bootstrap_timeline(conf, tenantid, tli, &repo)?;
 
-    // Move the initial WAL file
-    fs::rename(
-        tmppath.join("pg_wal").join("000000010000000000000001"),
-        timelinedir
-            .join("wal")
-            .join("000000010000000000000001.partial"),
-    )?;
-    info!("created initial timeline {}", tli);
+    Ok(repo)
+}
+
+// Returns checkpoint LSN from controlfile
+fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
+    // Read control file to extract the LSN
+    let controlfile_path = path.join("global").join("pg_control");
+    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
+    let lsn = controlfile.checkPoint;
+
+    Ok(Lsn(lsn))
+}
+
+// Create the cluster temporarily in a initdbpath directory inside the repository
+// to get bootstrap data for timeline initialization.
+//
+fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
+    info!("running initdb... ");
+
+    let initdb_path = conf.pg_bin_dir().join("initdb");
+    let initdb_otput = Command::new(initdb_path)
+        .args(&["-D", initdbpath.to_str().unwrap()])
+        .args(&["-U", &conf.superuser])
+        .arg("--no-instructions")
+        .env_clear()
+        .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+        .stdout(Stdio::null())
+        .output()
+        .with_context(|| "failed to execute initdb")?;
+    if !initdb_otput.status.success() {
+        anyhow::bail!(
+            "initdb failed: '{}'",
+            String::from_utf8_lossy(&initdb_otput.stderr)
+        );
+    }
+    info!("initdb succeeded");
+
+    Ok(())
+}
+
+//
+// - run initdb to init temporary instance and get bootstrap data
+// - after initialization complete, remove the temp dir.
+//
+fn bootstrap_timeline(
+    conf: &'static PageServerConf,
+    tenantid: ZTenantId,
+    tli: ZTimelineId,
+    repo: &dyn Repository,
+) -> Result<()> {
+    let initdb_path = conf.tenant_path(&tenantid).join("tmp");
+
+    // Init temporarily repo to get bootstrap data
+    run_initdb(conf, &initdb_path)?;
+    let pgdata_path = initdb_path;
+
+    let lsn = get_lsn_from_controlfile(&pgdata_path)?;
+
+    info!("bootstrap_timeline {:?} at lsn {}", pgdata_path, lsn);
+
+    let timeline = repo.create_empty_timeline(tli, lsn)?;
+    restore_local_repo::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+
+    let wal_dir = pgdata_path.join("pg_wal");
+    restore_local_repo::import_timeline_wal(&wal_dir, &*timeline, timeline.get_last_record_lsn())?;
+
+    println!(
+        "created initial timeline {} timeline.lsn {}",
+        tli,
+        timeline.get_last_record_lsn()
+    );
 
     let data = tli.to_string();
     fs::write(conf.branch_path("main", &tenantid), data)?;
-    info!("created main branch");
+    println!("created main branch");
 
-    // Remove pg_wal
-    fs::remove_dir_all(tmppath.join("pg_wal"))?;
+    // Remove temp dir. We don't need it anymore
+    fs::remove_dir_all(pgdata_path)?;
 
-    // Move the data directory as an initial base backup.
-    // FIXME: It would be enough to only copy the non-relation files here, the relation
-    // data was already loaded into the repository.
-    let target = timelinedir.join("snapshots").join(&lsnstr);
-    fs::rename(tmppath, &target)?;
-
-    info!(
-        "new zenith repository was created in {}",
-        repo_dir.display()
-    );
-
-    Ok(repo)
+    Ok(())
 }
 
 pub(crate) fn get_tenants(conf: &PageServerConf) -> Result<Vec<String>> {
@@ -269,25 +287,9 @@ pub(crate) fn create_branch(
 
     // create a new timeline directory for it
     let newtli = create_timeline(conf, Some(startpoint), tenantid)?;
-    let newtimelinedir = conf.timeline_path(&newtli, tenantid);
 
     // Let the Repository backend do its initialization
     repo.branch_timeline(startpoint.timelineid, newtli, startpoint.lsn)?;
-
-    // Copy the latest snapshot (TODO: before the startpoint) and all WAL
-    // TODO: be smarter and avoid the copying...
-    let (_maxsnapshot, oldsnapshotdir) =
-        find_latest_snapshot(conf, &startpoint.timelineid, tenantid)?;
-    let copy_opts = fs_extra::dir::CopyOptions::new();
-    fs_extra::dir::copy(oldsnapshotdir, newtimelinedir.join("snapshots"), &copy_opts)?;
-
-    let oldtimelinedir = conf.timeline_path(&startpoint.timelineid, tenantid);
-    copy_wal(
-        &oldtimelinedir.join("wal"),
-        &newtimelinedir.join("wal"),
-        startpoint.lsn,
-        pg_constants::WAL_SEGMENT_SIZE,
-    )?;
 
     // Remember the human-readable branch name for the new timeline.
     // FIXME: there's a race condition, if you create a branch with the same
@@ -389,7 +391,6 @@ fn create_timeline(
     let timelinedir = conf.timeline_path(&timelineid, tenantid);
 
     fs::create_dir(&timelinedir)?;
-    fs::create_dir(&timelinedir.join("snapshots"))?;
     fs::create_dir(&timelinedir.join("wal"))?;
 
     if let Some(ancestor) = ancestor {
@@ -398,77 +399,4 @@ fn create_timeline(
     }
 
     Ok(timelineid)
-}
-
-///
-/// Copy all WAL segments from one directory to another, up to given LSN.
-///
-/// If the given LSN is in the middle of a segment, the last segment containing it
-/// is written out as .partial, and padded with zeros.
-///
-fn copy_wal(src_dir: &Path, dst_dir: &Path, upto: Lsn, wal_seg_size: usize) -> Result<()> {
-    let last_segno = upto.segment_number(wal_seg_size);
-    let last_segoff = upto.segment_offset(wal_seg_size);
-
-    for entry in fs::read_dir(src_dir).unwrap().flatten() {
-        let entry_name = entry.file_name();
-        let fname = entry_name.to_str().unwrap();
-
-        // Check if the filename looks like an xlog file, or a .partial file.
-        if !xlog_utils::IsXLogFileName(fname) && !xlog_utils::IsPartialXLogFileName(fname) {
-            continue;
-        }
-        let (segno, _tli) = xlog_utils::XLogFromFileName(fname, wal_seg_size as usize);
-
-        let copylen;
-        let mut dst_fname = PathBuf::from(fname);
-        if segno > last_segno {
-            // future segment, skip
-            continue;
-        } else if segno < last_segno {
-            copylen = wal_seg_size;
-            dst_fname.set_extension("");
-        } else {
-            copylen = last_segoff;
-            dst_fname.set_extension("partial");
-        }
-
-        let src_file = File::open(entry.path())?;
-        let mut dst_file = File::create(dst_dir.join(&dst_fname))?;
-        std::io::copy(&mut src_file.take(copylen as u64), &mut dst_file)?;
-
-        if copylen < wal_seg_size {
-            std::io::copy(
-                &mut std::io::repeat(0).take((wal_seg_size - copylen) as u64),
-                &mut dst_file,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-// Find the latest snapshot for a timeline
-fn find_latest_snapshot(
-    conf: &PageServerConf,
-    timelineid: &ZTimelineId,
-    tenantid: &ZTenantId,
-) -> Result<(Lsn, PathBuf)> {
-    let snapshotsdir = conf.snapshots_path(timelineid, tenantid);
-    let paths = fs::read_dir(&snapshotsdir)?;
-    let mut maxsnapshot = Lsn(0);
-    let mut snapshotdir: Option<PathBuf> = None;
-    for path in paths {
-        let path = path?;
-        let filename = path.file_name().to_str().unwrap().to_owned();
-        if let Ok(lsn) = Lsn::from_hex(&filename) {
-            maxsnapshot = std::cmp::max(lsn, maxsnapshot);
-            snapshotdir = Some(path.path());
-        }
-    }
-    if maxsnapshot == Lsn(0) {
-        // TODO: check ancestor timeline
-        anyhow::bail!("no snapshot found in {}", snapshotsdir.display());
-    }
-
-    Ok((maxsnapshot, snapshotdir.unwrap()))
 }

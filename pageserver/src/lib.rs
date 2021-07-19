@@ -78,10 +78,6 @@ impl PageServerConf {
         self.timelines_path(tenantid).join(timelineid.to_string())
     }
 
-    fn snapshots_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
-        self.timeline_path(timelineid, tenantid).join("snapshots")
-    }
-
     fn ancestor_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
         self.timeline_path(timelineid, tenantid).join("ancestor")
     }

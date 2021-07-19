@@ -32,7 +32,6 @@ use crate::branches;
 use crate::object_key::ObjectTag;
 use crate::page_cache;
 use crate::repository::{BufferTag, Modification, RelTag};
-use crate::restore_local_repo;
 use crate::walreceiver;
 use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
@@ -295,23 +294,15 @@ impl PageServerHandler {
 
         /* Send a tarball of the latest snapshot on the timeline */
 
-        // find latest snapshot
-        let snapshot_lsn =
-            restore_local_repo::find_latest_snapshot(&self.conf, &timelineid, &tenantid).unwrap();
-
         let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
 
         {
             let mut writer = CopyDataSink { pgb };
             let mut basebackup = basebackup::Basebackup::new(
-                self.conf,
                 &mut writer,
-                tenantid,
-                timelineid,
                 &timeline,
                 req_lsn,
                 timeline.get_prev_record_lsn(),
-                snapshot_lsn,
             );
             basebackup.send_tarball()?;
         }
