@@ -144,6 +144,13 @@ pub trait Timeline: Send + Sync {
     /// but it can be explicitly requested through page server API.
     ///
     /// `horizon` specifies delta from last LSN to preserve all object versions (PITR interval).
+	/// `compact` parameter is used to force compaction of storage.
+	/// Some storage implementation are based on LSM tree and require periodic merge (compaction).
+	/// Usually storage implementation determines itself when compaction should be performed.
+	/// But for GC tests it way be useful to force compaction just after completion of GC iteration
+	/// to make sure that all detected garbage is removed.
+	/// So right now `compact` is set to true when GC explicitly requested through page srver API,
+	/// and is st to false in GC threads which infinitely repeats GC iterations in loop.
     fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult>;
 
     // Check transaction status
