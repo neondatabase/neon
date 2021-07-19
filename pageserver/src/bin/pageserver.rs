@@ -26,7 +26,7 @@ use pageserver::{branches, page_cache, page_service, tui, PageServerConf};
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(10);
+const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
 
 /// String arguments that can be declared via CLI or config file
 #[derive(Serialize, Deserialize)]

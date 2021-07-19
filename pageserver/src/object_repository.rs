@@ -632,7 +632,7 @@ impl Timeline for ObjectTimeline {
         }))
     }
 
-    fn gc_iteration(&self, horizon: u64) -> Result<GcResult> {
+    fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult> {
         let last_lsn = self.get_last_valid_lsn();
         let mut result: GcResult = Default::default();
 
@@ -793,7 +793,9 @@ impl Timeline for ObjectTimeline {
             result.elapsed = now.elapsed();
             info!("Garbage collection completed in {:?}: {} relations inspected, {} object inspected, {} version histories truncated, {} versions deleted, {} relations dropped",
                   result.elapsed, result.n_relations, result.inspected, result.truncated, result.deleted, result.dropped);
-            self.obj_store.compact();
+            if compact {
+                self.obj_store.compact();
+            }
         }
         Ok(result)
     }
@@ -900,7 +902,7 @@ impl ObjectTimeline {
     fn gc_loop(&self, conf: &'static PageServerConf) -> Result<()> {
         loop {
             thread::sleep(conf.gc_period);
-            self.gc_iteration(conf.gc_horizon)?;
+            self.gc_iteration(conf.gc_horizon, false)?;
         }
     }
 
