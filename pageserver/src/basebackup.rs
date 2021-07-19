@@ -4,23 +4,22 @@
 //! TODO: this module has nothing to do with PostgreSQL pg_basebackup.
 //! It could use a better name.
 //!
-//! Stateless Postgres compute node is launched by sending tarball which contains non-relational data (multixacts, clog, filenodemaps, twophase files)
-//! and generate pg_control and dummy segment of WAL. This module is responsible for creation of such tarball from snapshot directory and
-//! data stored in object storage.
+//! Stateless Postgres compute node is launched by sending a tarball
+//! which contains non-relational data (multixacts, clog, filenodemaps, twophase files),
+//! generated pg_control and dummy segment of WAL.
+//! This module is responsible for creation of such tarball
+//! from data stored in object storage.
 //!
-use crate::{PageServerConf, ZTenantId, ZTimelineId};
 use bytes::{BufMut, BytesMut};
 use log::*;
+use std::io;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-use tar::{Builder, Header};
-use walkdir::WalkDir;
+use tar::{Builder, EntryType, Header};
 
-use crate::object_key::*;
+use crate::object_key::{DatabaseTag, ObjectTag};
 use crate::repository::Timeline;
-use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
@@ -33,7 +32,6 @@ pub struct Basebackup<'a> {
     timeline: &'a Arc<dyn Timeline>,
     lsn: Lsn,
     prev_record_lsn: Lsn,
-    snappath: PathBuf,
     slru_buf: [u8; pg_constants::SLRU_SEG_SIZE],
     slru_segno: u32,
     slru_path: &'static str,
@@ -41,23 +39,16 @@ pub struct Basebackup<'a> {
 
 impl<'a> Basebackup<'a> {
     pub fn new(
-        conf: &PageServerConf,
         write: &'a mut dyn Write,
-        tenantid: ZTenantId,
-        timelineid: ZTimelineId,
         timeline: &'a Arc<dyn Timeline>,
         lsn: Lsn,
         prev_record_lsn: Lsn,
-        snapshot_lsn: Lsn,
     ) -> Basebackup<'a> {
         Basebackup {
             ar: Builder::new(write),
             timeline,
             lsn,
             prev_record_lsn,
-            snappath: conf
-                .snapshots_path(&timelineid, &tenantid)
-                .join(format!("{:016X}", snapshot_lsn.0)),
             slru_path: "",
             slru_segno: u32::MAX,
             slru_buf: [0u8; pg_constants::SLRU_SEG_SIZE],
@@ -65,47 +56,22 @@ impl<'a> Basebackup<'a> {
     }
 
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
-        debug!("sending tarball of snapshot in {}", self.snappath.display());
-        for entry in WalkDir::new(&self.snappath) {
-            let entry = entry?;
-            let fullpath = entry.path();
-            let relpath = entry.path().strip_prefix(&self.snappath).unwrap();
-
-            if relpath.to_str().unwrap() == "" {
-                continue;
-            }
-
-            if entry.file_type().is_dir() {
-                trace!(
-                    "sending dir {} as {}",
-                    fullpath.display(),
-                    relpath.display()
-                );
-                self.ar.append_dir(relpath, fullpath)?;
-            } else if entry.file_type().is_symlink() {
-                error!("ignoring symlink in snapshot dir");
-            } else if entry.file_type().is_file() {
-                if !is_rel_file_path(relpath.to_str().unwrap()) {
-                    if entry.file_name() != "pg_filenode.map" // this files will be generated from object storage
-                        && !relpath.starts_with("pg_xact/")
-                        && !relpath.starts_with("pg_multixact/")
-                    {
-                        trace!("sending {}", relpath.display());
-                        self.ar.append_path_with_name(fullpath, relpath)?;
-                    }
-                } else {
-                    // relation pages are loaded on demand and should not be included in tarball
-                    trace!("not sending {}", relpath.display());
-                }
+        // Send empty config files.
+        for filepath in pg_constants::PGDATA_SPECIAL_FILES.iter() {
+            if *filepath == "pg_hba.conf" {
+                let data = pg_constants::PG_HBA.as_bytes();
+                let header = new_tar_header(&filepath, data.len() as u64)?;
+                self.ar.append(&header, &data[..])?;
             } else {
-                error!("unknown file type: {}", fullpath.display());
+                let header = new_tar_header(&filepath, 0)?;
+                self.ar.append(&header, &mut io::empty())?;
             }
         }
 
-        // Generate non-relational files.
-        // Iteration is sorted order: all objects of the same time are grouped and traversed
+        // Gather non-relational files from object storage pages.
+        // Iteration is sorted order: all objects of the same type are grouped and traversed
         // in key ascending order. For example all pg_xact records precede pg_multixact records and are sorted by block number.
-        // It allows to easily construct SLRU segments (32 blocks).
+        // It allows to easily construct SLRU segments.
         for obj in self.timeline.list_nonrels(self.lsn)? {
             match obj {
                 ObjectTag::Clog(slru) => self.add_slru_segment("pg_xact", &obj, slru.blknum)?,
@@ -120,7 +86,10 @@ impl<'a> Basebackup<'a> {
                 _ => {}
             }
         }
-        self.finish_slru_segment()?; // write last non-completed SLRU segment (if any)
+
+        // write last non-completed SLRU segment (if any)
+        self.finish_slru_segment()?;
+        // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file()?;
         self.ar.finish()?;
         debug!("all tarred up!");
@@ -129,19 +98,18 @@ impl<'a> Basebackup<'a> {
 
     //
     // Generate SLRU segment files from repository. Path identifies SLRU kind (pg_xact, pg_multixact/members, ...).
-    // Intially pass an empty string.
     //
     fn add_slru_segment(
         &mut self,
         path: &'static str,
         tag: &ObjectTag,
-        page: u32,
+        blknum: u32,
     ) -> anyhow::Result<()> {
         let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
         // Zero length image indicates truncated segment: just skip it
         if !img.is_empty() {
             assert!(img.len() == pg_constants::BLCKSZ as usize);
-            let segno = page / pg_constants::SLRU_PAGES_PER_SEGMENT;
+            let segno = blknum / pg_constants::SLRU_PAGES_PER_SEGMENT;
             if self.slru_path != "" && (self.slru_segno != segno || self.slru_path != path) {
                 // Switch to new segment: save old one
                 let segname = format!("{}/{:>04X}", self.slru_path, self.slru_segno);
@@ -151,7 +119,7 @@ impl<'a> Basebackup<'a> {
             }
             self.slru_segno = segno;
             self.slru_path = path;
-            let offs_start = (page % pg_constants::SLRU_PAGES_PER_SEGMENT) as usize
+            let offs_start = (blknum % pg_constants::SLRU_PAGES_PER_SEGMENT) as usize
                 * pg_constants::BLCKSZ as usize;
             let offs_end = offs_start + pg_constants::BLCKSZ as usize;
             self.slru_buf[offs_start..offs_end].copy_from_slice(&img);
@@ -175,18 +143,36 @@ impl<'a> Basebackup<'a> {
 
     //
     // Extract pg_filenode.map files from repository
+    // Along with them also send PG_VERSION for each database.
     //
     fn add_relmap_file(&mut self, tag: &ObjectTag, db: &DatabaseTag) -> anyhow::Result<()> {
+        trace!("add_relmap_file {:?}", db);
         let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
-        info!("add_relmap_file {:?}", db);
         let path = if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
+            let dst_path = "PG_VERSION";
+            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
+            self.ar.append(&header, &version_bytes[..])?;
+
+            let dst_path = format!("global/PG_VERSION");
+            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
+            self.ar.append(&header, &version_bytes[..])?;
+
             String::from("global/pg_filenode.map") // filenode map for global tablespace
         } else {
             // User defined tablespaces are not supported
             assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
-            let src_path = self.snappath.join("base/1/PG_VERSION");
+
+            // Append dir path for each database
+            let path = format!("base/{}", db.dbnode);
+            let header = new_tar_header_dir(&path)?;
+            self.ar.append(&header, &mut io::empty())?;
+
             let dst_path = format!("base/{}/PG_VERSION", db.dbnode);
-            self.ar.append_path_with_name(&src_path, &dst_path)?;
+            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
+            self.ar.append(&header, &version_bytes[..])?;
+
             format!("base/{}/pg_filenode.map", db.dbnode)
         };
         assert!(img.len() == 512);
@@ -216,7 +202,8 @@ impl<'a> Basebackup<'a> {
     }
 
     //
-    // Add generated pg_control file
+    // Add generated pg_control file and bootstrap WAL segment.
+    // Also send zenith.signal file with extra bootstrap data.
     //
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
         let checkpoint_bytes = self
@@ -238,12 +225,13 @@ impl<'a> Basebackup<'a> {
         checkpoint.redo = self.lsn.0 + self.lsn.calc_padding(8u32);
 
         //reset some fields we don't want to preserve
+        //TODO Check this.
+        //We may need to determine the value from twophase data.
         checkpoint.oldestActiveXid = 0;
 
         //save new values in pg_control
         pg_control.checkPoint = checkpoint_lsn;
         pg_control.checkPointCopy = checkpoint;
-        info!("pg_control.state = {}", pg_control.state);
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
         // add zenith.signal file
@@ -271,60 +259,6 @@ impl<'a> Basebackup<'a> {
     }
 }
 
-///
-/// Parse a path, relative to the root of PostgreSQL data directory, as
-/// a PostgreSQL relation data file.
-///
-fn parse_rel_file_path(path: &str) -> Result<(), FilePathError> {
-    /*
-     * Relation data files can be in one of the following directories:
-     *
-     * global/
-     *		shared relations
-     *
-     * base/<db oid>/
-     *		regular relations, default tablespace
-     *
-     * pg_tblspc/<tblspc oid>/<tblspc version>/
-     *		within a non-default tablespace (the name of the directory
-     *		depends on version)
-     *
-     * And the relation data files themselves have a filename like:
-     *
-     * <oid>.<segment number>
-     */
-    if let Some(fname) = path.strip_prefix("global/") {
-        let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
-
-        Ok(())
-    } else if let Some(dbpath) = path.strip_prefix("base/") {
-        let mut s = dbpath.split('/');
-        let dbnode_str = s.next().ok_or(FilePathError::InvalidFileName)?;
-        let _dbnode = dbnode_str.parse::<u32>()?;
-        let fname = s.next().ok_or(FilePathError::InvalidFileName)?;
-        if s.next().is_some() {
-            return Err(FilePathError::InvalidFileName);
-        };
-
-        let (_relnode, _forknum, _segno) = parse_relfilename(fname)?;
-
-        Ok(())
-    } else if path.strip_prefix("pg_tblspc/").is_some() {
-        // TODO
-        error!("tablespaces not implemented yet");
-        Err(FilePathError::InvalidFileName)
-    } else {
-        Err(FilePathError::InvalidFileName)
-    }
-}
-
-//
-// Check if it is relational file
-//
-fn is_rel_file_path(path: &str) -> bool {
-    parse_rel_file_path(path).is_ok()
-}
-
 //
 // Create new tarball entry header
 //
@@ -333,6 +267,23 @@ fn new_tar_header(path: &str, size: u64) -> anyhow::Result<Header> {
     header.set_size(size);
     header.set_path(path)?;
     header.set_mode(0b110000000); // -rw-------
+    header.set_mtime(
+        // use currenttime as last modified time
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    header.set_cksum();
+    Ok(header)
+}
+
+fn new_tar_header_dir(path: &str) -> anyhow::Result<Header> {
+    let mut header = Header::new_gnu();
+    header.set_size(0);
+    header.set_path(path)?;
+    header.set_mode(0o755); // -rw-------
+    header.set_entry_type(EntryType::dir());
     header.set_mtime(
         // use currenttime as last modified time
         SystemTime::now()

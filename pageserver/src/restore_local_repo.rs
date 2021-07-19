@@ -3,7 +3,7 @@
 //! zenith Timeline.
 //!
 use log::*;
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -17,9 +17,6 @@ use bytes::{Buf, Bytes};
 use crate::object_key::*;
 use crate::repository::*;
 use crate::waldecoder::*;
-use crate::PageServerConf;
-use crate::ZTenantId;
-use crate::ZTimelineId;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::{pg_constants, CheckPoint, ControlFileData};
@@ -27,36 +24,6 @@ use zenith_utils::lsn::Lsn;
 
 const MAX_MBR_BLKNO: u32 =
     pg_constants::MAX_MULTIXACT_ID / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-
-///
-/// Find latest snapshot in a timeline's 'snapshots' directory
-///
-pub fn find_latest_snapshot(
-    conf: &PageServerConf,
-    timelineid: &ZTimelineId,
-    tenantid: &ZTenantId,
-) -> Result<Lsn> {
-    let snapshotspath = conf.snapshots_path(timelineid, tenantid);
-    let mut last_snapshot_lsn = Lsn(0);
-    for direntry in fs::read_dir(&snapshotspath).unwrap() {
-        let filename = direntry.unwrap().file_name();
-
-        if let Ok(lsn) = Lsn::from_filename(&filename) {
-            last_snapshot_lsn = max(lsn, last_snapshot_lsn);
-        } else {
-            error!("unrecognized file in snapshots directory: {:?}", filename);
-        }
-    }
-
-    if last_snapshot_lsn == Lsn(0) {
-        error!(
-            "could not find valid snapshot in {}",
-            snapshotspath.display()
-        );
-        // TODO return error?
-    }
-    Ok(last_snapshot_lsn)
-}
 
 ///
 /// Import all relation data pages from local disk into the repository.
@@ -107,6 +74,11 @@ pub fn import_timeline_from_postgres_datadir(
     // E.g. 'base/12345', where 12345 is the database OID.
     for direntry in fs::read_dir(path.join("base"))? {
         let direntry = direntry?;
+
+        //skip all temporary files
+        if direntry.file_name().to_str().unwrap() == "pgsql_tmp" {
+            continue;
+        }
 
         let dboid = direntry.file_name().to_str().unwrap().parse::<u32>()?;
 
@@ -296,8 +268,8 @@ fn import_slru_file(
     Ok(())
 }
 
-/// Scan PostgreSQL WAL files in given directory, and load all records >= 'startpoint' into
-/// the repository.
+/// Scan PostgreSQL WAL files in given directory
+/// and load all records >= 'startpoint' into the repository.
 pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: Lsn) -> Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
@@ -311,6 +283,9 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     loop {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
+        let mut buf = Vec::new();
+
+        //Read local file
         let mut path = walpath.join(&filename);
 
         // It could be as .partial
@@ -331,12 +306,12 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
             file.seek(SeekFrom::Start(offset as u64))?;
         }
 
-        let mut buf = Vec::new();
         let nread = file.read_to_end(&mut buf)?;
         if nread != pg_constants::WAL_SEGMENT_SIZE - offset as usize {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);
         }
+
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
@@ -358,19 +333,19 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
             nrecords += 1;
         }
 
-        info!(
-            "imported {} records from WAL file {} up to {}",
-            nrecords,
-            path.display(),
-            last_lsn
-        );
+        info!("imported {} records up to {}", nrecords, last_lsn);
 
         segno += 1;
         offset = 0;
     }
+
     info!("reached end of WAL at {}", last_lsn);
     let checkpoint_bytes = checkpoint.encode();
     timeline.put_page_image(ObjectTag::Checkpoint, last_lsn, checkpoint_bytes, false)?;
+
+    timeline.advance_last_valid_lsn(last_lsn);
+    timeline.checkpoint()?;
+
     Ok(())
 }
 
