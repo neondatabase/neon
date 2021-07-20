@@ -398,7 +398,6 @@ impl Timeline for ObjectTimeline {
     /// current end-of-file.
     fn put_wal_record(&self, tag: ObjectTag, rec: WALRecord) -> Result<()> {
         let lsn = rec.lsn;
-
         self.put_page_entry(&tag, lsn, PageEntry::WALRecord(rec))?;
         debug!("put_wal_record {:?} at {}", tag, lsn);
 
@@ -625,11 +624,7 @@ impl Timeline for ObjectTimeline {
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
         let lsn = self.last_valid_lsn.load();
         let iter = self.obj_store.objects(self.timelineid, lsn)?;
-        Ok(Box::new(ObjectHistory {
-            lsn,
-            iter,
-            last_relation_size: None,
-        }))
+        Ok(Box::new(ObjectHistory { lsn, iter }))
     }
 
     fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult> {
@@ -995,14 +990,15 @@ impl ObjectTimeline {
 struct ObjectHistory<'a> {
     iter: Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>,
     lsn: Lsn,
-    last_relation_size: Option<(RelTag, u32)>,
 }
 
 impl<'a> Iterator for ObjectHistory<'a> {
-    type Item = Result<RelationUpdate>;
+    type Item = Result<Modification>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_result().transpose()
+        self.iter
+            .next()
+            .map(|result| result.map(|t| Modification::new(t)))
     }
 }
 
@@ -1012,77 +1008,12 @@ impl<'a> History for ObjectHistory<'a> {
     }
 }
 
-impl<'a> ObjectHistory<'a> {
-    fn handle_relation_size(
-        &mut self,
-        rel_tag: RelTag,
-        entry: RelationSizeEntry,
-    ) -> Option<Update> {
-        match entry {
-            RelationSizeEntry::Size(size) => {
-                // we only want to output truncations, expansions are filtered out
-                let last_relation_size = self.last_relation_size.replace((rel_tag, size));
-
-                match last_relation_size {
-                    Some((last_buf, last_size)) if last_buf != rel_tag || size < last_size => {
-                        Some(Update::Truncate { n_blocks: size })
-                    }
-                    _ => None,
-                }
-            }
-            RelationSizeEntry::Unlink => Some(Update::Unlink),
-        }
-    }
-
-    fn handle_page(&mut self, buf_tag: BufferTag, entry: PageEntry) -> Update {
-        match entry {
-            PageEntry::Page(img) => Update::Page {
-                blknum: buf_tag.blknum,
-                img,
-            },
-            PageEntry::WALRecord(rec) => Update::WALRecord {
-                blknum: buf_tag.blknum,
-                rec,
-            },
-        }
-    }
-
-    fn next_result(&mut self) -> Result<Option<RelationUpdate>> {
-        while let Some((object_tag, lsn, value)) = self.iter.next().transpose()? {
-            let (rel_tag, update) = match object_tag {
-                ObjectTag::RelationMetadata(rel_tag) => {
-                    let entry = ObjectValue::des_relsize(&value)?;
-                    match self.handle_relation_size(rel_tag, entry) {
-                        Some(relation_update) => (rel_tag, relation_update),
-                        None => continue,
-                    }
-                }
-                ObjectTag::RelationBuffer(buf_tag) => {
-                    let entry = ObjectValue::des_page(&value)?;
-                    let update = self.handle_page(buf_tag, entry);
-
-                    (buf_tag.rel, update)
-                }
-                _ => continue,
-            };
-
-            return Ok(Some(RelationUpdate {
-                rel: rel_tag,
-                lsn,
-                update,
-            }));
-        }
-
-        Ok(None)
-    }
-}
-
 ///
 /// We store several kinds of objects in the repository.
 /// We have per-page, per-relation and per-timeline entries.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum ObjectValue {
+pub enum ObjectValue {
     Page(PageEntry),
     RelationSize(RelationSizeEntry),
     TimelineMetadata(MetadataEntry),
@@ -1094,7 +1025,7 @@ enum ObjectValue {
 /// ObjectTag::RelationBuffer as key.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum PageEntry {
+pub enum PageEntry {
     /// Ready-made image of the block
     Page(Bytes),
 
@@ -1118,7 +1049,7 @@ enum PageEntry {
 /// Use ObjectTag::RelationMetadata as the key.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum RelationSizeEntry {
+pub enum RelationSizeEntry {
     Size(u32),
 
     /// Tombstone for a dropped relation.
@@ -1250,6 +1181,7 @@ impl<'a> ObjectVersionIter<'a> {
                     .obj_store
                     .get(&timeline_metadata_key(ancestor_timeline), Lsn(0))
                     .with_context(|| "timeline not found in repository")?;
+
                 let ancestor_metadata = ObjectValue::des_timeline_metadata(&v)?;
                 self.ancestor_timeline = ancestor_metadata.ancestor_timeline;
                 self.ancestor_lsn = ancestor_metadata.ancestor_lsn;
