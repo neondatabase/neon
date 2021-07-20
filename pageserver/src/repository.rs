@@ -144,13 +144,13 @@ pub trait Timeline: Send + Sync {
     /// but it can be explicitly requested through page server API.
     ///
     /// `horizon` specifies delta from last LSN to preserve all object versions (PITR interval).
-	/// `compact` parameter is used to force compaction of storage.
-	/// Some storage implementation are based on LSM tree and require periodic merge (compaction).
-	/// Usually storage implementation determines itself when compaction should be performed.
-	/// But for GC tests it way be useful to force compaction just after completion of GC iteration
-	/// to make sure that all detected garbage is removed.
-	/// So right now `compact` is set to true when GC explicitly requested through page srver API,
-	/// and is st to false in GC threads which infinitely repeats GC iterations in loop.
+    /// `compact` parameter is used to force compaction of storage.
+    /// Some storage implementation are based on LSM tree and require periodic merge (compaction).
+    /// Usually storage implementation determines itself when compaction should be performed.
+    /// But for GC tests it way be useful to force compaction just after completion of GC iteration
+    /// to make sure that all detected garbage is removed.
+    /// So right now `compact` is set to true when GC explicitly requested through page srver API,
+    /// and is st to false in GC threads which infinitely repeats GC iterations in loop.
     fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult>;
 
     // Check transaction status
@@ -353,8 +353,10 @@ mod tests {
         let conf = PageServerConf {
             daemonize: false,
             interactive: false,
+            materialize: false,
             gc_horizon: 64 * 1024 * 1024,
             gc_period: Duration::from_secs(10),
+            n_redoers: 1,
             listen_addr: "127.0.0.1:5430".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),
