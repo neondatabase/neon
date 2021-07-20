@@ -29,6 +29,7 @@ pub struct PageServerConf {
     pub listen_addr: String,
     pub gc_horizon: u64,
     pub gc_period: Duration,
+    pub superuser: String,
 
     // Repository directory, relative to current working directory.
     // Normally, the page server changes the current working directory
