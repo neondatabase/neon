@@ -117,7 +117,7 @@ To view your documentation in a browser, try running `cargo doc --no-deps --open
 `/control_plane`:
 
 Local control plane.
-Functions to start, cofigure and stop pageserver and postgres instances running as a local processes.
+Functions to start, configure and stop pageserver and postgres instances running as a local processes.
 Intended to be used in integration tests and in CLI tools for local installations.
 
 `/zenith`
