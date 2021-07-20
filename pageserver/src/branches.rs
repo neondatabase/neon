@@ -65,6 +65,7 @@ pub fn init_repo(conf: &'static PageServerConf, repo_dir: &Path) -> Result<()> {
     let initdb_path = conf.pg_bin_dir().join("initdb");
     let initdb_otput = Command::new(initdb_path)
         .args(&["-D", tmppath.to_str().unwrap()])
+        .args(&["-U", &conf.superuser])
         .arg("--no-instructions")
         .env_clear()
         .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
