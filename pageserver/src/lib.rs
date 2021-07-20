@@ -26,9 +26,11 @@ pub mod walredo;
 pub struct PageServerConf {
     pub daemonize: bool,
     pub interactive: bool,
+    pub materialize: bool,
     pub listen_addr: String,
     pub gc_horizon: u64,
     pub gc_period: Duration,
+    pub wal_redoers: usize,
 
     // Repository directory, relative to current working directory.
     // Normally, the page server changes the current working directory

@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
@@ -103,13 +104,16 @@ struct PostgresRedoManagerInternal {
 }
 
 #[derive(Debug)]
-struct WalRedoRequest {
+struct WalRedoRequestData {
     tag: ObjectTag,
     lsn: Lsn,
-
     base_img: Option<Bytes>,
     records: Vec<WALRecord>,
+}
 
+#[derive(Debug)]
+struct WalRedoRequest {
+	data: WalRedoRequestData,
     response_channel: mpsc::Sender<Result<Bytes, WalRedoError>>,
 }
 
@@ -175,10 +179,12 @@ impl WalRedoManager for PostgresRedoManager {
         let (tx, rx) = mpsc::channel::<Result<Bytes, WalRedoError>>();
 
         let request = WalRedoRequest {
-            tag,
-            lsn,
-            base_img,
-            records,
+            data: WalRedoRequestData {
+				tag,
+				lsn,
+				base_img,
+				records,
+			},
             response_channel: tx,
         };
 
@@ -229,47 +235,64 @@ impl PostgresRedoManagerInternal {
             .build()
             .unwrap();
 
-        let process: PostgresRedoProcess;
+        let processes: Vec<PostgresRedoProcess>;
 
         info!("launching WAL redo postgres process");
 
-        process = runtime
-            .block_on(PostgresRedoProcess::launch(self.conf))
-            .unwrap();
+		let wal_redoers = self.conf.wal_redoers;
+        processes = (0..wal_redoers).map(|i|runtime.block_on(PostgresRedoProcess::launch(self.conf, i)).unwrap()).collect();
 
         // Loop forever, handling requests as they come.
         loop {
-            let request = self
-                .request_rx
-                .recv()
-                .expect("WAL redo request channel was closed");
+            let mut requests: Vec<WalRedoRequest> = Vec::new();
+			requests.push(self
+						  .request_rx
+						  .recv()
+						  .expect("WAL redo request channel was closed"));
+			loop {
+				let req = self.request_rx.try_recv();
+				match req {
+					Ok(req) => requests.push(req),
+					Err(_) => break,
+				}
+			}
+			let request_data = requests.iter().map(|req| &req.data);
+			let mut rr = 0; // round robin
+			let results = runtime.block_on(async {
+				let futures = request_data.map(|req| {
+					rr += 1;
+					self.handle_apply_request(&processes[rr % wal_redoers], &req)
+				});
+				let mut results : Vec<Result<Bytes, WalRedoError>> = Vec::new();
+				for future in futures {
+					results.push(future.await);
+				}
+				results
+			});
+			for (result, request) in results.into_iter().zip(requests.iter()) {
+				let result_ok = result.is_ok();
 
-            let result = runtime.block_on(self.handle_apply_request(&process, &request));
-            let result_ok = result.is_ok();
+				// Send the result to the requester
+				let _ = request.response_channel.send(result);
 
-            // Send the result to the requester
-            let _ = request.response_channel.send(result);
+				if !result_ok {
+					error!("wal-redo-postgres failed to apply request {:?}", request);
+				}
+			}
+		}
+	}
 
-            if !result_ok {
-                error!("wal-redo-postgres failed to apply request {:?}", request);
-            }
-        }
-    }
-
-    ///
-    /// Process one request for WAL redo.
-    ///
     async fn handle_apply_request(
         &self,
         process: &PostgresRedoProcess,
-        request: &WalRedoRequest,
+		request: &WalRedoRequestData,
     ) -> Result<Bytes, WalRedoError> {
         let tag = request.tag;
         let lsn = request.lsn;
         let base_img = request.base_img.clone();
         let records = &request.records;
 
-        let nrecords = records.len();
+         let nrecords = records.len();
 
         let start = Instant::now();
 
@@ -446,19 +469,19 @@ impl PostgresRedoManagerInternal {
 }
 
 struct PostgresRedoProcess {
-    stdin: RefCell<ChildStdin>,
-    stdout: RefCell<ChildStdout>,
+    stdin: Arc<RefCell<ChildStdin>>,
+    stdout: Arc<RefCell<ChildStdout>>,
 }
 
 impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    async fn launch(conf: &PageServerConf) -> Result<PostgresRedoProcess, Error> {
+    async fn launch(conf: &PageServerConf, id: usize) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
-        let datadir = conf.workdir.join("wal-redo-datadir");
+        let datadir = conf.workdir.join(format!("wal-redo-datadir-{}",id));
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
@@ -538,8 +561,8 @@ impl PostgresRedoProcess {
         tokio::spawn(f_stderr);
 
         Ok(PostgresRedoProcess {
-            stdin: RefCell::new(stdin),
-            stdout: RefCell::new(stdout),
+            stdin: Arc::new(RefCell::new(stdin)),
+            stdout: Arc::new(RefCell::new(stdout)),
         })
     }
 

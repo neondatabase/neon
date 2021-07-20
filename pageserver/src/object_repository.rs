@@ -71,6 +71,7 @@ impl Repository for ObjectRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let timeline = ObjectTimeline::open(
+					self.conf,
                     Arc::clone(&self.obj_store),
                     timelineid,
                     self.walredo_mgr.clone(),
@@ -124,6 +125,7 @@ impl Repository for ObjectRepository {
         info!("Created empty timeline {}", timelineid);
 
         let timeline = ObjectTimeline::open(
+			self.conf,
             Arc::clone(&self.obj_store),
             timelineid,
             self.walredo_mgr.clone(),
@@ -163,7 +165,7 @@ impl Repository for ObjectRepository {
             match tag {
                 ObjectTag::TimelineMetadataTag => {} // skip it
                 _ => {
-                    let img = src_timeline.get_page_at_lsn_nowait(tag, at_lsn)?;
+                    let img = src_timeline.get_page_at_lsn_nowait(tag, at_lsn, false)?;
                     let val = ObjectValue::Page(PageEntry::Page(img));
                     let key = ObjectKey { timeline: dst, tag };
                     self.obj_store.put(&key, at_lsn, &ObjectValue::ser(&val)?)?;
@@ -197,6 +199,7 @@ pub struct ObjectTimeline {
 
     // Backing key-value store
     obj_store: Arc<dyn ObjectStore>,
+    conf: &'static PageServerConf,
 
     // WAL redo manager, for reconstructing page versions from WAL records.
     walredo_mgr: Arc<dyn WalRedoManager>,
@@ -231,6 +234,7 @@ impl ObjectTimeline {
     ///
     /// Loads the metadata for the timeline into memory.
     fn open(
+		conf: &'static PageServerConf,
         obj_store: Arc<dyn ObjectStore>,
         timelineid: ZTimelineId,
         walredo_mgr: Arc<dyn WalRedoManager>,
@@ -244,6 +248,7 @@ impl ObjectTimeline {
         let timeline = ObjectTimeline {
             timelineid,
             obj_store,
+			conf,
             walredo_mgr,
             last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
             last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
@@ -265,10 +270,10 @@ impl Timeline for ObjectTimeline {
     fn get_page_at_lsn(&self, tag: ObjectTag, req_lsn: Lsn) -> Result<Bytes> {
         let lsn = self.wait_lsn(req_lsn)?;
 
-        self.get_page_at_lsn_nowait(tag, lsn)
+        self.get_page_at_lsn_nowait(tag, lsn, self.conf.materialize)
     }
 
-    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, req_lsn: Lsn) -> Result<Bytes> {
+    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, req_lsn: Lsn, materialize: bool) -> Result<Bytes> {
         const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
@@ -290,11 +295,13 @@ impl Timeline for ObjectTimeline {
                     let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
                     page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
 
-                    // Garbage collection assumes that we remember the materialized page
-                    // version. Otherwise we could opt to not do it, with the downside that
-                    // the next GetPage@LSN call of the same page version would have to
-                    // redo the WAL again.
-                    self.put_page_image(tag, lsn, page_img.clone(), false)?;
+					if materialize {
+						// Garbage collection assumes that we remember the materialized page
+						// version. Otherwise we could opt to not do it, with the downside that
+						// the next GetPage@LSN call of the same page version would have to
+						// redo the WAL again.
+						self.put_page_image(tag, lsn, page_img.clone(), false)?;
+					}
                 }
                 ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
                 _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),
@@ -712,7 +719,7 @@ impl Timeline for ObjectTimeline {
                                 {
                                     if rel_size > tag.blknum {
                                         // preserve and materialize last version before deleting all preceeding
-                                        self.get_page_at_lsn_nowait(obj, lsn)?;
+                                        self.get_page_at_lsn_nowait(obj, lsn, true)?;
                                         continue;
                                     }
                                     debug!("Drop last block {} of relation {:?} at {} because it is beyond relation size {}", tag.blknum, tag.rel, lsn, rel_size);
@@ -755,7 +762,7 @@ impl Timeline for ObjectTimeline {
                                     }
                                     ObjectValue::Page(PageEntry::WALRecord(_)) => {
                                         // preserve and materialize last version before deleting all preceeding
-                                        self.get_page_at_lsn_nowait(obj, lsn)?;
+                                        self.get_page_at_lsn_nowait(obj, lsn, true)?;
                                     }
                                     _ => {} // do nothing if already materialized
                                 }

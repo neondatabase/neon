@@ -132,7 +132,7 @@ impl<'a> Basebackup<'a> {
         tag: &ObjectTag,
         page: u32,
     ) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
+        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn, false)?;
         // Zero length image indicates truncated segment: just skip it
         if !img.is_empty() {
             assert!(img.len() == pg_constants::BLCKSZ as usize);
@@ -172,7 +172,7 @@ impl<'a> Basebackup<'a> {
     // Extract pg_filenode.map files from repository
     //
     fn add_relmap_file(&mut self, tag: &ObjectTag, db: &DatabaseTag) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
+        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn, false)?;
         info!("add_relmap_file {:?}", db);
         let path = if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
             String::from("global/pg_filenode.map") // filenode map for global tablespace
@@ -198,7 +198,7 @@ impl<'a> Basebackup<'a> {
         if self.timeline.get_tx_status(xid, self.lsn)?
             == pg_constants::TRANSACTION_STATUS_IN_PROGRESS
         {
-            let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
+            let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn, false)?;
             let mut buf = BytesMut::new();
             buf.extend_from_slice(&img[..]);
             let crc = crc32c::crc32c(&img[..]);
@@ -216,10 +216,10 @@ impl<'a> Basebackup<'a> {
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
         let checkpoint_bytes = self
             .timeline
-            .get_page_at_lsn_nowait(ObjectTag::Checkpoint, self.lsn)?;
+            .get_page_at_lsn_nowait(ObjectTag::Checkpoint, self.lsn, false)?;
         let pg_control_bytes = self
             .timeline
-            .get_page_at_lsn_nowait(ObjectTag::ControlFile, self.lsn)?;
+            .get_page_at_lsn_nowait(ObjectTag::ControlFile, self.lsn, false)?;
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 

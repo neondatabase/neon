@@ -28,12 +28,15 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
 
+const DEFAULT_WAL_REDOERS: usize = 2;
+
 /// String arguments that can be declared via CLI or config file
 #[derive(Serialize, Deserialize)]
 struct CfgFileParams {
     listen_addr: Option<String>,
     gc_horizon: Option<String>,
     gc_period: Option<String>,
+	wal_redoers: Option<String>,
     pg_distrib_dir: Option<String>,
 }
 
@@ -48,6 +51,7 @@ impl CfgFileParams {
             listen_addr: get_arg("listen"),
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
+            wal_redoers: get_arg("wal_redoers"),
             pg_distrib_dir: get_arg("postgres-distrib"),
         }
     }
@@ -59,6 +63,7 @@ impl CfgFileParams {
             listen_addr: self.listen_addr.or(other.listen_addr),
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
+            wal_redoers: self.wal_redoers.or(other.wal_redoers),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
         }
     }
@@ -79,6 +84,11 @@ impl CfgFileParams {
             None => DEFAULT_GC_PERIOD,
         };
 
+        let wal_redoers = match self.wal_redoers.as_ref() {
+            Some(wal_redoers_str) => wal_redoers_str.parse::<usize>()?,
+            None => DEFAULT_WAL_REDOERS,
+        };
+
         let pg_distrib_dir = match self.pg_distrib_dir.as_ref() {
             Some(pg_distrib_dir_str) => PathBuf::from(pg_distrib_dir_str),
             None => env::current_dir()?.join("tmp_install"),
@@ -91,11 +101,12 @@ impl CfgFileParams {
         Ok(PageServerConf {
             daemonize: false,
             interactive: false,
+            materialize: false,
 
             listen_addr,
             gc_horizon,
             gc_period,
-
+			wal_redoers,
             workdir: PathBuf::from("."),
 
             pg_distrib_dir,
@@ -121,6 +132,12 @@ fn main() -> Result<()> {
                 .help("Interactive mode"),
         )
         .arg(
+            Arg::with_name("materialize")
+                .long("materialize")
+                .takes_value(false)
+                .help("Materialize pages constructed by get_page_at"),
+        )
+        .arg(
             Arg::with_name("daemonize")
                 .short("d")
                 .long("daemonize")
@@ -144,6 +161,12 @@ fn main() -> Result<()> {
                 .long("gc_period")
                 .takes_value(true)
                 .help("Interval between garbage collector iterations"),
+        )
+        .arg(
+            Arg::with_name("wal_redoers")
+                .long("wal_redoers")
+                .takes_value(true)
+                .help("Number of wal-redo postgres instances"),
         )
         .arg(
             Arg::with_name("workdir")
@@ -181,6 +204,7 @@ fn main() -> Result<()> {
 
     conf.daemonize = arg_matches.is_present("daemonize");
     conf.interactive = arg_matches.is_present("interactive");
+    conf.materialize = arg_matches.is_present("materialize");
 
     if init && (conf.daemonize || conf.interactive) {
         eprintln!("--daemonize and --interactive may not be used with --init");

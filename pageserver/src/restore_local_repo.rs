@@ -70,7 +70,7 @@ pub fn import_timeline_from_postgres_datadir(
                 import_nonrel_file(timeline, lsn, ObjectTag::ControlFile, &direntry.path())?;
                 // Extract checkpoint record from pg_control and store is as separate object
                 let pg_control_bytes =
-                    timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, lsn)?;
+                    timeline.get_page_at_lsn_nowait(ObjectTag::ControlFile, lsn, false)?;
                 let pg_control = ControlFileData::decode(&pg_control_bytes)?;
                 let checkpoint_bytes = pg_control.checkPointCopy.encode();
                 timeline.put_page_image(ObjectTag::Checkpoint, lsn, checkpoint_bytes, false)?;
@@ -298,7 +298,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
+    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint, false)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
     loop {
@@ -578,7 +578,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
                 blknum,
             });
 
-            let content = timeline.get_page_at_lsn_nowait(src_key, req_lsn)?;
+            let content = timeline.get_page_at_lsn_nowait(src_key, req_lsn, false)?;
 
             debug!("copying block {:?} to {:?}", src_key, dst_key);
 
@@ -598,7 +598,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
         match tag {
             ObjectTag::FileNodeMap(db) => {
                 if db.spcnode == src_tablespace_id && db.dbnode == src_db_id {
-                    let img = timeline.get_page_at_lsn_nowait(tag, req_lsn)?;
+                    let img = timeline.get_page_at_lsn_nowait(tag, req_lsn, false)?;
                     let new_tag = ObjectTag::FileNodeMap(DatabaseTag {
                         spcnode: tablespace_id,
                         dbnode: db_id,

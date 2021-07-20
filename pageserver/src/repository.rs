@@ -59,7 +59,7 @@ pub trait Timeline: Send + Sync {
     fn get_page_at_lsn(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
+    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn, materialize: bool) -> Result<Bytes>;
 
     /// Get size of relation
     fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<u32>;
