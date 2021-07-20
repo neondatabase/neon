@@ -298,7 +298,8 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint, false)?;
+    let checkpoint_bytes =
+        timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint, false)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
     loop {

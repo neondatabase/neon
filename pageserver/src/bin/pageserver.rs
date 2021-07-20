@@ -28,7 +28,7 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
 
-const DEFAULT_WAL_REDOERS: usize = 2;
+const DEFAULT_WAL_REDOERS: usize = 1;
 
 /// String arguments that can be declared via CLI or config file
 #[derive(Serialize, Deserialize)]
@@ -36,7 +36,7 @@ struct CfgFileParams {
     listen_addr: Option<String>,
     gc_horizon: Option<String>,
     gc_period: Option<String>,
-	wal_redoers: Option<String>,
+    wal_redoers: Option<String>,
     pg_distrib_dir: Option<String>,
 }
 
@@ -106,7 +106,7 @@ impl CfgFileParams {
             listen_addr,
             gc_horizon,
             gc_period,
-			wal_redoers,
+            wal_redoers,
             workdir: PathBuf::from("."),
 
             pg_distrib_dir,

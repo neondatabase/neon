@@ -6,6 +6,7 @@
 use crate::object_repository::ObjectRepository;
 use crate::repository::Repository;
 use crate::rocksdb_storage::RocksObjectStore;
+//use crate::inmem_storage::InmemObjectStore;
 use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
 use lazy_static::lazy_static;
@@ -19,6 +20,7 @@ pub fn init(conf: &'static PageServerConf) {
     let mut m = REPOSITORY.lock().unwrap();
 
     let obj_store = RocksObjectStore::open(conf).unwrap();
+    //let obj_store = InmemObjectStore::open(conf).unwrap();
 
     // Set up a WAL redo manager, for applying WAL records.
     let walredo_mgr = PostgresRedoManager::new(conf);

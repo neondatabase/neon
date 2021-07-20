@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub mod basebackup;
 pub mod branches;
+pub mod inmem_storage;
 pub mod object_key;
 pub mod object_repository;
 pub mod object_store;
@@ -105,7 +106,7 @@ impl PageServerConf {
 /// is separate from PostgreSQL timelines, and doesn't have those
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ZTimelineId([u8; 16]);
 
 impl FromStr for ZTimelineId {

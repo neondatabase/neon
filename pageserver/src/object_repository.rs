@@ -71,7 +71,7 @@ impl Repository for ObjectRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let timeline = ObjectTimeline::open(
-					self.conf,
+                    self.conf,
                     Arc::clone(&self.obj_store),
                     timelineid,
                     self.walredo_mgr.clone(),
@@ -125,7 +125,7 @@ impl Repository for ObjectRepository {
         info!("Created empty timeline {}", timelineid);
 
         let timeline = ObjectTimeline::open(
-			self.conf,
+            self.conf,
             Arc::clone(&self.obj_store),
             timelineid,
             self.walredo_mgr.clone(),
@@ -234,7 +234,7 @@ impl ObjectTimeline {
     ///
     /// Loads the metadata for the timeline into memory.
     fn open(
-		conf: &'static PageServerConf,
+        conf: &'static PageServerConf,
         obj_store: Arc<dyn ObjectStore>,
         timelineid: ZTimelineId,
         walredo_mgr: Arc<dyn WalRedoManager>,
@@ -248,7 +248,7 @@ impl ObjectTimeline {
         let timeline = ObjectTimeline {
             timelineid,
             obj_store,
-			conf,
+            conf,
             walredo_mgr,
             last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
             last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
@@ -273,7 +273,12 @@ impl Timeline for ObjectTimeline {
         self.get_page_at_lsn_nowait(tag, lsn, self.conf.materialize)
     }
 
-    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, req_lsn: Lsn, materialize: bool) -> Result<Bytes> {
+    fn get_page_at_lsn_nowait(
+        &self,
+        tag: ObjectTag,
+        req_lsn: Lsn,
+        materialize: bool,
+    ) -> Result<Bytes> {
         const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
@@ -295,13 +300,13 @@ impl Timeline for ObjectTimeline {
                     let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
                     page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
 
-					if materialize {
-						// Garbage collection assumes that we remember the materialized page
-						// version. Otherwise we could opt to not do it, with the downside that
-						// the next GetPage@LSN call of the same page version would have to
-						// redo the WAL again.
-						self.put_page_image(tag, lsn, page_img.clone(), false)?;
-					}
+                    if materialize {
+                        // Garbage collection assumes that we remember the materialized page
+                        // version. Otherwise we could opt to not do it, with the downside that
+                        // the next GetPage@LSN call of the same page version would have to
+                        // redo the WAL again.
+                        self.put_page_image(tag, lsn, page_img.clone(), false)?;
+                    }
                 }
                 ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
                 _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),

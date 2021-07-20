@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// repository. It is shared between object_repository.rs and object_store.rs.
 /// It is mostly opaque to ObjectStore, it just stores and retrieves objects
 /// using the key given by the caller.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ObjectKey {
     pub timeline: ZTimelineId,
     pub tag: ObjectTag,
