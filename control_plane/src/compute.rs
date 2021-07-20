@@ -382,10 +382,11 @@ impl PostgresNode {
 
     pub fn connstr(&self) -> String {
         format!(
-            "host={} port={} user={}",
+            "host={} port={} user={} dbname={}",
             self.address.ip(),
             self.address.port(),
-            self.whoami()
+            "zenith_admin",
+            "postgres"
         )
     }
 
