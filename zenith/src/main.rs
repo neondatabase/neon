@@ -102,7 +102,7 @@ fn main() -> Result<()> {
     // Create config file
     if let ("init", Some(sub_args)) = matches.subcommand() {
         let pageserver_uri = sub_args.value_of("pageserver-url");
-        local_env::init(pageserver_uri).with_context(|| "Failed to create cofig file")?;
+        local_env::init(pageserver_uri).with_context(|| "Failed to create config file")?;
     }
 
     // all other commands would need config

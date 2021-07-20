@@ -1,7 +1,7 @@
 //
 // Local control plane.
 //
-// Can start, cofigure and stop postgres instances running as a local processes.
+// Can start, configure and stop postgres instances running as a local processes.
 //
 // Intended to be used in integration tests and in CLI tools for
 // local installations.
