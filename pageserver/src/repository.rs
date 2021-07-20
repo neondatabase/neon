@@ -356,7 +356,7 @@ mod tests {
             materialize: false,
             gc_horizon: 64 * 1024 * 1024,
             gc_period: Duration::from_secs(10),
-            n_redoers: 1,
+            wal_redoers: 1,
             listen_addr: "127.0.0.1:5430".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),
