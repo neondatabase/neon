@@ -281,7 +281,7 @@ impl LayeredRepository {
     }
 }
 
-/// LayerMap is a BTreeMap keyed by RelTag and the snapshot file's start LSN.
+/// LayerMap is a BTreeMap keyed by RelTag and the layer's start LSN.
 /// It provides a couple of convenience functions over a plain BTreeMap
 struct LayerMap(BTreeMap<(RelTag, Lsn), Arc<dyn Layer>>);
 
@@ -373,8 +373,8 @@ impl Timeline for LayeredTimeline {
         trace!("get_page_at_lsn: {:?} at {}", tag, lsn);
         let lsn = self.wait_lsn(lsn)?;
 
-        if let Some((snapfile, lsn)) = self.get_snapshot_file_for_read(tag.rel, lsn)? {
-            snapfile.get_page_at_lsn(&*self.walredo_mgr, tag.blknum, lsn)
+        if let Some((layer, lsn)) = self.get_layer_for_read(tag.rel, lsn)? {
+            layer.get_page_at_lsn(&*self.walredo_mgr, tag.blknum, lsn)
         } else {
             bail!("relation {} not found at {}", tag.rel, lsn);
         }
@@ -383,8 +383,8 @@ impl Timeline for LayeredTimeline {
     fn get_rel_size(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
         let lsn = self.wait_lsn(lsn)?;
 
-        if let Some((snapfile, lsn)) = self.get_snapshot_file_for_read(rel, lsn)? {
-            let result = snapfile.get_rel_size(lsn);
+        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
+            let result = layer.get_rel_size(lsn);
             trace!(
                 "get_relsize: rel {} at {}/{} -> {:?}",
                 rel,
@@ -406,8 +406,8 @@ impl Timeline for LayeredTimeline {
         let lsn = self.wait_lsn(lsn)?;
 
         let result;
-        if let Some((snapfile, lsn)) = self.get_snapshot_file_for_read(rel, lsn)? {
-            result = snapfile.get_rel_exists(lsn)?;
+        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
+            result = layer.get_rel_exists(lsn)?;
         } else {
             result = false;
         }
@@ -417,7 +417,7 @@ impl Timeline for LayeredTimeline {
     }
 
     fn list_rels(&self, spcnode: u32, dbnode: u32, _lsn: Lsn) -> Result<HashSet<RelTag>> {
-        // SnapshotFile::list_rels works by scanning the directory on disk. Make sure
+        // SnapshotLayer::list_rels works by scanning the directory on disk. Make sure
         // we have a file on disk for each relation.
         self.checkpoint()?;
 
@@ -466,29 +466,29 @@ impl Timeline for LayeredTimeline {
     fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()> {
         debug!("put_wal_record: {:?} at {}", tag, rec.lsn);
 
-        let snapfile = self.get_snapshot_file_for_write(tag.rel, rec.lsn)?;
-        snapfile.put_wal_record(tag.blknum, rec)
+        let layer = self.get_layer_for_write(tag.rel, rec.lsn)?;
+        layer.put_wal_record(tag.blknum, rec)
     }
 
     fn put_truncation(&self, rel: RelTag, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
         debug!("put_truncation: {:?} at {}", relsize, lsn);
 
-        let snapfile = self.get_snapshot_file_for_write(rel, lsn)?;
-        snapfile.put_truncation(lsn, relsize)
+        let layer = self.get_layer_for_write(rel, lsn)?;
+        layer.put_truncation(lsn, relsize)
     }
 
     fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
         debug!("put_page_image: {:?} at {}", tag, lsn);
 
-        let snapfile = self.get_snapshot_file_for_write(tag.rel, lsn)?;
-        snapfile.put_page_image(tag.blknum, lsn, img)
+        let layer = self.get_layer_for_write(tag.rel, lsn)?;
+        layer.put_page_image(tag.blknum, lsn, img)
     }
 
     fn put_unlink(&self, rel: RelTag, lsn: Lsn) -> Result<()> {
         debug!("put_unlink: {} at {}", rel, lsn);
 
-        let snapfile = self.get_snapshot_file_for_write(rel, lsn)?;
-        snapfile.put_unlink(lsn)
+        let layer = self.get_layer_for_write(rel, lsn)?;
+        layer.put_unlink(lsn)
     }
 
     ///
@@ -522,10 +522,10 @@ impl Timeline for LayeredTimeline {
         // probably too aggressive. Some kind of LRU policy would be
         // appropriate.
         //
-        let snapfiles = std::mem::take(&mut *layers);
-        for snapfile in snapfiles.0.values() {
-            if !snapfile.is_frozen() {
-                snapfile.freeze(last_valid_lsn + 1)?;
+        let layers = std::mem::take(&mut *layers);
+        for layer in layers.0.values() {
+            if !layer.is_frozen() {
+                layer.freeze(last_valid_lsn + 1)?;
             }
         }
 
@@ -632,12 +632,12 @@ impl LayeredTimeline {
     }
 
     ///
-    /// Get a handle to a SnapshotFile for reading.
+    /// Get a handle to a Layer for reading.
     ///
     /// The returned SnapshotFile might be from an ancestor timeline, if the
     /// relation hasn't been updated on this timeline yet.
     ///
-    fn get_snapshot_file_for_read(
+    fn get_layer_for_read(
         &self,
         tag: RelTag,
         lsn: Lsn,
@@ -646,7 +646,7 @@ impl LayeredTimeline {
         let mut timeline = self;
         let mut lsn = lsn;
         trace!(
-            "get_snapshot_file_for_read called for {} at {}/{}",
+            "get_layer_for_read called for {} at {}/{}",
             tag,
             self.timelineid,
             lsn
@@ -661,7 +661,7 @@ impl LayeredTimeline {
         }
 
         loop {
-            // Then look up the snapshot file
+            // Then look up the layer
             let mut layers = timeline.layers.lock().unwrap();
 
             // FIXME: If there is an entry in memory for an older snapshot file,
@@ -674,7 +674,7 @@ impl LayeredTimeline {
             // for an unrelated relation.
             //
             if let Some(layer) = layers.get(tag, lsn) {
-                trace!("found snapshot file in memory: {}", layer.get_start_lsn());
+                trace!("found layer in memory: {}-{}", layer.get_start_lsn(), layer.get_end_lsn());
                 return Ok(Some((layer.clone(), lsn)));
             } else {
                 // No layer in memory for this relation yet. Read it from disk.
@@ -706,9 +706,9 @@ impl LayeredTimeline {
     }
 
     ///
-    /// Get a handle to the latest SnapshotFile for appending.
+    /// Get a handle to the latest layer for appending.
     ///
-    fn get_snapshot_file_for_write(&self, tag: RelTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
+    fn get_layer_for_write(&self, tag: RelTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
         if lsn < self.last_valid_lsn.load() {
             bail!("cannot modify relation after advancing last_valid_lsn");
         }
@@ -721,22 +721,22 @@ impl LayeredTimeline {
             }
         }
 
-        // No SnapshotFile for this relation yet. Create one.
+        // No (writeable) layer for this relation yet. Create one.
         //
         // Is this a completely new relation? Or the first modification after branching?
         //
 
-        // FIXME: race condition, if another thread creates the SnapshotFile while
+        // FIXME: race condition, if another thread creates the layer while
         // we're busy looking up the previous one. We should hold the mutex throughout
-        // this operation, but for that we'll need a versio of get_snapshot_file_for_read()
+        // this operation, but for that we'll need a version of get_layer_for_read()
         // that doesn't try to also grab the mutex.
         drop(layers);
 
         let layer;
-        if let Some((prev_snapfile, _prev_lsn)) = self.get_snapshot_file_for_read(tag, lsn)? {
+        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read(tag, lsn)? {
             // Create new entry after the previous one.
             let lsn;
-            if prev_snapfile.get_timeline_id() != self.timelineid {
+            if prev_layer.get_timeline_id() != self.timelineid {
                 // First modification on this timeline
                 lsn = self.ancestor_lsn;
                 trace!(
@@ -746,31 +746,31 @@ impl LayeredTimeline {
                     lsn
                 );
             } else {
-                lsn = prev_snapfile.get_end_lsn();
+                lsn = prev_layer.get_end_lsn();
                 trace!(
-                    "creating file for write for {} after previous snapfile {}/{}",
+                    "creating file for write for {} after previous layer {}/{}",
                     tag,
                     self.timelineid,
                     lsn
                 );
             }
             trace!(
-                "prev snapfile is at {}/{} - {}",
-                prev_snapfile.get_timeline_id(),
-                prev_snapfile.get_start_lsn(),
-                prev_snapfile.get_end_lsn()
+                "prev layer is at {}/{} - {}",
+                prev_layer.get_timeline_id(),
+                prev_layer.get_start_lsn(),
+                prev_layer.get_end_lsn()
             );
             layer = InMemoryLayer::copy_snapshot(
                 self.conf,
                 &*self.walredo_mgr,
-                &*prev_snapfile,
+                &*prev_layer,
                 self.timelineid,
                 lsn,
             )?;
         } else {
             // New relation.
             trace!(
-                "creating file for write for new rel {} at {}/{}",
+                "creating layer for write for new rel {} at {}/{}",
                 tag,
                 self.timelineid,
                 lsn
