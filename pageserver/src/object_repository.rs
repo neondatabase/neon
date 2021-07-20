@@ -268,55 +268,6 @@ impl Timeline for ObjectTimeline {
         self.get_page_at_lsn_nowait(tag, lsn)
     }
 
-    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, req_lsn: Lsn) -> Result<Bytes> {
-        const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-        // Look up the page entry. If it's a page image, return that. If it's a WAL record,
-        // ask the WAL redo service to reconstruct the page image from the WAL records.
-        let searchkey = ObjectKey {
-            timeline: self.timelineid,
-            tag,
-        };
-        let mut iter = self.object_versions(&*self.obj_store, &searchkey, req_lsn)?;
-
-        if let Some((lsn, value)) = iter.next().transpose()? {
-            let page_img: Bytes;
-
-            match ObjectValue::des(&value)? {
-                ObjectValue::Page(PageEntry::Page(img)) => {
-                    page_img = img;
-                }
-                ObjectValue::Page(PageEntry::WALRecord(_rec)) => {
-                    // Request the WAL redo manager to apply the WAL records for us.
-                    let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
-                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
-
-                    // Garbage collection assumes that we remember the materialized page
-                    // version. Otherwise we could opt to not do it, with the downside that
-                    // the next GetPage@LSN call of the same page version would have to
-                    // redo the WAL again.
-                    self.put_page_image(tag, lsn, page_img.clone(), false)?;
-                }
-                ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
-                _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),
-            }
-            // FIXME: assumes little-endian. Only used for the debugging log though
-            let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
-            let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
-            trace!(
-                "Returning page with LSN {:X}/{:X} for {:?} from {} (request {})",
-                page_lsn_hi,
-                page_lsn_lo,
-                tag,
-                lsn,
-                req_lsn
-            );
-            return Ok(page_img);
-        }
-        trace!("page {:?} at {} not found", tag, req_lsn);
-        Ok(Bytes::from_static(&ZERO_PAGE))
-        /* return Err("could not find page image")?; */
-    }
-
     /// Get size of relation
     fn get_rel_size(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
         let lsn = self.wait_lsn(lsn)?;
@@ -802,6 +753,56 @@ impl Timeline for ObjectTimeline {
 }
 
 impl ObjectTimeline {
+
+    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, req_lsn: Lsn) -> Result<Bytes> {
+        const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
+        // Look up the page entry. If it's a page image, return that. If it's a WAL record,
+        // ask the WAL redo service to reconstruct the page image from the WAL records.
+        let searchkey = ObjectKey {
+            timeline: self.timelineid,
+            tag,
+        };
+        let mut iter = self.object_versions(&*self.obj_store, &searchkey, req_lsn)?;
+
+        if let Some((lsn, value)) = iter.next().transpose()? {
+            let page_img: Bytes;
+
+            match ObjectValue::des(&value)? {
+                ObjectValue::Page(PageEntry::Page(img)) => {
+                    page_img = img;
+                }
+                ObjectValue::Page(PageEntry::WALRecord(_rec)) => {
+                    // Request the WAL redo manager to apply the WAL records for us.
+                    let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
+                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
+
+                    // Garbage collection assumes that we remember the materialized page
+                    // version. Otherwise we could opt to not do it, with the downside that
+                    // the next GetPage@LSN call of the same page version would have to
+                    // redo the WAL again.
+                    self.put_page_image(tag, lsn, page_img.clone(), false)?;
+                }
+                ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
+                _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),
+            }
+            // FIXME: assumes little-endian. Only used for the debugging log though
+            let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
+            let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
+            trace!(
+                "Returning page with LSN {:X}/{:X} for {:?} from {} (request {})",
+                page_lsn_hi,
+                page_lsn_lo,
+                tag,
+                lsn,
+                req_lsn
+            );
+            return Ok(page_img);
+        }
+        trace!("page {:?} at {} not found", tag, req_lsn);
+        Ok(Bytes::from_static(&ZERO_PAGE))
+        /* return Err("could not find page image")?; */
+    }
+
     ///
     /// Internal function to get relation size at given LSN.
     ///
