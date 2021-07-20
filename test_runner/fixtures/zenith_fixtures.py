@@ -83,7 +83,7 @@ class PgProtocol:
     def __init__(self, host: str, port: int, username: Optional[str] = None):
         self.host = host
         self.port = port
-        self.username = username or getpass.getuser()
+        self.username = username or "zenith_admin"
 
     def connstr(self, *, dbname: str = 'postgres', username: Optional[str] = None) -> str:
         """
