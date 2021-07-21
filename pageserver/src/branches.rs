@@ -4,7 +4,7 @@
 // TODO: move all paths construction to conf impl
 //
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use fs::File;
 use postgres_ffi::{pg_constants, xlog_utils, ControlFileData};
 use rand::Rng;
@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{Read, Write};
 use std::{
-    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -191,29 +190,6 @@ pub(crate) fn get_branches(conf: &PageServerConf) -> Result<Vec<BranchInfo>> {
             })
         })
         .collect()
-}
-
-pub(crate) fn get_system_id(conf: &PageServerConf) -> Result<u64> {
-    // let branches = get_branches();
-
-    let branches_dir = std::path::Path::new("refs").join("branches");
-    let branches = std::fs::read_dir(&branches_dir)?
-        .map(|dir_entry_res| {
-            let dir_entry = dir_entry_res?;
-            let name = dir_entry.file_name().to_str().unwrap().to_string();
-            let timeline_id = std::fs::read_to_string(dir_entry.path())?.parse::<ZTimelineId>()?;
-            Ok((name, timeline_id))
-        })
-        .collect::<Result<HashMap<String, ZTimelineId>>>()?;
-
-    let main_tli = branches
-        .get("main")
-        .ok_or_else(|| anyhow!("Branch main not found"))?;
-
-    let (_, main_snap_dir) = find_latest_snapshot(conf, *main_tli)?;
-    let controlfile_path = main_snap_dir.join("global").join("pg_control");
-    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
-    Ok(controlfile.system_identifier)
 }
 
 pub(crate) fn create_branch(
