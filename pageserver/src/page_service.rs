@@ -500,16 +500,6 @@ impl postgres_backend::Handler for PageServerHandler {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string
-            .to_ascii_lowercase()
-            .starts_with(b"identify_system")
-        {
-            // TODO: match postgres response formarmat for 'identify_system'
-            let system_id = crate::branches::get_system_id(&self.conf)?.to_string();
-
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?;
-            pgb.write_message_noflush(&BeMessage::DataRow(&[Some(system_id.as_bytes())]))?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with(b"do_gc ") {
             // Run GC immediately on given timeline.
             // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
