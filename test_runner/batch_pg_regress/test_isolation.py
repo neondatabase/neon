@@ -31,10 +31,10 @@ def test_isolation(pageserver, postgres, pg_bin, zenith_cli, test_output_dir, pg
     pg_isolation_regress_command = [
         pg_isolation_regress,
         '--use-existing',
-        '--bindir={}'.format(bindir),
-        '--dlpath={}'.format(build_path),
-        '--inputdir={}'.format(src_path),
-        '--schedule={}'.format(schedule),
+        f'--bindir={bindir}',
+        f'--dlpath={build_path}',
+        f'--schedule={schedule}',
+        f'--inputdir={src_path}',
     ]
 
     env = {

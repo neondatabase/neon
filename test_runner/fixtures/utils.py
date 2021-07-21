@@ -30,7 +30,7 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
     If those files already exist, we will overwrite them.
     """
     assert type(cmd) is list
-    base = os.path.basename(cmd[0]) + '_{}'.format(global_counter())
+    base = '{}_{}'.format(os.path.basename(cmd[0]), global_counter())
     basepath = os.path.join(capture_dir, base)
     stdout_filename = basepath + '.stdout'
     stderr_filename = basepath + '.stderr'
