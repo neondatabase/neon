@@ -51,23 +51,23 @@ impl ReplicationConn {
     }
 
     /// Handle incoming messages from the network.
-    ///
     /// This is spawned into the background by `handle_start_replication`.
-    ///
     fn background_thread(mut stream_in: impl Read, timeline: Arc<Timeline>) -> Result<()> {
         // Wait for replica's feedback.
-        // We only handle `CopyData` messages. Anything else is ignored.
-        loop {
-            match FeMessage::read(&mut stream_in)? {
-                Some(FeMessage::CopyData(m)) => {
+        while let Some(msg) = FeMessage::read(&mut stream_in)? {
+            match msg {
+                FeMessage::CopyData(m) => {
                     let feedback = HotStandbyFeedback::des(&m)?;
-                    timeline.add_hs_feedback(feedback)
+                    timeline.add_hs_feedback(feedback);
                 }
-                msg => {
+                _ => {
+                    // We only handle `CopyData` messages. Anything else is ignored.
                     info!("unexpected message {:?}", msg);
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Helper function that parses a pair of LSNs.

@@ -1,5 +1,5 @@
 //! Postgres protocol messages serialization-deserialization. See
-//! https://www.postgresql.org/docs/devel/protocol-message-formats.html
+//! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
 
 use anyhow::{anyhow, bail, Result};
@@ -82,6 +82,23 @@ pub struct FeCloseMessage {}
 
 impl FeMessage {
     /// Read one message from the stream.
+    /// This function returns `Ok(None)` in case of EOF.
+    /// One way to handle this properly:
+    ///
+    /// ```
+    /// # use std::io::Read;
+    /// # use zenith_utils::pq_proto::FeMessage;
+    /// # fn process_message(msg: FeMessage) -> anyhow::Result<()> {
+    /// #     Ok(())
+    /// # };
+    /// fn do_the_job(stream: &mut impl Read) -> anyhow::Result<()> {
+    ///     while let Some(msg) = FeMessage::read(stream)? {
+    ///         process_message(msg)?;
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn read(stream: &mut impl Read) -> anyhow::Result<Option<FeMessage>> {
         // Each libpq message begins with a message type byte, followed by message length
         // If the client closes the connection, return None. But if the client closes the
