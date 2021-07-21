@@ -28,16 +28,18 @@ pub fn init(conf: &'static PageServerConf) {
     for dir_entry in fs::read_dir(conf.tenants_path()).unwrap() {
         let tenantid =
             ZTenantId::from_str(dir_entry.unwrap().file_name().to_str().unwrap()).unwrap();
-        let obj_store = RocksObjectStore::open(conf, &tenantid).unwrap();
 
         // Set up a WAL redo manager, for applying WAL records.
         let walredo_mgr = PostgresRedoManager::new(conf, tenantid);
 
         // Set up an object repository, for actual data storage.
         let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
-            RepositoryFormat::Layered => Arc::new(LayeredRepository::new(conf, Arc::new(walredo_mgr))),
+            RepositoryFormat::Layered => Arc::new(LayeredRepository::new(conf,
+                                                                         Arc::new(walredo_mgr),
+                                                                         tenantid
+            )),
             RepositoryFormat::RocksDb => {
-                let obj_store = RocksObjectStore::open(conf).unwrap();
+                let obj_store = RocksObjectStore::open(conf, &tenantid).unwrap();
 
                 Arc::new(ObjectRepository::new(
                     conf,
@@ -49,7 +51,7 @@ pub fn init(conf: &'static PageServerConf) {
         };
 
         info!("initialized storage for tenant: {}", &tenantid);
-        m.insert(tenantid, Arc::new(repo));
+        m.insert(tenantid, repo);
     }
 }
 

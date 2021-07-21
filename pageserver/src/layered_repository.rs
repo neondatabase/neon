@@ -16,14 +16,19 @@
 //! - A snapshot layer doesn't contain a snapshot at a specific LSN, but all page
 //!   versions in a range of LSNs. So each snapshot file has a start and end LSN.
 //!
+//!
+//! Each layer contains a full snapshot of the relish at the start LSN. In addition
+//! to that, it contains WAL (or more page images) needed to recontruct any page
+//! version up to the end LSN.
+//!
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 
-use std::collections::{HashSet, BTreeSet};
 use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::fs::File;
 use std::io::Write;
@@ -31,11 +36,12 @@ use std::ops::Bound::Included;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::repository::{GcResult, History, RelTag, Repository, Timeline, WALRecord};
+use crate::relish::*;
+use crate::repository::{GcResult, History, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
-use crate::ZTimelineId;
+use crate::{ZTimelineId, ZTenantId};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
@@ -57,6 +63,7 @@ static TIMEOUT: Duration = Duration::from_secs(60);
 ///
 pub struct LayeredRepository {
     conf: &'static PageServerConf,
+    tenantid: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, Arc<LayeredTimeline>>>,
 
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -77,22 +84,24 @@ impl Repository for LayeredRepository {
     ) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
-        std::fs::create_dir_all(self.conf.timeline_path(timelineid))?;
+        std::fs::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
         // Write initial metadata.
         let metadata = TimelineMetadata {
             last_valid_lsn: start_lsn,
             last_record_lsn: start_lsn,
+            prev_record_lsn: Lsn(0),
             ancestor_timeline: None,
             ancestor_lsn: start_lsn,
         };
-        Self::save_metadata(self.conf, timelineid, &metadata)?;
+        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata)?;
 
         let timeline = LayeredTimeline::new(
             self.conf,
             metadata,
             None,
             timelineid,
+            self.tenantid,
             self.walredo_mgr.clone(),
         )?;
 
@@ -104,19 +113,19 @@ impl Repository for LayeredRepository {
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
-        // just to check the source timeline exists
-        let _src_timeline = self.get_timeline(src)?;
+        let src_timeline = self.get_timeline(src)?;
 
         // Create the metadata file, noting the ancestor of th new timeline. There is initially
         // no data in it, but all the read-calls know to look into the ancestor.
         let metadata = TimelineMetadata {
             last_valid_lsn: start_lsn,
             last_record_lsn: start_lsn,
+            prev_record_lsn: src_timeline.get_prev_record_lsn(),
             ancestor_timeline: Some(src),
             ancestor_lsn: start_lsn,
         };
-        std::fs::create_dir_all(self.conf.timeline_path(dst))?;
-        Self::save_metadata(self.conf, dst, &metadata)?;
+        std::fs::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
+        Self::save_metadata(self.conf, dst, self.tenantid, &metadata)?;
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
@@ -136,7 +145,7 @@ impl LayeredRepository {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let metadata = Self::load_metadata(self.conf, timelineid)?;
+                let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
 
                 let ancestor = if let Some(ancestor_timelineid) = metadata.ancestor_timeline {
                     Some(self.get_timeline_locked(ancestor_timelineid, timelines)?)
@@ -149,6 +158,7 @@ impl LayeredRepository {
                     metadata,
                     ancestor,
                     timelineid,
+                    self.tenantid,
                     self.walredo_mgr.clone(),
                 )?;
 
@@ -158,7 +168,7 @@ impl LayeredRepository {
                     timelineid,
                     timeline.get_last_record_lsn()
                 );
-                let wal_dir = self.conf.timeline_path(timelineid).join("wal");
+                let wal_dir = self.conf.timeline_path(&timelineid, &self.tenantid).join("wal");
                 import_timeline_wal(&wal_dir, &timeline, timeline.get_last_record_lsn())?;
 
                 let timeline_rc = Arc::new(timeline);
@@ -171,8 +181,10 @@ impl LayeredRepository {
     pub fn new(
         conf: &'static PageServerConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+        tenantid: ZTenantId,
     ) -> LayeredRepository {
         LayeredRepository {
+            tenantid: tenantid,
             conf: conf,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
@@ -183,9 +195,10 @@ impl LayeredRepository {
     fn save_metadata(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
+        tenantid: ZTenantId,
         data: &TimelineMetadata,
     ) -> Result<()> {
-        let path = conf.timeline_path(timelineid).join("metadata");
+        let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
         let mut file = File::create(&path)?;
 
         file.write_all(&TimelineMetadata::ser(data)?)?;
@@ -196,8 +209,9 @@ impl LayeredRepository {
     fn load_metadata(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
+        tenantid: ZTenantId,
     ) -> Result<TimelineMetadata> {
-        let path = conf.timeline_path(timelineid).join("metadata");
+        let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
         let data = std::fs::read(&path)?;
 
         Ok(TimelineMetadata::des(&data)?)
@@ -230,8 +244,7 @@ impl LayeredRepository {
     //
     // - Currently, this is only triggered manually by the 'do_gc' command.
     //   There is no background thread to do it automatically.
-    fn gc_iteration(conf: &'static PageServerConf, horizon: u64) -> Result<GcResult> {
-
+    fn gc_iteration(conf: &'static PageServerConf, tenantid: ZTenantId, horizon: u64) -> Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
@@ -248,9 +261,8 @@ impl LayeredRepository {
             let direntry = direntry?;
             if let Some(fname) = direntry.file_name().to_str() {
                 if let Ok(timelineid) = fname.parse::<ZTimelineId>() {
-
                     // Read the metadata of this timeline to get its parent timeline.
-                    let metadata = Self::load_metadata(conf, timelineid)?;
+                    let metadata = Self::load_metadata(conf, timelineid, tenantid)?;
 
                     timelines.push((timelineid, metadata.last_record_lsn));
 
@@ -263,14 +275,16 @@ impl LayeredRepository {
 
         // Ok, we now know all the branch points. Iterate through them.
         for (timelineid, last_lsn) in timelines {
-            let branchpoints: Vec<Lsn> = all_branchpoints.range(
-                (Included((timelineid, Lsn(0))),
-                 Included((timelineid, Lsn(u64::MAX)))))
+            let branchpoints: Vec<Lsn> = all_branchpoints
+                .range((
+                    Included((timelineid, Lsn(0))),
+                    Included((timelineid, Lsn(u64::MAX))),
+                ))
                 .map(|&x| x.1)
                 .collect();
 
             if let Some(cutoff) = last_lsn.checked_sub(horizon) {
-                let result = SnapshotLayer::gc_timeline(conf, timelineid, branchpoints, cutoff)?;
+                let result = SnapshotLayer::gc_timeline(conf, timelineid, tenantid, branchpoints, cutoff)?;
 
                 totals += result;
             }
@@ -281,9 +295,9 @@ impl LayeredRepository {
     }
 }
 
-/// LayerMap is a BTreeMap keyed by RelTag and the layer's start LSN.
+/// LayerMap is a BTreeMap keyed by RelishTag and the layer's start LSN.
 /// It provides a couple of convenience functions over a plain BTreeMap
-struct LayerMap(BTreeMap<(RelTag, Lsn), Arc<dyn Layer>>);
+struct LayerMap(BTreeMap<(RelishTag, Lsn), Arc<dyn Layer>>);
 
 impl LayerMap {
     ///
@@ -292,7 +306,7 @@ impl LayerMap {
     /// given LSN, or precedes the given LSN, it is returned. In other words,
     /// you don't need to know the exact start LSN of the layer.
     ///
-    fn get(&self, tag: RelTag, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+    fn get(&self, tag: RelishTag, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         let startkey = (tag, Lsn(0));
         let endkey = (tag, lsn);
 
@@ -308,10 +322,10 @@ impl LayerMap {
     }
 
     fn insert(&mut self, layer: Arc<dyn Layer>) {
-        let tag = layer.get_tag();
+        let rel = layer.get_relish_tag();
         let start_lsn = layer.get_start_lsn();
 
-        self.0.insert((tag, start_lsn), Arc::clone(&layer));
+        self.0.insert((rel, start_lsn), Arc::clone(&layer));
     }
 }
 
@@ -326,6 +340,7 @@ impl Default for LayerMap {
 pub struct TimelineMetadata {
     last_valid_lsn: Lsn,
     last_record_lsn: Lsn,
+    prev_record_lsn: Lsn,
     ancestor_timeline: Option<ZTimelineId>,
     ancestor_lsn: Lsn,
 }
@@ -333,6 +348,7 @@ pub struct TimelineMetadata {
 pub struct LayeredTimeline {
     conf: &'static PageServerConf,
 
+    tenantid: ZTenantId,
     timelineid: ZTimelineId,
 
     layers: Mutex<LayerMap>,
@@ -359,6 +375,7 @@ pub struct LayeredTimeline {
     //
     last_valid_lsn: SeqWait<Lsn>,
     last_record_lsn: AtomicLsn,
+    prev_record_lsn: AtomicLsn,
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
@@ -369,18 +386,44 @@ pub struct LayeredTimeline {
 /// Public interface functions
 impl Timeline for LayeredTimeline {
     /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, tag: BufferTag, lsn: Lsn) -> Result<Bytes> {
-        trace!("get_page_at_lsn: {:?} at {}", tag, lsn);
+    fn get_page_at_lsn(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
         let lsn = self.wait_lsn(lsn)?;
 
-        if let Some((layer, lsn)) = self.get_layer_for_read(tag.rel, lsn)? {
-            layer.get_page_at_lsn(&*self.walredo_mgr, tag.blknum, lsn)
+        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
+            layer.get_page_at_lsn(&*self.walredo_mgr, blknum, lsn)
         } else {
-            bail!("relation {} not found at {}", tag.rel, lsn);
+            bail!("relish {} not found at {}", rel, lsn);
         }
     }
 
-    fn get_rel_size(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
+    fn get_page_at_lsn_nowait(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
+
+        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
+            layer.get_page_at_lsn(&*self.walredo_mgr, blknum, lsn)
+        } else {
+            bail!("relish {} not found at {}", rel, lsn);
+        }
+    }
+
+    fn get_rel_size(&self, rel: RelishTag, lsn: Lsn) -> Result<u32> {
+        if !rel.is_blocky() {
+            bail!("invalid get_rel_size request for non-blocky relish {}", rel);
+        }
+
         let lsn = self.wait_lsn(lsn)?;
 
         if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
@@ -402,7 +445,7 @@ impl Timeline for LayeredTimeline {
         }
     }
 
-    fn get_rel_exists(&self, rel: RelTag, lsn: Lsn) -> Result<bool> {
+    fn get_rel_exists(&self, rel: RelishTag, lsn: Lsn) -> Result<bool> {
         let lsn = self.wait_lsn(lsn)?;
 
         let result;
@@ -412,7 +455,7 @@ impl Timeline for LayeredTimeline {
             result = false;
         }
 
-        trace!("get_relsize_exists: {:?} at {} -> {:?}", rel, lsn, result);
+        trace!("get_relsize_exists: {} at {} -> {}", rel, lsn, result);
         Ok(result)
     }
 
@@ -425,9 +468,40 @@ impl Timeline for LayeredTimeline {
         let mut all_rels = HashSet::new();
         let mut timeline = self;
         loop {
-            let rels = SnapshotLayer::list_rels(self.conf, timeline.timelineid, spcnode, dbnode)?;
+            let rels = SnapshotLayer::list_rels(self.conf, timeline.timelineid, timeline.tenantid, spcnode, dbnode)?;
 
             // FIXME: We should filter out relations that don't exist at the given LSN.
+            all_rels.extend(rels.iter());
+
+            if let Some(ancestor) = timeline.ancestor_timeline.as_ref() {
+                timeline = ancestor;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        Ok(all_rels)
+    }
+
+    fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
+        info!("list_nonrels called at {}", lsn);
+
+        // List all rels in this timeline, and all its ancestors.
+        let mut all_rels = HashSet::new();
+        let mut timeline = self;
+        loop {
+            // SnapshotFile::list_rels works by scanning the directory on disk. Make sure
+            // we have a file on disk for each relation.
+            //
+            // FIXME: I think checkpoint() assumes that there can be only one running
+            // at a time, and that no modifications are "put" to the timeline concurrently.
+            // this violates those assumptions.
+            timeline.checkpoint()?;
+
+            let rels = SnapshotLayer::list_nonrels(self.conf, timeline.timelineid, timeline.tenantid, lsn)?;
+
+            // FIXME: We should filter out relishes that don't exist at the given LSN.
             all_rels.extend(rels.iter());
 
             if let Some(ancestor) = timeline.ancestor_timeline.as_ref() {
@@ -446,7 +520,7 @@ impl Timeline for LayeredTimeline {
         todo!();
     }
 
-    fn gc_iteration(&self, horizon: u64) -> Result<GcResult> {
+    fn gc_iteration(&self, horizon: u64, _compact: bool) -> Result<GcResult> {
         // In the layered repository, event to GC a single timeline,
         // we have to scan all the timelines to determine what child
         // timelines there are, so that we know to retain snapshot
@@ -460,35 +534,57 @@ impl Timeline for LayeredTimeline {
         // But do flush the in-memory layers to disk first.
         self.checkpoint()?;
 
-        LayeredRepository::gc_iteration(self.conf, horizon)
+        LayeredRepository::gc_iteration(self.conf, self.tenantid, horizon)
     }
 
-    fn put_wal_record(&self, tag: BufferTag, rec: WALRecord) -> Result<()> {
-        debug!("put_wal_record: {:?} at {}", tag, rec.lsn);
-
-        let layer = self.get_layer_for_write(tag.rel, rec.lsn)?;
-        layer.put_wal_record(tag.blknum, rec)
+    fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
+        let layer = self.get_layer_for_write(rel, rec.lsn)?;
+        layer.put_wal_record(blknum, rec)
     }
 
-    fn put_truncation(&self, rel: RelTag, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
-        debug!("put_truncation: {:?} at {}", relsize, lsn);
+    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
+        if !rel.is_blocky() {
+            bail!("invalid truncation for non-blocky relish {}", rel);
+        }
+
+        debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
 
         let layer = self.get_layer_for_write(rel, lsn)?;
         layer.put_truncation(lsn, relsize)
     }
 
-    fn put_page_image(&self, tag: BufferTag, lsn: Lsn, img: Bytes) -> Result<()> {
-        debug!("put_page_image: {:?} at {}", tag, lsn);
-
-        let layer = self.get_layer_for_write(tag.rel, lsn)?;
-        layer.put_page_image(tag.blknum, lsn, img)
+    fn put_page_image(
+        &self,
+        rel: RelishTag,
+        blknum: u32,
+        lsn: Lsn,
+        img: Bytes,
+        _update_meta: bool,
+    ) -> Result<()> {
+        let layer = self.get_layer_for_write(rel, lsn)?;
+        layer.put_page_image(blknum, lsn, img)
     }
 
-    fn put_unlink(&self, rel: RelTag, lsn: Lsn) -> Result<()> {
+    fn put_unlink(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
         debug!("put_unlink: {} at {}", rel, lsn);
 
         let layer = self.get_layer_for_write(rel, lsn)?;
         layer.put_unlink(lsn)
+    }
+
+    fn put_raw_data(&self, _tag: crate::object_key::ObjectTag, _lsn: Lsn, _data: &[u8]) -> Result<()> {
+
+        // FIXME: This doesn't make much sense for the layered storage format,
+        // it's pretty tightly coupled with the way the object store stores
+        // things.
+        bail!("put_raw_data not implemented");
+    }
+
+    fn get_next_tag(
+        &self,
+        _tag: crate::object_key::ObjectTag,
+    ) -> Result<Option<crate::object_key::ObjectTag>> {
+        todo!();
     }
 
     ///
@@ -525,7 +621,7 @@ impl Timeline for LayeredTimeline {
         let layers = std::mem::take(&mut *layers);
         for layer in layers.0.values() {
             if !layer.is_frozen() {
-                layer.freeze(last_valid_lsn + 1)?;
+                layer.freeze(last_valid_lsn)?;
             }
         }
 
@@ -540,10 +636,11 @@ impl Timeline for LayeredTimeline {
         let metadata = TimelineMetadata {
             last_valid_lsn: self.last_valid_lsn.load(),
             last_record_lsn: self.last_record_lsn.load(),
+            prev_record_lsn: self.prev_record_lsn.load(),
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
-        LayeredRepository::save_metadata(self.conf, self.timelineid, &metadata)?;
+        LayeredRepository::save_metadata(self.conf, self.timelineid, self.tenantid, &metadata)?;
 
         // If there were any concurrent updates on the timeline, we would have to work
         // harder to make sure we don't lose the new updates. Currently, that shouldn't
@@ -572,6 +669,7 @@ impl Timeline for LayeredTimeline {
         assert!(old == Lsn(0));
         let old = self.last_record_lsn.fetch_max(lsn);
         assert!(old == Lsn(0));
+        self.prev_record_lsn.store(Lsn(0));
     }
 
     fn get_last_valid_lsn(&self) -> Lsn {
@@ -588,6 +686,9 @@ impl Timeline for LayeredTimeline {
         let old = self.last_record_lsn.fetch_max(lsn);
         assert!(old <= lsn);
 
+        // Use old value of last_record_lsn as prev_record_lsn
+        self.prev_record_lsn.fetch_max(old);
+
         // Also advance last_valid_lsn
         let old = self.last_valid_lsn.advance(lsn);
         // Can't move backwards.
@@ -602,6 +703,10 @@ impl Timeline for LayeredTimeline {
     fn get_last_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load()
     }
+
+    fn get_prev_record_lsn(&self) -> Lsn {
+        self.prev_record_lsn.load()
+    }
 }
 
 impl LayeredTimeline {
@@ -613,17 +718,20 @@ impl LayeredTimeline {
         metadata: TimelineMetadata,
         ancestor: Option<Arc<LayeredTimeline>>,
         timelineid: ZTimelineId,
+        tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
     ) -> Result<LayeredTimeline> {
         let timeline = LayeredTimeline {
             conf,
             timelineid,
+            tenantid,
             layers: Mutex::new(LayerMap::default()),
 
             walredo_mgr,
 
             last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
             last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
+            prev_record_lsn: AtomicLsn::new(metadata.prev_record_lsn.0),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn,
@@ -639,7 +747,7 @@ impl LayeredTimeline {
     ///
     fn get_layer_for_read(
         &self,
-        tag: RelTag,
+        rel: RelishTag,
         lsn: Lsn,
     ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
         // First dig the right ancestor timeline
@@ -647,7 +755,7 @@ impl LayeredTimeline {
         let mut lsn = lsn;
         trace!(
             "get_layer_for_read called for {} at {}/{}",
-            tag,
+            rel,
             self.timelineid,
             lsn
         );
@@ -661,46 +769,82 @@ impl LayeredTimeline {
         }
 
         loop {
-            // Then look up the layer
             let mut layers = timeline.layers.lock().unwrap();
-
-            // FIXME: If there is an entry in memory for an older snapshot file,
-            // but there is a newere snapshot file on disk, this will incorrectly
-            // return the older entry from memory.
             //
             // FIXME: If the relation has been dropped, does this return the right
             // thing? The compute node should not normally request dropped relations,
             // but if OID wraparound happens the same relfilenode might get reused
             // for an unrelated relation.
             //
-            if let Some(layer) = layers.get(tag, lsn) {
-                trace!("found layer in memory: {}-{}", layer.get_start_lsn(), layer.get_end_lsn());
-                return Ok(Some((layer.clone(), lsn)));
-            } else {
-                // No layer in memory for this relation yet. Read it from disk.
-                if let Some(layer) =
-                    SnapshotLayer::load(timeline.conf, timeline.timelineid, tag, lsn)?
-                {
-                    trace!(
-                        "found snapshot file on disk: {}-{}",
-                        layer.get_start_lsn(),
-                        layer.get_end_lsn()
-                    );
-                    let layer_rc: Arc<dyn Layer> = Arc::new(layer);
-                    layers.insert(Arc::clone(&layer_rc));
+            let mut best_candidate = None;
+            let mut best_end_lsn = Lsn(0);
 
-                    return Ok(Some((layer_rc, lsn)));
-                } else {
-                    // No snapshot files for this relation on this timeline. But there might still
-                    // be one on the ancestor timeline
-                    if let Some(ancestor) = &timeline.ancestor_timeline {
-                        lsn = timeline.ancestor_lsn;
-                        timeline = &ancestor.as_ref();
-                        trace!("recursing into ancestor at {}/{}", timeline.timelineid, lsn);
-                        continue;
-                    }
-                    return Ok(None);
+            // First, see if we have loaded a layer in the cache ready.
+            if let Some(layer) = layers.get(rel, lsn) {
+                trace!(
+                    "found layer in cache: {} {}-{}",
+                    timeline.timelineid,
+                    layer.get_start_lsn(),
+                    layer.get_end_lsn()
+                );
+
+                assert!(layer.get_start_lsn() <= lsn);
+
+                // If this layer's LSN range contains the request LSN, it is an "exact" match,
+                // and we can return it directly. If it's not an exact match there might be
+                // a more recent layer on disk than what we have in cache.
+                //
+                // For example, imagine that the following snapshot files exist:
+                //
+                // 100-200 [cached]
+                // 200-300
+                // 300-400
+                //
+                // A request comes in for LSN 250. We already have the layer 100-200 in cache,
+                // so we find it here. But there's a newer layer on disk for 200-300, that's the
+                // correct one we need to return from this function. If the 200-300 snapshot file
+                // didn't exist (because there were no modifications to the relation after LSN
+                // 200), then the 100-200 layer was the correct one
+                //
+                // So if we find a layer in cache with end-LSN before the request LSN, remember
+                // that, but fall through to check if there is a newer snapshot file on disk before
+                // returning it.
+                if layer.get_end_lsn() >= lsn {
+                    return Ok(Some((layer.clone(), lsn)));
                 }
+                best_candidate = Some(layer.clone());
+                best_end_lsn = layer.get_end_lsn();
+            }
+
+            // Proceed to check if there is a (better) snapshot file on disk.
+            if let Some(layer) =
+                SnapshotLayer::load(timeline.conf, timeline.timelineid, timeline.tenantid, rel, best_end_lsn, lsn)?
+            {
+                trace!(
+                    "found snapshot file on disk: {}-{}",
+                    layer.get_start_lsn(),
+                    layer.get_end_lsn()
+                );
+                let layer_rc: Arc<dyn Layer> = Arc::new(layer);
+                layers.insert(Arc::clone(&layer_rc));
+
+                return Ok(Some((layer_rc, lsn)));
+            } else {
+                // No (better) snapshot files for this relation on this timeline. If we found
+                // something in cache, return that.
+                if let Some(result) = best_candidate {
+                    return Ok(Some((result, lsn)));
+                }
+
+                // If we got nothing on this timeline, check if there's a layer on the ancestor
+                // timeline
+                if let Some(ancestor) = &timeline.ancestor_timeline {
+                    lsn = timeline.ancestor_lsn;
+                    timeline = &ancestor.as_ref();
+                    trace!("recursing into ancestor at {}/{}", timeline.timelineid, lsn);
+                    continue;
+                }
+                return Ok(None);
             }
         }
     }
@@ -708,14 +852,14 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, tag: RelTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
+    fn get_layer_for_write(&self, rel: RelishTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
         if lsn < self.last_valid_lsn.load() {
             bail!("cannot modify relation after advancing last_valid_lsn");
         }
 
         // Look up the snapshot file
         let layers = self.layers.lock().unwrap();
-        if let Some(layer) = layers.get(tag, lsn) {
+        if let Some(layer) = layers.get(rel, lsn) {
             if !layer.is_frozen() {
                 return Ok(Arc::clone(&layer));
             }
@@ -733,7 +877,7 @@ impl LayeredTimeline {
         drop(layers);
 
         let layer;
-        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read(tag, lsn)? {
+        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read(rel, lsn)? {
             // Create new entry after the previous one.
             let lsn;
             if prev_layer.get_timeline_id() != self.timelineid {
@@ -741,7 +885,7 @@ impl LayeredTimeline {
                 lsn = self.ancestor_lsn;
                 trace!(
                     "creating file for write for {} at branch point {}/{}",
-                    tag,
+                    rel,
                     self.timelineid,
                     lsn
                 );
@@ -749,7 +893,7 @@ impl LayeredTimeline {
                 lsn = prev_layer.get_end_lsn();
                 trace!(
                     "creating file for write for {} after previous layer {}/{}",
-                    tag,
+                    rel,
                     self.timelineid,
                     lsn
                 );
@@ -765,13 +909,14 @@ impl LayeredTimeline {
                 &*self.walredo_mgr,
                 &*prev_layer,
                 self.timelineid,
+                self.tenantid,
                 lsn,
             )?;
         } else {
             // New relation.
             trace!(
                 "creating layer for write for new rel {} at {}/{}",
-                tag,
+                rel,
                 self.timelineid,
                 lsn
             );
@@ -782,7 +927,9 @@ impl LayeredTimeline {
             if let Some((_start, end, dropped)) = SnapshotLayer::find_latest_snapshot_file(
                 self.conf,
                 self.timelineid,
-                tag,
+                self.tenantid,
+                rel,
+                Lsn(0),
                 Lsn(u64::MAX),
             )? {
                 if dropped {
@@ -793,7 +940,7 @@ impl LayeredTimeline {
             } else {
                 start_lsn = lsn;
             }
-            layer = InMemoryLayer::create(self.conf, self.timelineid, tag, start_lsn)?;
+            layer = InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, rel, start_lsn)?;
         }
 
         let mut layers = self.layers.lock().unwrap();

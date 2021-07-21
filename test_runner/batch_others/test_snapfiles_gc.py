@@ -5,7 +5,9 @@ import time;
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 def print_gc_result(row):
-    print("GC duration {elapsed} ms, total: {snapshot_files_total}, needed_by_cutoff {snapshot_files_needed_by_cutoff}, needed_by_branches: {snapshot_files_needed_by_branches}, not_updated: {snapshot_files_not_updated}, removed: {snapshot_files_removed}, dropped: {snapshot_files_dropped}".format_map(row))
+    print("GC duration {elapsed} ms".format_map(row));
+    print("  REL    total: {snapshot_relfiles_total}, needed_by_cutoff {snapshot_relfiles_needed_by_cutoff}, needed_by_branches: {snapshot_relfiles_needed_by_branches}, not_updated: {snapshot_relfiles_not_updated}, removed: {snapshot_relfiles_removed}, dropped: {snapshot_relfiles_dropped}".format_map(row))
+    print("  NONREL total: {snapshot_nonrelfiles_total}, needed_by_cutoff {snapshot_nonrelfiles_needed_by_cutoff}, needed_by_branches: {snapshot_nonrelfiles_needed_by_branches}, not_updated: {snapshot_nonrelfiles_not_updated}, removed: {snapshot_nonrelfiles_removed}, dropped: {snapshot_nonrelfiles_dropped}".format_map(row))
 
 
 #
@@ -44,20 +46,20 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     row = pscur.fetchone()
                     print_gc_result(row);
                     # remember the number of files
-                    snapshot_files_total = row['snapshot_files_total']
-                    assert snapshot_files_total > 0
+                    snapshot_relfiles_remain = row['snapshot_relfiles_total'] - row['snapshot_relfiles_removed']
+                    assert snapshot_relfiles_remain > 0
 
                     # Insert a row. The first insert will also create a metadata entry for the
                     # relation, with size == 1 block. Hence, bump up the expected relation count.
-                    snapshot_files_total += 1;
+                    snapshot_relfiles_remain += 1;
                     print("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
                     pscur.execute(f"do_gc {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['snapshot_files_total'] == snapshot_files_total
-                    assert row['snapshot_files_removed'] == 0
-                    assert row['snapshot_files_dropped'] == 0
+                    assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain
+                    assert row['snapshot_relfiles_removed'] == 0
+                    assert row['snapshot_relfiles_dropped'] == 0
 
                     # Insert two more rows and run GC.
                     # This should create a new snapshot file with the new contents, and
@@ -69,9 +71,9 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     pscur.execute(f"do_gc {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['snapshot_files_total'] == snapshot_files_total + 1
-                    assert row['snapshot_files_removed'] == 1
-                    assert row['snapshot_files_dropped'] == 0
+                    assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain + 1
+                    assert row['snapshot_relfiles_removed'] == 1
+                    assert row['snapshot_relfiles_dropped'] == 0
 
                     # Do it again. Should again create a new snapshot file and remove old one.
                     print("Inserting two more rows and running GC")
@@ -81,18 +83,18 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     pscur.execute(f"do_gc {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['snapshot_files_total'] == snapshot_files_total + 1
-                    assert row['snapshot_files_removed'] == 1
-                    assert row['snapshot_files_dropped'] == 0
+                    assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain + 1
+                    assert row['snapshot_relfiles_removed'] == 1
+                    assert row['snapshot_relfiles_dropped'] == 0
 
                     # Run GC again, with no changes in the database. Should not remove anything.
                     print("Run GC again, with nothing to do")
                     pscur.execute(f"do_gc {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['snapshot_files_total'] == snapshot_files_total
-                    assert row['snapshot_files_removed'] == 0
-                    assert row['snapshot_files_dropped'] == 0
+                    assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain
+                    assert row['snapshot_relfiles_removed'] == 0
+                    assert row['snapshot_relfiles_dropped'] == 0
 
                     #
                     # Test DROP TABLE checks that relation data and metadata was deleted by GC from object storage
@@ -105,11 +107,11 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     print_gc_result(row);
 
                     # Each relation fork is counted separately, hence 3.
-                    assert row['snapshot_files_dropped'] == 3
+                    assert row['snapshot_relfiles_dropped'] == 3
 
                     # The catalog updates also create new snapshot files of the catalogs, which
                     # are counted as 'removed'
-                    assert row['snapshot_files_removed'] > 0
+                    assert row['snapshot_relfiles_removed'] > 0
 
                     # TODO: perhaps we should count catalog and user relations separately,
                     # to make this kind of testing more robust

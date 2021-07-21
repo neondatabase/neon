@@ -17,9 +17,7 @@ use anyhow::Result;
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use slog::{Drain, FnValue};
-
-use pageserver::{branches, page_cache, page_service};
+use pageserver::{branches, logger, page_cache, page_service};
 use pageserver::{PageServerConf, RepositoryFormat};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";

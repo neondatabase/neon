@@ -10,7 +10,7 @@
 //! a new snapshot file is created for writing, the full contents of relation are
 //! materialized as it is at the beginning of the LSN range. That can be very expensive,
 //! we should find a way to store differential files. But this keeps the read-side
-//! of things simple. You can find the correct snapshot file based on RelTag and
+//! of things simple. You can find the correct snapshot file based on RelishTag and
 //! timeline+LSN, and once you've located it, you have all the data you need to in that
 //! file.
 //!
@@ -39,18 +39,21 @@
 //!
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::PageVersion;
-use crate::repository::{GcResult, RelTag, WALRecord};
+use crate::layered_repository::storage_layer::ZERO_PAGE;
+use crate::relish::*;
+use crate::repository::{GcResult, WALRecord};
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
-use crate::ZTimelineId;
+use crate::{ZTimelineId, ZTenantId};
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use log::*;
-use std::collections::{BTreeMap, HashSet, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::ops::Bound::Included;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -60,13 +63,145 @@ use bookfile::{Book, BookWriter};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
-
 // Magic constant to identify a Zenith snapshot file
 static SNAPSHOT_FILE_MAGIC: u32 = 0x5A616E01;
 
 static PAGE_VERSIONS_CHAPTER: u64 = 1;
 static REL_SIZES_CHAPTER: u64 = 2;
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+struct SnapshotFileName {
+    rel: RelishTag,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+    dropped: bool,
+}
+
+impl SnapshotFileName {
+    fn from_str(fname: &str) -> Option<Self> {
+        // Split the filename into parts
+        //
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
+        //
+        // or if it was dropped:
+        //
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>_DROPPED
+        //
+        let rel;
+        let mut parts;
+        if let Some(rest) = fname.strip_prefix("rel_") {
+            parts = rest.split('_');
+            rel = RelishTag::Relation(RelTag {
+                spcnode: parts.next()?.parse::<u32>().ok()?,
+                dbnode: parts.next()?.parse::<u32>().ok()?,
+                relnode: parts.next()?.parse::<u32>().ok()?,
+                forknum: parts.next()?.parse::<u8>().ok()?,
+            });
+        } else if let Some(rest) = fname.strip_prefix("pg_xact_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_multixact_members_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::MultiXactMembers,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_multixact_offsets_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::MultiXactOffsets,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_filenodemap_") {
+            parts = rest.split('_');
+            rel = RelishTag::FileNodeMap {
+                spcnode: parts.next()?.parse::<u32>().ok()?,
+                dbnode: parts.next()?.parse::<u32>().ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_twophase_") {
+            parts = rest.split('_');
+            rel = RelishTag::TwoPhase {
+                xid: parts.next()?.parse::<u32>().ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_control_checkpoint_") {
+            parts = rest.split('_');
+            rel = RelishTag::Checkpoint;
+        } else if let Some(rest) = fname.strip_prefix("pg_control_") {
+            parts = rest.split('_');
+            rel = RelishTag::ControlFile;
+        } else {
+            return None;
+        }
+
+        let start_lsn = Lsn::from_hex(parts.next()?).ok()?;
+        let end_lsn = Lsn::from_hex(parts.next()?).ok()?;
+
+        let mut dropped = false;
+        if let Some(suffix) = parts.next() {
+            if suffix == "DROPPED" {
+                dropped = true;
+            } else {
+                warn!("unrecognized filename in timeline dir: {}", fname);
+                return None;
+            }
+        }
+        if parts.next().is_some() {
+            warn!("unrecognized filename in timeline dir: {}", fname);
+            return None;
+        }
+
+        Some(SnapshotFileName {
+            rel,
+            start_lsn,
+            end_lsn,
+            dropped,
+        })
+    }
+
+    fn to_string(&self) -> String {
+        let basename = match self.rel {
+            RelishTag::Relation(reltag) => format!(
+                "rel_{}_{}_{}_{}",
+                reltag.spcnode, reltag.dbnode, reltag.relnode, reltag.forknum
+            ),
+            RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno,
+            } => format!("pg_xact_{:04X}", segno),
+            RelishTag::Slru {
+                slru: SlruKind::MultiXactMembers,
+                segno,
+            } => format!("pg_multixact_members_{:04X}", segno),
+            RelishTag::Slru {
+                slru: SlruKind::MultiXactOffsets,
+                segno,
+            } => format!("pg_multixact_offsets_{:04X}", segno),
+            RelishTag::FileNodeMap { spcnode, dbnode } => {
+                format!("pg_filenodemap_{}_{}", spcnode, dbnode)
+            }
+            RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
+            RelishTag::Checkpoint => format!("pg_control_checkpoint"),
+            RelishTag::ControlFile => format!("pg_control"),
+        };
+
+        format!(
+            "{}_{:016X}_{:016X}{}",
+            basename,
+            u64::from(self.start_lsn),
+            u64::from(self.end_lsn),
+            if self.dropped { "_DROPPED" } else { "" }
+        )
+    }
+}
+
+impl fmt::Display for SnapshotFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
+}
 
 ///
 /// SnapshotLayer is the in-memory data structure associated with an on-disk snapshot file.
@@ -75,8 +210,9 @@ static REL_SIZES_CHAPTER: u64 = 2;
 ///
 pub struct SnapshotLayer {
     conf: &'static PageServerConf,
+    pub tenantid: ZTenantId,
     pub timelineid: ZTimelineId,
-    pub tag: RelTag,
+    pub rel: RelishTag,
 
     //
     // This entry contains all the changes from 'start_lsn' to 'end_lsn'. The
@@ -107,8 +243,8 @@ impl Layer for SnapshotLayer {
         return self.timelineid;
     }
 
-    fn get_tag(&self) -> RelTag {
-        return self.tag;
+    fn get_relish_tag(&self) -> RelishTag {
+        return self.rel;
     }
 
     fn get_start_lsn(&self) -> Lsn {
@@ -166,12 +302,12 @@ impl Layer for SnapshotLayer {
                 // but never writes the page.
                 //
                 // Would be nice to detect that situation better.
-                warn!("Page {:?}/{} at {} not found", self.tag, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
                 return Ok(ZERO_PAGE.clone());
             }
             bail!(
                 "No base image found for page {} blk {} at {}/{}",
-                self.tag,
+                self.rel,
                 blknum,
                 self.timelineid,
                 lsn
@@ -184,14 +320,14 @@ impl Layer for SnapshotLayer {
                 trace!(
                     "found page image for blk {} in {} at {}/{}, no WAL redo required",
                     blknum,
-                    self.tag,
+                    self.rel,
                     self.timelineid,
                     lsn
                 );
                 Ok(img)
             } else {
                 // FIXME: this ought to be an error?
-                warn!("Page {:?}/{} at {} not found", self.tag, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
                 Ok(ZERO_PAGE.clone())
             }
         } else {
@@ -202,8 +338,8 @@ impl Layer for SnapshotLayer {
             if page_img.is_none() && !records.first().unwrap().will_init {
                 // FIXME: this ought to be an error?
                 warn!(
-                    "Base image for page {:?}/{} at {} not found, but got {} WAL records",
-                    self.tag,
+                    "Base image for page {} blk {} at {} not found, but got {} WAL records",
+                    self.rel,
                     blknum,
                     lsn,
                     records.len()
@@ -211,17 +347,11 @@ impl Layer for SnapshotLayer {
                 Ok(ZERO_PAGE.clone())
             } else {
                 if page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.tag, self.timelineid, lsn);
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
                 } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.tag, self.timelineid, lsn);
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
                 }
-                let img = walredo_mgr.request_redo(
-                    self.tag,
-                    blknum,
-                    lsn,
-                    page_img,
-                    records,
-                )?;
+                let img = walredo_mgr.request_redo(self.rel, blknum, lsn, page_img, records)?;
 
                 // FIXME: Should we memoize the page image in memory, so that
                 // we wouldn't need to reconstruct it again, if it's requested again?
@@ -239,14 +369,12 @@ impl Layer for SnapshotLayer {
         let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         if let Some((_entry_lsn, entry)) = iter.next_back() {
-            trace!("get_relsize: {} at {} -> {}", self.tag, lsn, *entry);
-            Ok(*entry)
+            let result = *entry;
+            drop(relsizes);
+            trace!("get_relsize: {} at {} -> {}", self.rel, lsn, result);
+            Ok(result)
         } else {
-            bail!(
-                "No size found for relfile {:?} at {} in memory",
-                self.tag,
-                lsn
-            );
+            bail!("No size found for {} at {} in memory", self.rel, lsn);
         }
     }
 
@@ -269,7 +397,7 @@ impl Layer for SnapshotLayer {
     fn put_page_version(&self, blknum: u32, lsn: Lsn, _pv: PageVersion) -> Result<()> {
         panic!(
             "cannot modify historical snapshot file, rel {} blk {} at {}/{}, {}-{}",
-            self.tag, blknum, self.timelineid, lsn, self.start_lsn, self.end_lsn
+            self.rel, blknum, self.timelineid, lsn, self.start_lsn, self.end_lsn
         );
     }
     fn put_truncation(&self, _lsn: Lsn, _relsize: u32) -> anyhow::Result<()> {
@@ -290,33 +418,23 @@ impl SnapshotLayer {
         Self::path_for(
             self.conf,
             self.timelineid,
-            self.tag,
-            self.start_lsn,
-            self.end_lsn,
-            self.dropped,
+            self.tenantid,
+            &SnapshotFileName {
+                rel: self.rel,
+                start_lsn: self.start_lsn,
+                end_lsn: self.end_lsn,
+                dropped: self.dropped,
+            },
         )
     }
 
     fn path_for(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tag: RelTag,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
-        dropped: bool
+        tenantid: ZTenantId,
+        fname: &SnapshotFileName,
     ) -> PathBuf {
-        let fname = format!(
-            "{}_{}_{}_{}_{:016X}_{:016X}{}",
-            tag.spcnode,
-            tag.dbnode,
-            tag.relnode,
-            tag.forknum,
-            u64::from(start_lsn),
-            u64::from(end_lsn),
-            if dropped { "_DROPPED" } else { "" },
-        );
-
-        conf.timeline_path(timelineid).join(&fname)
+        conf.timeline_path(&timelineid, &tenantid).join(fname.to_string())
     }
 
     /// Create a new snapshot file, using the given btreemaps containing the page versions and
@@ -328,7 +446,8 @@ impl SnapshotLayer {
     pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tag: RelTag,
+        tenantid: ZTenantId,
+        rel: RelishTag,
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
@@ -338,7 +457,8 @@ impl SnapshotLayer {
         let snapfile = SnapshotLayer {
             conf: conf,
             timelineid: timelineid,
-            tag: tag,
+            tenantid: tenantid,
+            rel: rel,
             start_lsn: start_lsn,
             end_lsn,
             dropped,
@@ -377,7 +497,7 @@ impl SnapshotLayer {
 
         book.close()?;
 
-        debug!("saved {}", &path.display());
+        trace!("saved {}", &path.display());
 
         Ok(())
     }
@@ -388,26 +508,24 @@ impl SnapshotLayer {
     pub fn find_latest_snapshot_file(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tag: RelTag,
+        tenantid: ZTenantId,
+        rel: RelishTag,
+        earliest_lsn: Lsn,
         lsn: Lsn,
     ) -> Result<Option<(Lsn, Lsn, bool)>> {
         // Scan the timeline directory to get all rels in this timeline.
-        let path = conf.timeline_path(timelineid);
         let mut result_start_lsn = Lsn(0);
         let mut result_end_lsn = Lsn(0);
         let mut result_dropped = false;
-        for direntry in fs::read_dir(path)? {
-            let direntry = direntry?;
+        for fname in Self::list_snapshot_files(conf, timelineid, tenantid)? {
+            if fname.end_lsn <= earliest_lsn {
+                continue;
+            }
 
-            let fname = direntry.file_name();
-            let fname = fname.to_str().unwrap();
-
-            if let Some((reltag, start_lsn, end_lsn, dropped)) = Self::fname_to_tag(fname) {
-                if reltag == tag && start_lsn <= lsn && start_lsn > result_start_lsn {
-                    result_start_lsn = start_lsn;
-                    result_end_lsn = end_lsn;
-                    result_dropped = dropped;
-                }
+            if fname.rel == rel && fname.start_lsn <= lsn && fname.end_lsn > result_end_lsn {
+                result_start_lsn = fname.start_lsn;
+                result_end_lsn = fname.end_lsn;
+                result_dropped = fname.dropped;
             }
         }
         if result_start_lsn != Lsn(0) {
@@ -420,18 +538,20 @@ impl SnapshotLayer {
     ///
     /// Load the state for one relation back into memory.
     ///
-    /// Returns the latest snapshot file that before the given 'lsn'.
+    /// Returns the latest snapshot file that before the given 'lsn', but newer than 'earliest_lsn'
     ///
     pub fn load(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tag: RelTag,
+        tenantid: ZTenantId,
+        rel: RelishTag,
+        earliest_lsn: Lsn,
         lsn: Lsn,
     ) -> Result<Option<SnapshotLayer>> {
         if let Some((start_lsn, end_lsn, dropped)) =
-            Self::find_latest_snapshot_file(conf, timelineid, tag, lsn)?
+            Self::find_latest_snapshot_file(conf, timelineid, tenantid, rel, earliest_lsn, lsn)?
         {
-            let snap = Self::load_path(conf, timelineid, tag, start_lsn, end_lsn, dropped)?;
+            let snap = Self::load_path(conf, timelineid, tenantid, rel, start_lsn, end_lsn, dropped)?;
             Ok(Some(snap))
         } else {
             Ok(None)
@@ -441,12 +561,23 @@ impl SnapshotLayer {
     fn load_path(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tag: RelTag,
+        tenantid: ZTenantId,
+        rel: RelishTag,
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
     ) -> Result<SnapshotLayer> {
-        let path = Self::path_for(conf, timelineid, tag, start_lsn, end_lsn, dropped);
+        let path = Self::path_for(
+            conf,
+            timelineid,
+            tenantid,
+            &SnapshotFileName {
+                rel,
+                start_lsn,
+                end_lsn,
+                dropped,
+            },
+        );
 
         let file = File::open(&path)?;
         let mut book = Book::new(file)?;
@@ -468,7 +599,8 @@ impl SnapshotLayer {
         Ok(SnapshotLayer {
             conf,
             timelineid,
-            tag,
+            tenantid,
+            rel,
             start_lsn,
             end_lsn,
             dropped,
@@ -480,21 +612,15 @@ impl SnapshotLayer {
     pub fn list_rels(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
+        tenantid: ZTenantId,
         spcnode: u32,
         dbnode: u32,
     ) -> Result<HashSet<RelTag>> {
         let mut rels: HashSet<RelTag> = HashSet::new();
 
         // Scan the timeline directory to get all rels in this timeline.
-        let path = conf.timeline_path(timelineid);
-        for direntry in fs::read_dir(path)? {
-            let direntry = direntry?;
-
-            let fname = direntry.file_name();
-            let fname = fname.to_str().unwrap();
-
-            if let Some((reltag, _start_lsn, _end_lsn, _dropped)) = Self::fname_to_tag(fname) {
-
+        for snapfiles in Self::list_snapshot_files(conf, timelineid, tenantid)? {
+            if let RelishTag::Relation(reltag) = snapfiles.rel {
                 // FIXME: skip if it was dropped before the requested LSN. But there is no
                 // LSN argument
 
@@ -508,43 +634,25 @@ impl SnapshotLayer {
         Ok(rels)
     }
 
-    fn fname_to_tag(fname: &str) -> Option<(RelTag, Lsn, Lsn, bool)> {
-        // Split the filename into parts
-        //
-        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
-        //
-        // or if it was dropped:
-        //
-        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>_DROPPED
-        //
-        let mut parts = fname.split('_');
+    pub fn list_nonrels(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        _lsn: Lsn,
+    ) -> Result<HashSet<RelishTag>> {
+        let mut rels: HashSet<RelishTag> = HashSet::new();
 
-        let reltag = RelTag {
-            spcnode: parts.next()?.parse::<u32>().ok()?,
-            dbnode: parts.next()?.parse::<u32>().ok()?,
-            relnode: parts.next()?.parse::<u32>().ok()?,
-            forknum: parts.next()?.parse::<u8>().ok()?,
-        };
-        let start_lsn = Lsn::from_hex(parts.next()?).ok()?;
-        let end_lsn = Lsn::from_hex(parts.next()?).ok()?;
+        // Scan the timeline directory to get all rels in this timeline.
+        for snapfile in Self::list_snapshot_files(conf, timelineid, tenantid)? {
+            // FIXME: skip if it was dropped before the requested LSN.
 
-        let mut dropped = false;
-        if let Some(suffix) = parts.next() {
-            if suffix == "DROPPED" {
-                dropped = true;
+            if let RelishTag::Relation(_) = snapfile.rel {
             } else {
-                warn!("unrecognized filename in timeline dir: {}", fname);
-                return None;
+                rels.insert(snapfile.rel);
             }
         }
-        if parts.next().is_some() {
-            warn!("unrecognized filename in timeline dir: {}", fname);
-            return None;
-        }
-
-        Some((reltag, start_lsn, end_lsn, dropped))
+        Ok(rels)
     }
-
 
     ///
     /// Garbage collect snapshot files on a timeline that are no longer needed.
@@ -568,72 +676,143 @@ impl SnapshotLayer {
     /// within a snapshot file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub fn gc_timeline(conf: &'static PageServerConf,
-                       timelineid: ZTimelineId,
-                       retain_lsns: Vec<Lsn>,
-                       cutoff: Lsn) -> Result<GcResult> {
-
+    pub fn gc_timeline(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        retain_lsns: Vec<Lsn>,
+        cutoff: Lsn,
+    ) -> Result<GcResult> {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
 
         // Scan all snapshot files in the directory. For each file, if a newer file
         // exists, we can remove the old one.
 
-        // For convenience and speed, slurp the list of files in the directoy into memory first.
-        let mut snapfiles: BTreeSet<(RelTag, Lsn, Lsn, bool)> = BTreeSet::new();
+        // For convenience and speed, slurp the list of files in the directory into memory first.
+        let mut snapfiles: BTreeSet<SnapshotFileName> = BTreeSet::new();
 
-        let timeline_path = conf.timeline_path(timelineid);
-        for direntry in fs::read_dir(timeline_path)? {
-            let direntry = direntry?;
-            let fname = direntry.file_name();
-            let fname = fname.to_str().unwrap();
+        for fname in Self::list_snapshot_files(conf, timelineid, tenantid)? {
+            snapfiles.insert(fname.clone());
 
-            if let Some((reltag, start_lsn, end_lsn, dropped)) = Self::fname_to_tag(fname) {
-                snapfiles.insert((reltag, start_lsn, end_lsn, dropped));
+            if fname.rel.is_relation() {
+                result.snapshot_relfiles_total += 1;
+            } else {
+                result.snapshot_nonrelfiles_total += 1;
             }
-            result.snapshot_files_total += 1;
         }
 
         // Now determine for each file if it needs to be retained
-        'outer: for (reltag, start_lsn, end_lsn, dropped) in &snapfiles {
-
+        'outer: for snapfile in &snapfiles {
             // Is it newer than cutoff point?
-            if *end_lsn > cutoff {
-                result.snapshot_files_needed_by_cutoff += 1;
+            if snapfile.end_lsn > cutoff {
+                if snapfile.rel.is_relation() {
+                    result.snapshot_relfiles_needed_by_cutoff += 1;
+                } else {
+                    result.snapshot_nonrelfiles_needed_by_cutoff += 1;
+                }
                 continue 'outer;
             }
 
             // Is it needed by a child branch?
             for retain_lsn in &retain_lsns {
                 // FIXME: are the bounds inclusive or exclusive?
-                if *start_lsn <= *retain_lsn && *retain_lsn <= *end_lsn {
-                    result.snapshot_files_needed_by_branches += 1;
+                if snapfile.start_lsn <= *retain_lsn && *retain_lsn <= snapfile.end_lsn {
+                    if snapfile.rel.is_relation() {
+                        result.snapshot_relfiles_needed_by_branches += 1;
+                    } else {
+                        result.snapshot_nonrelfiles_needed_by_branches += 1;
+                    }
                     continue 'outer;
                 }
             }
 
             // Unless the relation was dropped, is there a later snapshot file for this relation?
-            if !dropped && snapfiles.range(
-                (Included((*reltag, *end_lsn, Lsn(0), false)),
-                 Included((*reltag, Lsn(u64::MAX), Lsn(0), true)))).next().is_none() {
-                // there is no later file, so keep it
-                result.snapshot_files_not_updated += 1;
-                continue 'outer;
+            if !snapfile.dropped {
+                let mut found_later_file = false;
+                if let Some(other_snapfile) =
+                    snapfiles.range((Excluded(snapfile), Unbounded)).next()
+                {
+                    if other_snapfile.rel != snapfile.rel {
+                        // walked past the files for this rel. So there is no later file.
+                    } else {
+                        // found a later file.
+                        found_later_file = true;
+                    }
+                }
+
+                if !found_later_file {
+                    if snapfile.rel.is_relation() {
+                        result.snapshot_relfiles_not_updated += 1;
+                    } else {
+                        result.snapshot_nonrelfiles_not_updated += 1;
+                    }
+                    continue 'outer;
+                }
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            let path = Self::path_for(conf, timelineid, *reltag, *start_lsn, *end_lsn, *dropped);
+            let path = Self::path_for(conf, timelineid, tenantid, snapfile);
             info!("garbage collecting {}", path.display());
             fs::remove_file(path)?;
 
-            if *dropped {
-                result.snapshot_files_dropped += 1;
+            if snapfile.dropped {
+                if snapfile.rel.is_relation() {
+                    result.snapshot_relfiles_dropped += 1;
+                } else {
+                    result.snapshot_nonrelfiles_dropped += 1;
+                }
             } else {
-                result.snapshot_files_removed += 1;
+                if snapfile.rel.is_relation() {
+                    result.snapshot_relfiles_removed += 1;
+                } else {
+                    result.snapshot_nonrelfiles_removed += 1;
+                }
             }
         }
 
         result.elapsed = now.elapsed();
         Ok(result)
+    }
+
+    // TODO: returning an Iterator would be more idiomatic
+    fn list_snapshot_files(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+    ) -> Result<Vec<SnapshotFileName>> {
+        let path = conf.timeline_path(&timelineid, &tenantid);
+
+        let mut snapfiles = Vec::new();
+        for direntry in fs::read_dir(path)? {
+            let fname = direntry?.file_name();
+            let fname = fname.to_str().unwrap();
+
+            if let Some(snapfilename) = SnapshotFileName::from_str(fname) {
+                snapfiles.push(snapfilename);
+            }
+        }
+        return Ok(snapfiles);
+    }
+
+    /// debugging function to print out the contents of the layer
+    #[allow(unused)]
+    pub fn dump(&self) -> String {
+        let mut result = format!(
+            "----- snapshot layer for {} {}-{} ----\n",
+            self.rel, self.start_lsn, self.end_lsn
+        );
+
+        let relsizes = self.relsizes.lock().unwrap();
+        //let page_versions = self.page_versions.lock().unwrap();
+
+        for (k, v) in relsizes.iter() {
+            result += &format!("{}: {}\n", k, v);
+        }
+        //for (k, v) in page_versions.iter() {
+        //    result += &format!("blk {} at {}: {}/{}\n", k.0, k.1, v.page_image.is_some(), v.record.is_some());
+        //}
+
+        result
     }
 }

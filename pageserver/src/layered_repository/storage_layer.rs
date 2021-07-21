@@ -1,4 +1,4 @@
-use crate::repository::RelTag;
+use crate::relish::RelishTag;
 use crate::repository::WALRecord;
 use crate::walredo::WalRedoManager;
 use crate::ZTimelineId;
@@ -7,6 +7,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use zenith_utils::lsn::Lsn;
+
+pub static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 ///
 /// Represents a version of a page at a specific LSN. The LSN is the key of the
@@ -27,7 +29,7 @@ pub trait Layer: Send + Sync {
     fn is_frozen(&self) -> bool;
 
     fn get_timeline_id(&self) -> ZTimelineId;
-    fn get_tag(&self) -> RelTag;
+    fn get_relish_tag(&self) -> RelishTag;
     fn get_start_lsn(&self) -> Lsn;
     fn get_end_lsn(&self) -> Lsn;
 

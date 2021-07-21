@@ -179,31 +179,6 @@ fn bootstrap_timeline(
 
     info!("bootstrap_timeline {:?} at lsn {}", pgdata_path, lsn);
 
-    // We don't use page_cache here, because we don't want to spawn the WAL redo thread during
-    // repository initialization.
-    //
-    // FIXME: That caused trouble, because the WAL redo thread launched initdb in the background,
-    // and it kept running even after the "zenith init" had exited. In tests, we started the
-    // page server immediately after that, so that initdb was still running in the background,
-    // and we failed to run initdb again in the same directory. This has been solved for the
-    // rapid init+start case now, but the general race condition remains if you restart the
-    // server quickly.
-    let walredo_mgr = std::sync::Arc::new(crate::walredo::DummyRedoManager {});
-    let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
-        crate::RepositoryFormat::Layered => Box::new(
-            crate::layered_repository::LayeredRepository::new(conf, walredo_mgr),
-        ),
-        crate::RepositoryFormat::RocksDb => {
-            let storage = crate::rocksdb_storage::RocksObjectStore::create(conf)?;
-
-            Box::new(crate::object_repository::ObjectRepository::new(
-                conf,
-                std::sync::Arc::new(storage),
-                walredo_mgr,
-            ))
-        }
-    };
-
     let timeline = repo.create_empty_timeline(tli, lsn)?;
     restore_local_repo::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
     timeline.checkpoint()?;

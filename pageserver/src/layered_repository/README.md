@@ -12,11 +12,11 @@ are stored in the timeline's subdirectory under .zenith/timelines.
 
 The files are named like this:
 
-    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
+    rel_<spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
 
 For example:
 
-    1663_13990_2609_0_000000000169C348_0000000001702000
+    rel_1663_13990_2609_0_000000000169C348_0000000001702000
 
 Each snapshot file contains a full snapshot, that is, full copy of all
 pages in the relation, as of the "start LSN". It also contains all WAL
@@ -27,13 +27,20 @@ version of the relation in the LSN range.
 If a file has been dropped, the last snapshot file for it is created
 with the _DROPPED suffix, e.g.
 
-    1663_13990_2609_0_000000000169C348_0000000001702000_DROPPED
+    rel_1663_13990_2609_0_000000000169C348_0000000001702000_DROPPED
+	
+In addition to the relations, with "rel_*" prefix, we use the same
+format for storing various smaller files from the PostgreSQL data
+directory. They will use different suffixes and the naming scheme
+up to the LSN range varies. The Zenith source code uses the term
+"relish" to mean "a relation, or other file that's treated like a
+relation in the storage"
 
 ## Notation used in this document
 
 The full path of a snapshot file looks like this:
 
-    .zenith/timelines/4af489b06af8eed9e27a841775616962/1663_13990_2609_0_000000000169C348_0000000001702000
+    .zenith/timelines/4af489b06af8eed9e27a841775616962/rel_1663_13990_2609_0_000000000169C348_0000000001702000
 
 For simplicity, the examples below use a simplified notation for the
 paths.  The timeline ID is replaced with the human-readable branch

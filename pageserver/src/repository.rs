@@ -9,7 +9,6 @@ use postgres_ffi::TransactionId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::iter::Iterator;
-use std::fmt;
 use std::ops::AddAssign;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,16 +52,22 @@ pub struct GcResult {
     pub dropped: u64,
 
     // These are used for the LayeredRepository instead
-    pub snapshot_files_total: u64,
-    pub snapshot_files_needed_by_cutoff: u64,
-    pub snapshot_files_needed_by_branches: u64,
-    pub snapshot_files_not_updated: u64,
-    pub snapshot_files_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
-    pub snapshot_files_dropped: u64,  // # of snapshot files removed because the relation was dropped
+    pub snapshot_relfiles_total: u64,
+    pub snapshot_relfiles_needed_by_cutoff: u64,
+    pub snapshot_relfiles_needed_by_branches: u64,
+    pub snapshot_relfiles_not_updated: u64,
+    pub snapshot_relfiles_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
+    pub snapshot_relfiles_dropped: u64, // # of snapshot files removed because the relation was dropped
+
+    pub snapshot_nonrelfiles_total: u64,
+    pub snapshot_nonrelfiles_needed_by_cutoff: u64,
+    pub snapshot_nonrelfiles_needed_by_branches: u64,
+    pub snapshot_nonrelfiles_not_updated: u64,
+    pub snapshot_nonrelfiles_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
+    pub snapshot_nonrelfiles_dropped: u64, // # of snapshot files removed because the relation was dropped
 
     pub elapsed: Duration,
 }
-
 
 impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
@@ -71,12 +76,20 @@ impl AddAssign for GcResult {
         self.deleted += other.deleted;
         self.dropped += other.dropped;
 
-        self.snapshot_files_total += other.snapshot_files_total;
-        self.snapshot_files_needed_by_cutoff += other.snapshot_files_needed_by_cutoff;
-        self.snapshot_files_needed_by_branches += other.snapshot_files_needed_by_branches;
-        self.snapshot_files_not_updated += other.snapshot_files_not_updated;
-        self.snapshot_files_removed += other.snapshot_files_removed;
-        self.snapshot_files_dropped += other.snapshot_files_dropped;
+        self.snapshot_relfiles_total += other.snapshot_relfiles_total;
+        self.snapshot_relfiles_needed_by_cutoff += other.snapshot_relfiles_needed_by_cutoff;
+        self.snapshot_relfiles_needed_by_branches += other.snapshot_relfiles_needed_by_branches;
+        self.snapshot_relfiles_not_updated += other.snapshot_relfiles_not_updated;
+        self.snapshot_relfiles_removed += other.snapshot_relfiles_removed;
+        self.snapshot_relfiles_dropped += other.snapshot_relfiles_dropped;
+
+        self.snapshot_nonrelfiles_total += other.snapshot_nonrelfiles_total;
+        self.snapshot_nonrelfiles_needed_by_cutoff += other.snapshot_nonrelfiles_needed_by_cutoff;
+        self.snapshot_nonrelfiles_needed_by_branches +=
+            other.snapshot_nonrelfiles_needed_by_branches;
+        self.snapshot_nonrelfiles_not_updated += other.snapshot_nonrelfiles_not_updated;
+        self.snapshot_nonrelfiles_removed += other.snapshot_nonrelfiles_removed;
+        self.snapshot_nonrelfiles_dropped += other.snapshot_nonrelfiles_dropped;
 
         self.elapsed += other.elapsed;
     }
@@ -318,6 +331,8 @@ mod tests {
         buf.freeze()
     }
 
+    static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+
     fn get_test_repo(
         test_name: &str,
         repository_format: RepositoryFormat,
@@ -547,6 +562,10 @@ mod tests {
     fn test_branch(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
+
+        // Import initial dummy checkpoint record, otherwise the get_timeline() call
+        // after branching fails below
+        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(1), ZERO_PAGE.clone(), false)?;
 
         // Create a relation on the timeline
         tline.init_valid_lsn(Lsn(1));

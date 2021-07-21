@@ -53,10 +53,7 @@ pub enum RelishTag {
     // relish. For example, pg_clog/0000, pg_clog/0001, and so forth.
     //
     // SLRU segments are divided into blocks, like relations.
-    Slru {
-        slru: SlruKind,
-        segno: u32,
-    },
+    Slru { slru: SlruKind, segno: u32 },
 
     // Miscellaneous other files that need to be included in the
     // tarball at compute node creation. These are non-blocky, and are
@@ -76,17 +73,12 @@ pub enum RelishTag {
     // These files are always 512 bytes long (although we don't check
     // or care about that in the page server).
     //
-    FileNodeMap {
-        spcnode: Oid,
-        dbnode: Oid,
-    },
+    FileNodeMap { spcnode: Oid, dbnode: Oid },
 
     //
     // State files for prepared transactions (e.g pg_twophase/1234)
     //
-    TwoPhase {
-        xid: TransactionId,
-    },
+    TwoPhase { xid: TransactionId },
 
     // The control file, stored in global/pg_control
     ControlFile,
@@ -112,6 +104,15 @@ impl RelishTag {
             | RelishTag::TwoPhase { xid: _ }
             | RelishTag::ControlFile
             | RelishTag::Checkpoint => false,
+        }
+    }
+
+    // convenience function to check if this relish is a normal relation.
+    pub const fn is_relation(&self) -> bool {
+        if let RelishTag::Relation(_) = self {
+            true
+        } else {
+            false
         }
     }
 }

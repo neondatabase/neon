@@ -6,10 +6,11 @@
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::PageVersion;
 use crate::layered_repository::SnapshotLayer;
-use crate::repository::{RelTag, WALRecord};
+use crate::relish::*;
+use crate::repository::WALRecord;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
-use crate::ZTimelineId;
+use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use bytes::Bytes;
 use log::*;
@@ -23,8 +24,9 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
+    tenantid: ZTenantId,
     timelineid: ZTimelineId,
-    tag: RelTag,
+    rel: RelishTag,
 
     ///
     /// This layer contains all the changes from 'start_lsn'. The
@@ -35,7 +37,6 @@ pub struct InMemoryLayer {
 
     // FIXME: the three mutex-protected fields below should probably be protected
     // by a single mutex.
-
     /// If this relation was dropped, remember when that happened. Lsn(0) means
     /// it hasn't been dropped
     drop_lsn: Mutex<Lsn>,
@@ -61,8 +62,8 @@ impl Layer for InMemoryLayer {
         return self.timelineid;
     }
 
-    fn get_tag(&self) -> RelTag {
-        return self.tag;
+    fn get_relish_tag(&self) -> RelishTag {
+        return self.rel;
     }
 
     fn get_start_lsn(&self) -> Lsn {
@@ -120,12 +121,12 @@ impl Layer for InMemoryLayer {
                 // but never writes the page.
                 //
                 // Would be nice to detect that situation better.
-                warn!("Page {:?}/{} at {} not found", self.tag, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
                 return Ok(ZERO_PAGE.clone());
             }
             bail!(
                 "No base image found for page {} blk {} at {}/{}",
-                self.tag,
+                self.rel,
                 blknum,
                 self.timelineid,
                 lsn
@@ -138,14 +139,14 @@ impl Layer for InMemoryLayer {
                 trace!(
                     "found page image for blk {} in {} at {}/{}, no WAL redo required",
                     blknum,
-                    self.tag,
+                    self.rel,
                     self.timelineid,
                     lsn
                 );
                 Ok(img)
             } else {
                 // FIXME: this ought to be an error?
-                warn!("Page {:?}/{} at {} not found", self.tag, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
                 Ok(ZERO_PAGE.clone())
             }
         } else {
@@ -156,8 +157,8 @@ impl Layer for InMemoryLayer {
             if page_img.is_none() && !records.first().unwrap().will_init {
                 // FIXME: this ought to be an error?
                 warn!(
-                    "Base image for page {:?}/{} at {} not found, but got {} WAL records",
-                    self.tag,
+                    "Base image for page {}/{} at {} not found, but got {} WAL records",
+                    self.rel,
                     blknum,
                     lsn,
                     records.len()
@@ -165,17 +166,11 @@ impl Layer for InMemoryLayer {
                 Ok(ZERO_PAGE.clone())
             } else {
                 if page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.tag, self.timelineid, lsn);
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
                 } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.tag, self.timelineid, lsn);
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
                 }
-                let img = walredo_mgr.request_redo(
-                    self.rel,
-                    blknum,
-                    lsn,
-                    page_img,
-                    records,
-                )?;
+                let img = walredo_mgr.request_redo(self.rel, blknum, lsn, page_img, records)?;
 
                 self.put_page_image(blknum, lsn, img.clone())?;
 
@@ -191,12 +186,14 @@ impl Layer for InMemoryLayer {
         let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         if let Some((_entry_lsn, entry)) = iter.next_back() {
-            trace!("get_relsize: {} at {} -> {}", self.tag, lsn, *entry);
-            Ok(*entry)
+            let result = *entry;
+            drop(relsizes);
+            trace!("get_relsize: {} at {} -> {}", self.rel, lsn, result);
+            Ok(result)
         } else {
             bail!(
                 "No size found for relfile {:?} at {} in memory",
-                self.tag,
+                self.rel,
                 lsn
             );
         }
@@ -225,7 +222,7 @@ impl Layer for InMemoryLayer {
         trace!(
             "put_page_version blk {} of {} at {}/{}",
             blknum,
-            self.tag,
+            self.rel,
             self.timelineid,
             lsn
         );
@@ -237,7 +234,7 @@ impl Layer for InMemoryLayer {
                 // We already had an entry for this LSN. That's odd..
                 warn!(
                     "Page version of rel {:?} blk {} at {} already exists",
-                    self.tag, blknum, lsn
+                    self.rel, blknum, lsn
                 );
             }
 
@@ -259,7 +256,7 @@ impl Layer for InMemoryLayer {
             if blknum >= oldsize {
                 trace!(
                     "enlarging relation {} from {} to {} blocks",
-                    self.tag,
+                    self.rel,
                     oldsize,
                     blknum + 1
                 );
@@ -285,13 +282,12 @@ impl Layer for InMemoryLayer {
 
     /// Remember that the relation was truncated at given LSN
     fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()> {
-
         let mut drop_lsn = self.drop_lsn.lock().unwrap();
 
         assert!(*drop_lsn == Lsn(0));
         *drop_lsn = lsn;
 
-        info!("dropped relation {} at {}", self.tag, lsn);
+        info!("dropped relation {} at {}", self.rel, lsn);
 
         Ok(())
     }
@@ -300,6 +296,11 @@ impl Layer for InMemoryLayer {
     /// Write the this in-memory layer to disk, as a snapshot layer.
     ///
     fn freeze(&self, end_lsn: Lsn) -> Result<()> {
+        info!(
+            "freezing in memory layer for {} on timeline {} at {}",
+            self.rel, self.timelineid, end_lsn
+        );
+
         let page_versions = self.page_versions.lock().unwrap();
         let relsizes = self.relsizes.lock().unwrap();
         let drop_lsn = self.drop_lsn.lock().unwrap();
@@ -312,18 +313,18 @@ impl Layer for InMemoryLayer {
 
         let dropped = *drop_lsn != Lsn(0);
 
-        let end_lsn =
-            if dropped {
-                assert!(*drop_lsn < end_lsn);
-                *drop_lsn
-            } else {
-                end_lsn
-            };
+        let end_lsn = if dropped {
+            assert!(*drop_lsn < end_lsn);
+            *drop_lsn
+        } else {
+            end_lsn
+        };
 
         let _snapfile = SnapshotLayer::create(
             self.conf,
             self.timelineid,
-            self.tag,
+            self.tenantid,
+            self.rel,
             self.start_lsn,
             end_lsn,
             dropped,
@@ -342,18 +343,22 @@ impl InMemoryLayer {
     pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tag: RelTag,
+        tenantid: ZTenantId,
+        rel: RelishTag,
         start_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
-        debug!(
-            "initializing new InMemoryLayer for writing {} on timeline {}",
-            tag, timelineid
+        trace!(
+            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
+            rel,
+            timelineid,
+            start_lsn
         );
 
         Ok(InMemoryLayer {
             conf,
             timelineid,
-            tag,
+            tenantid,
+            rel,
             start_lsn,
             drop_lsn: Mutex::new(Lsn(0)),
             page_versions: Mutex::new(BTreeMap::new()),
@@ -370,12 +375,14 @@ impl InMemoryLayer {
         walredo_mgr: &dyn WalRedoManager,
         src: &dyn Layer,
         timelineid: ZTimelineId,
+        tenantid: ZTenantId,
         lsn: Lsn,
     ) -> Result<InMemoryLayer> {
-        debug!(
-            "initializing new InMemoryLayer for writing {} on timeline {}",
-            src.get_tag(),
-            timelineid
+        trace!(
+            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
+            src.get_relish_tag(),
+            timelineid,
+            lsn
         );
         let mut page_versions = BTreeMap::new();
         let mut relsizes = BTreeMap::new();
@@ -395,11 +402,39 @@ impl InMemoryLayer {
         Ok(InMemoryLayer {
             conf,
             timelineid,
-            tag: src.get_tag(),
+            tenantid,
+            rel: src.get_relish_tag(),
             start_lsn: lsn,
             drop_lsn: Mutex::new(Lsn(0)),
             page_versions: Mutex::new(page_versions),
             relsizes: Mutex::new(relsizes),
         })
+    }
+
+    /// debugging function to print out the contents of the layer
+    #[allow(unused)]
+    pub fn dump(&self) -> String {
+        let mut result = format!(
+            "----- inmemory layer for {} {}-> ----\n",
+            self.rel, self.start_lsn
+        );
+
+        let relsizes = self.relsizes.lock().unwrap();
+        let page_versions = self.page_versions.lock().unwrap();
+
+        for (k, v) in relsizes.iter() {
+            result += &format!("{}: {}\n", k, v);
+        }
+        for (k, v) in page_versions.iter() {
+            result += &format!(
+                "blk {} at {}: {}/{}\n",
+                k.0,
+                k.1,
+                v.page_image.is_some(),
+                v.record.is_some()
+            );
+        }
+
+        result
     }
 }
