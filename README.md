@@ -159,9 +159,3 @@ Integration tests, written in Python using the `pytest` framework.
 `test_runner/zenith_regress`:
 
 Quick way to add new SQL regression test to integration tests set.
-
-`/integration_tests`:
-
-Another pack of integration tests. Written in Rust.
-
-[Rust]: https://www.rust-lang.org/learn/get-started
