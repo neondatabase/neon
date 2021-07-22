@@ -229,14 +229,17 @@ impl ReplicationConn {
     }
 }
 
+#[cfg(test)]
 mod tests {
+    use super::*;
+
     // A no-op impl for tests
-    impl super::HsFeedbackSubscriber for () {}
+    impl HsFeedbackSubscriber for () {}
 
     #[test]
     fn test_replication_conn_background_thread_eof() {
         // Test that background_thread recognizes EOF
         let stream: &[u8] = &[];
-        super::ReplicationConn::background_thread(stream, ()).unwrap();
+        ReplicationConn::background_thread(stream, ()).unwrap();
     }
 }
