@@ -88,9 +88,11 @@ impl FeMessage {
     /// ```
     /// # use std::io::Read;
     /// # use zenith_utils::pq_proto::FeMessage;
+    /// #
     /// # fn process_message(msg: FeMessage) -> anyhow::Result<()> {
     /// #     Ok(())
     /// # };
+    /// #
     /// fn do_the_job(stream: &mut impl Read) -> anyhow::Result<()> {
     ///     while let Some(msg) = FeMessage::read(stream)? {
     ///         process_message(msg)?;
