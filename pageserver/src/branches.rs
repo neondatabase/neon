@@ -47,11 +47,13 @@ pub fn init_pageserver(
     workdir: &Path,
     create_tenant: Option<&str>,
 ) -> Result<()> {
+
+    env::set_current_dir(workdir)?;
+
     // Initialize logger
     let (_scope_guard, _log_file) = logger::init_logging(&conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;
 
-    env::set_current_dir(workdir)?;
     if let Some(tenantid) = create_tenant {
         let tenantid = ZTenantId::from_str(tenantid)?;
         println!("initializing tenantid {}", tenantid);
