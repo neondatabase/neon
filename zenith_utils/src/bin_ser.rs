@@ -139,7 +139,7 @@ pub trait BeSer: Serialize + DeserializeOwned {
     }
 }
 
-/// Binary serialize/deserialize helper functions (Big Endian)
+/// Binary serialize/deserialize helper functions (Little Endian)
 ///
 pub trait LeSer: Serialize + DeserializeOwned {
     /// Serialize into a byte slice
