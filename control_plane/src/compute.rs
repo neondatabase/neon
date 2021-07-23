@@ -20,7 +20,6 @@ use crate::local_env::LocalEnv;
 use pageserver::{ZTenantId, ZTimelineId};
 
 use crate::storage::PageServerNode;
-use postgres_ffi::pg_constants;
 
 //
 // ComputeControlPlane
@@ -278,20 +277,6 @@ impl PostgresNode {
                 )
             },
         )?;
-
-        // Create pgdata subdirs structure
-        for dir in pg_constants::PGDATA_SUBDIRS.iter() {
-            let path = pgdata.as_path().join(*dir);
-
-            fs::create_dir_all(path.clone())?;
-
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).with_context(|| {
-                format!(
-                    "could not set permissions in data directory {}",
-                    pgdata.display()
-                )
-            })?;
-        }
 
         let mut copyreader = client
             .copy_out(sql.as_str())
