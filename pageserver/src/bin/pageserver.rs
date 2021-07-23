@@ -17,7 +17,7 @@ use anyhow::Result;
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{branches, logger, page_cache, page_service, tui, PageServerConf};
+use pageserver::{branches, logger, page_cache, page_service, PageServerConf};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 
@@ -88,7 +88,6 @@ impl CfgFileParams {
 
         Ok(PageServerConf {
             daemonize: false,
-            interactive: false,
 
             listen_addr,
             gc_horizon,
@@ -112,13 +111,6 @@ fn main() -> Result<()> {
                 .long("listen")
                 .takes_value(true)
                 .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"),
-        )
-        .arg(
-            Arg::with_name("interactive")
-                .short("i")
-                .long("interactive")
-                .takes_value(false)
-                .help("Interactive mode"),
         )
         .arg(
             Arg::with_name("daemonize")
@@ -189,15 +181,9 @@ fn main() -> Result<()> {
     let mut conf = params.try_into_config()?;
 
     conf.daemonize = arg_matches.is_present("daemonize");
-    conf.interactive = arg_matches.is_present("interactive");
 
-    if init && (conf.daemonize || conf.interactive) {
-        eprintln!("--daemonize and --interactive may not be used with --init");
-        exit(1);
-    }
-
-    if conf.daemonize && conf.interactive {
-        eprintln!("--daemonize is not allowed with --interactive: choose one");
+    if init && conf.daemonize {
+        eprintln!("--daemonize cannot be used with --init");
         exit(1);
     }
 
@@ -229,20 +215,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
     // Note: this `info!(...)` macro comes from `log` crate
     info!("standard logging redirected to slog");
-
-    let tui_thread = if conf.interactive {
-        // Initialize the UI
-        Some(
-            thread::Builder::new()
-                .name("UI thread".into())
-                .spawn(|| {
-                    let _ = tui::ui_main();
-                })
-                .unwrap(),
-        )
-    } else {
-        None
-    };
 
     // TODO: Check that it looks like a valid repository before going further
 
@@ -280,14 +252,9 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         .name("Page Service thread".into())
         .spawn(move || page_service::thread_main(conf, pageserver_listener))?;
 
-    if let Some(tui_thread) = tui_thread {
-        // The TUI thread exits when the user asks to Quit.
-        tui_thread.join().unwrap();
-    } else {
-        page_service_thread
-            .join()
-            .expect("Page service thread has panicked")?
-    }
+    page_service_thread
+        .join()
+        .expect("Page service thread has panicked")?;
 
     Ok(())
 }

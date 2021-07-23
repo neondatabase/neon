@@ -18,9 +18,6 @@ pub mod page_service;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod rocksdb_storage;
-pub mod tui;
-pub mod tui_event;
-mod tui_logger;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
@@ -28,7 +25,6 @@ pub mod walredo;
 #[derive(Debug, Clone)]
 pub struct PageServerConf {
     pub daemonize: bool,
-    pub interactive: bool,
     pub listen_addr: String,
     pub gc_horizon: u64,
     pub gc_period: Duration,
