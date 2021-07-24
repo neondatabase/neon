@@ -22,7 +22,7 @@
 #
 FROM alpine:3.13 as pg-build
 RUN apk add --update clang llvm compiler-rt compiler-rt-static lld musl-dev binutils \
-                     make bison flex readline-dev zlib-dev perl linux-headers
+                     make bison flex readline-dev zlib-dev perl linux-headers libseccomp-dev
 WORKDIR zenith
 COPY ./vendor/postgres vendor/postgres
 COPY ./Makefile Makefile
@@ -78,7 +78,7 @@ RUN cargo build --release
 # out how to statically link rocksdb or avoid it at all).
 #
 FROM alpine:3.13
-RUN apk add --update openssl build-base
+RUN apk add --update openssl build-base libseccomp-dev
 RUN apk --no-cache --update --repository https://dl-cdn.alpinelinux.org/alpine/edge/testing add rocksdb
 COPY --from=build /zenith/target/release/pageserver /usr/local/bin
 COPY --from=build /zenith/target/release/wal_acceptor /usr/local/bin
