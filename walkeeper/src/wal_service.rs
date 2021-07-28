@@ -38,7 +38,6 @@ pub fn thread_main(conf: WalAcceptorConf) -> Result<()> {
 }
 
 /// This is run by main_loop, inside a background thread.
-///
 fn handle_socket(mut socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
     socket.set_nodelay(true)?;
 
@@ -58,14 +57,14 @@ fn handle_socket(mut socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
 }
 
 /// Fetch the first 4 bytes from the network (big endian), without consuming them.
-///
 /// This is used to help determine what protocol the peer is using.
 fn peek_u32(stream: &mut TcpStream) -> Result<u32> {
     let mut buf = [0u8; 4];
     loop {
-        let num_bytes = stream.peek(&mut buf)?;
-        if num_bytes == 4 {
-            return Ok(u32::from_be_bytes(buf));
+        match stream.peek(&mut buf)? {
+            0 => anyhow::bail!("unexpected end of stream"),
+            4 => return Ok(u32::from_be_bytes(buf)),
+            _ => continue,
         }
     }
 }
