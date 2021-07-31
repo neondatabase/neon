@@ -62,7 +62,7 @@ def test_tenant_list(pageserver: ZenithPageserver, zenith_cli):
     cur = conn.cursor()
 
     # check same tenant cannot be created twice
-    with pytest.raises(psycopg2.DatabaseError, match=f'repo for {pageserver.initial_tenant} already exists'):
+    with pytest.raises(psycopg2.DatabaseError, match=f'tenant {pageserver.initial_tenant} already exists'):
         cur.execute(f'tenant_create {pageserver.initial_tenant}')
 
     # create one more tenant

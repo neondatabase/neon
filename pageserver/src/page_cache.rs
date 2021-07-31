@@ -1,12 +1,13 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use crate::branches;
 use crate::object_repository::ObjectRepository;
 use crate::repository::Repository;
 use crate::rocksdb_storage::RocksObjectStore;
 use crate::walredo::PostgresRedoManager;
 use crate::{PageServerConf, ZTenantId};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use lazy_static::lazy_static;
 use log::info;
 use std::collections::HashMap;
@@ -36,6 +37,24 @@ pub fn init(conf: &'static PageServerConf) {
         info!("initialized storage for tenant: {}", &tenantid);
         m.insert(tenantid, Arc::new(repo));
     }
+}
+
+pub fn create_repository_for_tenant(
+    conf: &'static PageServerConf,
+    tenantid: ZTenantId,
+) -> Result<()> {
+    let mut m = REPOSITORY.lock().unwrap();
+
+    // First check that the tenant doesn't exist already
+    if m.get(&tenantid).is_some() {
+        bail!("tenant {} already exists", tenantid);
+    }
+    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
+    let repo = branches::create_repo(conf, tenantid, wal_redo_manager)?;
+
+    m.insert(tenantid, Arc::new(repo));
+
+    Ok(())
 }
 
 pub fn insert_repository_for_tenant(tenantid: ZTenantId, repo: Arc<dyn Repository>) {

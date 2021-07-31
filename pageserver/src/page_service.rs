@@ -17,7 +17,6 @@ use regex::Regex;
 use std::io::Write;
 use std::net::TcpListener;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::thread;
 use std::{io, net::TcpStream};
 use zenith_utils::postgres_backend::PostgresBackend;
@@ -33,7 +32,6 @@ use crate::object_key::ObjectTag;
 use crate::page_cache;
 use crate::repository::{BufferTag, Modification, RelTag};
 use crate::walreceiver;
-use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
 use crate::ZTenantId;
 use crate::ZTimelineId;
@@ -508,9 +506,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let caps = re.captures(&query_string).ok_or_else(err)?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let wal_redo_manager = Arc::new(PostgresRedoManager::new(self.conf, tenantid));
-            let repo = branches::create_repo(self.conf, tenantid, wal_redo_manager)?;
-            page_cache::insert_repository_for_tenant(tenantid, Arc::new(repo));
+
+            page_cache::create_repository_for_tenant(&self.conf, tenantid)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
