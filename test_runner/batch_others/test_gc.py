@@ -48,8 +48,8 @@ def test_gc(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
                     assert row['dropped'] == 0
-                    assert row['truncated'] == 30
-                    assert row['deleted'] == 3
+                    assert row['truncated'] == 31
+                    assert row['deleted'] == 4
 
                     # Insert two more rows and run GC.
                     print("Inserting two more rows and running GC")
@@ -61,8 +61,8 @@ def test_gc(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
                     assert row['dropped'] == 0
-                    assert row['truncated'] == 30
-                    assert row['deleted'] == 2
+                    assert row['truncated'] == 31
+                    assert row['deleted'] == 4
 
                     # Insert one more row. It creates one more page version, but doesn't affect the
                     # relation size.
@@ -74,8 +74,8 @@ def test_gc(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
                     assert row['dropped'] == 0
-                    assert row['truncated'] == 30
-                    assert row['deleted'] == 1
+                    assert row['truncated'] == 31
+                    assert row['deleted'] == 2
 
                     # Run GC again, with no changes in the database. Should not remove anything.
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
@@ -83,7 +83,7 @@ def test_gc(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
                     print("GC duration {elapsed} ms, relations: {n_relations}, dropped {dropped}, truncated: {truncated}, deleted: {deleted}".format_map(row))
                     assert row['n_relations'] == n_relations
                     assert row['dropped'] == 0
-                    assert row['truncated'] == 30
+                    assert row['truncated'] == 31
                     assert row['deleted'] == 0
 
                     #

@@ -3,7 +3,7 @@
 //!
 use crate::object_key::*;
 use crate::object_store::ObjectStore;
-use crate::repository::RelTag;
+use crate::relish::*;
 use crate::PageServerConf;
 use crate::ZTenantId;
 use crate::ZTimelineId;
@@ -144,10 +144,9 @@ impl ObjectStore for RocksObjectStore {
     fn list_objects<'a>(
         &'a self,
         timeline: ZTimelineId,
-        nonrel_only: bool,
         lsn: Lsn,
     ) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>> {
-        let iter = RocksObjectIter::new(&self.db, timeline, nonrel_only, lsn)?;
+        let iter = RocksObjectIter::new(&self.db, timeline, lsn)?;
         Ok(Box::new(iter))
     }
 
@@ -179,7 +178,7 @@ impl ObjectStore for RocksObjectStore {
             let search_key = StorageKey {
                 obj_key: ObjectKey {
                     timeline: timelineid,
-                    tag: ObjectTag::RelationMetadata(search_rel_tag),
+                    tag: ObjectTag::RelationMetadata(RelishTag::Relation(search_rel_tag)),
                 },
                 lsn: Lsn(0),
             };
@@ -189,7 +188,7 @@ impl ObjectStore for RocksObjectStore {
             }
             let key = StorageKey::des(iter.key().unwrap())?;
 
-            if let ObjectTag::RelationMetadata(rel_tag) = key.obj_key.tag {
+            if let ObjectTag::RelationMetadata(RelishTag::Relation(rel_tag)) = key.obj_key.tag {
                 if spcnode != 0 && rel_tag.spcnode != spcnode
                     || dbnode != 0 && rel_tag.dbnode != dbnode
                 {
@@ -207,6 +206,48 @@ impl ObjectStore for RocksObjectStore {
                 // no more relation metadata entries
                 break;
             }
+        }
+
+        Ok(rels)
+    }
+
+    /// Get a list of all distinct NON-relations in timeline
+    ///
+    /// TODO: This implementation is very inefficient, it scans
+    /// through all non-rel page versions in the system. In practice, this
+    /// is used when initializing a new compute node, and the non-rel files
+    /// are never very large nor change very frequently, so this will do for now.
+    fn list_nonrels(&self, timelineid: ZTimelineId, lsn: Lsn) -> Result<HashSet<RelishTag>> {
+        let mut rels: HashSet<RelishTag> = HashSet::new();
+
+        let search_key = StorageKey {
+            obj_key: ObjectKey {
+                timeline: timelineid,
+                tag: ObjectTag::Buffer(FIRST_NONREL_RELISH_TAG, 0),
+            },
+            lsn: Lsn(0),
+        };
+
+        let mut iter = self.db.raw_iterator();
+        iter.seek(search_key.ser()?);
+        while iter.valid() {
+            let key = StorageKey::des(iter.key().unwrap())?;
+
+            if key.obj_key.timeline != timelineid {
+                // reached end of this timeline in the store
+                break;
+            }
+
+            if let ObjectTag::Buffer(rel_tag, _blknum) = key.obj_key.tag {
+                if key.lsn <= lsn {
+                    // visible in this snapshot
+                    rels.insert(rel_tag);
+                }
+            }
+            // TODO: we could skip to next relation here like we do in list_rels(),
+            // but hopefully there are not that many SLRU segments or other non-rel
+            // entries for it to matter.
+            iter.next();
         }
 
         Ok(rels)
@@ -387,17 +428,11 @@ impl<'r> RocksObjects<'r> {
 struct RocksObjectIter<'a> {
     timeline: ZTimelineId,
     key: StorageKey,
-    nonrel_only: bool,
     lsn: Lsn,
     dbiter: rocksdb::DBRawIterator<'a>,
 }
 impl<'a> RocksObjectIter<'a> {
-    fn new(
-        db: &'a rocksdb::DB,
-        timeline: ZTimelineId,
-        nonrel_only: bool,
-        lsn: Lsn,
-    ) -> Result<RocksObjectIter<'a>> {
+    fn new(db: &'a rocksdb::DB, timeline: ZTimelineId, lsn: Lsn) -> Result<RocksObjectIter<'a>> {
         let key = StorageKey {
             obj_key: ObjectKey {
                 timeline,
@@ -409,7 +444,6 @@ impl<'a> RocksObjectIter<'a> {
         Ok(RocksObjectIter {
             key,
             timeline,
-            nonrel_only,
             lsn,
             dbiter,
         })
@@ -433,15 +467,7 @@ impl<'a> Iterator for RocksObjectIter<'a> {
             self.key.lsn = Lsn(u64::MAX); // next seek should skip all versions
             if key.lsn <= self.lsn {
                 // visible in this snapshot
-                if self.nonrel_only {
-                    match key.obj_key.tag {
-                        ObjectTag::RelationMetadata(_) => return None,
-                        ObjectTag::RelationBuffer(_) => return None,
-                        _ => return Some(key.obj_key.tag),
-                    }
-                } else {
-                    return Some(key.obj_key.tag);
-                }
+                return Some(key.obj_key.tag);
             }
         }
     }

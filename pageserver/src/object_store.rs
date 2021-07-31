@@ -1,7 +1,7 @@
 //! Low-level key-value storage abstraction.
 //!
 use crate::object_key::*;
-use crate::repository::RelTag;
+use crate::relish::*;
 use crate::ZTimelineId;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -69,6 +69,12 @@ pub trait ObjectStore: Send + Sync {
         lsn: Lsn,
     ) -> Result<HashSet<RelTag>>;
 
+    /// Iterate through non-rel relishes
+    ///
+    /// This is used to prepare tarball for new node startup.
+    /// Returns objects in increasing key-version order.
+    fn list_nonrels<'a>(&'a self, timelineid: ZTimelineId, lsn: Lsn) -> Result<HashSet<RelishTag>>;
+
     /// Iterate through objects tags. If nonrel_only, then only non-relationa data is iterated.
     ///
     /// This is used to implement GC and preparing tarball for new node startup
@@ -76,7 +82,6 @@ pub trait ObjectStore: Send + Sync {
     fn list_objects<'a>(
         &'a self,
         timelineid: ZTimelineId,
-        nonrel_only: bool,
         lsn: Lsn,
     ) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>>;
 

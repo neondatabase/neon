@@ -14,6 +14,7 @@
 //! key-value store for each timeline.
 
 use crate::object_store::ObjectStore;
+use crate::relish::*;
 use crate::repository::*;
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
@@ -162,18 +163,6 @@ impl Repository for ObjectRepository {
             &ObjectValue::ser(&val)?,
         )?;
 
-        // Copy non-rel objects
-        for tag in src_timeline.list_nonrels(at_lsn)? {
-            match tag {
-                ObjectTag::TimelineMetadataTag => {} // skip it
-                _ => {
-                    let img = src_timeline.get_page_at_lsn_nowait(tag, at_lsn)?;
-                    let val = ObjectValue::Page(PageEntry::Page(img));
-                    let key = ObjectKey { timeline: dst, tag };
-                    self.obj_store.put(&key, at_lsn, &ObjectValue::ser(&val)?)?;
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -187,7 +176,7 @@ impl Repository for ObjectRepository {
 /// To prevent memory overflow metadata only of the most recent version of relation is cached.
 /// If page server needs to access some older version, then object storage has to be accessed.
 ///
-struct RelMetadata {
+struct RelishMetadata {
     size: u32,         // size of relation
     last_updated: Lsn, // lsn of last metadata update (used to determine when cache value can be used)
 }
@@ -227,7 +216,7 @@ pub struct ObjectTimeline {
     ancestor_timeline: Option<ZTimelineId>,
     ancestor_lsn: Lsn,
 
-    rel_meta: RwLock<BTreeMap<RelTag, RelMetadata>>,
+    rel_meta: RwLock<BTreeMap<RelishTag, RelishMetadata>>,
 }
 
 impl ObjectTimeline {
@@ -266,19 +255,28 @@ impl Timeline for ObjectTimeline {
     //------------------------------------------------------------------------------
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, tag: ObjectTag, req_lsn: Lsn) -> Result<Bytes> {
+    fn get_page_at_lsn(&self, tag: RelishTag, blknum: u32, req_lsn: Lsn) -> Result<Bytes> {
         let lsn = self.wait_lsn(req_lsn)?;
 
-        self.get_page_at_lsn_nowait(tag, lsn)
+        self.get_page_at_lsn_nowait(tag, blknum, lsn)
     }
 
-    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, req_lsn: Lsn) -> Result<Bytes> {
+    fn get_page_at_lsn_nowait(&self, rel: RelishTag, blknum: u32, req_lsn: Lsn) -> Result<Bytes> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
+
         const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
+        let object_tag = ObjectTag::Buffer(rel, blknum);
         let searchkey = ObjectKey {
             timeline: self.timelineid,
-            tag,
+            tag: object_tag,
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, req_lsn)?;
 
@@ -291,14 +289,16 @@ impl Timeline for ObjectTimeline {
                 }
                 ObjectValue::Page(PageEntry::WALRecord(_rec)) => {
                     // Request the WAL redo manager to apply the WAL records for us.
-                    let (base_img, records) = self.collect_records_for_apply(tag, lsn)?;
-                    page_img = self.walredo_mgr.request_redo(tag, lsn, base_img, records)?;
+                    let (base_img, records) = self.collect_records_for_apply(rel, blknum, lsn)?;
+                    page_img = self
+                        .walredo_mgr
+                        .request_redo(rel, blknum, lsn, base_img, records)?;
 
                     // Garbage collection assumes that we remember the materialized page
                     // version. Otherwise we could opt to not do it, with the downside that
                     // the next GetPage@LSN call of the same page version would have to
                     // redo the WAL again.
-                    self.put_page_image(tag, lsn, page_img.clone(), false)?;
+                    self.put_page_image(rel, blknum, lsn, page_img.clone(), false)?;
                 }
                 ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
                 _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),
@@ -310,19 +310,23 @@ impl Timeline for ObjectTimeline {
                 "Returning page with LSN {:X}/{:X} for {:?} from {} (request {})",
                 page_lsn_hi,
                 page_lsn_lo,
-                tag,
+                object_tag,
                 lsn,
                 req_lsn
             );
             return Ok(page_img);
         }
-        trace!("page {:?} at {} not found", tag, req_lsn);
+        trace!("page {:?} at {} not found", object_tag, req_lsn);
         Ok(Bytes::from_static(&ZERO_PAGE))
         /* return Err("could not find page image")?; */
     }
 
     /// Get size of relation
-    fn get_rel_size(&self, rel: RelTag, lsn: Lsn) -> Result<u32> {
+    fn get_rel_size(&self, rel: RelishTag, lsn: Lsn) -> Result<u32> {
+        if !rel.is_blocky() {
+            bail!("invalid get_rel_size request for non-blocky relish {}", rel);
+        }
+
         let lsn = self.wait_lsn(lsn)?;
 
         match self.relsize_get_nowait(rel, lsn)? {
@@ -332,7 +336,7 @@ impl Timeline for ObjectTimeline {
     }
 
     /// Does relation exist at given LSN?
-    fn get_rel_exists(&self, rel: RelTag, req_lsn: Lsn) -> Result<bool> {
+    fn get_rel_exists(&self, rel: RelishTag, req_lsn: Lsn) -> Result<bool> {
         let lsn = self.wait_lsn(req_lsn)?;
         {
             let rel_meta = self.rel_meta.read().unwrap();
@@ -353,8 +357,34 @@ impl Timeline for ObjectTimeline {
     }
 
     /// Get a list of non-relational objects
-    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>> {
-        self.obj_store.list_objects(self.timelineid, true, lsn)
+    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
+        // List all non-relations in this timeline.
+        let mut all_rels = self.obj_store.list_nonrels(self.timelineid, lsn)?;
+
+        // Also list all nonrelations in ancestor timelines. If a nonrelation hasn't been modified
+        // after the fork, there will be no trace of it in the object store with the current
+        // timeline id.
+        let mut prev_timeline: Option<ZTimelineId> = self.ancestor_timeline;
+        let mut lsn = self.ancestor_lsn;
+        while let Some(timeline) = prev_timeline {
+            let this_rels = self.obj_store.list_nonrels(timeline, lsn)?;
+
+            for rel in this_rels {
+                all_rels.insert(rel);
+            }
+
+            // Load ancestor metadata.
+            let v = self
+                .obj_store
+                .get(&timeline_metadata_key(timeline), Lsn(0))
+                .with_context(|| "timeline not found in repository")?;
+            let metadata = ObjectValue::des_timeline_metadata(&v)?;
+
+            prev_timeline = metadata.ancestor_timeline;
+            lsn = metadata.ancestor_lsn;
+        }
+
+        Ok(all_rels)
     }
 
     /// Get a list of all distinct relations in given tablespace and database.
@@ -400,31 +430,39 @@ impl Timeline for ObjectTimeline {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: ObjectTag, rec: WALRecord) -> Result<()> {
+    fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
+
         let lsn = rec.lsn;
-        self.put_page_entry(&tag, lsn, PageEntry::WALRecord(rec))?;
-        debug!("put_wal_record {:?} at {}", tag, lsn);
+        self.put_page_entry(&rel, blknum, lsn, PageEntry::WALRecord(rec))?;
+        debug!("put_wal_record {} at {}", rel, lsn);
 
-        if let ObjectTag::RelationBuffer(tag) = tag {
+        if rel.is_blocky() {
             // Also check if this created or extended the file
-            let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
+            let old_nblocks = self.relsize_get_nowait(rel, lsn)?.unwrap_or(0);
 
-            if tag.blknum >= old_nblocks {
-                let new_nblocks = tag.blknum + 1;
+            if blknum >= old_nblocks {
+                let new_nblocks = blknum + 1;
 
                 trace!(
-                    "Extended relation {} from {} to {} blocks at {}",
-                    tag.rel,
+                    "Extended {} from {} to {} blocks at {}",
+                    rel,
                     old_nblocks,
                     new_nblocks,
                     lsn
                 );
 
-                self.put_relsize_entry(&tag.rel, lsn, RelationSizeEntry::Size(new_nblocks))?;
+                self.put_relsize_entry(&rel, lsn, RelationSizeEntry::Size(new_nblocks))?;
                 let mut rel_meta = self.rel_meta.write().unwrap();
                 rel_meta.insert(
-                    tag.rel,
-                    RelMetadata {
+                    rel,
+                    RelishMetadata {
                         size: new_nblocks,
                         last_updated: lsn,
                     },
@@ -435,20 +473,9 @@ impl Timeline for ObjectTimeline {
     }
 
     /// Unlink relation. This method is used for marking dropped relations.
-    fn put_unlink(&self, rel_tag: RelTag, lsn: Lsn) -> Result<()> {
+    fn put_unlink(&self, rel_tag: RelishTag, lsn: Lsn) -> Result<()> {
         self.put_relsize_entry(&rel_tag, lsn, RelationSizeEntry::Unlink)?;
 
-        Ok(())
-    }
-
-    /// Truncate SLRU segment
-    fn put_slru_truncate(&self, tag: ObjectTag, lsn: Lsn) -> Result<()> {
-        let key = ObjectKey {
-            timeline: self.timelineid,
-            tag,
-        };
-        let val = ObjectValue::SLRUTruncate;
-        self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)?;
         Ok(())
     }
 
@@ -478,38 +505,47 @@ impl Timeline for ObjectTimeline {
     ///
     fn put_page_image(
         &self,
-        tag: ObjectTag,
+        rel: RelishTag,
+        blknum: u32,
         lsn: Lsn,
         img: Bytes,
         update_meta: bool,
     ) -> Result<()> {
-        self.put_page_entry(&tag, lsn, PageEntry::Page(img))?;
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
 
-        debug!("put_page_image rel {:?} at {}", tag, lsn);
+        self.put_page_entry(&rel, blknum, lsn, PageEntry::Page(img))?;
+
+        debug!("put_page_image {} at {}", rel, lsn);
 
         if !update_meta {
             return Ok(());
         }
-        if let ObjectTag::RelationBuffer(tag) = tag {
+        if rel.is_blocky() {
             // Also check if this created or extended the file
-            let old_nblocks = self.relsize_get_nowait(tag.rel, lsn)?.unwrap_or(0);
+            let old_nblocks = self.relsize_get_nowait(rel, lsn)?.unwrap_or(0);
 
-            if tag.blknum >= old_nblocks {
-                let new_nblocks = tag.blknum + 1;
+            if blknum >= old_nblocks {
+                let new_nblocks = blknum + 1;
 
                 trace!(
-                    "Extended relation {} from {} to {} blocks at {}",
-                    tag.rel,
+                    "Extended {} from {} to {} blocks at {}",
+                    rel,
                     old_nblocks,
                     new_nblocks,
                     lsn
                 );
 
-                self.put_relsize_entry(&tag.rel, lsn, RelationSizeEntry::Size(new_nblocks))?;
+                self.put_relsize_entry(&rel, lsn, RelationSizeEntry::Size(new_nblocks))?;
                 let mut rel_meta = self.rel_meta.write().unwrap();
                 rel_meta.insert(
-                    tag.rel,
-                    RelMetadata {
+                    rel,
+                    RelishMetadata {
                         size: new_nblocks,
                         last_updated: lsn,
                     },
@@ -523,14 +559,18 @@ impl Timeline for ObjectTimeline {
     /// Adds a relation-wide WAL record (like truncate) to the repository,
     /// associating it with all pages started with specified block number
     ///
-    fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()> {
+    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()> {
+        if !rel.is_blocky() {
+            bail!("invalid truncation for non-blocky relish {}", rel);
+        }
+
         info!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
 
         self.put_relsize_entry(&rel, lsn, RelationSizeEntry::Size(nblocks))?;
         let mut rel_meta = self.rel_meta.write().unwrap();
         rel_meta.insert(
             rel,
-            RelMetadata {
+            RelishMetadata {
                 size: nblocks,
                 last_updated: lsn,
             },
@@ -641,14 +681,11 @@ impl Timeline for ObjectTimeline {
             let now = Instant::now();
             let mut prepared_horizon = Lsn(u64::MAX);
             // Iterate through all objects in timeline
-            for obj in self
-                .obj_store
-                .list_objects(self.timelineid, false, last_lsn)?
-            {
+            for obj in self.obj_store.list_objects(self.timelineid, last_lsn)? {
                 result.inspected += 1;
                 match obj {
                     // Prepared transactions
-                    ObjectTag::TwoPhase(prepare) => {
+                    ObjectTag::Buffer(RelishTag::TwoPhase { xid }, _blknum) => {
                         let key = ObjectKey {
                             timeline: self.timelineid,
                             tag: obj,
@@ -656,7 +693,7 @@ impl Timeline for ObjectTimeline {
                         for vers in self.obj_store.object_versions(&key, horizon)? {
                             let lsn = vers.0;
                             prepared_horizon = Lsn::min(lsn, prepared_horizon);
-                            if self.get_tx_status(prepare.xid, horizon)?
+                            if self.get_tx_status(xid, horizon)?
                                 != pg_constants::TRANSACTION_STATUS_IN_PROGRESS
                             {
                                 self.obj_store.unlink(&key, lsn)?;
@@ -693,96 +730,62 @@ impl Timeline for ObjectTimeline {
                             }
                         }
                     }
-                    ObjectTag::RelationBuffer(tag) => {
-                        // Reconstruct page at horizon unless relation was dropped
-                        // and delete all older versions over horizon
-                        let mut last_version = true;
-                        let key = ObjectKey {
-                            timeline: self.timelineid,
-                            tag: obj,
-                        };
-                        for vers in self.obj_store.object_versions(&key, horizon)? {
-                            let lsn = vers.0;
-                            if last_version {
-                                result.truncated += 1;
-                                last_version = false;
-                                if let Some(rel_size) =
-                                    self.relsize_get_nowait(tag.rel, last_lsn)?
-                                {
-                                    if rel_size > tag.blknum {
-                                        // preserve and materialize last version before deleting all preceeding
-                                        self.get_page_at_lsn_nowait(obj, lsn)?;
-                                        continue;
-                                    }
-                                    debug!("Drop last block {} of relation {:?} at {} because it is beyond relation size {}", tag.blknum, tag.rel, lsn, rel_size);
-                                } else {
+                    ObjectTag::Buffer(rel, blknum) => {
+                        if rel.is_blocky() {
+                            // Reconstruct page at horizon unless relation was dropped
+                            // and delete all older versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
+                                if last_version {
+                                    result.truncated += 1;
+                                    last_version = false;
                                     if let Some(rel_size) =
-                                        self.relsize_get_nowait(tag.rel, last_lsn)?
+                                        self.relsize_get_nowait(rel, last_lsn)?
                                     {
-                                        debug!("Preserve block {} of relation {:?} at {} because relation has size {} at {}", tag.rel, tag, lsn, rel_size, last_lsn);
-                                        continue;
+                                        if rel_size > blknum {
+                                            // preserve and materialize last version before deleting all preceeding
+                                            self.get_page_at_lsn_nowait(rel, blknum, lsn)?;
+                                            continue;
+                                        }
+                                        debug!("Drop last block {} of relation {} at {} because it is beyond relation size {}", blknum, rel, lsn, rel_size);
+                                    } else {
+                                        if let Some(rel_size) =
+                                            self.relsize_get_nowait(rel, last_lsn)?
+                                        {
+                                            debug!("Preserve block {} of relation {} at {} because relation has size {} at {}", blknum, rel, lsn, rel_size, last_lsn);
+                                            continue;
+                                        }
+                                        debug!("Relation {} was dropped at {}", rel, lsn);
                                     }
-                                    debug!("Relation {:?} was dropped at {}", tag.rel, lsn);
+                                    // relation was dropped or truncated so this block can be removed
                                 }
-                                // relation was dropped or truncated so this block can be removed
+                                self.obj_store.unlink(&key, lsn)?;
+                                result.deleted += 1;
                             }
-                            self.obj_store.unlink(&key, lsn)?;
-                            result.deleted += 1;
-                        }
-                    }
-                    // SLRU-s
-                    ObjectTag::Clog(_)
-                    | ObjectTag::MultiXactOffsets(_)
-                    | ObjectTag::MultiXactMembers(_) => {
-                        // Remove old versions over horizon
-                        let mut last_version = true;
-                        let key = ObjectKey {
-                            timeline: self.timelineid,
-                            tag: obj,
-                        };
-                        for vers in self
-                            .obj_store
-                            .object_versions(&key, Lsn::min(prepared_horizon, horizon))?
-                        {
-                            let lsn = vers.0;
-                            if last_version {
-                                let content = vers.1;
-                                match ObjectValue::des(&content[..])? {
-                                    ObjectValue::SLRUTruncate => {
-                                        self.obj_store.unlink(&key, lsn)?;
-                                        result.slru_deleted += 1;
-                                    }
-                                    ObjectValue::Page(PageEntry::WALRecord(_)) => {
-                                        // preserve and materialize last version before deleting all preceeding
-                                        self.get_page_at_lsn_nowait(obj, lsn)?;
-                                    }
-                                    _ => {} // do nothing if already materialized
+                        } else {
+                            // versioned always materialized objects: no need to reconstruct pages
+
+                            // Remove old versions over horizon
+                            let mut last_version = true;
+                            let key = ObjectKey {
+                                timeline: self.timelineid,
+                                tag: obj,
+                            };
+                            for vers in self.obj_store.object_versions(&key, horizon)? {
+                                let lsn = vers.0;
+                                if last_version {
+                                    // preserve last version
+                                    last_version = false;
+                                } else {
+                                    // delete deteriorated version
+                                    self.obj_store.unlink(&key, lsn)?;
+                                    result.chkp_deleted += 1;
                                 }
-                                last_version = false;
-                            } else {
-                                // delete deteriorated version
-                                self.obj_store.unlink(&key, lsn)?;
-                                result.slru_deleted += 1;
-                            }
-                        }
-                    }
-                    // versioned always materialized objects: no need to reconstruct pages
-                    ObjectTag::Checkpoint | ObjectTag::ControlFile => {
-                        // Remove old versions over horizon
-                        let mut last_version = true;
-                        let key = ObjectKey {
-                            timeline: self.timelineid,
-                            tag: obj,
-                        };
-                        for vers in self.obj_store.object_versions(&key, horizon)? {
-                            let lsn = vers.0;
-                            if last_version {
-                                // preserve last version
-                                last_version = false;
-                            } else {
-                                // delete deteriorated version
-                                self.obj_store.unlink(&key, lsn)?;
-                                result.chkp_deleted += 1;
                             }
                         }
                     }
@@ -806,7 +809,7 @@ impl ObjectTimeline {
     ///
     /// The caller must ensure that WAL has been received up to 'lsn'.
     ///
-    fn relsize_get_nowait(&self, rel: RelTag, lsn: Lsn) -> Result<Option<u32>> {
+    fn relsize_get_nowait(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {
         {
             let rel_meta = self.rel_meta.read().unwrap();
             if let Some(meta) = rel_meta.get(&rel) {
@@ -854,7 +857,8 @@ impl ObjectTimeline {
     ///
     fn collect_records_for_apply(
         &self,
-        tag: ObjectTag,
+        rel: RelishTag,
+        blknum: u32,
         lsn: Lsn,
     ) -> Result<(Option<Bytes>, Vec<WALRecord>)> {
         let mut base_img: Option<Bytes> = None;
@@ -864,7 +868,7 @@ impl ObjectTimeline {
         // old page image.
         let searchkey = ObjectKey {
             timeline: self.timelineid,
-            tag,
+            tag: ObjectTag::Buffer(rel, blknum),
         };
         let mut iter = self.object_versions(&*self.obj_store, &searchkey, lsn)?;
         while let Some((_key, value)) = iter.next().transpose()? {
@@ -966,17 +970,17 @@ impl ObjectTimeline {
     //
     // Helper functions to store different kinds of objects to the underlying ObjectStore
     //
-    fn put_page_entry(&self, tag: &ObjectTag, lsn: Lsn, val: PageEntry) -> Result<()> {
+    fn put_page_entry(&self, tag: &RelishTag, blknum: u32, lsn: Lsn, val: PageEntry) -> Result<()> {
         let key = ObjectKey {
             timeline: self.timelineid,
-            tag: *tag,
+            tag: ObjectTag::Buffer(*tag, blknum),
         };
         let val = ObjectValue::Page(val);
 
         self.obj_store.put(&key, lsn, &ObjectValue::ser(&val)?)
     }
 
-    fn put_relsize_entry(&self, tag: &RelTag, lsn: Lsn, val: RelationSizeEntry) -> Result<()> {
+    fn put_relsize_entry(&self, tag: &RelishTag, lsn: Lsn, val: RelationSizeEntry) -> Result<()> {
         let key = relation_size_key(self.timelineid, *tag);
         let val = ObjectValue::RelationSize(val);
 
@@ -1060,7 +1064,7 @@ pub enum RelationSizeEntry {
     Unlink,
 }
 
-const fn relation_size_key(timelineid: ZTimelineId, rel: RelTag) -> ObjectKey {
+const fn relation_size_key(timelineid: ZTimelineId, rel: RelishTag) -> ObjectKey {
     ObjectKey {
         timeline: timelineid,
         tag: ObjectTag::RelationMetadata(rel),

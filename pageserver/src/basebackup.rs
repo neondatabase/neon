@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 
-use crate::object_key::{DatabaseTag, ObjectTag};
+use crate::relish::*;
 use crate::repository::Timeline;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
@@ -32,9 +32,6 @@ pub struct Basebackup<'a> {
     timeline: &'a Arc<dyn Timeline>,
     lsn: Lsn,
     prev_record_lsn: Lsn,
-    slru_buf: [u8; pg_constants::SLRU_SEG_SIZE],
-    slru_segno: u32,
-    slru_path: &'static str,
 }
 
 impl<'a> Basebackup<'a> {
@@ -49,9 +46,6 @@ impl<'a> Basebackup<'a> {
             timeline,
             lsn,
             prev_record_lsn,
-            slru_path: "",
-            slru_segno: u32::MAX,
-            slru_buf: [0u8; pg_constants::SLRU_SEG_SIZE],
         }
     }
 
@@ -82,21 +76,19 @@ impl<'a> Basebackup<'a> {
         // It allows to easily construct SLRU segments.
         for obj in self.timeline.list_nonrels(self.lsn)? {
             match obj {
-                ObjectTag::Clog(slru) => self.add_slru_segment("pg_xact", &obj, slru.blknum)?,
-                ObjectTag::MultiXactMembers(slru) => {
-                    self.add_slru_segment("pg_multixact/members", &obj, slru.blknum)?
+                RelishTag::Slru { slru, segno } => {
+                    self.add_slru_segment(slru, segno)?;
                 }
-                ObjectTag::MultiXactOffsets(slru) => {
-                    self.add_slru_segment("pg_multixact/offsets", &obj, slru.blknum)?
+                RelishTag::FileNodeMap { spcnode, dbnode } => {
+                    self.add_relmap_file(spcnode, dbnode)?;
                 }
-                ObjectTag::FileNodeMap(db) => self.add_relmap_file(&obj, &db)?,
-                ObjectTag::TwoPhase(prepare) => self.add_twophase_file(&obj, prepare.xid)?,
+                RelishTag::TwoPhase { xid } => {
+                    self.add_twophase_file(xid)?;
+                }
                 _ => {}
             }
         }
 
-        // write last non-completed SLRU segment (if any)
-        self.finish_slru_segment()?;
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file()?;
         self.ar.finish()?;
@@ -107,45 +99,33 @@ impl<'a> Basebackup<'a> {
     //
     // Generate SLRU segment files from repository. Path identifies SLRU kind (pg_xact, pg_multixact/members, ...).
     //
-    fn add_slru_segment(
-        &mut self,
-        path: &'static str,
-        tag: &ObjectTag,
-        blknum: u32,
-    ) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
-        // Zero length image indicates truncated segment: just skip it
-        if !img.is_empty() {
-            assert!(img.len() == pg_constants::BLCKSZ as usize);
-            let segno = blknum / pg_constants::SLRU_PAGES_PER_SEGMENT;
-            if self.slru_path != "" && (self.slru_segno != segno || self.slru_path != path) {
-                // Switch to new segment: save old one
-                let segname = format!("{}/{:>04X}", self.slru_path, self.slru_segno);
-                let header = new_tar_header(&segname, pg_constants::SLRU_SEG_SIZE as u64)?;
-                self.ar.append(&header, &self.slru_buf[..])?;
-                self.slru_buf = [0u8; pg_constants::SLRU_SEG_SIZE]; // reinitialize segment buffer
-            }
-            self.slru_segno = segno;
-            self.slru_path = path;
-            let offs_start = (blknum % pg_constants::SLRU_PAGES_PER_SEGMENT) as usize
-                * pg_constants::BLCKSZ as usize;
-            let offs_end = offs_start + pg_constants::BLCKSZ as usize;
-            self.slru_buf[offs_start..offs_end].copy_from_slice(&img);
-        }
-        Ok(())
-    }
+    fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
+        let nblocks = self
+            .timeline
+            .get_rel_size(RelishTag::Slru { slru, segno }, self.lsn)?;
 
-    //
-    // We flush SLRU segments to the tarball once them are completed.
-    // This method is used to flush last (may be incompleted) segment.
-    //
-    fn finish_slru_segment(&mut self) -> anyhow::Result<()> {
-        if self.slru_path != "" {
-            // is there is some incompleted segment
-            let segname = format!("{}/{:>04X}", self.slru_path, self.slru_segno);
-            let header = new_tar_header(&segname, pg_constants::SLRU_SEG_SIZE as u64)?;
-            self.ar.append(&header, &self.slru_buf[..])?;
+        let mut slru_buf: Vec<u8> =
+            Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
+        for blknum in 0..nblocks {
+            let img = self.timeline.get_page_at_lsn_nowait(
+                RelishTag::Slru { slru, segno },
+                blknum,
+                self.lsn,
+            )?;
+            assert!(img.len() == pg_constants::BLCKSZ as usize);
+
+            slru_buf.extend_from_slice(&img);
         }
+
+        let dir = match slru {
+            SlruKind::Clog => "pg_xact",
+            SlruKind::MultiXactMembers => "pg_multixact/members",
+            SlruKind::MultiXactOffsets => "pg_multixact/offsets",
+        };
+
+        let segname = format!("{}/{:>04X}", dir, segno);
+        let header = new_tar_header(&segname, slru_buf.len() as u64)?;
+        self.ar.append(&header, slru_buf.as_slice())?;
         Ok(())
     }
 
@@ -153,10 +133,13 @@ impl<'a> Basebackup<'a> {
     // Extract pg_filenode.map files from repository
     // Along with them also send PG_VERSION for each database.
     //
-    fn add_relmap_file(&mut self, tag: &ObjectTag, db: &DatabaseTag) -> anyhow::Result<()> {
-        trace!("add_relmap_file {:?}", db);
-        let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
-        let path = if db.spcnode == pg_constants::GLOBALTABLESPACE_OID {
+    fn add_relmap_file(&mut self, spcnode: u32, dbnode: u32) -> anyhow::Result<()> {
+        let img = self.timeline.get_page_at_lsn_nowait(
+            RelishTag::FileNodeMap { spcnode, dbnode },
+            0,
+            self.lsn,
+        )?;
+        let path = if spcnode == pg_constants::GLOBALTABLESPACE_OID {
             let dst_path = "PG_VERSION";
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
@@ -169,19 +152,19 @@ impl<'a> Basebackup<'a> {
             String::from("global/pg_filenode.map") // filenode map for global tablespace
         } else {
             // User defined tablespaces are not supported
-            assert!(db.spcnode == pg_constants::DEFAULTTABLESPACE_OID);
+            assert!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
 
             // Append dir path for each database
-            let path = format!("base/{}", db.dbnode);
+            let path = format!("base/{}", dbnode);
             let header = new_tar_header_dir(&path)?;
             self.ar.append(&header, &mut io::empty())?;
 
-            let dst_path = format!("base/{}/PG_VERSION", db.dbnode);
+            let dst_path = format!("base/{}/PG_VERSION", dbnode);
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
             self.ar.append(&header, &version_bytes[..])?;
 
-            format!("base/{}/pg_filenode.map", db.dbnode)
+            format!("base/{}/pg_filenode.map", dbnode)
         };
         assert!(img.len() == 512);
         let header = new_tar_header(&path, img.len() as u64)?;
@@ -192,12 +175,14 @@ impl<'a> Basebackup<'a> {
     //
     // Extract twophase state files
     //
-    fn add_twophase_file(&mut self, tag: &ObjectTag, xid: TransactionId) -> anyhow::Result<()> {
+    fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
         // Include in tarball two-phase files only of in-progress transactions
         if self.timeline.get_tx_status(xid, self.lsn)?
             == pg_constants::TRANSACTION_STATUS_IN_PROGRESS
         {
-            let img = self.timeline.get_page_at_lsn_nowait(*tag, self.lsn)?;
+            let img =
+                self.timeline
+                    .get_page_at_lsn_nowait(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
             let mut buf = BytesMut::new();
             buf.extend_from_slice(&img[..]);
             let crc = crc32c::crc32c(&img[..]);
@@ -214,12 +199,12 @@ impl<'a> Basebackup<'a> {
     // Also send zenith.signal file with extra bootstrap data.
     //
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
-        let checkpoint_bytes = self
-            .timeline
-            .get_page_at_lsn_nowait(ObjectTag::Checkpoint, self.lsn)?;
-        let pg_control_bytes = self
-            .timeline
-            .get_page_at_lsn_nowait(ObjectTag::ControlFile, self.lsn)?;
+        let checkpoint_bytes =
+            self.timeline
+                .get_page_at_lsn_nowait(RelishTag::Checkpoint, 0, self.lsn)?;
+        let pg_control_bytes =
+            self.timeline
+                .get_page_at_lsn_nowait(RelishTag::ControlFile, 0, self.lsn)?;
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
@@ -262,6 +247,7 @@ impl<'a> Basebackup<'a> {
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
         let wal_seg = generate_wal_segment(&pg_control);
+        assert!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())
     }

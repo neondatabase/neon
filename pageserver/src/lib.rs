@@ -15,6 +15,7 @@ pub mod object_repository;
 pub mod object_store;
 pub mod page_cache;
 pub mod page_service;
+pub mod relish;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod rocksdb_storage;

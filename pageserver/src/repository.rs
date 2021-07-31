@@ -1,14 +1,13 @@
 use crate::object_key::*;
-use crate::waldecoder::TransactionId;
+use crate::relish::*;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
 use postgres_ffi::pg_constants;
-use postgres_ffi::relfile_utils::forknumber_to_name;
+use postgres_ffi::TransactionId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fmt;
 use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,22 +56,22 @@ pub trait Timeline: Send + Sync {
     //------------------------------------------------------------------------------
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
+    fn get_page_at_lsn(&self, tag: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes>;
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn_nowait(&self, tag: ObjectTag, lsn: Lsn) -> Result<Bytes>;
+    fn get_page_at_lsn_nowait(&self, tag: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes>;
 
     /// Get size of relation
-    fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<u32>;
+    fn get_rel_size(&self, tag: RelishTag, lsn: Lsn) -> Result<u32>;
 
     /// Does relation exist?
-    fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool>;
+    fn get_rel_exists(&self, tag: RelishTag, lsn: Lsn) -> Result<bool>;
 
     /// Get a list of all distinct relations in given tablespace and database.
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>>;
 
     /// Get a list of non-relational objects
-    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<Box<dyn Iterator<Item = ObjectTag> + 'a>>;
+    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
@@ -84,23 +83,26 @@ pub trait Timeline: Send + Sync {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: ObjectTag, rec: WALRecord) -> Result<()>;
+    fn put_wal_record(&self, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
+
+    /// Like put_wal_record, but with ready-made image of the page.
+    fn put_page_image(
+        &self,
+        tag: RelishTag,
+        blknum: u32,
+        lsn: Lsn,
+        img: Bytes,
+        update_meta: bool,
+    ) -> Result<()>;
+
+    /// Truncate relation
+    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
+
+    /// Unlink relation. This method is used for marking dropped relations.
+    fn put_unlink(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
 
     /// Put raw data
     fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()>;
-
-    /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: ObjectTag, lsn: Lsn, img: Bytes, update_meta: bool)
-        -> Result<()>;
-
-    /// Truncate relation
-    fn put_truncation(&self, rel: RelTag, lsn: Lsn, nblocks: u32) -> Result<()>;
-
-    /// Unlink relation. This method is used for marking dropped relations.
-    fn put_unlink(&self, tag: RelTag, lsn: Lsn) -> Result<()>;
-
-    /// Truncate SLRU segment
-    fn put_slru_truncate(&self, tag: ObjectTag, lsn: Lsn) -> Result<()>;
 
     // Get object tag greater or equal than specified
     fn get_next_tag(&self, tag: ObjectTag) -> Result<Option<ObjectTag>>;
@@ -156,9 +158,18 @@ pub trait Timeline: Send + Sync {
 
     // Check transaction status
     fn get_tx_status(&self, xid: TransactionId, lsn: Lsn) -> anyhow::Result<u8> {
-        let blknum = xid / pg_constants::CLOG_XACTS_PER_PAGE;
-        let tag = ObjectTag::Clog(SlruBufferTag { blknum });
-        let clog_page = self.get_page_at_lsn(tag, lsn)?;
+        let pageno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+        let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+        let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+
+        let clog_page = self.get_page_at_lsn(
+            RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno,
+            },
+            rpageno,
+            lsn,
+        )?;
         let status = transaction_id_get_status(xid, &clog_page[..]);
         Ok(status)
     }
@@ -196,76 +207,6 @@ pub struct RepositoryStats {
     pub num_page_images: Lsn,
     pub num_wal_records: Lsn,
     pub num_getpage_requests: Lsn,
-}
-
-///
-/// Relation data file segment id throughout the Postgres cluster.
-///
-/// Every data file in Postgres is uniquely identified by 4 numbers:
-/// - relation id / node (`relnode`)
-/// - database id (`dbnode`)
-/// - tablespace id (`spcnode`), in short this is a unique id of a separate
-///   directory to store data files.
-/// - forknumber (`forknum`) is used to split different kinds of data of the same relation
-///   between some set of files (`relnode`, `relnode_fsm`, `relnode_vm`).
-///
-/// In native Postgres code `RelFileNode` structure and individual `ForkNumber` value
-/// are used for the same purpose.
-/// [See more related comments here](https:///github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/relfilenode.h#L57).
-///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Serialize, Deserialize)]
-pub struct RelTag {
-    pub forknum: u8,
-    pub spcnode: u32,
-    pub dbnode: u32,
-    pub relnode: u32,
-}
-
-impl RelTag {
-    pub const ZEROED: Self = Self {
-        forknum: 0,
-        spcnode: 0,
-        dbnode: 0,
-        relnode: 0,
-    };
-}
-
-/// Display RelTag in the same format that's used in most PostgreSQL debug messages:
-///
-/// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]
-///
-impl fmt::Display for RelTag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(forkname) = forknumber_to_name(self.forknum) {
-            write!(
-                f,
-                "{}/{}/{}_{}",
-                self.spcnode, self.dbnode, self.relnode, forkname
-            )
-        } else {
-            write!(f, "{}/{}/{}", self.spcnode, self.dbnode, self.relnode)
-        }
-    }
-}
-
-///
-/// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
-/// This is used as a part of the key inside key-value storage (RocksDB currently).
-///
-/// In Postgres `BufferTag` structure is used for exactly the same purpose.
-/// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
-///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
-pub struct BufferTag {
-    pub rel: RelTag,
-    pub blknum: u32,
-}
-
-impl BufferTag {
-    pub const ZEROED: Self = Self {
-        rel: RelTag::ZEROED,
-        blknum: 0,
-    };
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -321,28 +262,18 @@ mod tests {
     use zenith_utils::bin_ser::BeSer;
 
     /// Arbitrary relation tag, for testing.
-    const TESTREL_A: RelTag = RelTag {
+    const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
         spcnode: 0,
         dbnode: 111,
         relnode: 1000,
         forknum: 0,
-    };
-    const TESTREL_B: RelTag = RelTag {
+    });
+    const TESTREL_B: RelishTag = RelishTag::Relation(RelTag {
         spcnode: 0,
         dbnode: 111,
         relnode: 1001,
         forknum: 0,
-    };
-
-    /// Convenience function to create a BufferTag for testing.
-    /// Helps to keeps the tests shorter.
-    #[allow(non_snake_case)]
-    fn TEST_BUF(blknum: u32) -> ObjectTag {
-        ObjectTag::RelationBuffer(BufferTag {
-            rel: TESTREL_A,
-            blknum,
-        })
-    }
+    });
 
     /// Convenience function to create a page image with given string as the only content
     #[allow(non_snake_case)]
@@ -396,11 +327,11 @@ mod tests {
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
-        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
-        tline.put_page_image(TEST_BUF(1), Lsn(4), TEST_IMG("foo blk 1 at 4"), true)?;
-        tline.put_page_image(TEST_BUF(2), Lsn(5), TEST_IMG("foo blk 2 at 5"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
+        tline.put_page_image(TESTREL_A, 1, Lsn(4), TEST_IMG("foo blk 1 at 4"), true)?;
+        tline.put_page_image(TESTREL_A, 2, Lsn(5), TEST_IMG("foo blk 2 at 5"), true)?;
 
         tline.advance_last_valid_lsn(Lsn(5));
 
@@ -414,34 +345,34 @@ mod tests {
 
         // Check page contents at each LSN
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(0), Lsn(2))?,
+            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(2))?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(0), Lsn(3))?,
+            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(3))?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(0), Lsn(4))?,
+            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(4))?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(1), Lsn(4))?,
+            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(4))?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(0), Lsn(5))?,
+            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(5))?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(1), Lsn(5))?,
+            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(5))?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(2), Lsn(5))?,
+            tline.get_page_at_lsn(TESTREL_A, 2, Lsn(5))?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -452,18 +383,18 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(6))?, 2);
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(0), Lsn(6))?,
+            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(6))?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(1), Lsn(6))?,
+            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(6))?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(5))?, 3);
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(2), Lsn(5))?,
+            tline.get_page_at_lsn(TESTREL_A, 2, Lsn(5))?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -484,10 +415,10 @@ mod tests {
         tline.init_valid_lsn(Lsn(1));
 
         let mut lsn = 0;
-        for i in 0..pg_constants::RELSEG_SIZE + 1 {
-            let img = TEST_IMG(&format!("foo blk {} at {}", i, Lsn(lsn)));
+        for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
+            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 1;
-            tline.put_page_image(TEST_BUF(i as u32), Lsn(lsn), img, true)?;
+            tline.put_page_image(TESTREL_A, blknum as u32, Lsn(lsn), img, true)?;
         }
         tline.advance_last_valid_lsn(Lsn(lsn));
 
@@ -540,16 +471,12 @@ mod tests {
 
         // Create a relation on the timeline
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TEST_BUF(0), Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
-        tline.put_page_image(TEST_BUF(0), Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
-        tline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("foo blk 0 at 4"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(4), TEST_IMG("foo blk 0 at 4"), true)?;
 
         // Create another relation
-        let buftag2 = ObjectTag::RelationBuffer(BufferTag {
-            rel: TESTREL_B,
-            blknum: 0,
-        });
-        tline.put_page_image(buftag2, Lsn(2), TEST_IMG("foobar blk 0 at 2"), true)?;
+        tline.put_page_image(TESTREL_B, 0, Lsn(2), TEST_IMG("foobar blk 0 at 2"), true)?;
 
         tline.advance_last_valid_lsn(Lsn(4));
 
@@ -558,22 +485,22 @@ mod tests {
         repo.branch_timeline(timelineid, newtimelineid, Lsn(3))?;
         let newtline = repo.get_timeline(newtimelineid)?;
 
-        newtline.put_page_image(TEST_BUF(0), Lsn(4), TEST_IMG("bar blk 0 at 4"), true)?;
+        newtline.put_page_image(TESTREL_A, 0, Lsn(4), TEST_IMG("bar blk 0 at 4"), true)?;
         newtline.advance_last_valid_lsn(Lsn(4));
 
         // Check page contents on both branches
         assert_eq!(
-            tline.get_page_at_lsn(TEST_BUF(0), Lsn(4))?,
+            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(4))?,
             TEST_IMG("foo blk 0 at 4")
         );
 
         assert_eq!(
-            newtline.get_page_at_lsn(TEST_BUF(0), Lsn(4))?,
+            newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(4))?,
             TEST_IMG("bar blk 0 at 4")
         );
 
         assert_eq!(
-            newtline.get_page_at_lsn(buftag2, Lsn(4))?,
+            newtline.get_page_at_lsn(TESTREL_B, 0, Lsn(4))?,
             TEST_IMG("foobar blk 0 at 2")
         );
 
@@ -595,13 +522,11 @@ mod tests {
 
         // add a page and advance the last valid LSN
         let rel = TESTREL_A;
-        let tag = TEST_BUF(1);
-
-        tline.put_page_image(tag, Lsn(1), TEST_IMG("blk 1 @ lsn 1"), true)?;
+        tline.put_page_image(rel, 1, Lsn(1), TEST_IMG("blk 1 @ lsn 1"), true)?;
         tline.advance_last_valid_lsn(Lsn(1));
 
         let expected_page = Modification {
-            tag,
+            tag: ObjectTag::Buffer(rel, 1),
             lsn: Lsn(1),
             data: ObjectValue::ser(&ObjectValue::Page(PageEntry::Page(TEST_IMG(
                 "blk 1 @ lsn 1",
@@ -665,14 +590,16 @@ mod tests {
     impl WalRedoManager for TestRedoManager {
         fn request_redo(
             &self,
-            tag: ObjectTag,
+            rel: RelishTag,
+            blknum: u32,
             lsn: Lsn,
             base_img: Option<Bytes>,
             records: Vec<WALRecord>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
-                "redo for {:?} to get to {}, with {} and {} records",
-                tag,
+                "redo for {} blk {} to get to {}, with {} and {} records",
+                rel,
+                blknum,
                 lsn,
                 if base_img.is_some() {
                     "base image"
