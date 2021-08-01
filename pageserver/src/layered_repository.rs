@@ -495,10 +495,6 @@ impl Timeline for LayeredTimeline {
         loop {
             // SnapshotFile::list_rels works by scanning the directory on disk. Make sure
             // we have a file on disk for each relation.
-            //
-            // FIXME: I think checkpoint() assumes that there can be only one running
-            // at a time, and that no modifications are "put" to the timeline concurrently.
-            // this violates those assumptions.
             timeline.checkpoint()?;
 
             let rels = SnapshotLayer::list_nonrels(self.conf, timeline.timelineid, timeline.tenantid, lsn)?;
@@ -540,6 +536,13 @@ impl Timeline for LayeredTimeline {
     }
 
     fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
         let layer = self.get_layer_for_write(rel, rec.lsn)?;
         layer.put_wal_record(blknum, rec)
     }
@@ -563,6 +566,14 @@ impl Timeline for LayeredTimeline {
         img: Bytes,
         _update_meta: bool,
     ) -> Result<()> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
+
         let layer = self.get_layer_for_write(rel, lsn)?;
         layer.put_page_image(blknum, lsn, img)
     }
@@ -595,7 +606,9 @@ impl Timeline for LayeredTimeline {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self) -> Result<()> {
+
         let last_valid_lsn = self.last_valid_lsn.load();
+        trace!("checkpointing timeline {} at {}", self.timelineid, last_valid_lsn);
 
         let mut layers = self.layers.lock().unwrap();
 
@@ -620,10 +633,12 @@ impl Timeline for LayeredTimeline {
         // probably too aggressive. Some kind of LRU policy would be
         // appropriate.
         //
-        let layers = std::mem::take(&mut *layers);
-        for layer in layers.0.values() {
-            if !layer.is_frozen() {
-                layer.freeze(last_valid_lsn)?;
+        let old_layers = std::mem::take(&mut *layers);
+        for old_layer in old_layers.0.values() {
+            if !old_layer.is_frozen() {
+                if let Some(new_layer) = old_layer.freeze(last_valid_lsn)? {
+                    layers.insert(Arc::clone(&new_layer));
+                }
             }
         }
 

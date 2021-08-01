@@ -5,6 +5,7 @@ use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
 
@@ -75,5 +76,5 @@ pub trait Layer: Send + Sync {
         )
     }
 
-    fn freeze(&self, end_lsn: Lsn) -> Result<()>;
+    fn freeze(&self, end_lsn: Lsn) -> Result<Option<Arc<dyn Layer>>>;
 }

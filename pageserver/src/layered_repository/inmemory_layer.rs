@@ -16,7 +16,7 @@ use bytes::Bytes;
 use log::*;
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use zenith_utils::lsn::Lsn;
 
@@ -191,11 +191,7 @@ impl Layer for InMemoryLayer {
             trace!("get_relsize: {} at {} -> {}", self.rel, lsn, result);
             Ok(result)
         } else {
-            bail!(
-                "No size found for relfile {:?} at {} in memory",
-                self.rel,
-                lsn
-            );
+            bail!("No size found for {} at {} in memory", self.rel, lsn);
         }
     }
 
@@ -242,7 +238,7 @@ impl Layer for InMemoryLayer {
         }
 
         // Also update the relation size, if this extended the relation.
-        {
+        if self.rel.is_blocky() {
             let mut relsizes = self.relsizes.lock().unwrap();
             let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
@@ -255,10 +251,11 @@ impl Layer for InMemoryLayer {
             }
             if blknum >= oldsize {
                 trace!(
-                    "enlarging relation {} from {} to {} blocks",
+                    "enlarging relation {} from {} to {} blocks at {}",
                     self.rel,
                     oldsize,
-                    blknum + 1
+                    blknum + 1,
+                    lsn
                 );
                 relsizes.insert(lsn, blknum + 1);
             }
@@ -295,7 +292,11 @@ impl Layer for InMemoryLayer {
     ///
     /// Write the this in-memory layer to disk, as a snapshot layer.
     ///
-    fn freeze(&self, end_lsn: Lsn) -> Result<()> {
+    /// The cutoff point for the layer that's written to disk is 'end_lsn'.
+    /// If there were page versions newer than 'end_lsn', a new in-memory
+    /// layer is returned with those page versions. Otherwise returns None.
+    ///
+    fn freeze(&self, end_lsn: Lsn) -> Result<Option<Arc<dyn Layer>>> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.rel, self.timelineid, end_lsn
@@ -305,13 +306,31 @@ impl Layer for InMemoryLayer {
         let relsizes = self.relsizes.lock().unwrap();
         let drop_lsn = self.drop_lsn.lock().unwrap();
 
-        // FIXME: we assume there are no modification in-flight, and that there are no
-        // changes past 'lsn'.
-
-        let page_versions = page_versions.clone();
-        let relsizes = relsizes.clone();
-
         let dropped = *drop_lsn != Lsn(0);
+
+        // Divide all the page versions into old and new at the 'end_lsn' cutoff point.
+        let mut old_page_versions = BTreeMap::new();
+        let mut old_relsizes = BTreeMap::new();
+        let mut new_relsizes = BTreeMap::new();
+        let mut new_page_versions = BTreeMap::new();
+
+        if !dropped {
+            for (lsn, size) in relsizes.iter() {
+                if *lsn > end_lsn {
+                    new_relsizes.insert(*lsn, *size);
+                } else {
+                    old_relsizes.insert(*lsn, *size);
+                }
+            }
+
+            for ((blknum, lsn), pv) in page_versions.iter() {
+                if *lsn > end_lsn {
+                    new_page_versions.insert((*blknum, *lsn), pv.clone());
+                } else {
+                    old_page_versions.insert((*blknum, *lsn), pv.clone());
+                }
+            }
+        }
 
         let end_lsn = if dropped {
             assert!(*drop_lsn < end_lsn);
@@ -320,6 +339,7 @@ impl Layer for InMemoryLayer {
             end_lsn
         };
 
+        // Write the old page versions to disk.
         let _snapfile = SnapshotLayer::create(
             self.conf,
             self.timelineid,
@@ -328,11 +348,27 @@ impl Layer for InMemoryLayer {
             self.start_lsn,
             end_lsn,
             dropped,
-            page_versions,
-            relsizes,
+            old_page_versions,
+            old_relsizes,
         )?;
 
-        Ok(())
+        // If there were any "new" page versions, initialize a new in-memory layer to hold
+        // them
+        if !new_relsizes.is_empty() || !new_page_versions.is_empty() {
+            let new_layer: Arc<dyn Layer> = Arc::new(InMemoryLayer {
+                conf: self.conf,
+                timelineid: self.timelineid,
+                tenantid: self.tenantid,
+                rel: self.rel,
+                start_lsn: end_lsn,
+                drop_lsn: Mutex::new(Lsn(0)),
+                page_versions: Mutex::new(new_page_versions),
+                relsizes: Mutex::new(new_relsizes),
+            });
+            Ok(Some(new_layer))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -348,7 +384,7 @@ impl InMemoryLayer {
         start_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!(
-            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
+            "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
             rel,
             timelineid,
             start_lsn
@@ -387,8 +423,13 @@ impl InMemoryLayer {
         let mut page_versions = BTreeMap::new();
         let mut relsizes = BTreeMap::new();
 
-        let size = src.get_rel_size(lsn)?;
-        relsizes.insert(lsn, size);
+        let size;
+        if src.get_relish_tag().is_blocky() {
+            size = src.get_rel_size(lsn)?;
+            relsizes.insert(lsn, size);
+        } else {
+            size = 1;
+        }
 
         for blknum in 0..size {
             let img = src.get_page_at_lsn(walredo_mgr, blknum, lsn)?;

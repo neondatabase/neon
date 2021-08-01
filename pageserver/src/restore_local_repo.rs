@@ -132,6 +132,7 @@ pub fn import_timeline_from_postgres_datadir(
     }
     // TODO: Scan pg_tblspc
 
+    timeline.advance_last_valid_lsn(lsn);
     timeline.checkpoint()?;
 
     Ok(())

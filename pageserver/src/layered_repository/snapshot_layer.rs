@@ -55,7 +55,7 @@ use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bookfile::{Book, BookWriter};
@@ -374,7 +374,8 @@ impl Layer for SnapshotLayer {
             trace!("get_relsize: {} at {} -> {}", self.rel, lsn, result);
             Ok(result)
         } else {
-            bail!("No size found for {} at {} in memory", self.rel, lsn);
+            error!("No size found for {} at {} in snapshot layer {} {} {}", self.rel, lsn, self.rel, self.start_lsn, self.end_lsn);
+            bail!("No size found for {} at {} in snapshot layer", self.rel, lsn);
         }
     }
 
@@ -396,20 +397,20 @@ impl Layer for SnapshotLayer {
     // Unsupported write operations
     fn put_page_version(&self, blknum: u32, lsn: Lsn, _pv: PageVersion) -> Result<()> {
         panic!(
-            "cannot modify historical snapshot file, rel {} blk {} at {}/{}, {}-{}",
+            "cannot modify historical snapshot layer, rel {} blk {} at {}/{}, {}-{}",
             self.rel, blknum, self.timelineid, lsn, self.start_lsn, self.end_lsn
         );
     }
     fn put_truncation(&self, _lsn: Lsn, _relsize: u32) -> anyhow::Result<()> {
-        bail!("cannot modify historical snapshot file");
+        bail!("cannot modify historical snapshot layer");
     }
 
     fn put_unlink(&self, _lsn: Lsn) -> anyhow::Result<()> {
-        bail!("cannot modify historical snapshot file");
+        bail!("cannot modify historical snapshot layer");
     }
 
-    fn freeze(&self, _end_lsn: Lsn) -> Result<()> {
-        bail!("cannot freeze historical snapshot file");
+    fn freeze(&self, _end_lsn: Lsn) -> Result<Option<Arc<dyn Layer>>> {
+        bail!("cannot freeze historical snapshot layer");
     }
 }
 
