@@ -362,7 +362,7 @@ mod tests {
 
         let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
             RepositoryFormat::Layered => {
-                Box::new(LayeredRepository::new(conf, Arc::new(walredo_mgr)))
+                Box::new(LayeredRepository::new(conf, Arc::new(walredo_mgr), tenantid))
             }
             RepositoryFormat::RocksDb => {
                 let obj_store = RocksObjectStore::create(conf, &tenantid)?;

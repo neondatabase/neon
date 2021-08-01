@@ -201,6 +201,8 @@ impl LayeredRepository {
         let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
         let mut file = File::create(&path)?;
 
+        info!("saving metadata {}", path.display());
+
         file.write_all(&TimelineMetadata::ser(data)?)?;
 
         Ok(())
@@ -256,7 +258,7 @@ impl LayeredRepository {
         // Remember timelineid and its last_record_lsn for each timeline
         let mut timelines: Vec<(ZTimelineId, Lsn)> = Vec::new();
 
-        let timelines_path = conf.workdir.join("timelines");
+        let timelines_path = conf.timelines_path(&tenantid);
         for direntry in fs::read_dir(timelines_path)? {
             let direntry = direntry?;
             if let Some(fname) = direntry.file_name().to_str() {

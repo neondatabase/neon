@@ -24,7 +24,6 @@ lazy_static! {
 pub fn init(conf: &'static PageServerConf) {
     let mut m = REPOSITORY.lock().unwrap();
 
-
     for dir_entry in fs::read_dir(conf.tenants_path()).unwrap() {
         let tenantid =
             ZTenantId::from_str(dir_entry.unwrap().file_name().to_str().unwrap()).unwrap();
@@ -68,7 +67,7 @@ pub fn create_repository_for_tenant(
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
     let repo = branches::create_repo(conf, tenantid, wal_redo_manager)?;
 
-    m.insert(tenantid, Arc::new(repo));
+    m.insert(tenantid, repo);
 
     Ok(())
 }

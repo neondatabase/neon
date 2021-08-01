@@ -25,7 +25,7 @@ use crate::page_cache;
 use crate::restore_local_repo;
 use crate::walredo::WalRedoManager;
 use crate::ZTenantId;
-use crate::{repository::Repository, PageServerConf, ZTimelineId};
+use crate::{repository::Repository, PageServerConf, RepositoryFormat, ZTimelineId};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -73,8 +73,8 @@ pub fn init_pageserver(
 pub fn create_repo(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
-    wal_redo_manager: Arc<dyn WalRedoManager>,
-) -> Result<ObjectRepository> {
+    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
+) -> Result<Arc<dyn Repository>> {
     let repo_dir = conf.tenant_path(&tenantid);
     if repo_dir.exists() {
         bail!("repo for {} already exists", tenantid)
@@ -104,19 +104,28 @@ pub fn create_repo(
     // and we failed to run initdb again in the same directory. This has been solved for the
     // rapid init+start case now, but the general race condition remains if you restart the
     // server quickly.
-    let storage = crate::rocksdb_storage::RocksObjectStore::create(conf, &tenantid)?;
+    let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
+        RepositoryFormat::Layered => Arc::new(
+            crate::layered_repository::LayeredRepository::new(conf,
+                                                              wal_redo_manager,
+                                                              tenantid
+        )),
+        RepositoryFormat::RocksDb => {
+            let obj_store = crate::rocksdb_storage::RocksObjectStore::open(conf, &tenantid).unwrap();
 
-    let repo = crate::object_repository::ObjectRepository::new(
-        conf,
-        std::sync::Arc::new(storage),
-        wal_redo_manager,
-        tenantid,
-    );
+            Arc::new(ObjectRepository::new(
+                conf,
+                Arc::new(obj_store),
+                wal_redo_manager,
+                tenantid
+            ))
+        }
+    };
 
     // Load data into pageserver
     // TODO To implement zenith import we need to
     //      move data loading out of create_repo()
-    bootstrap_timeline(conf, tenantid, tli, &repo)?;
+    bootstrap_timeline(conf, tenantid, tli, &*repo)?;
 
     Ok(repo)
 }

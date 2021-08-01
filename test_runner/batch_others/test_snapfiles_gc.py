@@ -42,7 +42,7 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     cur.execute("VACUUM")
 
                     print("Running GC before test")
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
                     # remember the number of files
@@ -54,7 +54,7 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     snapshot_relfiles_remain += 1;
                     print("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
                     assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain
@@ -68,7 +68,7 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
                     assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain + 1
@@ -80,7 +80,7 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
                     assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain + 1
@@ -89,7 +89,7 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
 
                     # Run GC again, with no changes in the database. Should not remove anything.
                     print("Run GC again, with nothing to do")
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
                     assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain
@@ -102,7 +102,7 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     print("Drop table and run GC again");
                     cur.execute("DROP TABLE foo")
 
-                    pscur.execute(f"do_gc {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
 
