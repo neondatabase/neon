@@ -1,50 +1,77 @@
-//! This module contains tools for managing timelines.
-//!
+//! This module contains timeline id -> safekeeper state map with file-backed
+//! persistence and support for interaction between sending and receiving wal.
 
 use anyhow::{bail, Result};
 use fs2::FileExt;
 use lazy_static::lazy_static;
 use log::*;
-use postgres_ffi::xlog_utils::{find_end_of_wal, TimeLineID};
+use postgres_ffi::xlog_utils::find_end_of_wal;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom};
-use std::path::Path;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
+
 use zenith_utils::zid::ZTimelineId;
 
-use crate::receive_wal::{SafeKeeperInfo, CONTROL_FILE_NAME, SK_FORMAT_VERSION, SK_MAGIC};
 use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};
+use crate::safekeeper::{
+    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, Storage,
+    SK_FORMAT_VERSION, SK_MAGIC,
+};
 use crate::WalAcceptorConf;
+use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
+
+const CONTROL_FILE_NAME: &str = "safekeeper.control";
 
 /// Shared state associated with database instance (tenant)
 #[derive(Debug)]
 struct SharedState {
-    /// quorum commit LSN
+    /// Safekeeper object
+    sk: SafeKeeper<FileStorage>,
+    /// opened file control file handle (needed to hold exlusive file lock)
+    control_file: File,
+    /// For receiving-sending wal cooperation
+    /// quorum commit LSN we've notified walsenders about
     commit_lsn: Lsn,
-    /// information about this safekeeper
-    info: SafeKeeperInfo,
-    /// opened file control file handle (needed to hold exlusive file lock
-    control_file: Option<File>,
     /// combined hot standby feedback from all replicas
     hs_feedback: HotStandbyFeedback,
 }
 
 impl SharedState {
-    fn new() -> Self {
-        Self {
+    /// Restore SharedState from control file. Locks the control file along the
+    /// way to prevent running more than one instance of safekeeper on the same
+    /// data dir.
+    /// If create=false and file doesn't exist, bails out.
+    fn create_restore(
+        conf: &WalAcceptorConf,
+        timelineid: ZTimelineId,
+        create: bool,
+    ) -> Result<Self> {
+        let (cf, state) = SharedState::load_control_file(conf, timelineid, create)?;
+        let storage = FileStorage {
+            control_file: cf.try_clone()?,
+            conf: conf.clone(),
+        };
+        let (flush_lsn, tli) = if state.server.wal_seg_size != 0 {
+            let wal_dir = conf.data_dir.join(format!("{}", timelineid));
+            find_end_of_wal(&wal_dir, state.server.wal_seg_size as usize, true)
+        } else {
+            (0, 0)
+        };
+
+        Ok(Self {
             commit_lsn: Lsn(0),
-            info: SafeKeeperInfo::new(),
-            control_file: None,
+            sk: SafeKeeper::new(Lsn(flush_lsn), tli, storage, state),
+            control_file: cf,
             hs_feedback: HotStandbyFeedback {
                 ts: 0,
                 xmin: u64::MAX,
                 catalog_xmin: u64::MAX,
             },
-        }
+        })
     }
 
     /// Accumulate hot standby feedbacks from replicas
@@ -54,80 +81,75 @@ impl SharedState {
         self.hs_feedback.ts = max(self.hs_feedback.ts, feedback.ts);
     }
 
-    /// Load and lock control file (prevent running more than one instance of safekeeper)
-    pub fn load_control_file(
-        &mut self,
+    /// Fetch and lock control file (prevent running more than one instance of safekeeper)
+    /// If create=false and file doesn't exist, bails out.
+    fn load_control_file(
         conf: &WalAcceptorConf,
         timelineid: ZTimelineId,
-    ) -> Result<()> {
-        if self.control_file.is_some() {
-            info!("control file for timeline {} is already open", timelineid);
-            return Ok(());
-        }
-
+        create: bool,
+    ) -> Result<(File, SafeKeeperState)> {
         let control_file_path = conf
             .data_dir
             .join(timelineid.to_string())
             .join(CONTROL_FILE_NAME);
-        info!("loading control file {}", control_file_path.display());
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&control_file_path)
-        {
-            Ok(file) => {
+        info!(
+            "loading control file {}, create={}",
+            control_file_path.display(),
+            create
+        );
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true);
+        if create {
+            opts.create(true);
+        }
+        match opts.open(&control_file_path) {
+            Ok(mut file) => {
                 // Lock file to prevent two or more active wal_acceptors
                 match file.try_lock_exclusive() {
                     Ok(()) => {}
                     Err(e) => {
                         bail!(
-                            "Control file {:?} is locked by some other process: {}",
+                            "control file {:?} is locked by some other process: {}",
                             &control_file_path,
                             e
                         );
                     }
                 }
-                self.control_file = Some(file);
-
-                let cfile_ref = self.control_file.as_mut().unwrap();
-                match SafeKeeperInfo::des_from(cfile_ref) {
-                    Err(e) => {
-                        warn!("read from {:?} failed: {}", control_file_path, e);
+                // Empty file is legit on 'create', don't try to deser from it.
+                if file.metadata().unwrap().len() == 0 {
+                    if !create {
+                        bail!("control file is empty");
                     }
-                    Ok(info) => {
-                        if info.magic != SK_MAGIC {
-                            bail!("Invalid control file magic: {}", info.magic);
+                    return Ok((file, SafeKeeperState::new()));
+                } else {
+                    match SafeKeeperState::des_from(&mut file) {
+                        Err(e) => {
+                            bail!("failed to read control file {:?}: {}", control_file_path, e);
                         }
-                        if info.format_version != SK_FORMAT_VERSION {
-                            bail!(
-                                "Incompatible format version: {} vs. {}",
-                                info.format_version,
-                                SK_FORMAT_VERSION
-                            );
+                        Ok(s) => {
+                            if s.magic != SK_MAGIC {
+                                bail!("bad control file magic: {}", s.magic);
+                            }
+                            if s.format_version != SK_FORMAT_VERSION {
+                                bail!(
+                                    "incompatible format version: {} vs. {}",
+                                    s.format_version,
+                                    SK_FORMAT_VERSION
+                                );
+                            }
+                            return Ok((file, s));
                         }
-                        self.info = info;
                     }
                 }
             }
             Err(e) => {
-                panic!(
-                    "Failed to open control file {:?}: {}",
-                    &control_file_path, e
+                bail!(
+                    "failed to open control file {:?}: {}",
+                    &control_file_path,
+                    e
                 );
             }
         }
-        Ok(())
-    }
-
-    pub fn save_control_file(&mut self, sync: bool) -> Result<()> {
-        let file = self.control_file.as_mut().unwrap();
-        file.seek(SeekFrom::Start(0))?;
-        self.info.ser_into(file)?;
-        if sync {
-            file.sync_all()?;
-        }
-        Ok(())
     }
 }
 
@@ -179,12 +201,32 @@ impl Timeline {
         self.notify_wal_senders(END_REPLICATION_MARKER);
     }
 
-    pub fn get_info(&self) -> SafeKeeperInfo {
-        return self.mutex.lock().unwrap().info.clone();
+    /// Pass arrived message to the safekeeper.
+    pub fn process_msg(&self, msg: &ProposerAcceptorMessage) -> Result<AcceptorProposerMessage> {
+        let mut rmsg: AcceptorProposerMessage;
+        let commit_lsn: Lsn;
+        {
+            let mut shared_state = self.mutex.lock().unwrap();
+            rmsg = shared_state.sk.process_msg(msg)?;
+            // locally available commit lsn. flush_lsn can be smaller than
+            // commit_lsn if we are catching up safekeeper.
+            commit_lsn = min(shared_state.sk.flush_lsn, shared_state.sk.s.commit_lsn);
+
+            // if this is AppendResponse, fill in proper hot standby feedback
+            match rmsg {
+                AcceptorProposerMessage::AppendResponse(ref mut resp) => {
+                    resp.hs_feedback = shared_state.hs_feedback.clone();
+                }
+                _ => (),
+            }
+        }
+        // Ping wal sender that new data might be available.
+        self.notify_wal_senders(commit_lsn);
+        Ok(rmsg)
     }
 
-    pub fn set_info(&self, info: &SafeKeeperInfo) {
-        self.mutex.lock().unwrap().info = info.clone();
+    pub fn get_info(&self) -> SafeKeeperState {
+        self.mutex.lock().unwrap().sk.s.clone()
     }
 
     // Accumulate hot standby feedbacks from replicas
@@ -198,43 +240,35 @@ impl Timeline {
         shared_state.hs_feedback.clone()
     }
 
-    pub fn load_control_file(&self, conf: &WalAcceptorConf) -> Result<()> {
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.load_control_file(conf, self.timelineid)
-    }
-
-    pub fn save_control_file(&self, sync: bool) -> Result<()> {
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.save_control_file(sync)
+    pub fn get_end_of_wal(&self) -> (Lsn, u32) {
+        let shared_state = self.mutex.lock().unwrap();
+        (shared_state.sk.flush_lsn, shared_state.sk.tli)
     }
 }
 
 // Utilities needed by various Connection-like objects
 pub trait TimelineTools {
-    fn set(&mut self, timeline_id: ZTimelineId) -> Result<()>;
+    fn set(&mut self, conf: &WalAcceptorConf, timeline_id: ZTimelineId, create: bool)
+        -> Result<()>;
     fn get(&self) -> &Arc<Timeline>;
-    fn find_end_of_wal(&self, data_dir: &Path, precise: bool) -> (Lsn, TimeLineID);
 }
 
 impl TimelineTools for Option<Arc<Timeline>> {
-    fn set(&mut self, timeline_id: ZTimelineId) -> Result<()> {
+    fn set(
+        &mut self,
+        conf: &WalAcceptorConf,
+        timeline_id: ZTimelineId,
+        create: bool,
+    ) -> Result<()> {
         // We will only set the timeline once. If it were to ever change,
         // anyone who cloned the Arc would be out of date.
         assert!(self.is_none());
-        *self = Some(GlobalTimelines::store(timeline_id)?);
+        *self = Some(GlobalTimelines::get(conf, timeline_id, create)?);
         Ok(())
     }
 
     fn get(&self) -> &Arc<Timeline> {
         self.as_ref().unwrap()
-    }
-
-    /// Find last WAL record. If "precise" is false then just locate last partial segment
-    fn find_end_of_wal(&self, data_dir: &Path, precise: bool) -> (Lsn, TimeLineID) {
-        let seg_size = self.get().get_info().server.wal_seg_size as usize;
-        let wal_dir = data_dir.join(format!("{}", self.get().timelineid));
-        let (lsn, timeline) = find_end_of_wal(&wal_dir, seg_size, precise);
-        (Lsn(lsn), timeline)
     }
 }
 
@@ -247,22 +281,143 @@ lazy_static! {
 struct GlobalTimelines;
 
 impl GlobalTimelines {
-    /// Store a new timeline into the global TIMELINES map.
-    fn store(timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
+    /// Get a timeline with control file loaded from the global TIMELINES map.
+    /// If control file doesn't exist and create=false, bails out.
+    pub fn get(
+        conf: &WalAcceptorConf,
+        timeline_id: ZTimelineId,
+        create: bool,
+    ) -> Result<Arc<Timeline>> {
         let mut timelines = TIMELINES.lock().unwrap();
 
         match timelines.get(&timeline_id) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
-                info!("creating timeline dir {}", timeline_id);
+                info!(
+                    "creating timeline dir {}, create is {}",
+                    timeline_id, create
+                );
                 fs::create_dir_all(timeline_id.to_string())?;
 
-                let shared_state = SharedState::new();
+                let shared_state = SharedState::create_restore(conf, timeline_id, create)?;
 
-                let new_tid = Arc::new(Timeline::new(timeline_id, shared_state));
-                timelines.insert(timeline_id, Arc::clone(&new_tid));
-                Ok(new_tid)
+                let new_tli = Arc::new(Timeline::new(timeline_id, shared_state));
+                timelines.insert(timeline_id, Arc::clone(&new_tli));
+                Ok(new_tli)
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct FileStorage {
+    control_file: File,
+    conf: WalAcceptorConf,
+}
+
+impl Storage for FileStorage {
+    fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()> {
+        self.control_file.seek(SeekFrom::Start(0))?;
+        s.ser_into(&mut self.control_file)?;
+        if sync {
+            self.control_file.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn write_wal(&mut self, s: &SafeKeeperState, startpos: Lsn, buf: &[u8]) -> Result<()> {
+        let mut bytes_left: usize = buf.len();
+        let mut bytes_written: usize = 0;
+        let mut partial;
+        let mut start_pos = startpos;
+        const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
+        let wal_seg_size = s.server.wal_seg_size as usize;
+        let ztli = s.server.ztli;
+
+        /* Extract WAL location for this block */
+        let mut xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
+
+        while bytes_left != 0 {
+            let bytes_to_write;
+
+            /*
+             * If crossing a WAL boundary, only write up until we reach wal
+             * segment size.
+             */
+            if xlogoff + bytes_left > wal_seg_size {
+                bytes_to_write = wal_seg_size - xlogoff;
+            } else {
+                bytes_to_write = bytes_left;
+            }
+
+            /* Open file */
+            let segno = start_pos.segment_number(wal_seg_size);
+            // note: we basically don't support changing pg timeline
+            let wal_file_name = XLogFileName(s.server.tli, segno, wal_seg_size);
+            let wal_file_path = self
+                .conf
+                .data_dir
+                .join(ztli.to_string())
+                .join(wal_file_name.clone());
+            let wal_file_partial_path = self
+                .conf
+                .data_dir
+                .join(ztli.to_string())
+                .join(wal_file_name.clone() + ".partial");
+
+            {
+                let mut wal_file: File;
+                /* Try to open already completed segment */
+                if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path) {
+                    wal_file = file;
+                    partial = false;
+                } else if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_partial_path)
+                {
+                    /* Try to open existed partial file */
+                    wal_file = file;
+                    partial = true;
+                } else {
+                    /* Create and fill new partial file */
+                    partial = true;
+                    match OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .open(&wal_file_partial_path)
+                    {
+                        Ok(mut file) => {
+                            for _ in 0..(wal_seg_size / XLOG_BLCKSZ) {
+                                file.write_all(&ZERO_BLOCK)?;
+                            }
+                            wal_file = file;
+                        }
+                        Err(e) => {
+                            error!("Failed to open log file {:?}: {}", &wal_file_path, e);
+                            return Err(e.into());
+                        }
+                    }
+                }
+                wal_file.seek(SeekFrom::Start(xlogoff as u64))?;
+                wal_file.write_all(&buf[bytes_written..(bytes_written + bytes_to_write)])?;
+
+                // Flush file, if not said otherwise
+                if !self.conf.no_sync {
+                    wal_file.sync_all()?;
+                }
+            }
+            /* Write was successful, advance our position */
+            bytes_written += bytes_to_write;
+            bytes_left -= bytes_to_write;
+            start_pos += bytes_to_write as u64;
+            xlogoff += bytes_to_write;
+
+            /* Did we reach the end of a WAL segment? */
+            if start_pos.segment_offset(wal_seg_size) == 0 {
+                xlogoff = 0;
+                if partial {
+                    fs::rename(&wal_file_partial_path, &wal_file_path)?;
+                }
+            }
+        }
+        Ok(())
     }
 }

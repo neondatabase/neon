@@ -21,6 +21,7 @@ pub struct SendWalHandler {
     pub conf: WalAcceptorConf,
     /// assigned application name
     pub appname: Option<String>,
+    pub timelineid: Option<ZTimelineId>,
     pub timeline: Option<Arc<Timeline>>,
 }
 
@@ -29,7 +30,7 @@ impl postgres_backend::Handler for SendWalHandler {
         match sm.params.get("ztimelineid") {
             Some(ref ztimelineid) => {
                 let ztlid = ZTimelineId::from_str(ztimelineid)?;
-                self.timeline.set(ztlid)?;
+                self.timelineid = Some(ztlid);
             }
             _ => bail!("timelineid is required"),
         }
@@ -40,6 +41,16 @@ impl postgres_backend::Handler for SendWalHandler {
     }
 
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()> {
+        // START_WAL_PUSH is the only command that initializes the timeline
+        if self.timeline.is_none() {
+            if query_string.starts_with(b"START_WAL_PUSH") {
+                self.timeline
+                    .set(&self.conf, self.timelineid.unwrap(), true)?;
+            } else {
+                self.timeline
+                    .set(&self.conf, self.timelineid.unwrap(), false)?;
+            }
+        }
         if query_string.starts_with(b"IDENTIFY_SYSTEM") {
             self.handle_identify_system(pgb)?;
             Ok(())
@@ -60,6 +71,7 @@ impl SendWalHandler {
         SendWalHandler {
             conf,
             appname: None,
+            timelineid: None,
             timeline: None,
         }
     }
@@ -68,7 +80,7 @@ impl SendWalHandler {
     /// Handle IDENTIFY_SYSTEM replication command
     ///
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
-        let (start_pos, timeline) = self.timeline.find_end_of_wal(&self.conf.data_dir, false);
+        let (start_pos, timeline) = self.timeline.get().get_end_of_wal();
         let lsn = start_pos.to_string();
         let tli = timeline.to_string();
         let sysid = self.timeline.get().get_info().server.system_id.to_string();
