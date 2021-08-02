@@ -35,6 +35,16 @@ pub struct HotStandbyFeedback {
     pub catalog_xmin: FullTransactionId,
 }
 
+impl HotStandbyFeedback {
+    pub fn empty() -> HotStandbyFeedback {
+        HotStandbyFeedback {
+            ts: 0,
+            xmin: 0,
+            catalog_xmin: 0,
+        }
+    }
+}
+
 /// A network connection that's speaking the replication protocol.
 pub struct ReplicationConn {
     /// This is an `Option` because we will spawn a background thread that will
@@ -148,7 +158,7 @@ impl ReplicationConn {
                 break;
             }
         }
-        let (wal_end, timeline) = swh.timeline.find_end_of_wal(&swh.conf.data_dir, true);
+        let (wal_end, timeline) = swh.timeline.get().get_end_of_wal();
         if start_pos == Lsn(0) {
             start_pos = wal_end;
         }

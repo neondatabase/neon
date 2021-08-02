@@ -121,6 +121,7 @@ fn find_end_of_wal_segment(
     let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];
 
     while offs < wal_seg_size {
+        // we are at the beginning of the page; read it in
         if offs % XLOG_BLCKSZ == 0 {
             if let Ok(bytes_read) = file.read(&mut buf) {
                 if bytes_read != buf.len() {
@@ -144,11 +145,12 @@ fn find_end_of_wal_segment(
             } else {
                 offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
             }
+        // beginning of the next record
         } else if contlen == 0 {
             let page_offs = offs % XLOG_BLCKSZ;
             let xl_tot_len = LittleEndian::read_u32(&buf[page_offs..page_offs + 4]) as usize;
             if xl_tot_len == 0 {
-                break;
+                break; // zeros, reached the end
             }
             last_valid_rec_pos = offs;
             offs += 4;
@@ -156,12 +158,13 @@ fn find_end_of_wal_segment(
             contlen = xl_tot_len - 4;
             rec_hdr[0..4].copy_from_slice(&buf[page_offs..page_offs + 4]);
         } else {
-            let page_offs = offs % XLOG_BLCKSZ;
             // we're continuing a record, possibly from previous page.
+            let page_offs = offs % XLOG_BLCKSZ;
             let pageleft = XLOG_BLCKSZ - page_offs;
 
             // read the rest of the record, or as much as fits on this page.
             let n = min(contlen, pageleft);
+            // fill rec_hdr (header up to (but not including) xl_crc field)
             if rec_offs < XLOG_RECORD_CRC_OFFS {
                 let len = min(XLOG_RECORD_CRC_OFFS - rec_offs, n);
                 rec_hdr[rec_offs..rec_offs + len].copy_from_slice(&buf[page_offs..page_offs + len]);
@@ -185,6 +188,8 @@ fn find_end_of_wal_segment(
                 crc = crc32c_append(crc, &rec_hdr);
                 offs = (offs + 7) & !7; // pad on 8 bytes boundary */
                 if crc == wal_crc {
+                    // record is valid, advance the result to its end (with
+                    // alignment to the next record taken into account)
                     last_valid_rec_pos = offs;
                 } else {
                     info!(
@@ -201,6 +206,9 @@ fn find_end_of_wal_segment(
 
 ///
 /// Scan a directory that contains PostgreSQL WAL files, for the end of WAL.
+/// If precise, returns end LSN (next insertion point, basically);
+/// otherwise, start of the last segment.
+/// Returns (0, 0) if there is no WAL.
 ///
 pub fn find_end_of_wal(
     data_dir: &Path,
