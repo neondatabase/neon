@@ -111,7 +111,7 @@ pub fn create_repo(
                                                               tenantid
         )),
         RepositoryFormat::RocksDb => {
-            let obj_store = crate::rocksdb_storage::RocksObjectStore::open(conf, &tenantid).unwrap();
+            let obj_store = crate::rocksdb_storage::RocksObjectStore::create(conf, &tenantid)?;
 
             Arc::new(ObjectRepository::new(
                 conf,
