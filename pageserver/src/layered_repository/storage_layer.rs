@@ -33,6 +33,7 @@ pub trait Layer: Send + Sync {
     fn get_relish_tag(&self) -> RelishTag;
     fn get_start_lsn(&self) -> Lsn;
     fn get_end_lsn(&self) -> Lsn;
+    fn is_dropped(&self) -> bool;
 
     fn get_page_at_lsn(
         &self,
@@ -76,5 +77,9 @@ pub trait Layer: Send + Sync {
         )
     }
 
-    fn freeze(&self, end_lsn: Lsn) -> Result<Option<Arc<dyn Layer>>>;
+    fn freeze(&self, end_lsn: Lsn, walredo_mgr: &dyn WalRedoManager) -> Result<Vec<Arc<dyn Layer>>>;
+
+    fn delete(&self) -> Result<()>;
+
+    fn unload(&self) -> Result<()>;
 }

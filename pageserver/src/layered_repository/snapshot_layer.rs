@@ -41,22 +41,21 @@ use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::PageVersion;
 use crate::layered_repository::storage_layer::ZERO_PAGE;
 use crate::relish::*;
-use crate::repository::{GcResult, WALRecord};
+use crate::repository::WALRecord;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTimelineId, ZTenantId};
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use log::*;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::Bound::Included;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
 
@@ -205,8 +204,10 @@ impl fmt::Display for SnapshotFileName {
 
 ///
 /// SnapshotLayer is the in-memory data structure associated with an on-disk snapshot file.
-/// It is also used to accumulate new changes at the tip of a branch; end_lsn is u64::MAX
-/// in that case.
+/// We hold a SnapshotLayer in memory for each file, in the LayerMap. If a layer is in
+/// "loaded" state, we have a copy of the file in memory, in 'inner'. Otherwise the struct
+/// is just a placeholder for a file that exists in memory, and it needs to be loaded
+/// before using it in queries.
 ///
 pub struct SnapshotLayer {
     conf: &'static PageServerConf,
@@ -222,16 +223,24 @@ pub struct SnapshotLayer {
 
     dropped: bool,
 
+    inner: Mutex<SnapshotLayerInner>
+}
+
+pub struct SnapshotLayerInner {
+    // If false, the 'page_versions' and 'relsizes' have not been loaded into memory
+    // yet.
+    loaded: bool,
+    
     ///
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
     ///
-    page_versions: Mutex<BTreeMap<(u32, Lsn), PageVersion>>,
+    page_versions: BTreeMap<(u32, Lsn), PageVersion>,
 
     ///
     /// `relsizes` tracks the size of the relation at different points in time.
     ///
-    relsizes: Mutex<BTreeMap<Lsn, u32>>,
+    relsizes: BTreeMap<Lsn, u32>,
 }
 
 impl Layer for SnapshotLayer {
@@ -245,6 +254,10 @@ impl Layer for SnapshotLayer {
 
     fn get_relish_tag(&self) -> RelishTag {
         return self.rel;
+    }
+
+    fn is_dropped(&self) -> bool {
+        return self.dropped;
     }
 
     fn get_start_lsn(&self) -> Lsn {
@@ -267,10 +280,10 @@ impl Layer for SnapshotLayer {
         let mut page_img: Option<Bytes> = None;
         let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
         {
-            let page_versions = self.page_versions.lock().unwrap();
+            let inner = self.load()?;
             let minkey = (blknum, Lsn(0));
             let maxkey = (blknum, lsn);
-            let mut iter = page_versions.range((Included(&minkey), Included(&maxkey)));
+            let mut iter = inner.page_versions.range((Included(&minkey), Included(&maxkey)));
             while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
                 if let Some(img) = &entry.page_image {
                     page_img = Some(img.clone());
@@ -291,7 +304,7 @@ impl Layer for SnapshotLayer {
                 }
             }
 
-            // release lock on 'page_versions'
+            // release lock on 'inner'
         }
         records.reverse();
 
@@ -365,12 +378,12 @@ impl Layer for SnapshotLayer {
     /// Get size of the relation at given LSN
     fn get_rel_size(&self, lsn: Lsn) -> Result<u32> {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let relsizes = self.relsizes.lock().unwrap();
-        let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let inner = self.load()?;
+        let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             let result = *entry;
-            drop(relsizes);
+            drop(inner);
             trace!("get_relsize: {} at {} -> {}", self.rel, lsn, result);
             Ok(result)
         } else {
@@ -382,9 +395,9 @@ impl Layer for SnapshotLayer {
     /// Does this relation exist at given LSN?
     fn get_rel_exists(&self, lsn: Lsn) -> Result<bool> {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let relsizes = self.relsizes.lock().unwrap();
+        let inner = self.load()?;
 
-        let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         let result = if let Some((_entry_lsn, _entry)) = iter.next_back() {
             true
@@ -409,8 +422,22 @@ impl Layer for SnapshotLayer {
         bail!("cannot modify historical snapshot layer");
     }
 
-    fn freeze(&self, _end_lsn: Lsn) -> Result<Option<Arc<dyn Layer>>> {
+    fn freeze(&self, _end_lsn: Lsn, _walredo_mgr: &dyn WalRedoManager) -> Result<Vec<Arc<dyn Layer>>> {
         bail!("cannot freeze historical snapshot layer");
+    }
+
+    fn delete(&self) -> Result<()> {
+        // delete underlying file
+        fs::remove_file(self.path())?;
+        Ok(())
+    }
+
+    fn unload(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.page_versions = BTreeMap::new();
+        inner.relsizes = BTreeMap::new();
+        inner.loaded = false;
+        Ok(())
     }
 }
 
@@ -463,20 +490,16 @@ impl SnapshotLayer {
             start_lsn: start_lsn,
             end_lsn,
             dropped,
-            page_versions: Mutex::new(page_versions),
-            relsizes: Mutex::new(relsizes),
+            inner: Mutex::new(SnapshotLayerInner {
+                loaded: true,
+                page_versions: page_versions,
+                relsizes: relsizes,
+            }),
         };
+        let inner = snapfile.inner.lock().unwrap();
 
-        snapfile.save()?;
-        Ok(snapfile)
-    }
-
-    /// Write the in-memory btreemaps into files
-    fn save(&self) -> Result<()> {
-        let path = self.path();
-
-        let page_versions = self.page_versions.lock().unwrap();
-        let relsizes = self.relsizes.lock().unwrap();
+        // Write the in-memory btreemaps into files
+        let path = snapfile.path();
 
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
@@ -486,13 +509,13 @@ impl SnapshotLayer {
 
         // Write out page versions
         let mut chapter = book.new_chapter(PAGE_VERSIONS_CHAPTER);
-        let buf = BTreeMap::ser(&page_versions)?;
+        let buf = BTreeMap::ser(&inner.page_versions)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
         // and relsizes to separate chapter
         let mut chapter = book.new_chapter(REL_SIZES_CHAPTER);
-        let buf = BTreeMap::ser(&relsizes)?;
+        let buf = BTreeMap::ser(&inner.relsizes)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
@@ -500,83 +523,29 @@ impl SnapshotLayer {
 
         trace!("saved {}", &path.display());
 
-        Ok(())
+        drop(inner);
+
+        Ok(snapfile)
     }
 
-    ///
-    /// Find the snapshot file with latest LSN that covers the given 'lsn', or is before it.
-    ///
-    pub fn find_latest_snapshot_file(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        rel: RelishTag,
-        earliest_lsn: Lsn,
-        lsn: Lsn,
-    ) -> Result<Option<(Lsn, Lsn, bool)>> {
-        // Scan the timeline directory to get all rels in this timeline.
-        let mut result_start_lsn = Lsn(0);
-        let mut result_end_lsn = Lsn(0);
-        let mut result_dropped = false;
-        for fname in Self::list_snapshot_files(conf, timelineid, tenantid)? {
-            if fname.end_lsn <= earliest_lsn {
-                continue;
-            }
+    fn load(&self) -> Result<MutexGuard<SnapshotLayerInner>> {
 
-            if fname.rel == rel && fname.start_lsn <= lsn && fname.end_lsn > result_end_lsn {
-                result_start_lsn = fname.start_lsn;
-                result_end_lsn = fname.end_lsn;
-                result_dropped = fname.dropped;
-            }
-        }
-        if result_start_lsn != Lsn(0) {
-            Ok(Some((result_start_lsn, result_end_lsn, result_dropped)))
-        } else {
-            Ok(None)
-        }
-    }
+        // quick exit if already loaded
+        let mut inner = self.inner.lock().unwrap();
 
-    ///
-    /// Load the state for one relation back into memory.
-    ///
-    /// Returns the latest snapshot file that before the given 'lsn', but newer than 'earliest_lsn'
-    ///
-    pub fn load(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        rel: RelishTag,
-        earliest_lsn: Lsn,
-        lsn: Lsn,
-    ) -> Result<Option<SnapshotLayer>> {
-        if let Some((start_lsn, end_lsn, dropped)) =
-            Self::find_latest_snapshot_file(conf, timelineid, tenantid, rel, earliest_lsn, lsn)?
-        {
-            let snap = Self::load_path(conf, timelineid, tenantid, rel, start_lsn, end_lsn, dropped)?;
-            Ok(Some(snap))
-        } else {
-            Ok(None)
+        if inner.loaded {
+            return Ok(inner);
         }
-    }
 
-    fn load_path(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        rel: RelishTag,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
-        dropped: bool,
-    ) -> Result<SnapshotLayer> {
         let path = Self::path_for(
-            conf,
-            timelineid,
-            tenantid,
+            self.conf,
+            self.timelineid,
+            self.tenantid,
             &SnapshotFileName {
-                rel,
-                start_lsn,
-                end_lsn,
-                dropped,
+                rel: self.rel,
+                start_lsn: self.start_lsn,
+                end_lsn: self.end_lsn,
+                dropped: self.dropped,
             },
         );
 
@@ -597,200 +566,46 @@ impl SnapshotLayer {
 
         debug!("loaded from {}", &path.display());
 
-        Ok(SnapshotLayer {
-            conf,
-            timelineid,
-            tenantid,
-            rel,
-            start_lsn,
-            end_lsn,
-            dropped,
-            page_versions: Mutex::new(page_versions),
-            relsizes: Mutex::new(relsizes),
-        })
-    }
+        *inner = SnapshotLayerInner {
+            loaded: true,
+            page_versions,
+            relsizes,
+        };
 
-    pub fn list_rels(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        spcnode: u32,
-        dbnode: u32,
-    ) -> Result<HashSet<RelTag>> {
-        let mut rels: HashSet<RelTag> = HashSet::new();
-
-        // Scan the timeline directory to get all rels in this timeline.
-        for snapfiles in Self::list_snapshot_files(conf, timelineid, tenantid)? {
-            if let RelishTag::Relation(reltag) = snapfiles.rel {
-                // FIXME: skip if it was dropped before the requested LSN. But there is no
-                // LSN argument
-
-                if (spcnode == 0 || reltag.spcnode == spcnode)
-                    && (dbnode == 0 || reltag.dbnode == dbnode)
-                {
-                    rels.insert(reltag);
-                }
-            }
-        }
-        Ok(rels)
-    }
-
-    pub fn list_nonrels(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        _lsn: Lsn,
-    ) -> Result<HashSet<RelishTag>> {
-        let mut rels: HashSet<RelishTag> = HashSet::new();
-
-        // Scan the timeline directory to get all rels in this timeline.
-        for snapfile in Self::list_snapshot_files(conf, timelineid, tenantid)? {
-            // FIXME: skip if it was dropped before the requested LSN.
-
-            if let RelishTag::Relation(_) = snapfile.rel {
-            } else {
-                rels.insert(snapfile.rel);
-            }
-        }
-        Ok(rels)
-    }
-
-    ///
-    /// Garbage collect snapshot files on a timeline that are no longer needed.
-    ///
-    /// The caller specifies how much history is needed with the two arguments:
-    ///
-    /// retain_lsns: keep page a version of each page at these LSNs
-    /// cutoff: also keep everything newer than this LSN
-    ///
-    /// The 'retain_lsns' lists is currently used to prevent removing files that
-    /// are needed by child timelines. In the future, the user might be able to
-    /// name additional points in time to retain. The caller is responsible for
-    /// collecting that information.
-    ///
-    /// The 'cutoff' point is used to retain recent versions that might still be
-    /// needed by read-only nodes. (As of this writing, the caller just passes
-    /// the latest LSN subtracted by a constant, and doesn't do anything smart
-    /// to figure out what read-only nodes might actually need.)
-    ///
-    /// Currently, we don't make any attempt at removing unneeded page versions
-    /// within a snapshot file. We can only remove the whole file if it's fully
-    /// obsolete.
-    ///
-    pub fn gc_timeline(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        retain_lsns: Vec<Lsn>,
-        cutoff: Lsn,
-    ) -> Result<GcResult> {
-        let now = Instant::now();
-        let mut result: GcResult = Default::default();
-
-        // Scan all snapshot files in the directory. For each file, if a newer file
-        // exists, we can remove the old one.
-
-        // For convenience and speed, slurp the list of files in the directory into memory first.
-        let mut snapfiles: BTreeSet<SnapshotFileName> = BTreeSet::new();
-
-        for fname in Self::list_snapshot_files(conf, timelineid, tenantid)? {
-            snapfiles.insert(fname.clone());
-
-            if fname.rel.is_relation() {
-                result.snapshot_relfiles_total += 1;
-            } else {
-                result.snapshot_nonrelfiles_total += 1;
-            }
-        }
-
-        // Now determine for each file if it needs to be retained
-        'outer: for snapfile in &snapfiles {
-            // Is it newer than cutoff point?
-            if snapfile.end_lsn > cutoff {
-                if snapfile.rel.is_relation() {
-                    result.snapshot_relfiles_needed_by_cutoff += 1;
-                } else {
-                    result.snapshot_nonrelfiles_needed_by_cutoff += 1;
-                }
-                continue 'outer;
-            }
-
-            // Is it needed by a child branch?
-            for retain_lsn in &retain_lsns {
-                // FIXME: are the bounds inclusive or exclusive?
-                if snapfile.start_lsn <= *retain_lsn && *retain_lsn <= snapfile.end_lsn {
-                    if snapfile.rel.is_relation() {
-                        result.snapshot_relfiles_needed_by_branches += 1;
-                    } else {
-                        result.snapshot_nonrelfiles_needed_by_branches += 1;
-                    }
-                    continue 'outer;
-                }
-            }
-
-            // Unless the relation was dropped, is there a later snapshot file for this relation?
-            if !snapfile.dropped {
-                let mut found_later_file = false;
-                if let Some(other_snapfile) =
-                    snapfiles.range((Excluded(snapfile), Unbounded)).next()
-                {
-                    if other_snapfile.rel != snapfile.rel {
-                        // walked past the files for this rel. So there is no later file.
-                    } else {
-                        // found a later file.
-                        found_later_file = true;
-                    }
-                }
-
-                if !found_later_file {
-                    if snapfile.rel.is_relation() {
-                        result.snapshot_relfiles_not_updated += 1;
-                    } else {
-                        result.snapshot_nonrelfiles_not_updated += 1;
-                    }
-                    continue 'outer;
-                }
-            }
-
-            // We didn't find any reason to keep this file, so remove it.
-            let path = Self::path_for(conf, timelineid, tenantid, snapfile);
-            info!("garbage collecting {}", path.display());
-            fs::remove_file(path)?;
-
-            if snapfile.dropped {
-                if snapfile.rel.is_relation() {
-                    result.snapshot_relfiles_dropped += 1;
-                } else {
-                    result.snapshot_nonrelfiles_dropped += 1;
-                }
-            } else {
-                if snapfile.rel.is_relation() {
-                    result.snapshot_relfiles_removed += 1;
-                } else {
-                    result.snapshot_nonrelfiles_removed += 1;
-                }
-            }
-        }
-
-        result.elapsed = now.elapsed();
-        Ok(result)
+        Ok(inner)
     }
 
     // TODO: returning an Iterator would be more idiomatic
-    fn list_snapshot_files(
+    pub fn list_snapshot_files(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-    ) -> Result<Vec<SnapshotFileName>> {
+    ) -> Result<Vec<Arc<dyn Layer>>> {
         let path = conf.timeline_path(&timelineid, &tenantid);
 
-        let mut snapfiles = Vec::new();
+        let mut snapfiles: Vec<Arc<dyn Layer>> = Vec::new();
         for direntry in fs::read_dir(path)? {
             let fname = direntry?.file_name();
             let fname = fname.to_str().unwrap();
 
             if let Some(snapfilename) = SnapshotFileName::from_str(fname) {
-                snapfiles.push(snapfilename);
+
+                let snapfile = SnapshotLayer {
+                    conf,
+                    timelineid,
+                    tenantid,
+                    rel: snapfilename.rel,
+                    start_lsn: snapfilename.start_lsn,
+                    end_lsn: snapfilename.end_lsn,
+                    dropped: snapfilename.dropped,
+                    inner: Mutex::new(SnapshotLayerInner {
+                        loaded: false,
+                        page_versions: BTreeMap::new(),
+                        relsizes: BTreeMap::new(),
+                    }),
+                };
+
+                snapfiles.push(Arc::new(snapfile));
             }
         }
         return Ok(snapfiles);
@@ -804,13 +619,11 @@ impl SnapshotLayer {
             self.rel, self.start_lsn, self.end_lsn
         );
 
-        let relsizes = self.relsizes.lock().unwrap();
-        //let page_versions = self.page_versions.lock().unwrap();
-
-        for (k, v) in relsizes.iter() {
+        let inner = self.inner.lock().unwrap();
+        for (k, v) in inner.relsizes.iter() {
             result += &format!("{}: {}\n", k, v);
         }
-        //for (k, v) in page_versions.iter() {
+        //for (k, v) in inner.page_versions.iter() {
         //    result += &format!("blk {} at {}: {}/{}\n", k.0, k.1, v.page_image.is_some(), v.record.is_some());
         //}
 

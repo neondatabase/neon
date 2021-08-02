@@ -32,6 +32,11 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     # Create a test table
                     cur.execute("CREATE TABLE foo(x integer)")
 
+                    print("Inserting two more rows and running GC")
+                    cur.execute("select relfilenode from pg_class where oid = 'foo'::regclass");
+                    row = cur.fetchone();
+                    print("relfilenode is {}", row[0]);
+
                     # Run GC, to clear out any garbage left behind in the catalogs by
                     # the CREATE TABLE command. We want to have a clean slate with no garbage
                     # before running the actual tests below, otherwise the counts won't match

@@ -231,10 +231,11 @@ impl PostgresBackend {
                 }
 
                 Some(FeMessage::Query(m)) => {
-                    trace!("got query {:?}", m.body);
+                    info!("got query {:?}", m.body);
                     // xxx distinguish fatal and recoverable errors?
                     if let Err(e) = handler.process_query(self, m.body) {
                         let errmsg = format!("{}", e);
+                        error!("process_query errored: {}", errmsg);
                         self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
                     }
                     self.write_message(&BeMessage::ReadyForQuery)?;

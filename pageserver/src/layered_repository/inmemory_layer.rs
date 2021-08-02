@@ -35,22 +35,24 @@ pub struct InMemoryLayer {
     ///
     start_lsn: Lsn,
 
-    // FIXME: the three mutex-protected fields below should probably be protected
-    // by a single mutex.
+    inner: Mutex<InMemoryLayerInner>,
+}
+
+pub struct InMemoryLayerInner {
     /// If this relation was dropped, remember when that happened. Lsn(0) means
     /// it hasn't been dropped
-    drop_lsn: Mutex<Lsn>,
+    drop_lsn: Lsn,
 
     ///
     /// All versions of all pages in the layer are are kept here.
     /// Indexed by block number and LSN.
     ///
-    page_versions: Mutex<BTreeMap<(u32, Lsn), PageVersion>>,
+    page_versions: BTreeMap<(u32, Lsn), PageVersion>,
 
     ///
     /// `relsizes` tracks the size of the relation at different points in time.
     ///
-    relsizes: Mutex<BTreeMap<Lsn, u32>>,
+    relsizes: BTreeMap<Lsn, u32>,
 }
 
 impl Layer for InMemoryLayer {
@@ -74,6 +76,11 @@ impl Layer for InMemoryLayer {
         return Lsn(u64::MAX);
     }
 
+    fn is_dropped(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        return inner.drop_lsn != Lsn(0);
+    }
+
     /// Look up given page in the cache.
     fn get_page_at_lsn(
         &self,
@@ -85,11 +92,12 @@ impl Layer for InMemoryLayer {
         let mut records: Vec<WALRecord> = Vec::new();
         let mut page_img: Option<Bytes> = None;
         let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
+
         {
-            let page_versions = self.page_versions.lock().unwrap();
+            let inner = self.inner.lock().unwrap();
             let minkey = (blknum, Lsn(0));
             let maxkey = (blknum, lsn);
-            let mut iter = page_versions.range((Included(&minkey), Included(&maxkey)));
+            let mut iter = inner. page_versions.range((Included(&minkey), Included(&maxkey)));
             while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
                 if let Some(img) = &entry.page_image {
                     page_img = Some(img.clone());
@@ -182,12 +190,12 @@ impl Layer for InMemoryLayer {
     /// Get size of the relation at given LSN
     fn get_rel_size(&self, lsn: Lsn) -> Result<u32> {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let relsizes = self.relsizes.lock().unwrap();
-        let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let inner = self.inner.lock().unwrap();
+        let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             let result = *entry;
-            drop(relsizes);
+            drop(inner);
             trace!("get_relsize: {} at {} -> {}", self.rel, lsn, result);
             Ok(result)
         } else {
@@ -198,9 +206,9 @@ impl Layer for InMemoryLayer {
     /// Does this relation exist at given LSN?
     fn get_rel_exists(&self, lsn: Lsn) -> Result<bool> {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let relsizes = self.relsizes.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
 
-        let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         let result = if let Some((_entry_lsn, _entry)) = iter.next_back() {
             true
@@ -222,25 +230,21 @@ impl Layer for InMemoryLayer {
             self.timelineid,
             lsn
         );
-        {
-            let mut page_versions = self.page_versions.lock().unwrap();
-            let old = page_versions.insert((blknum, lsn), pv);
+        let mut inner = self.inner.lock().unwrap();
 
-            if old.is_some() {
-                // We already had an entry for this LSN. That's odd..
-                warn!(
-                    "Page version of rel {:?} blk {} at {} already exists",
-                    self.rel, blknum, lsn
-                );
-            }
+        let old = inner.page_versions.insert((blknum, lsn), pv);
 
-            // release lock on 'page_versions'
+        if old.is_some() {
+            // We already had an entry for this LSN. That's odd..
+            warn!(
+                "Page version of rel {:?} blk {} at {} already exists",
+                self.rel, blknum, lsn
+            );
         }
 
         // Also update the relation size, if this extended the relation.
         if self.rel.is_blocky() {
-            let mut relsizes = self.relsizes.lock().unwrap();
-            let mut iter = relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+            let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
             let oldsize;
             if let Some((_entry_lsn, entry)) = iter.next_back() {
@@ -257,7 +261,7 @@ impl Layer for InMemoryLayer {
                     blknum + 1,
                     lsn
                 );
-                relsizes.insert(lsn, blknum + 1);
+                inner.relsizes.insert(lsn, blknum + 1);
             }
         }
 
@@ -266,8 +270,8 @@ impl Layer for InMemoryLayer {
 
     /// Remember that the relation was truncated at given LSN
     fn put_truncation(&self, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
-        let mut relsizes = self.relsizes.lock().unwrap();
-        let old = relsizes.insert(lsn, relsize);
+        let mut inner = self.inner.lock().unwrap();
+        let old = inner.relsizes.insert(lsn, relsize);
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -279,10 +283,10 @@ impl Layer for InMemoryLayer {
 
     /// Remember that the relation was truncated at given LSN
     fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()> {
-        let mut drop_lsn = self.drop_lsn.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
 
-        assert!(*drop_lsn == Lsn(0));
-        *drop_lsn = lsn;
+        assert!(inner.drop_lsn == Lsn(0));
+        inner.drop_lsn = lsn;
 
         info!("dropped relation {} at {}", self.rel, lsn);
 
@@ -296,17 +300,15 @@ impl Layer for InMemoryLayer {
     /// If there were page versions newer than 'end_lsn', a new in-memory
     /// layer is returned with those page versions. Otherwise returns None.
     ///
-    fn freeze(&self, end_lsn: Lsn) -> Result<Option<Arc<dyn Layer>>> {
+    fn freeze(&self, end_lsn: Lsn, walredo_mgr: &dyn WalRedoManager) -> Result<Vec<Arc<dyn Layer>>> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.rel, self.timelineid, end_lsn
         );
 
-        let page_versions = self.page_versions.lock().unwrap();
-        let relsizes = self.relsizes.lock().unwrap();
-        let drop_lsn = self.drop_lsn.lock().unwrap();
-
-        let dropped = *drop_lsn != Lsn(0);
+        let inner = self.inner.lock().unwrap();
+        
+        let dropped = inner.drop_lsn != Lsn(0);
 
         // Divide all the page versions into old and new at the 'end_lsn' cutoff point.
         let mut old_page_versions = BTreeMap::new();
@@ -315,7 +317,7 @@ impl Layer for InMemoryLayer {
         let mut new_page_versions = BTreeMap::new();
 
         if !dropped {
-            for (lsn, size) in relsizes.iter() {
+            for (lsn, size) in inner.relsizes.iter() {
                 if *lsn > end_lsn {
                     new_relsizes.insert(*lsn, *size);
                 } else {
@@ -323,7 +325,7 @@ impl Layer for InMemoryLayer {
                 }
             }
 
-            for ((blknum, lsn), pv) in page_versions.iter() {
+            for ((blknum, lsn), pv) in inner.page_versions.iter() {
                 if *lsn > end_lsn {
                     new_page_versions.insert((*blknum, *lsn), pv.clone());
                 } else {
@@ -333,14 +335,14 @@ impl Layer for InMemoryLayer {
         }
 
         let end_lsn = if dropped {
-            assert!(*drop_lsn < end_lsn);
-            *drop_lsn
+            assert!(inner.drop_lsn < end_lsn);
+            inner.drop_lsn
         } else {
             end_lsn
         };
 
         // Write the old page versions to disk.
-        let _snapfile = SnapshotLayer::create(
+        let snapfile = SnapshotLayer::create(
             self.conf,
             self.timelineid,
             self.tenantid,
@@ -351,24 +353,34 @@ impl Layer for InMemoryLayer {
             old_page_versions,
             old_relsizes,
         )?;
+        let mut result: Vec<Arc<dyn Layer>> = Vec::new();
 
         // If there were any "new" page versions, initialize a new in-memory layer to hold
         // them
         if !new_relsizes.is_empty() || !new_page_versions.is_empty() {
-            let new_layer: Arc<dyn Layer> = Arc::new(InMemoryLayer {
-                conf: self.conf,
-                timelineid: self.timelineid,
-                tenantid: self.tenantid,
-                rel: self.rel,
-                start_lsn: end_lsn,
-                drop_lsn: Mutex::new(Lsn(0)),
-                page_versions: Mutex::new(new_page_versions),
-                relsizes: Mutex::new(new_relsizes),
-            });
-            Ok(Some(new_layer))
-        } else {
-            Ok(None)
+            info!("created new in-mem layer for {} {}-", self.rel, end_lsn);
+
+            let new_layer = Self::copy_snapshot(self.conf, walredo_mgr, &snapfile, self.timelineid, self.tenantid, end_lsn)?;
+            let mut new_inner = new_layer.inner.lock().unwrap();
+            new_inner.page_versions.append(&mut new_page_versions);
+            new_inner.relsizes.append(&mut new_relsizes);
+            drop(new_inner);
+
+            result.push(Arc::new(new_layer));
         }
+        result.push(Arc::new(snapfile));
+
+        Ok(result)
+    }
+
+    fn delete(&self) -> Result<()> {
+        // Nothing to do. When the reference is dropped, the memory is released.
+        Ok(())
+    }
+
+    fn unload(&self) -> Result<()> {
+        // cannot unload in-memory layer. Freeze instead
+        Ok(())
     }
 }
 
@@ -396,9 +408,11 @@ impl InMemoryLayer {
             tenantid,
             rel,
             start_lsn,
-            drop_lsn: Mutex::new(Lsn(0)),
-            page_versions: Mutex::new(BTreeMap::new()),
-            relsizes: Mutex::new(BTreeMap::new()),
+            inner: Mutex::new(InMemoryLayerInner {
+                drop_lsn: Lsn(0),
+                page_versions: BTreeMap::new(),
+                relsizes: BTreeMap::new(),
+            }),
         })
     }
 
@@ -446,9 +460,11 @@ impl InMemoryLayer {
             tenantid,
             rel: src.get_relish_tag(),
             start_lsn: lsn,
-            drop_lsn: Mutex::new(Lsn(0)),
-            page_versions: Mutex::new(page_versions),
-            relsizes: Mutex::new(relsizes),
+            inner: Mutex::new(InMemoryLayerInner {
+                drop_lsn: Lsn(0),
+                page_versions: page_versions,
+                relsizes: relsizes,
+            }),
         })
     }
 
@@ -460,13 +476,12 @@ impl InMemoryLayer {
             self.rel, self.start_lsn
         );
 
-        let relsizes = self.relsizes.lock().unwrap();
-        let page_versions = self.page_versions.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
 
-        for (k, v) in relsizes.iter() {
+        for (k, v) in inner.relsizes.iter() {
             result += &format!("{}: {}\n", k, v);
         }
-        for (k, v) in page_versions.iter() {
+        for (k, v) in inner.page_versions.iter() {
             result += &format!(
                 "blk {} at {}: {}/{}\n",
                 k.0,

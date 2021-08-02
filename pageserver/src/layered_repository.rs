@@ -27,7 +27,7 @@ use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::fs::File;
@@ -50,10 +50,12 @@ use zenith_utils::seqwait::SeqWait;
 mod inmemory_layer;
 mod snapshot_layer;
 mod storage_layer;
+mod layer_map;
 
 use inmemory_layer::InMemoryLayer;
 use snapshot_layer::SnapshotLayer;
 use storage_layer::Layer;
+use layer_map::LayerMap;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -131,6 +133,101 @@ impl Repository for LayeredRepository {
 
         Ok(())
     }
+
+    //
+    // How garbage collection works
+    // --------
+    //
+    //                    +--bar------------->
+    //                   /
+    //             +----+-----foo---------------->
+    //            /
+    // ----main--+-------------------------->
+    //                \
+    //                 +-----baz-------->
+    //
+    //
+    // 1. Grab a mutex to prevent new timelines from being created
+    // 2. Scan all timelines, and on each timeline, make note of the
+    //    all the points where other timelines have been branched off.
+    //    We will refrain from removing page versions at those LSNs.
+    // 3. For each timeline, scan all snapshot files on the timeline.
+    //    Remove all files for which a newer file exists and which
+    //    don't cover any branch point LSNs.
+    //
+    // TODO:
+    // - if a relation has been modified on a child branch, then we
+    //   we don't need to keep that in the parent anymore.
+    //
+    // - Currently, this is only triggered manually by the 'do_gc' command.
+    //   There is no background thread to do it automatically.
+    fn gc_iteration(&self, target_timelineid: Option<ZTimelineId>, horizon: u64, _compact: bool) -> Result<GcResult> {
+        let mut totals: GcResult = Default::default();
+        let now = Instant::now();
+
+        // grab mutex to prevent new timelines from being created here.
+        // TODO: We will hold it for a long time
+        let mut timelines = self.timelines.lock().unwrap();
+
+        // Scan all timelines for the branch points.
+        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
+
+        // Remember timelineid and its last_record_lsn for each timeline
+        let mut timelineids: Vec<ZTimelineId> = Vec::new();
+
+        let timelines_path = self.conf.timelines_path(&self.tenantid);
+        for direntry in fs::read_dir(timelines_path)? {
+            let direntry = direntry?;
+            if let Some(fname) = direntry.file_name().to_str() {
+                if let Ok(timelineid) = fname.parse::<ZTimelineId>() {
+                    // Read the metadata of this timeline to get its parent timeline.
+                    // FIXME: we open the timeline below with get_timeline() anyway.
+                    // shouldn't we fetch the metadata from the in-memory Timeline
+                    // struct?
+                    let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
+
+                    timelineids.push(timelineid);
+
+                    if let Some(ancestor_timeline) = metadata.ancestor_timeline {
+                        all_branchpoints.insert((ancestor_timeline, metadata.ancestor_lsn));
+                    }
+                }
+            }
+        }
+
+        // Ok, we now know all the branch points. Iterate through them.
+        for timelineid in timelineids {
+            // If a target timeline was specified, leave the other timelines alone.
+            // This is a bit inefficient, we still collect the information for all
+            // the timelines above.
+            if let Some(x) = target_timelineid {
+                if x != timelineid {
+                    continue;
+                }
+            }
+
+            let branchpoints: Vec<Lsn> = all_branchpoints
+                .range((
+                    Included((timelineid, Lsn(0))),
+                    Included((timelineid, Lsn(u64::MAX))),
+                ))
+                .map(|&x| x.1)
+                .collect();
+
+            let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
+            let last_lsn = timeline.get_last_valid_lsn();
+
+            if let Some(cutoff) = last_lsn.checked_sub(horizon) {
+                info!("running GC on timeline {}, last_lsn {}, cutoff {}", timelineid, last_lsn, cutoff);
+                let result = timeline.gc_timeline(branchpoints, cutoff)?;
+
+                totals += result;
+            }
+        }
+
+        totals.elapsed = now.elapsed();
+        Ok(totals)
+    }
 }
 
 /// Private functions
@@ -161,6 +258,9 @@ impl LayeredRepository {
                     self.tenantid,
                     self.walredo_mgr.clone(),
                 )?;
+
+                // List the snapshot layers on disk, and load them into the layer map
+                timeline.load_layer_map()?;
 
                 // Load any new WAL after the last checkpoint into memory.
                 info!(
@@ -217,123 +317,6 @@ impl LayeredRepository {
         let data = std::fs::read(&path)?;
 
         Ok(TimelineMetadata::des(&data)?)
-    }
-
-    //
-    // How garbage collection works
-    // --------
-    //
-    //                    +--bar------------->
-    //                   /
-    //             +----+-----foo---------------->
-    //            /
-    // ----main--+-------------------------->
-    //                \
-    //                 +-----baz-------->
-    //
-    //
-    // 1. Grab a mutex to prevent new timelines from being created
-    // 2. Scan all timelines, and on each timeline, make note of the
-    //    all the points where other timelines have been branched off.
-    //    We will refrain from removing page versions at those LSNs.
-    // 3. For each timeline, scan all snapshot files on the timeline.
-    //    Remove all files for which a newer file exists and which
-    //    don't cover any branch point LSNs.
-    //
-    // TODO:
-    // - if a relation has been modified on a child branch, then we
-    //   we don't need to keep that in the parent anymore.
-    //
-    // - Currently, this is only triggered manually by the 'do_gc' command.
-    //   There is no background thread to do it automatically.
-    fn gc_iteration(conf: &'static PageServerConf, tenantid: ZTenantId, horizon: u64) -> Result<GcResult> {
-        let mut totals: GcResult = Default::default();
-        let now = Instant::now();
-
-        // TODO: grab mutex to prevent new timelines from being created here.
-
-        // Scan all timelines for the branch points.
-        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
-
-        // Remember timelineid and its last_record_lsn for each timeline
-        let mut timelines: Vec<(ZTimelineId, Lsn)> = Vec::new();
-
-        let timelines_path = conf.timelines_path(&tenantid);
-        for direntry in fs::read_dir(timelines_path)? {
-            let direntry = direntry?;
-            if let Some(fname) = direntry.file_name().to_str() {
-                if let Ok(timelineid) = fname.parse::<ZTimelineId>() {
-                    // Read the metadata of this timeline to get its parent timeline.
-                    let metadata = Self::load_metadata(conf, timelineid, tenantid)?;
-
-                    timelines.push((timelineid, metadata.last_record_lsn));
-
-                    if let Some(ancestor_timeline) = metadata.ancestor_timeline {
-                        all_branchpoints.insert((ancestor_timeline, metadata.ancestor_lsn));
-                    }
-                }
-            }
-        }
-
-        // Ok, we now know all the branch points. Iterate through them.
-        for (timelineid, last_lsn) in timelines {
-            let branchpoints: Vec<Lsn> = all_branchpoints
-                .range((
-                    Included((timelineid, Lsn(0))),
-                    Included((timelineid, Lsn(u64::MAX))),
-                ))
-                .map(|&x| x.1)
-                .collect();
-
-            if let Some(cutoff) = last_lsn.checked_sub(horizon) {
-                let result = SnapshotLayer::gc_timeline(conf, timelineid, tenantid, branchpoints, cutoff)?;
-
-                totals += result;
-            }
-        }
-
-        totals.elapsed = now.elapsed();
-        Ok(totals)
-    }
-}
-
-/// LayerMap is a BTreeMap keyed by RelishTag and the layer's start LSN.
-/// It provides a couple of convenience functions over a plain BTreeMap
-struct LayerMap(BTreeMap<(RelishTag, Lsn), Arc<dyn Layer>>);
-
-impl LayerMap {
-    ///
-    /// Look up using the given rel tag and LSN. This differs from a plain
-    /// key-value lookup in that if there is any layer that covers the
-    /// given LSN, or precedes the given LSN, it is returned. In other words,
-    /// you don't need to know the exact start LSN of the layer.
-    ///
-    fn get(&self, tag: RelishTag, lsn: Lsn) -> Option<Arc<dyn Layer>> {
-        let startkey = (tag, Lsn(0));
-        let endkey = (tag, lsn);
-
-        if let Some((_k, v)) = self
-            .0
-            .range((Included(startkey), Included(endkey)))
-            .next_back()
-        {
-            Some(Arc::clone(v))
-        } else {
-            None
-        }
-    }
-
-    fn insert(&mut self, layer: Arc<dyn Layer>) {
-        let rel = layer.get_relish_tag();
-        let start_lsn = layer.get_start_lsn();
-
-        self.0.insert((rel, start_lsn), Arc::clone(&layer));
-    }
-}
-
-impl Default for LayerMap {
-    fn default() -> Self {
-        LayerMap(BTreeMap::new())
     }
 }
 
@@ -462,15 +445,12 @@ impl Timeline for LayeredTimeline {
     }
 
     fn list_rels(&self, spcnode: u32, dbnode: u32, _lsn: Lsn) -> Result<HashSet<RelTag>> {
-        // SnapshotLayer::list_rels works by scanning the directory on disk. Make sure
-        // we have a file on disk for each relation.
-        self.checkpoint()?;
 
         // List all rels in this timeline, and all its ancestors.
         let mut all_rels = HashSet::new();
         let mut timeline = self;
         loop {
-            let rels = SnapshotLayer::list_rels(self.conf, timeline.timelineid, timeline.tenantid, spcnode, dbnode)?;
+            let rels = timeline.layers.lock().unwrap().list_rels(spcnode, dbnode)?;
 
             // FIXME: We should filter out relations that don't exist at the given LSN.
             all_rels.extend(rels.iter());
@@ -493,11 +473,7 @@ impl Timeline for LayeredTimeline {
         let mut all_rels = HashSet::new();
         let mut timeline = self;
         loop {
-            // SnapshotFile::list_rels works by scanning the directory on disk. Make sure
-            // we have a file on disk for each relation.
-            timeline.checkpoint()?;
-
-            let rels = SnapshotLayer::list_nonrels(self.conf, timeline.timelineid, timeline.tenantid, lsn)?;
+            let rels = timeline.layers.lock().unwrap().list_nonrels(lsn)?;
 
             // FIXME: We should filter out relishes that don't exist at the given LSN.
             all_rels.extend(rels.iter());
@@ -516,23 +492,6 @@ impl Timeline for LayeredTimeline {
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
         // TODO
         todo!();
-    }
-
-    fn gc_iteration(&self, horizon: u64, _compact: bool) -> Result<GcResult> {
-        // In the layered repository, event to GC a single timeline,
-        // we have to scan all the timelines to determine what child
-        // timelines there are, so that we know to retain snapshot
-        // files that are still needed by the children. So we just do
-        // GC on the whole repository.
-        //
-        // FIXME: This makes writing repeatable tests harder, if
-        // activity on other timelines can affect the counters that
-        // we return
-
-        // But do flush the in-memory layers to disk first.
-        self.checkpoint()?;
-
-        LayeredRepository::gc_iteration(self.conf, self.tenantid, horizon)
     }
 
     fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
@@ -633,12 +592,28 @@ impl Timeline for LayeredTimeline {
         // probably too aggressive. Some kind of LRU policy would be
         // appropriate.
         //
+
+        // Call freeze() for any unfrozen layers (that is, layers that
+        // haven't been written to disk yet)
+        // Call unload() for all layers, to release memory.
+        //
+        // FIXME: We do this by creating a whole new LayerMap. I couldn't
+        // figure out the borrowing rules to remove and insert entries
+        // to the old LayerMap while iterating through it.
         let old_layers = std::mem::take(&mut *layers);
-        for old_layer in old_layers.0.values() {
-            if !old_layer.is_frozen() {
-                if let Some(new_layer) = old_layer.freeze(last_valid_lsn)? {
+        for layer in old_layers.inner.values() {
+            if !layer.is_frozen() {
+                let new_layers = layer.freeze(last_valid_lsn, &*self.walredo_mgr)?;
+
+                for new_layer in new_layers {
+                    info!("freeze returned {} {}-{}", new_layer.get_relish_tag(), new_layer.get_start_lsn(), new_layer.get_end_lsn());
                     layers.insert(Arc::clone(&new_layer));
                 }
+            } else {
+                // FIXME: if this fails, we're in trouble because we already
+                // swapped the 'layers' with the empty one. Hence panic on error.
+                layer.unload().expect("could not unload layer from memory");
+                layers.insert(Arc::clone(layer));
             }
         }
 
@@ -786,15 +761,13 @@ impl LayeredTimeline {
         }
 
         loop {
-            let mut layers = timeline.layers.lock().unwrap();
+            let layers = timeline.layers.lock().unwrap();
             //
             // FIXME: If the relation has been dropped, does this return the right
             // thing? The compute node should not normally request dropped relations,
             // but if OID wraparound happens the same relfilenode might get reused
             // for an unrelated relation.
             //
-            let mut best_candidate = None;
-            let mut best_end_lsn = Lsn(0);
 
             // First, see if we have loaded a layer in the cache ready.
             if let Some(layer) = layers.get(rel, lsn) {
@@ -826,43 +799,19 @@ impl LayeredTimeline {
                 // So if we find a layer in cache with end-LSN before the request LSN, remember
                 // that, but fall through to check if there is a newer snapshot file on disk before
                 // returning it.
-                if layer.get_end_lsn() >= lsn {
-                    return Ok(Some((layer.clone(), lsn)));
-                }
-                best_candidate = Some(layer.clone());
-                best_end_lsn = layer.get_end_lsn();
+                // FIXME: obsolete comment, the layer map contains all layers now
+                return Ok(Some((layer.clone(), lsn)));
             }
 
-            // Proceed to check if there is a (better) snapshot file on disk.
-            if let Some(layer) =
-                SnapshotLayer::load(timeline.conf, timeline.timelineid, timeline.tenantid, rel, best_end_lsn, lsn)?
-            {
-                trace!(
-                    "found snapshot file on disk: {}-{}",
-                    layer.get_start_lsn(),
-                    layer.get_end_lsn()
-                );
-                let layer_rc: Arc<dyn Layer> = Arc::new(layer);
-                layers.insert(Arc::clone(&layer_rc));
-
-                return Ok(Some((layer_rc, lsn)));
-            } else {
-                // No (better) snapshot files for this relation on this timeline. If we found
-                // something in cache, return that.
-                if let Some(result) = best_candidate {
-                    return Ok(Some((result, lsn)));
-                }
-
-                // If we got nothing on this timeline, check if there's a layer on the ancestor
-                // timeline
-                if let Some(ancestor) = &timeline.ancestor_timeline {
-                    lsn = timeline.ancestor_lsn;
-                    timeline = &ancestor.as_ref();
-                    trace!("recursing into ancestor at {}/{}", timeline.timelineid, lsn);
-                    continue;
-                }
-                return Ok(None);
+            // If we got nothing on this timeline, check if there's a layer on the ancestor
+            // timeline
+            if let Some(ancestor) = &timeline.ancestor_timeline {
+                lsn = timeline.ancestor_lsn;
+                timeline = &ancestor.as_ref();
+                trace!("recursing into ancestor at {}/{}", timeline.timelineid, lsn);
+                continue;
             }
+            return Ok(None);
         }
     }
 
@@ -938,26 +887,7 @@ impl LayeredTimeline {
                 lsn
             );
 
-            // Scan the directory for latest existing file.
-            // FIXME: if this is truly a new rel, none should exist right?
-            let start_lsn;
-            if let Some((_start, end, dropped)) = SnapshotLayer::find_latest_snapshot_file(
-                self.conf,
-                self.timelineid,
-                self.tenantid,
-                rel,
-                Lsn(0),
-                Lsn(u64::MAX),
-            )? {
-                if dropped {
-                    start_lsn = lsn;
-                } else {
-                    start_lsn = end;
-                }
-            } else {
-                start_lsn = lsn;
-            }
-            layer = InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, rel, start_lsn)?;
+            layer = InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, rel, lsn)?;
         }
 
         let mut layers = self.layers.lock().unwrap();
@@ -965,6 +895,22 @@ impl LayeredTimeline {
         layers.insert(Arc::clone(&layer_rc));
 
         Ok(layer_rc)
+    }
+
+    ///
+    ///
+    ///
+    fn load_layer_map(&self) -> anyhow::Result<()> {
+        info!("loading layer map for timeline {} into memory", self.timelineid);
+        let mut layers = self.layers.lock().unwrap();
+        let snapfiles = SnapshotLayer::list_snapshot_files(self.conf, self.timelineid, self.tenantid)?;
+
+        for layer_rc in snapfiles.iter() {
+            info!("found layer {} {}-{} {} on timeline {}", layer_rc.get_relish_tag(), layer_rc.get_start_lsn(), layer_rc.get_end_lsn(), layer_rc.is_dropped(), self.timelineid );
+            layers.insert(Arc::clone(layer_rc));
+        }
+
+        Ok(())
     }
 
     ///
@@ -993,5 +939,118 @@ impl LayeredTimeline {
             })?;
 
         Ok(lsn)
+    }
+
+
+    ///
+    /// Garbage collect snapshot files on a timeline that are no longer needed.
+    ///
+    /// The caller specifies how much history is needed with the two arguments:
+    ///
+    /// retain_lsns: keep page a version of each page at these LSNs
+    /// cutoff: also keep everything newer than this LSN
+    ///
+    /// The 'retain_lsns' lists is currently used to prevent removing files that
+    /// are needed by child timelines. In the future, the user might be able to
+    /// name additional points in time to retain. The caller is responsible for
+    /// collecting that information.
+    ///
+    /// The 'cutoff' point is used to retain recent versions that might still be
+    /// needed by read-only nodes. (As of this writing, the caller just passes
+    /// the latest LSN subtracted by a constant, and doesn't do anything smart
+    /// to figure out what read-only nodes might actually need.)
+    ///
+    /// Currently, we don't make any attempt at removing unneeded page versions
+    /// within a snapshot file. We can only remove the whole file if it's fully
+    /// obsolete.
+    ///
+    pub fn gc_timeline(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) -> Result<GcResult> {
+        let now = Instant::now();
+        let mut result: GcResult = Default::default();
+
+        // Scan all snapshot files in the directory. For each file, if a newer file
+        // exists, we can remove the old one.
+        self.checkpoint()?;
+
+        let mut layers = self.layers.lock().unwrap();
+
+        info!("running GC on timeline {}, cutoff {}", self.timelineid, cutoff);
+
+        let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
+
+        // Determine for each file if it needs to be retained
+        'outer: for ((rel, _lsn), l) in layers.inner.iter() {
+            if rel.is_relation() {
+                result.snapshot_relfiles_total += 1;
+            } else {
+                result.snapshot_nonrelfiles_total += 1;
+            }
+
+            // Is it newer than cutoff point?
+            if l.get_end_lsn() > cutoff {
+                info!("keeping {} {}-{} because it's newer than cutoff {}",
+                      rel, l.get_start_lsn(), l.get_end_lsn(), cutoff);
+                if rel.is_relation() {
+                    result.snapshot_relfiles_needed_by_cutoff += 1;
+                } else {
+                    result.snapshot_nonrelfiles_needed_by_cutoff += 1;
+                }
+                continue 'outer;
+            }
+
+            // Is it needed by a child branch?
+            for retain_lsn in &retain_lsns {
+                // FIXME: are the bounds inclusive or exclusive?
+                if l.get_start_lsn() <= *retain_lsn && *retain_lsn <= l.get_end_lsn() {
+                    info!("keeping {} {}-{} because it's needed by branch point {}",
+                          rel, l.get_start_lsn(), l.get_end_lsn(), *retain_lsn);
+                    if rel.is_relation() {
+                        result.snapshot_relfiles_needed_by_branches += 1;
+                    } else {
+                        result.snapshot_nonrelfiles_needed_by_branches += 1;
+                    }
+                    continue 'outer;
+                }
+            }
+
+            // Unless the relation was dropped, is there a later snapshot file for this relation?
+            if !l.is_dropped() && !layers.newer_layer_exists(l.get_relish_tag(), l.get_end_lsn()) {
+                if rel.is_relation() {
+                    result.snapshot_relfiles_not_updated += 1;
+                } else {
+                    result.snapshot_nonrelfiles_not_updated += 1;
+                }
+                continue 'outer;
+            }
+
+            // We didn't find any reason to keep this file, so remove it.
+            info!("garbage collecting {} {}-{} {}", l.get_relish_tag(), l.get_start_lsn(), l.get_end_lsn(), l.is_dropped());
+            layers_to_remove.push(Arc::clone(l));
+        }
+
+        // Actually delete the layers from disk and remove them from the map.
+        // (couldn't do this in the loop above, because you cannot modify a collection
+        // while iterating it. BTreeMap::retain() would be another option)
+        for doomed_layer in layers_to_remove {
+            doomed_layer.delete()?;
+            layers.remove(&*doomed_layer);
+
+            if doomed_layer.is_dropped() {
+                if doomed_layer.get_relish_tag().is_relation() {
+                    result.snapshot_relfiles_dropped += 1;
+                } else {
+                    result.snapshot_nonrelfiles_dropped += 1;
+                }
+            } else {
+                if doomed_layer.get_relish_tag().is_relation() {
+                    result.snapshot_relfiles_removed += 1;
+                } else {
+                    result.snapshot_nonrelfiles_removed += 1;
+                }
+            }
+        }
+
+        result.elapsed = now.elapsed();
+        Ok(result)
     }
 }
