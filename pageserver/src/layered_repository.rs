@@ -41,21 +41,21 @@ use crate::repository::{GcResult, History, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
-use crate::{ZTimelineId, ZTenantId};
+use crate::{ZTenantId, ZTimelineId};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 
 mod inmemory_layer;
+mod layer_map;
 mod snapshot_layer;
 mod storage_layer;
-mod layer_map;
 
 use inmemory_layer::InMemoryLayer;
+use layer_map::LayerMap;
 use snapshot_layer::SnapshotLayer;
 use storage_layer::Layer;
-use layer_map::LayerMap;
 
 // Timeout when waiting or WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -161,7 +161,12 @@ impl Repository for LayeredRepository {
     //
     // - Currently, this is only triggered manually by the 'do_gc' command.
     //   There is no background thread to do it automatically.
-    fn gc_iteration(&self, target_timelineid: Option<ZTimelineId>, horizon: u64, _compact: bool) -> Result<GcResult> {
+    fn gc_iteration(
+        &self,
+        target_timelineid: Option<ZTimelineId>,
+        horizon: u64,
+        _compact: bool,
+    ) -> Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
@@ -218,7 +223,10 @@ impl Repository for LayeredRepository {
             let last_lsn = timeline.get_last_valid_lsn();
 
             if let Some(cutoff) = last_lsn.checked_sub(horizon) {
-                info!("running GC on timeline {}, last_lsn {}, cutoff {}", timelineid, last_lsn, cutoff);
+                info!(
+                    "running GC on timeline {}, last_lsn {}, cutoff {}",
+                    timelineid, last_lsn, cutoff
+                );
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
 
                 totals += result;
@@ -232,6 +240,23 @@ impl Repository for LayeredRepository {
 
 /// Private functions
 impl LayeredRepository {
+    pub fn launch_gc_thread(conf: &'static PageServerConf, rc: Arc<LayeredRepository>) {
+        let _gc_thread = std::thread::Builder::new()
+            .name("Garbage collection thread".into())
+            .spawn(move || {
+                // FIXME
+                rc.gc_loop(conf).expect("GC thread died");
+            })
+            .unwrap();
+    }
+
+    fn gc_loop(&self, conf: &'static PageServerConf) -> Result<()> {
+        loop {
+            std::thread::sleep(conf.gc_period);
+            self.gc_iteration(None, conf.gc_horizon, false).unwrap();
+        }
+    }
+
     // Implementation of the public `get_timeline` function. This differs from the public
     // interface in that the caller must already hold the mutex on the 'timelines' hashmap.
     fn get_timeline_locked(
@@ -268,7 +293,10 @@ impl LayeredRepository {
                     timelineid,
                     timeline.get_last_record_lsn()
                 );
-                let wal_dir = self.conf.timeline_path(&timelineid, &self.tenantid).join("wal");
+                let wal_dir = self
+                    .conf
+                    .timeline_path(&timelineid, &self.tenantid)
+                    .join("wal");
                 import_timeline_wal(&wal_dir, &timeline, timeline.get_last_record_lsn())?;
 
                 let timeline_rc = Arc::new(timeline);
@@ -445,7 +473,6 @@ impl Timeline for LayeredTimeline {
     }
 
     fn list_rels(&self, spcnode: u32, dbnode: u32, _lsn: Lsn) -> Result<HashSet<RelTag>> {
-
         // List all rels in this timeline, and all its ancestors.
         let mut all_rels = HashSet::new();
         let mut timeline = self;
@@ -544,8 +571,12 @@ impl Timeline for LayeredTimeline {
         layer.put_unlink(lsn)
     }
 
-    fn put_raw_data(&self, _tag: crate::object_key::ObjectTag, _lsn: Lsn, _data: &[u8]) -> Result<()> {
-
+    fn put_raw_data(
+        &self,
+        _tag: crate::object_key::ObjectTag,
+        _lsn: Lsn,
+        _data: &[u8],
+    ) -> Result<()> {
         // FIXME: This doesn't make much sense for the layered storage format,
         // it's pretty tightly coupled with the way the object store stores
         // things.
@@ -565,9 +596,12 @@ impl Timeline for LayeredTimeline {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self) -> Result<()> {
-
         let last_valid_lsn = self.last_valid_lsn.load();
-        trace!("checkpointing timeline {} at {}", self.timelineid, last_valid_lsn);
+        trace!(
+            "checkpointing timeline {} at {}",
+            self.timelineid,
+            last_valid_lsn
+        );
 
         let mut layers = self.layers.lock().unwrap();
 
@@ -606,7 +640,12 @@ impl Timeline for LayeredTimeline {
                 let new_layers = layer.freeze(last_valid_lsn, &*self.walredo_mgr)?;
 
                 for new_layer in new_layers {
-                    info!("freeze returned {} {}-{}", new_layer.get_relish_tag(), new_layer.get_start_lsn(), new_layer.get_end_lsn());
+                    info!(
+                        "freeze returned {} {}-{}",
+                        new_layer.get_relish_tag(),
+                        new_layer.get_start_lsn(),
+                        new_layer.get_end_lsn()
+                    );
                     layers.insert(Arc::clone(&new_layer));
                 }
             } else {
@@ -901,12 +940,23 @@ impl LayeredTimeline {
     ///
     ///
     fn load_layer_map(&self) -> anyhow::Result<()> {
-        info!("loading layer map for timeline {} into memory", self.timelineid);
+        info!(
+            "loading layer map for timeline {} into memory",
+            self.timelineid
+        );
         let mut layers = self.layers.lock().unwrap();
-        let snapfiles = SnapshotLayer::list_snapshot_files(self.conf, self.timelineid, self.tenantid)?;
+        let snapfiles =
+            SnapshotLayer::list_snapshot_files(self.conf, self.timelineid, self.tenantid)?;
 
         for layer_rc in snapfiles.iter() {
-            info!("found layer {} {}-{} {} on timeline {}", layer_rc.get_relish_tag(), layer_rc.get_start_lsn(), layer_rc.get_end_lsn(), layer_rc.is_dropped(), self.timelineid );
+            info!(
+                "found layer {} {}-{} {} on timeline {}",
+                layer_rc.get_relish_tag(),
+                layer_rc.get_start_lsn(),
+                layer_rc.get_end_lsn(),
+                layer_rc.is_dropped(),
+                self.timelineid
+            );
             layers.insert(Arc::clone(layer_rc));
         }
 
@@ -941,7 +991,6 @@ impl LayeredTimeline {
         Ok(lsn)
     }
 
-
     ///
     /// Garbage collect snapshot files on a timeline that are no longer needed.
     ///
@@ -974,7 +1023,10 @@ impl LayeredTimeline {
 
         let mut layers = self.layers.lock().unwrap();
 
-        info!("running GC on timeline {}, cutoff {}", self.timelineid, cutoff);
+        info!(
+            "running GC on timeline {}, cutoff {}",
+            self.timelineid, cutoff
+        );
 
         let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
@@ -988,8 +1040,13 @@ impl LayeredTimeline {
 
             // Is it newer than cutoff point?
             if l.get_end_lsn() > cutoff {
-                info!("keeping {} {}-{} because it's newer than cutoff {}",
-                      rel, l.get_start_lsn(), l.get_end_lsn(), cutoff);
+                info!(
+                    "keeping {} {}-{} because it's newer than cutoff {}",
+                    rel,
+                    l.get_start_lsn(),
+                    l.get_end_lsn(),
+                    cutoff
+                );
                 if rel.is_relation() {
                     result.snapshot_relfiles_needed_by_cutoff += 1;
                 } else {
@@ -1002,8 +1059,13 @@ impl LayeredTimeline {
             for retain_lsn in &retain_lsns {
                 // FIXME: are the bounds inclusive or exclusive?
                 if l.get_start_lsn() <= *retain_lsn && *retain_lsn <= l.get_end_lsn() {
-                    info!("keeping {} {}-{} because it's needed by branch point {}",
-                          rel, l.get_start_lsn(), l.get_end_lsn(), *retain_lsn);
+                    info!(
+                        "keeping {} {}-{} because it's needed by branch point {}",
+                        rel,
+                        l.get_start_lsn(),
+                        l.get_end_lsn(),
+                        *retain_lsn
+                    );
                     if rel.is_relation() {
                         result.snapshot_relfiles_needed_by_branches += 1;
                     } else {
@@ -1024,7 +1086,13 @@ impl LayeredTimeline {
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            info!("garbage collecting {} {}-{} {}", l.get_relish_tag(), l.get_start_lsn(), l.get_end_lsn(), l.is_dropped());
+            info!(
+                "garbage collecting {} {}-{} {}",
+                l.get_relish_tag(),
+                l.get_start_lsn(),
+                l.get_end_lsn(),
+                l.is_dropped()
+            );
             layers_to_remove.push(Arc::clone(l));
         }
 
