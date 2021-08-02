@@ -33,10 +33,19 @@ pub fn init(conf: &'static PageServerConf) {
 
         // Set up an object repository, for actual data storage.
         let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
-            RepositoryFormat::Layered => Arc::new(LayeredRepository::new(conf,
-                                                                         Arc::new(walredo_mgr),
-                                                                         tenantid
-            )),
+            RepositoryFormat::Layered => {
+				let repo = Arc::new(LayeredRepository::new(
+					conf,
+					Arc::new(walredo_mgr),
+					tenantid,
+				));
+				if conf.gc_horizon != 0 {
+					crate::layered_repository::LayeredRepository::launch_gc_thread(conf, repo.clone());
+				} else {
+					info!("Garbage collection is disabled");
+				}
+				repo
+			}
             RepositoryFormat::RocksDb => {
                 let obj_store = RocksObjectStore::open(conf, &tenantid).unwrap();
 
@@ -44,7 +53,7 @@ pub fn init(conf: &'static PageServerConf) {
                     conf,
                     Arc::new(obj_store),
                     Arc::new(walredo_mgr),
-                    tenantid
+                    tenantid,
                 ))
             }
         };

@@ -47,6 +47,7 @@ pub fn init_pageserver(
     workdir: &Path,
     create_tenant: Option<&str>,
 ) -> Result<()> {
+
     env::set_current_dir(workdir)?;
 
     // Initialize logger
@@ -104,17 +105,11 @@ pub fn create_repo(
     // rapid init+start case now, but the general race condition remains if you restart the
     // server quickly.
     let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
-        RepositoryFormat::Layered => {
-            let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
-                conf,
-                wal_redo_manager,
-                tenantid,
-            ));
-            if conf.gc_horizon != 0 {
-                crate::layered_repository::LayeredRepository::launch_gc_thread(conf, repo.clone());
-            }
-            repo
-        }
+        RepositoryFormat::Layered => Arc::new(
+            crate::layered_repository::LayeredRepository::new(conf,
+                                                              wal_redo_manager,
+                                                              tenantid
+        )),
         RepositoryFormat::RocksDb => {
             let obj_store = crate::rocksdb_storage::RocksObjectStore::create(conf, &tenantid)?;
 
@@ -122,7 +117,7 @@ pub fn create_repo(
                 conf,
                 Arc::new(obj_store),
                 wal_redo_manager,
-                tenantid,
+                tenantid
             ))
         }
     };
