@@ -295,6 +295,7 @@ mod tests {
             gc_horizon: 64 * 1024 * 1024,
             gc_period: Duration::from_secs(10),
             listen_addr: "127.0.0.1:5430".to_string(),
+            http_endpoint_addr: "127.0.0.1:9898".to_string(),
             superuser: "zenith_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),

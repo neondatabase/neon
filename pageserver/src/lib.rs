@@ -1,11 +1,13 @@
-use hex::FromHex;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+
+use hex::FromHex;
+use lazy_static::lazy_static;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 
 pub mod basebackup;
 pub mod branches;
@@ -23,10 +25,20 @@ pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
 
+lazy_static! {
+    static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
+        "pageserver_live_connections_count",
+        "Number of live network connections",
+        &["pageserver_connection_kind"]
+    )
+    .expect("failed to define a metric");
+}
+
 #[derive(Debug, Clone)]
 pub struct PageServerConf {
     pub daemonize: bool,
     pub listen_addr: String,
+    pub http_endpoint_addr: String,
     pub gc_horizon: u64,
     pub gc_period: Duration,
     pub superuser: String,

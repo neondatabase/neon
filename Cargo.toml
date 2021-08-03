@@ -1,13 +1,14 @@
 [workspace]
 members = [
-    "pageserver",
-    "walkeeper",
-    "zenith",
     "control_plane",
+    "pageserver",
     "postgres_ffi",
-    "zenith_utils",
+    "proxy",
+    "walkeeper",
     "workspace_hack",
-    "proxy"
+    "zenith",
+    "zenith_metrics",
+    "zenith_utils",
 ]
 
 [profile.release]

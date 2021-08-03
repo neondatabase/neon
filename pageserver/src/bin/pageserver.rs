@@ -18,8 +18,10 @@ use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
 use pageserver::{branches, logger, page_cache, page_service, PageServerConf};
+use zenith_utils::http_endpoint;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
+const DEFAULT_HTTP_ENDPOINT_ADDR: &str = "127.0.0.1:9898";
 
 const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
@@ -30,6 +32,7 @@ const DEFAULT_SUPERUSER: &str = "zenith_admin";
 #[derive(Serialize, Deserialize)]
 struct CfgFileParams {
     listen_addr: Option<String>,
+    http_endpoint_addr: Option<String>,
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     pg_distrib_dir: Option<String>,
@@ -44,6 +47,7 @@ impl CfgFileParams {
 
         Self {
             listen_addr: get_arg("listen"),
+            http_endpoint_addr: get_arg("http_endpoint"),
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
             pg_distrib_dir: get_arg("postgres-distrib"),
@@ -55,6 +59,7 @@ impl CfgFileParams {
         // TODO cleaner way to do this
         Self {
             listen_addr: self.listen_addr.or(other.listen_addr),
+            http_endpoint_addr: self.http_endpoint_addr.or(other.http_endpoint_addr),
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
@@ -66,6 +71,11 @@ impl CfgFileParams {
         let listen_addr = match self.listen_addr.as_ref() {
             Some(addr) => addr.clone(),
             None => DEFAULT_LISTEN_ADDR.to_owned(),
+        };
+
+        let http_endpoint_addr = match self.http_endpoint_addr.as_ref() {
+            Some(addr) => addr.clone(),
+            None => DEFAULT_HTTP_ENDPOINT_ADDR.to_owned(),
         };
 
         let gc_horizon: u64 = match self.gc_horizon.as_ref() {
@@ -90,6 +100,7 @@ impl CfgFileParams {
             daemonize: false,
 
             listen_addr,
+            http_endpoint_addr,
             gc_horizon,
             gc_period,
 
@@ -237,6 +248,11 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
             Err(e) => error!("Error, {}", e),
         }
     }
+
+    // Spawn a new thread for the http endpoint
+    thread::Builder::new()
+        .name("Metrics thread".into())
+        .spawn(move || http_endpoint::thread_main(conf.http_endpoint_addr.clone()))?;
 
     // Check that we can bind to address before starting threads to simplify shutdown
     // sequence if port is occupied.

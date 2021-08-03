@@ -7,7 +7,7 @@ use anyhow::bail;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use zenith_utils::{
-    postgres_backend::{self, query_from_cstring, PostgresBackend},
+    postgres_backend::{self, query_from_cstring, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
 };
 
@@ -34,7 +34,7 @@ pub fn thread_main(state: &'static ProxyState, listener: TcpListener) -> anyhow:
 
 pub fn mgmt_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow::Result<()> {
     let mut conn_handler = MgmtHandler { state };
-    let mut pgbackend = PostgresBackend::new(socket, postgres_backend::AuthType::Trust)?;
+    let mut pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
     pgbackend.run(&mut conn_handler)
 }
 
