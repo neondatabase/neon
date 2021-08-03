@@ -12,8 +12,10 @@
 
 use anyhow::{anyhow, bail, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use lazy_static::lazy_static;
 use log::*;
 use regex::Regex;
+use zenith_metrics::{HistogramVec, register_histogram_vec};
 use std::io::Write;
 use std::net::TcpListener;
 use std::str::FromStr;
@@ -153,6 +155,15 @@ pub fn thread_main(conf: &'static PageServerConf, listener: TcpListener) -> anyh
 }
 
 fn page_service_conn_main(conf: &'static PageServerConf, socket: TcpStream) -> anyhow::Result<()> {
+    // Immediately increment the gauge, then create a job to decrement it on thread exit.
+    // One of the pros of `defer!` is that this will *most probably*
+    // get called, even in presence of panics.
+    let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
+    gauge.inc();
+    scopeguard::defer! {
+        gauge.dec();
+    }
+
     let mut conn_handler = PageServerHandler::new(conf);
     let mut pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
     pgbackend.run(&mut conn_handler)
@@ -161,6 +172,24 @@ fn page_service_conn_main(conf: &'static PageServerConf, socket: TcpStream) -> a
 #[derive(Debug)]
 struct PageServerHandler {
     conf: &'static PageServerConf,
+}
+
+const TIME_BUCKETS: &[f64] = &[
+    0.00001, // 1/100000 s
+    0.0001, 0.00015, 0.0002, 0.00025, 0.0003, 0.00035, 0.0005, 0.00075, // 1/10000 s
+    0.001, 0.0025, 0.005, 0.0075, // 1/1000 s
+    0.01, 0.0125, 0.015, 0.025, 0.05, // 1/100 s
+    0.1,  // 1/10 s
+];
+
+lazy_static! {
+    static ref SMGR_QUERY_TIME: HistogramVec = register_histogram_vec!(
+        "pageserver_smgr_query_time",
+        "Time spent on smgr query handling",
+        &["smgr_query_type"],
+        TIME_BUCKETS.into()
+    )
+    .expect("failed to define a metric");
 }
 
 impl PageServerHandler {
@@ -214,7 +243,11 @@ impl PageServerHandler {
                     };
                     let tag = RelishTag::Relation(rel);
 
-                    let exist = timeline.get_rel_exists(tag, req.lsn).unwrap_or(false);
+                    let exist = SMGR_QUERY_TIME
+                        .with_label_values(&["get_rel_exists"])
+                        .observe_closure_duration(|| {
+                            timeline.get_rel_exists(tag, req.lsn).unwrap_or(false)
+                        });
 
                     PagestreamBeMessage::Status(PagestreamStatusResponse {
                         ok: exist,
@@ -230,7 +263,11 @@ impl PageServerHandler {
                     };
                     let tag = RelishTag::Relation(rel);
 
-                    let n_blocks = timeline.get_rel_size(tag, req.lsn).unwrap_or(0);
+                    let n_blocks = SMGR_QUERY_TIME
+                        .with_label_values(&["get_rel_size"])
+                        .observe_closure_duration(|| {
+                            timeline.get_rel_size(tag, req.lsn).unwrap_or(0)
+                        });
 
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
                 }
@@ -243,22 +280,26 @@ impl PageServerHandler {
                     };
                     let tag = RelishTag::Relation(rel);
 
-                    let read_response = match timeline.get_page_at_lsn(tag, req.blkno, req.lsn) {
-                        Ok(p) => PagestreamReadResponse {
-                            ok: true,
-                            n_blocks: 0,
-                            page: p,
-                        },
-                        Err(e) => {
-                            const ZERO_PAGE: [u8; 8192] = [0; 8192];
-                            error!("get_page_at_lsn: {}", e);
-                            PagestreamReadResponse {
-                                ok: false,
-                                n_blocks: 0,
-                                page: Bytes::from_static(&ZERO_PAGE),
+                    let read_response = SMGR_QUERY_TIME
+                        .with_label_values(&["get_page_at_lsn"])
+                        .observe_closure_duration(|| {
+                            match timeline.get_page_at_lsn(tag, req.blkno, req.lsn) {
+                                Ok(p) => PagestreamReadResponse {
+                                    ok: true,
+                                    n_blocks: 0,
+                                    page: p,
+                                },
+                                Err(e) => {
+                                    const ZERO_PAGE: [u8; 8192] = [0; 8192];
+                                    error!("get_page_at_lsn: {}", e);
+                                    PagestreamReadResponse {
+                                        ok: false,
+                                        n_blocks: 0,
+                                        page: Bytes::from_static(&ZERO_PAGE),
+                                    }
+                                }
                             }
-                        }
-                    };
+                        });
 
                     PagestreamBeMessage::Read(read_response)
                 }

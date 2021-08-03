@@ -131,6 +131,15 @@ fn walreceiver_main(
     let mut rclient = Client::connect(&connect_cfg, NoTls)?;
     info!("connected!");
 
+    // Immediately increment the gauge, then create a job to decrement it on thread exit.
+    // One of the pros of `defer!` is that this will *most probably*
+    // get called, even in presence of panics.
+    let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["wal_receiver"]);
+    gauge.inc();
+    scopeguard::defer! {
+        gauge.dec();
+    }
+
     let identify = identify_system(&mut rclient)?;
     info!("{:?}", identify);
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
