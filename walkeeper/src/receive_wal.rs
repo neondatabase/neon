@@ -242,9 +242,20 @@ impl ReceiveWalConn {
         my_info.server.node_id = node_id;
 
         /* Calculate WAL end based on local data */
-        let (flush_lsn, timeline) = self.timeline.find_end_of_wal(&self.conf.data_dir, true);
+        let (flush_lsn, timeline) = self.timeline.find_end_of_wal(
+            &self
+                .conf
+                .data_dir
+                .join(format!("{}", server_info.timeline_id)),
+            true,
+        );
         my_info.flush_lsn = flush_lsn;
         my_info.server.timeline = timeline;
+
+        info!(
+            "find_end_of_wal in {:?}: timeline={} flush_lsn={}",
+            &self.conf.data_dir, timeline, flush_lsn
+        );
 
         /* Report my identifier to proposer */
         my_info.ser_into(&mut self.stream_out)?;
@@ -284,8 +295,8 @@ impl ReceiveWalConn {
         }
 
         info!(
-            "Start streaming from timeline {} tenant {} address {:?}",
-            server_info.timeline_id, server_info.tenant_id, self.peer_addr,
+            "Start streaming from timeline {} tenant {} address {:?} flush_lsn={}",
+            server_info.timeline_id, server_info.tenant_id, self.peer_addr, my_info.flush_lsn
         );
 
         // Main loop
