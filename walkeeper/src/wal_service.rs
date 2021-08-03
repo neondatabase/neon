@@ -50,7 +50,7 @@ fn handle_socket(mut socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
         ReceiveWalConn::new(socket, conf)?.run()?; // internal protocol between wal_proposer and wal_acceptor
     } else {
         let mut conn_handler = SendWalHandler::new(conf);
-        let mut pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
+        let pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
         // libpq replication protocol between wal_acceptor and replicas/pagers
         pgbackend.run(&mut conn_handler)?;
     }

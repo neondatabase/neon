@@ -165,7 +165,7 @@ fn page_service_conn_main(conf: &'static PageServerConf, socket: TcpStream) -> a
     }
 
     let mut conn_handler = PageServerHandler::new(conf);
-    let mut pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
+    let pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
     pgbackend.run(&mut conn_handler)
 }
 

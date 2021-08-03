@@ -34,7 +34,7 @@ pub fn thread_main(state: &'static ProxyState, listener: TcpListener) -> anyhow:
 
 pub fn mgmt_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow::Result<()> {
     let mut conn_handler = MgmtHandler { state };
-    let mut pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
+    let pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
     pgbackend.run(&mut conn_handler)
 }
 
