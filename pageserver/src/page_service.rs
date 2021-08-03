@@ -28,9 +28,9 @@ use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 
 use crate::basebackup;
 use crate::branches;
-use crate::object_key::ObjectTag;
 use crate::page_cache;
-use crate::repository::{BufferTag, Modification, RelTag};
+use crate::relish::*;
+use crate::repository::Modification;
 use crate::walreceiver;
 use crate::PageServerConf;
 use crate::ZTenantId;
@@ -206,12 +206,13 @@ impl PageServerHandler {
 
             let response = match zenith_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
-                    let tag = RelTag {
+                    let rel = RelTag {
                         spcnode: req.spcnode,
                         dbnode: req.dbnode,
                         relnode: req.relnode,
                         forknum: req.forknum,
                     };
+                    let tag = RelishTag::Relation(rel);
 
                     let exist = timeline.get_rel_exists(tag, req.lsn).unwrap_or(false);
 
@@ -221,29 +222,28 @@ impl PageServerHandler {
                     })
                 }
                 PagestreamFeMessage::Nblocks(req) => {
-                    let tag = RelTag {
+                    let rel = RelTag {
                         spcnode: req.spcnode,
                         dbnode: req.dbnode,
                         relnode: req.relnode,
                         forknum: req.forknum,
                     };
+                    let tag = RelishTag::Relation(rel);
 
                     let n_blocks = timeline.get_rel_size(tag, req.lsn).unwrap_or(0);
 
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
                 }
                 PagestreamFeMessage::Read(req) => {
-                    let tag = ObjectTag::RelationBuffer(BufferTag {
-                        rel: RelTag {
-                            spcnode: req.spcnode,
-                            dbnode: req.dbnode,
-                            relnode: req.relnode,
-                            forknum: req.forknum,
-                        },
-                        blknum: req.blkno,
-                    });
+                    let rel = RelTag {
+                        spcnode: req.spcnode,
+                        dbnode: req.dbnode,
+                        relnode: req.relnode,
+                        forknum: req.forknum,
+                    };
+                    let tag = RelishTag::Relation(rel);
 
-                    let read_response = match timeline.get_page_at_lsn(tag, req.lsn) {
+                    let read_response = match timeline.get_page_at_lsn(tag, req.blkno, req.lsn) {
                         Ok(p) => PagestreamReadResponse {
                             ok: true,
                             n_blocks: 0,
@@ -431,11 +431,7 @@ impl postgres_backend::Handler for PageServerHandler {
                         let modification = Modification::des(&bytes)?;
 
                         last_lsn = modification.lsn;
-                        timeline.put_raw_data(
-                            modification.tag,
-                            last_lsn,
-                            &modification.data[..],
-                        )?;
+                        timeline.put_raw_data(modification.tag, modification.lsn, &modification.data)?;
                     }
                     FeMessage::CopyDone => {
                         timeline.advance_last_valid_lsn(last_lsn);

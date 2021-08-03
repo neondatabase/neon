@@ -9,12 +9,11 @@ use postgres_ffi::xlog_utils::*;
 use postgres_ffi::XLogLongPageHeaderData;
 use postgres_ffi::XLogPageHeaderData;
 use postgres_ffi::XLogRecord;
+use postgres_ffi::{Oid, TransactionId};
 use std::cmp::min;
 use thiserror::Error;
 use zenith_utils::lsn::Lsn;
 
-pub type Oid = u32;
-pub type TransactionId = u32;
 pub type BlockNumber = u32;
 pub type OffsetNumber = u16;
 pub type MultiXactId = TransactionId;
@@ -492,6 +491,24 @@ impl XlXactParsedRecord {
             ts_id,
             subxacts,
             xnodes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlClogTruncate {
+    pub pageno: u32,
+    pub oldest_xid: TransactionId,
+    pub oldest_xid_db: Oid,
+}
+
+impl XlClogTruncate {
+    pub fn decode(buf: &mut Bytes) -> XlClogTruncate {
+        XlClogTruncate {
+            pageno: buf.get_u32_le(),
+            oldest_xid: buf.get_u32_le(),
+            oldest_xid_db: buf.get_u32_le(),
         }
     }
 }

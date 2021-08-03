@@ -4,8 +4,8 @@
 //!
 //! We keep one WAL receiver active per timeline.
 
-use crate::object_key::*;
 use crate::page_cache;
+use crate::relish::*;
 use crate::restore_local_repo;
 use crate::waldecoder::*;
 use crate::PageServerConf;
@@ -171,7 +171,7 @@ fn walreceiver_main(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
-    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(ObjectTag::Checkpoint, startpoint)?;
+    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(RelishTag::Checkpoint, 0, startpoint)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
     trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
@@ -215,7 +215,8 @@ fn walreceiver_main(
                     // Check if checkpoint data was updated by save_decoded_record
                     if new_checkpoint_bytes != old_checkpoint_bytes {
                         timeline.put_page_image(
-                            ObjectTag::Checkpoint,
+                            RelishTag::Checkpoint,
+                            0,
                             lsn,
                             new_checkpoint_bytes,
                             false,

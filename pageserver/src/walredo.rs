@@ -18,6 +18,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fs;
 use std::fs::OpenOptions;
@@ -36,8 +37,7 @@ use tokio::time::timeout;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-use crate::object_key::*;
-use crate::repository::BufferTag;
+use crate::relish::*;
 use crate::repository::WALRecord;
 use crate::waldecoder::XlXactParsedRecord;
 use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
@@ -46,6 +46,19 @@ use crate::ZTenantId;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::XLogRecord;
+
+///
+/// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
+/// This is used as a part of the key inside key-value storage (RocksDB currently).
+///
+/// In Postgres `BufferTag` structure is used for exactly the same purpose.
+/// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
+///
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
+pub struct BufferTag {
+    pub rel: RelTag,
+    pub blknum: u32,
+}
 
 ///
 /// WAL Redo Manager is responsible for replaying WAL records.
@@ -60,7 +73,8 @@ pub trait WalRedoManager: Send + Sync {
     /// the reords.
     fn request_redo(
         &self,
-        tag: ObjectTag,
+        rel: RelishTag,
+        blknum: u32,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
@@ -76,7 +90,8 @@ pub struct DummyRedoManager {}
 impl crate::walredo::WalRedoManager for DummyRedoManager {
     fn request_redo(
         &self,
-        _tag: ObjectTag,
+        _rel: RelishTag,
+        _blknum: u32,
         _lsn: Lsn,
         _base_img: Option<Bytes>,
         _records: Vec<WALRecord>,
@@ -107,7 +122,8 @@ struct PostgresRedoManagerInternal {
 
 #[derive(Debug)]
 struct WalRedoRequest {
-    tag: ObjectTag,
+    rel: RelishTag,
+    blknum: u32,
     lsn: Lsn,
 
     base_img: Option<Bytes>,
@@ -173,7 +189,8 @@ impl WalRedoManager for PostgresRedoManager {
     ///
     fn request_redo(
         &self,
-        tag: ObjectTag,
+        rel: RelishTag,
+        blknum: u32,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<WALRecord>,
@@ -182,7 +199,8 @@ impl WalRedoManager for PostgresRedoManager {
         let (tx, rx) = mpsc::channel::<Result<Bytes, WalRedoError>>();
 
         let request = WalRedoRequest {
-            tag,
+            rel,
+            blknum,
             lsn,
             base_img,
             records,
@@ -274,7 +292,8 @@ impl PostgresRedoManagerInternal {
         process: &PostgresRedoProcess,
         request: &WalRedoRequest,
     ) -> Result<Bytes, WalRedoError> {
-        let tag = request.tag;
+        let rel = request.rel;
+        let blknum = request.blknum;
         let lsn = request.lsn;
         let base_img = request.base_img.clone();
         let records = &request.records;
@@ -284,11 +303,11 @@ impl PostgresRedoManagerInternal {
         let start = Instant::now();
 
         let apply_result: Result<Bytes, Error>;
-        if let ObjectTag::RelationBuffer(buf_tag) = tag {
+        if let RelishTag::Relation(rel) = rel {
             // Relational WAL records are applied using wal-redo-postgres
+            let buf_tag = BufferTag { rel, blknum };
             apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
         } else {
-            // Non-relational WAL records we apply ourselves.
             const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
             let mut page = BytesMut::new();
             if let Some(fpi) = base_img {
@@ -317,16 +336,21 @@ impl PostgresRedoManagerInternal {
                 if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
                     // Transaction manager stuff
                     let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
-                    let tag_blknum = match tag {
-                        ObjectTag::Clog(slru) => slru.blknum,
-                        ObjectTag::TwoPhase(_) => {
+                    let rec_segno = match rel {
+                        RelishTag::Slru { slru, segno } => {
+                            if slru != SlruKind::Clog {
+                                panic!("Not valid XACT relish tag {:?}", rel);
+                            }
+                            segno
+                        }
+                        RelishTag::TwoPhase { xid: _ } => {
                             assert!(info == pg_constants::XLOG_XACT_PREPARE);
                             trace!("Apply prepare {} record", xlogrec.xl_xid);
                             page.clear();
                             page.extend_from_slice(&buf[..]);
                             continue;
                         }
-                        _ => panic!("Not valid XACT object tag {:?}", tag),
+                        _ => panic!("Not valid XACT relish tag {:?}", rel),
                     };
                     let parsed_xact =
                         XlXactParsedRecord::decode(&mut buf, xlogrec.xl_xid, xlogrec.xl_info);
@@ -339,9 +363,11 @@ impl PostgresRedoManagerInternal {
                             &mut page,
                         );
                         for subxact in &parsed_xact.subxacts {
-                            let blkno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                            let pageno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                            let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                            let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                             // only update xids on the requested page
-                            if tag_blknum == blkno {
+                            if rec_segno == segno && blknum == rpageno {
                                 transaction_id_set_status(
                                     *subxact,
                                     pg_constants::TRANSACTION_STATUS_SUB_COMMITTED,
@@ -358,9 +384,11 @@ impl PostgresRedoManagerInternal {
                             &mut page,
                         );
                         for subxact in &parsed_xact.subxacts {
-                            let blkno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                            let pageno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                            let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                            let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                             // only update xids on the requested page
-                            if tag_blknum == blkno {
+                            if rec_segno == segno && blknum == rpageno {
                                 transaction_id_set_status(
                                     *subxact,
                                     pg_constants::TRANSACTION_STATUS_ABORTED,
@@ -374,36 +402,49 @@ impl PostgresRedoManagerInternal {
                     let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
                     if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                         let xlrec = XlMultiXactCreate::decode(&mut buf);
-                        if let ObjectTag::MultiXactMembers(slru) = tag {
-                            for i in 0..xlrec.nmembers {
-                                let blkno = i / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-                                if blkno == slru.blknum {
-                                    // update only target block
-                                    let offset = xlrec.moff + i;
-                                    let memberoff = mx_offset_to_member_offset(offset);
-                                    let flagsoff = mx_offset_to_flags_offset(offset);
-                                    let bshift = mx_offset_to_flags_bitshift(offset);
-                                    let mut flagsval =
-                                        LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
-                                    flagsval &=
-                                        !(((1 << pg_constants::MXACT_MEMBER_BITS_PER_XACT) - 1)
+                        if let RelishTag::Slru {
+                            slru,
+                            segno: rec_segno,
+                        } = rel
+                        {
+                            if slru == SlruKind::MultiXactMembers {
+                                for i in 0..xlrec.nmembers {
+                                    let pageno =
+                                        i / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+                                    let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                                    let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                                    if segno == rec_segno && rpageno == blknum {
+                                        // update only target block
+                                        let offset = xlrec.moff + i;
+                                        let memberoff = mx_offset_to_member_offset(offset);
+                                        let flagsoff = mx_offset_to_flags_offset(offset);
+                                        let bshift = mx_offset_to_flags_bitshift(offset);
+                                        let mut flagsval =
+                                            LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
+                                        flagsval &= !(((1
+                                            << pg_constants::MXACT_MEMBER_BITS_PER_XACT)
+                                            - 1)
                                             << bshift);
-                                    flagsval |= xlrec.members[i as usize].status << bshift;
-                                    LittleEndian::write_u32(
-                                        &mut page[flagsoff..flagsoff + 4],
-                                        flagsval,
-                                    );
-                                    LittleEndian::write_u32(
-                                        &mut page[memberoff..memberoff + 4],
-                                        xlrec.members[i as usize].xid,
-                                    );
+                                        flagsval |= xlrec.members[i as usize].status << bshift;
+                                        LittleEndian::write_u32(
+                                            &mut page[flagsoff..flagsoff + 4],
+                                            flagsval,
+                                        );
+                                        LittleEndian::write_u32(
+                                            &mut page[memberoff..memberoff + 4],
+                                            xlrec.members[i as usize].xid,
+                                        );
+                                    }
                                 }
+                            } else {
+                                // Multixact offsets SLRU
+                                let offs = (xlrec.mid
+                                    % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32
+                                    * 4) as usize;
+                                LittleEndian::write_u32(&mut page[offs..offs + 4], xlrec.moff);
                             }
                         } else {
-                            // Multixact offsets SLRU
-                            let offs = (xlrec.mid % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32
-                                * 4) as usize;
-                            LittleEndian::write_u32(&mut page[offs..offs + 4], xlrec.moff);
+                            panic!();
                         }
                     } else {
                         panic!();
