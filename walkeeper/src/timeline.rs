@@ -232,7 +232,8 @@ impl TimelineTools for Option<Arc<Timeline>> {
     /// Find last WAL record. If "precise" is false then just locate last partial segment
     fn find_end_of_wal(&self, data_dir: &Path, precise: bool) -> (Lsn, TimeLineID) {
         let seg_size = self.get().get_info().server.wal_seg_size as usize;
-        let (lsn, timeline) = find_end_of_wal(data_dir, seg_size, precise);
+        let wal_dir = data_dir.join(format!("{}", self.get().timelineid));
+        let (lsn, timeline) = find_end_of_wal(&wal_dir, seg_size, precise);
         (Lsn(lsn), timeline)
     }
 }

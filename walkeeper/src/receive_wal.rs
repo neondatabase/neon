@@ -242,13 +242,7 @@ impl ReceiveWalConn {
         my_info.server.node_id = node_id;
 
         /* Calculate WAL end based on local data */
-        let (flush_lsn, timeline) = self.timeline.find_end_of_wal(
-            &self
-                .conf
-                .data_dir
-                .join(format!("{}", server_info.timeline_id)),
-            true,
-        );
+        let (flush_lsn, timeline) = self.timeline.find_end_of_wal(&self.conf.data_dir, true);
         my_info.flush_lsn = flush_lsn;
         my_info.server.timeline = timeline;
 
