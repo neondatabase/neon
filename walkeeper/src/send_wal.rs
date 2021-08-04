@@ -7,12 +7,12 @@ use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
 use anyhow::{bail, Result};
 use bytes::Bytes;
-use pageserver::ZTimelineId;
 use std::str::FromStr;
 use std::sync::Arc;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor};
+use zenith_utils::zid::ZTimelineId;
 
 /// Handler for streaming WAL from acceptor
 pub struct SendWalHandler {

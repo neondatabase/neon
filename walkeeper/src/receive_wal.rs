@@ -17,11 +17,11 @@ use std::thread::sleep;
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::connstring::connection_host_port;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::replication::HotStandbyFeedback;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
-use pageserver::{ZTenantId, ZTimelineId};
 use postgres_ffi::xlog_utils::{TimeLineID, XLogFileName, MAX_SEND_SIZE, XLOG_BLCKSZ};
 use zenith_utils::pq_proto::SystemId;
 
@@ -153,7 +153,11 @@ pub struct ReceiveWalConn {
 ///
 fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
     let ps_addr = conf.pageserver_addr.unwrap();
-    let ps_connstr = format!("postgresql://no_user@{}/no_db", ps_addr);
+    let ps_connstr = format!(
+        "postgresql://no_user:{}@{}/no_db",
+        &conf.pageserver_auth_token.unwrap_or_default(),
+        ps_addr
+    );
 
     // use Config parsing because SockAddr parsing doesnt allow to use host names instead of ip addresses
     let me_connstr = format!("postgresql://no_user@{}/no_db", conf.listen_addr);

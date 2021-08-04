@@ -5,14 +5,14 @@ use crate::object_key::*;
 use crate::object_store::ObjectStore;
 use crate::relish::*;
 use crate::PageServerConf;
-use crate::ZTenantId;
-use crate::ZTimelineId;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::ZTimelineId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StorageKey {

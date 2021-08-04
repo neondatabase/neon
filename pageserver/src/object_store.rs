@@ -2,11 +2,11 @@
 //!
 use crate::object_key::*;
 use crate::relish::*;
-use crate::ZTimelineId;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::iter::Iterator;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTimelineId;
 
 ///
 /// Low-level storage abstraction.

@@ -6,9 +6,9 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 use log::*;
 use slog::Drain;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::{env, io};
 use std::{fs::File, fs::OpenOptions};
 
 use walkeeper::s3_offload;
@@ -74,6 +74,7 @@ fn main() -> Result<()> {
         listen_addr: "localhost:5454".to_string(),
         ttl: None,
         recall_period: None,
+        pageserver_auth_token: env::var("PAGESERVER_AUTH_TOKEN").ok(),
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {

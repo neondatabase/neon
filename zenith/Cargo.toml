@@ -12,7 +12,7 @@ anyhow = "1.0"
 serde_json = "1"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 
-# FIXME: 'pageserver' is needed for ZTimelineId. Refactor
+# FIXME: 'pageserver' is needed for BranchInfo. Refactor
 pageserver = { path = "../pageserver" }
 control_plane = { path = "../control_plane" }
 postgres_ffi = { path = "../postgres_ffi" }

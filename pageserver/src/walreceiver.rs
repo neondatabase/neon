@@ -9,8 +9,6 @@ use crate::relish::*;
 use crate::restore_local_repo;
 use crate::waldecoder::*;
 use crate::PageServerConf;
-use crate::ZTenantId;
-use crate::ZTimelineId;
 use anyhow::{Error, Result};
 use lazy_static::lazy_static;
 use log::*;
@@ -32,6 +30,8 @@ use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::ZTimelineId;
 
 //
 // We keep one WAL Receiver active per timeline.

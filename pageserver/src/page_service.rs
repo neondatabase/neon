@@ -10,22 +10,27 @@
 //     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
-use anyhow::{anyhow, bail, ensure};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
 use regex::Regex;
 use std::io::Write;
 use std::net::TcpListener;
+use std::str;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::thread;
 use std::{io, net::TcpStream};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
+use zenith_utils::auth::JwtAuth;
+use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
 use zenith_utils::pq_proto::{
     BeMessage, FeMessage, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
 };
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 
 use crate::basebackup;
@@ -35,8 +40,6 @@ use crate::relish::*;
 use crate::repository::Modification;
 use crate::walreceiver;
 use crate::PageServerConf;
-use crate::ZTenantId;
-use crate::ZTimelineId;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
@@ -140,22 +143,32 @@ impl PagestreamBeMessage {
 ///
 /// Listens for connections, and launches a new handler thread for each.
 ///
-pub fn thread_main(conf: &'static PageServerConf, listener: TcpListener) -> anyhow::Result<()> {
+pub fn thread_main(
+    conf: &'static PageServerConf,
+    auth: Arc<Option<JwtAuth>>,
+    listener: TcpListener,
+    auth_type: AuthType,
+) -> anyhow::Result<()> {
     loop {
         let (socket, peer_addr) = listener.accept()?;
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
-
+        let local_auth = Arc::clone(&auth);
         thread::spawn(move || {
-            if let Err(err) = page_service_conn_main(conf, socket) {
+            if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
                 error!("error: {}", err);
             }
         });
     }
 }
 
-fn page_service_conn_main(conf: &'static PageServerConf, socket: TcpStream) -> anyhow::Result<()> {
-    // Immediately increment the gauge, then create a job to decrement it on thread exit.
+fn page_service_conn_main(
+    conf: &'static PageServerConf,
+    auth: Arc<Option<JwtAuth>>,
+    socket: TcpStream,
+    auth_type: AuthType,
+) -> anyhow::Result<()> {
+    // Immediatsely increment the gauge, then create a job to decrement it on thread exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
     let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
@@ -164,14 +177,16 @@ fn page_service_conn_main(conf: &'static PageServerConf, socket: TcpStream) -> a
         gauge.dec();
     }
 
-    let mut conn_handler = PageServerHandler::new(conf);
-    let pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
+    let mut conn_handler = PageServerHandler::new(conf, auth);
+    let pgbackend = PostgresBackend::new(socket, auth_type)?;
     pgbackend.run(&mut conn_handler)
 }
 
 #[derive(Debug)]
 struct PageServerHandler {
     conf: &'static PageServerConf,
+    auth: Arc<Option<JwtAuth>>,
+    claims: Option<Claims>,
 }
 
 const TIME_BUCKETS: &[f64] = &[
@@ -193,8 +208,12 @@ lazy_static! {
 }
 
 impl PageServerHandler {
-    pub fn new(conf: &'static PageServerConf) -> Self {
-        PageServerHandler { conf }
+    pub fn new(conf: &'static PageServerConf, auth: Arc<Option<JwtAuth>>) -> Self {
+        PageServerHandler {
+            conf,
+            auth,
+            claims: None,
+        }
     }
 
     fn handle_controlfile(&self, pgb: &mut PostgresBackend) -> io::Result<()> {
@@ -355,9 +374,68 @@ impl PageServerHandler {
 
         Ok(())
     }
+
+    // when accessing management api supply None as an argument
+    // when using to authorize tenant pass corresponding tenant id
+    fn check_permission(&self, tenantid: Option<ZTenantId>) -> Result<()> {
+        if self.auth.is_none() {
+            // auth is set to Trust, nothing to check so just return ok
+            return Ok(());
+        }
+        // auth is some, just checked above, when auth is some
+        // then claims are always present because of checks during connetion init
+        // so this expect won't trigger
+        let claims = self
+            .claims
+            .as_ref()
+            .expect("claims presence already checked");
+        match (&claims.scope, tenantid) {
+            (Scope::Tenant, None) => {
+                bail!("Attempt to access management api with tenant scope. Permission denied")
+            }
+            (Scope::Tenant, Some(tenantid)) => {
+                if claims.tenant_id.unwrap() != tenantid {
+                    bail!("Tenant id mismatch. Permission denied")
+                }
+                Ok(())
+            }
+            (Scope::PageServerApi, None) => Ok(()), // access to management api for PageServerApi scope
+            (Scope::PageServerApi, Some(_)) => Ok(()), // access to tenant api using PageServerApi scope
+        }
+    }
 }
 
 impl postgres_backend::Handler for PageServerHandler {
+    fn check_auth_jwt(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        jwt_response: &[u8],
+    ) -> anyhow::Result<()> {
+        // this unwrap is never triggered, because check_auth_jwt only called when auth_type is ZenithJWT
+        // which requires auth to be present
+        let data = self
+            .auth
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .decode(&str::from_utf8(jwt_response)?)?;
+
+        if matches!(data.claims.scope, Scope::Tenant) {
+            ensure!(
+                data.claims.tenant_id.is_some(),
+                "jwt token scope is Tenant, but tenant id is missing"
+            )
+        }
+
+        info!(
+            "jwt auth succeeded for scope: {:#?} by tenantid: {:?}",
+            data.claims.scope, data.claims.tenant_id,
+        );
+
+        self.claims = Some(data.claims);
+        Ok(())
+    }
+
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
@@ -384,6 +462,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenantid = ZTenantId::from_str(params[0])?;
             let timelineid = ZTimelineId::from_str(params[1])?;
 
+            self.check_permission(Some(tenantid))?;
+
             self.handle_pagerequests(pgb, timelineid, tenantid)?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
@@ -395,6 +475,8 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(params[0])?;
             let timelineid = ZTimelineId::from_str(params[1])?;
+
+            self.check_permission(Some(tenantid))?;
 
             // TODO are there any tests with lsn option?
             let lsn = if params.len() == 3 {
@@ -422,6 +504,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let connstr = caps.get(3).unwrap().as_str().to_owned();
 
+            self.check_permission(Some(tenantid))?;
+
             // Check that the timeline exists
             let repository = page_cache::get_repository_for_tenant(&tenantid)?;
             if repository.get_timeline(timelineid).is_err() {
@@ -445,6 +529,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let branchname = caps.get(2).ok_or_else(err)?.as_str().to_owned();
             let startpoint_str = caps.get(3).ok_or_else(err)?.as_str().to_owned();
 
+            self.check_permission(Some(tenantid))?;
+
             let branch =
                 branches::create_branch(&self.conf, &branchname, &startpoint_str, &tenantid)?;
             let branch = serde_json::to_vec(&branch)?;
@@ -462,6 +548,8 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+
+            self.check_permission(Some(tenantid))?;
 
             let start_lsn = Lsn(0); // TODO this needs to come from the repo
             let timeline = page_cache::get_repository_for_tenant(&tenantid)?
@@ -504,6 +592,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let postgres_connection_uri = caps.get(3).unwrap().as_str();
+
+            self.check_permission(Some(tenantid))?;
 
             let timeline =
                 page_cache::get_repository_for_tenant(&tenantid)?.get_timeline(timelineid)?;
@@ -550,6 +640,8 @@ impl postgres_backend::Handler for PageServerHandler {
             // tenant_create <tenantid>
             let re = Regex::new(r"^tenant_create ([[:xdigit:]]+)$").unwrap();
             let caps = re.captures(&query_string).ok_or_else(err)?;
+
+            self.check_permission(None)?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
 

@@ -87,23 +87,30 @@ class PgProtocol:
         self.port = port
         self.username = username or "zenith_admin"
 
-    def connstr(self, *, dbname: str = 'postgres', username: Optional[str] = None) -> str:
+    def connstr(self, *, dbname: str = 'postgres', username: Optional[str] = None, password: Optional[str] = None) -> str:
         """
         Build a libpq connection string for the Postgres instance.
         """
 
         username = username or self.username
-        return f'host={self.host} port={self.port} user={username} dbname={dbname}'
+        res = f'host={self.host} port={self.port} user={username} dbname={dbname}'
+        if not password:
+            return res
+        return f'{res} password={password}'
 
     # autocommit=True here by default because that's what we need most of the time
-    def connect(self, *, autocommit=True, **kwargs: Any) -> PgConnection:
+    def connect(self, *, autocommit=True, dbname: str = 'postgres', username: Optional[str] = None, password: Optional[str] = None) -> PgConnection:
         """
         Connect to the node.
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
 
-        conn = psycopg2.connect(self.connstr(**kwargs))
+        conn = psycopg2.connect(self.connstr(
+            dbname=dbname,
+            username=username,
+            password=password,
+        ))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
@@ -175,12 +182,15 @@ class ZenithPageserver(PgProtocol):
         self.running = False
         self.initial_tenant = None
 
-    def init(self) -> 'ZenithPageserver':
+    def init(self, enable_auth: bool = False) -> 'ZenithPageserver':
         """
         Initialize the repository, i.e. run "zenith init".
         Returns self.
         """
-        self.zenith_cli.run(['init'])
+        cmd = ['init']
+        if enable_auth:
+            cmd.append('--enable-auth')
+        self.zenith_cli.run(cmd)
         return self
 
     def start(self) -> 'ZenithPageserver':
@@ -206,6 +216,12 @@ class ZenithPageserver(PgProtocol):
             self.running = False
 
         return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
 
 
 @zenfixture
@@ -235,11 +251,10 @@ def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, instance_num: int, tenant_id: str):
-        super().__init__(host='localhost', port=55431 + instance_num)
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, tenant_id: str, port: int):
+        super().__init__(host='localhost', port=port)
 
         self.zenith_cli = zenith_cli
-        self.instance_num = instance_num
         self.running = False
         self.repo_dir = repo_dir
         self.branch: Optional[str] = None  # dubious, see asserts below
@@ -373,15 +388,22 @@ class Postgres(PgProtocol):
 
         return self
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, initial_tenant: str):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, initial_tenant: str, base_port: int = 55431):
         self.zenith_cli = zenith_cli
         self.repo_dir = repo_dir
         self.num_instances = 0
         self.instances: List[Postgres] = []
         self.initial_tenant: str = initial_tenant
+        self.base_port = base_port
 
     def create_start(
         self,
@@ -391,7 +413,13 @@ class PostgresFactory:
         config_lines: Optional[List[str]] = None
     ) -> Postgres:
 
-        pg = Postgres(self.zenith_cli, self.repo_dir, self.num_instances + 1, tenant_id=tenant_id or self.initial_tenant)
+        pg = Postgres(
+            zenith_cli=self.zenith_cli,
+            repo_dir=self.repo_dir,
+            tenant_id=tenant_id or self.initial_tenant,
+            port=self.base_port + self.num_instances + 1,
+        )
+
         self.num_instances += 1
         self.instances.append(pg)
 
@@ -490,11 +518,12 @@ def read_pid(path):
 
 class WalAcceptor:
     """ An object representing a running wal acceptor daemon. """
-    def __init__(self, wa_binpath, data_dir, port, num):
+    def __init__(self, wa_binpath, data_dir, port, num, auth_token: Optional[str] = None):
         self.wa_binpath = wa_binpath
         self.data_dir = data_dir
         self.port = port
         self.num = num  # identifier for logging
+        self.auth_token = auth_token
 
     def start(self) -> 'WalAcceptor':
         # create data directory if not exists
@@ -509,7 +538,8 @@ class WalAcceptor:
         cmd.extend(["--pageserver", "localhost:{}".format(DEFAULT_PAGESERVER_PORT)])
         cmd.extend(["--recall", "1 second"])
         print('Running command "{}"'.format(' '.join(cmd)))
-        subprocess.run(cmd, check=True)
+        env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None
+        subprocess.run(cmd, check=True, env=env)
 
         return self
 
@@ -545,26 +575,30 @@ class WalAcceptorFactory:
         self.instances = []
         self.initial_port = 54321
 
-    def start_new(self) -> WalAcceptor:
+    def start_new(self, auth_token: Optional[str] = None) -> WalAcceptor:
         """
         Start new wal acceptor.
         """
 
         wa_num = len(self.instances)
-        wa = WalAcceptor(self.wa_binpath,
-                         os.path.join(self.data_dir, "wal_acceptor_{}".format(wa_num)),
-                         self.initial_port + wa_num, wa_num)
+        wa = WalAcceptor(
+            self.wa_binpath,
+            os.path.join(self.data_dir, "wal_acceptor_{}".format(wa_num)),
+            self.initial_port + wa_num,
+            wa_num,
+            auth_token,
+        )
         wa.start()
         self.instances.append(wa)
         return wa
 
-    def start_n_new(self, n: int) -> None:
+    def start_n_new(self, n: int, auth_token: Optional[str] = None) -> None:
         """
         Start n new wal acceptors.
         """
 
         for _ in range(n):
-            self.start_new()
+            self.start_new(auth_token)
 
     def stop_all(self) -> 'WalAcceptorFactory':
         for wa in self.instances:

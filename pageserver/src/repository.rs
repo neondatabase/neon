@@ -1,6 +1,5 @@
 use crate::object_key::*;
 use crate::relish::*;
-use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
@@ -12,6 +11,7 @@ use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTimelineId;
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
@@ -258,13 +258,15 @@ mod tests {
     use crate::object_repository::{ObjectValue, PageEntry, RelationSizeEntry};
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
-    use crate::{PageServerConf, ZTenantId};
+    use crate::PageServerConf;
     use postgres_ffi::pg_constants;
     use std::fs;
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
     use zenith_utils::bin_ser::BeSer;
+    use zenith_utils::postgres_backend::AuthType;
+    use zenith_utils::zid::ZTenantId;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
@@ -304,6 +306,8 @@ mod tests {
             superuser: "zenith_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),
+            auth_type: AuthType::Trust,
+            auth_validation_public_key_path: None,
         };
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
