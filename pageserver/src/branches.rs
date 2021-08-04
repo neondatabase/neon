@@ -137,7 +137,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
     info!("running initdb... ");
 
     let initdb_path = conf.pg_bin_dir().join("initdb");
-    let initdb_otput = Command::new(initdb_path)
+    let initdb_output = Command::new(initdb_path)
         .args(&["-D", initdbpath.to_str().unwrap()])
         .args(&["-U", &conf.superuser])
         .arg("--no-instructions")
@@ -147,10 +147,10 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .output()
         .with_context(|| "failed to execute initdb")?;
-    if !initdb_otput.status.success() {
+    if !initdb_output.status.success() {
         anyhow::bail!(
             "initdb failed: '{}'",
-            String::from_utf8_lossy(&initdb_otput.stderr)
+            String::from_utf8_lossy(&initdb_output.stderr)
         );
     }
     info!("initdb succeeded");
