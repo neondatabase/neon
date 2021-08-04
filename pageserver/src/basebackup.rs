@@ -50,7 +50,6 @@ impl<'a> Basebackup<'a> {
     }
 
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
-
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
             info!("send subdir {:?}", *dir);

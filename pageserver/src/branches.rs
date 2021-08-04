@@ -47,7 +47,6 @@ pub fn init_pageserver(
     workdir: &Path,
     create_tenant: Option<&str>,
 ) -> Result<()> {
-
     env::set_current_dir(workdir)?;
 
     // Initialize logger

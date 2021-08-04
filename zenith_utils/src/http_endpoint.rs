@@ -4,8 +4,8 @@ use hyper::{
     Body, Request, Response, Server,
 };
 use lazy_static::lazy_static;
-use zenith_metrics::{Encoder, TextEncoder};
 use zenith_metrics::{register_int_counter, IntCounter};
+use zenith_metrics::{Encoder, TextEncoder};
 
 lazy_static! {
     static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(

@@ -1,4 +1,4 @@
-use std::io::{Result, Read, Write};
+use std::io::{Read, Result, Write};
 
 /// A wrapper for an object implementing [Read](std::io::Read)
 /// which allows a closure to observe the amount of bytes read.

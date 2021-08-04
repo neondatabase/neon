@@ -15,12 +15,12 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
 use regex::Regex;
-use zenith_metrics::{HistogramVec, register_histogram_vec};
 use std::io::Write;
 use std::net::TcpListener;
 use std::str::FromStr;
 use std::thread;
 use std::{io, net::TcpStream};
+use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
 use zenith_utils::pq_proto::{
@@ -472,7 +472,11 @@ impl postgres_backend::Handler for PageServerHandler {
                         let modification = Modification::des(&bytes)?;
 
                         last_lsn = modification.lsn;
-                        timeline.put_raw_data(modification.tag, modification.lsn, &modification.data)?;
+                        timeline.put_raw_data(
+                            modification.tag,
+                            modification.lsn,
+                            &modification.data,
+                        )?;
                     }
                     FeMessage::CopyDone => {
                         timeline.advance_last_valid_lsn(last_lsn);

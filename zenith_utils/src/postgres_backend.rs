@@ -80,10 +80,7 @@ pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
 }
 
 impl PostgresBackend {
-    pub fn new(
-        socket: TcpStream,
-        auth_type: AuthType,
-    ) -> io::Result<Self> {
+    pub fn new(socket: TcpStream, auth_type: AuthType) -> io::Result<Self> {
         let mut pb = PostgresBackend {
             stream_in: None,
             stream_out: socket,
