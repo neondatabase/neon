@@ -148,7 +148,7 @@ impl ReplicationConn {
                 break;
             }
         }
-        let (wal_end, timeline) = swh.timeline.find_end_of_wal(&swh.conf.data_dir, false);
+        let (wal_end, timeline) = swh.timeline.find_end_of_wal(&swh.conf.data_dir, true);
         if start_pos == Lsn(0) {
             start_pos = wal_end;
         }
