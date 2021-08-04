@@ -15,10 +15,11 @@ use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use zenith_utils::connstring::connection_host_port;
+use zenith_utils::postgres_backend::AuthType;
+use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::ZTimelineId;
 
 use crate::local_env::LocalEnv;
-use pageserver::{ZTenantId, ZTimelineId};
-
 use crate::storage::PageServerNode;
 
 //
@@ -103,7 +104,7 @@ impl ComputeControlPlane {
             tenantid,
         });
 
-        node.init_from_page_server()?;
+        node.init_from_page_server(self.env.auth_type)?;
         self.nodes
             .insert((tenantid, node.name.clone()), Arc::clone(&node));
 
@@ -247,7 +248,7 @@ impl PostgresNode {
 
     // Connect to a page server, get base backup, and untar it to initialize a
     // new data directory
-    pub fn init_from_page_server(&self) -> Result<()> {
+    pub fn init_from_page_server(&self, auth_type: AuthType) -> Result<()> {
         let pgdata = self.pgdata();
 
         println!(
@@ -322,18 +323,27 @@ impl PostgresNode {
 
         // Connect it to the page server.
 
+        // set up authentication
+        let password = if let AuthType::ZenithJWT = auth_type {
+            "$ZENITH_AUTH_TOKEN"
+        } else {
+            ""
+        };
+
         // Configure that node to take pages from pageserver
-        let (host, port) = connection_host_port(&self.pageserver.connection_config());
+        let (host, port) = connection_host_port(&self.pageserver.connection_config);
         self.append_conf(
             "postgresql.conf",
             format!(
                 concat!(
                     "shared_preload_libraries = zenith\n",
-                    "zenith.page_server_connstring = 'host={} port={}'\n",
+                    // $ZENITH_AUTH_TOKEN will be replaced with value from environment variable during compute pg startup
+                    // it is done this way because otherwise user will be able to retrieve the value using SHOW command or pg_settings
+                    "zenith.page_server_connstring = 'host={} port={} password={}'\n",
                     "zenith.zenith_timeline='{}'\n",
                     "zenith.zenith_tenant='{}'\n",
                 ),
-                host, port, self.timelineid, self.tenantid,
+                host, port, password, self.timelineid, self.tenantid,
             )
             .as_str(),
         )?;
@@ -368,45 +378,48 @@ impl PostgresNode {
         Ok(())
     }
 
-    fn pg_ctl(&self, args: &[&str]) -> Result<()> {
+    fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
         let pg_ctl_path = self.env.pg_bin_dir().join("pg_ctl");
+        let mut cmd = Command::new(pg_ctl_path);
+        cmd.args(
+            [
+                &[
+                    "-D",
+                    self.pgdata().to_str().unwrap(),
+                    "-l",
+                    self.pgdata().join("pg.log").to_str().unwrap(),
+                    "-w", //wait till pg_ctl actually does what was asked
+                ],
+                args,
+            ]
+            .concat(),
+        )
+        .env_clear()
+        .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+        .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
 
-        let pg_ctl = Command::new(pg_ctl_path)
-            .args(
-                [
-                    &[
-                        "-D",
-                        self.pgdata().to_str().unwrap(),
-                        "-l",
-                        self.pgdata().join("pg.log").to_str().unwrap(),
-                        "-w", //wait till pg_ctl actually does what was asked
-                    ],
-                    args,
-                ]
-                .concat(),
-            )
-            .env_clear()
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .status()
-            .with_context(|| "pg_ctl failed")?;
+        if let Some(token) = auth_token {
+            cmd.env("ZENITH_AUTH_TOKEN", token);
+        }
+        let pg_ctl = cmd.status().with_context(|| "pg_ctl failed")?;
+
         if !pg_ctl.success() {
             anyhow::bail!("pg_ctl failed");
         }
         Ok(())
     }
 
-    pub fn start(&self) -> Result<()> {
+    pub fn start(&self, auth_token: &Option<String>) -> Result<()> {
         println!("Starting postgres node at '{}'", self.connstr());
-        self.pg_ctl(&["start"])
+        self.pg_ctl(&["start"], auth_token)
     }
 
-    pub fn restart(&self) -> Result<()> {
-        self.pg_ctl(&["restart"])
+    pub fn restart(&self, auth_token: &Option<String>) -> Result<()> {
+        self.pg_ctl(&["restart"], auth_token)
     }
 
     pub fn stop(&self, destroy: bool) -> Result<()> {
-        self.pg_ctl(&["-m", "immediate", "stop"])?;
+        self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
         if destroy {
             println!(
                 "Destroying postgres data directory '{}'",

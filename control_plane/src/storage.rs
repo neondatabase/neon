@@ -8,8 +8,9 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::ZTenantId;
 use postgres::{Config, NoTls};
+use zenith_utils::postgres_backend::AuthType;
+use zenith_utils::zid::ZTenantId;
 
 use crate::local_env::LocalEnv;
 use crate::read_pidfile;
@@ -24,33 +25,32 @@ use zenith_utils::connstring::connection_address;
 #[derive(Debug)]
 pub struct PageServerNode {
     pub kill_on_exit: bool,
-    pub connection_config: Option<Config>,
+    pub connection_config: Config,
     pub env: LocalEnv,
 }
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
+        let password = if matches!(env.auth_type, AuthType::ZenithJWT) {
+            &env.auth_token
+        } else {
+            ""
+        };
+
         PageServerNode {
             kill_on_exit: false,
-            connection_config: None, // default
+            connection_config: Self::default_config(password), // default
             env: env.clone(),
         }
     }
 
-    fn default_config() -> Config {
-        "postgresql://no_user@localhost:64000/no_db"
+    fn default_config(password: &str) -> Config {
+        format!("postgresql://no_user:{}@localhost:64000/no_db", password)
             .parse()
             .unwrap()
     }
 
-    pub fn connection_config(&self) -> Config {
-        match &self.connection_config {
-            Some(config) => config.clone(),
-            None => Self::default_config(),
-        }
-    }
-
-    pub fn init(&self, create_tenant: Option<&str>) -> Result<()> {
+    pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool) -> Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         let mut args = vec![
             "--init",
@@ -59,6 +59,12 @@ impl PageServerNode {
             "--postgres-distrib",
             self.env.pg_distrib_dir.to_str().unwrap(),
         ];
+
+        if enable_auth {
+            args.extend(&["--auth-validation-public-key-path", "auth_public_key.pem"]);
+            args.extend(&["--auth-type", "ZenithJWT"]);
+        }
+
         create_tenant.map(|tenantid| args.extend(&["--create-tenant", tenantid]));
         let status = cmd
             .args(args)
@@ -85,7 +91,7 @@ impl PageServerNode {
     pub fn start(&self) -> Result<()> {
         println!(
             "Starting pageserver at '{}' in {}",
-            connection_address(&self.connection_config()),
+            connection_address(&self.connection_config),
             self.repo_path().display()
         );
 
@@ -105,18 +111,21 @@ impl PageServerNode {
         // It takes a while for the page server to start up. Wait until it is
         // open for business.
         for retries in 1..15 {
-            let client = self.page_server_psql_client();
-            if client.is_ok() {
-                break;
-            } else {
-                println!("Pageserver not responding yet, retrying ({})...", retries);
-                thread::sleep(Duration::from_secs(1));
+            match self.page_server_psql_client() {
+                Ok(_) => {
+                    println!("Pageserver started");
+                    return Ok(());
+                }
+                Err(err) => {
+                    println!(
+                        "Pageserver not responding yet, err {} retrying ({})...",
+                        err, retries
+                    );
+                    thread::sleep(Duration::from_secs(1));
+                }
             }
         }
-
-        println!("Pageserver started");
-
-        Ok(())
+        bail!("pageserver failed to start");
     }
 
     pub fn stop(&self) -> Result<()> {
@@ -127,7 +136,7 @@ impl PageServerNode {
         }
 
         // wait for pageserver stop
-        let address = connection_address(&self.connection_config());
+        let address = connection_address(&self.connection_config);
         for _ in 0..5 {
             let stream = TcpStream::connect(&address);
             thread::sleep(Duration::from_secs(1));
@@ -142,14 +151,14 @@ impl PageServerNode {
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        let mut client = self.connection_config().connect(NoTls).unwrap();
+        let mut client = self.connection_config.connect(NoTls).unwrap();
 
         println!("Pageserver query: '{}'", sql);
         client.simple_query(sql).unwrap()
     }
 
     pub fn page_server_psql_client(&self) -> Result<postgres::Client, postgres::Error> {
-        self.connection_config().connect(NoTls)
+        self.connection_config.connect(NoTls)
     }
 
     pub fn tenants_list(&self) -> Result<Vec<String>> {

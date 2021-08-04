@@ -4,12 +4,14 @@
 //! is rather narrow, but we can extend it once required.
 
 use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode};
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
 use log::*;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::io::{self, BufReader, Write};
 use std::net::{Shutdown, TcpStream};
+use std::str::FromStr;
 
 pub trait Handler {
     /// Handle single query.
@@ -27,9 +29,14 @@ pub trait Handler {
         Ok(())
     }
 
-    /// Check auth
+    /// Check auth md5
     fn check_auth_md5(&mut self, _pgb: &mut PostgresBackend, _md5_response: &[u8]) -> Result<()> {
-        bail!("Auth failed")
+        bail!("MD5 auth failed")
+    }
+
+    /// Check auth jwt
+    fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
+        bail!("JWT auth failed")
     }
 }
 
@@ -42,10 +49,25 @@ pub enum ProtoState {
     Established,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum AuthType {
     Trust,
     MD5,
+    // This mimics postgres's AuthenticationCleartextPassword but instead of password expects JWT
+    ZenithJWT,
+}
+
+impl FromStr for AuthType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Trust" => Ok(Self::Trust),
+            "MD5" => Ok(Self::MD5),
+            "ZenithJWT" => Ok(Self::ZenithJWT),
+            _ => bail!("invalid value \"{}\" for auth type", s),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -125,7 +147,7 @@ impl PostgresBackend {
 
         use ProtoState::*;
         match state {
-            ProtoState::Initialization => FeStartupMessage::read(stream),
+            Initialization => FeStartupMessage::read(stream),
             Authentication | Established => FeMessage::read(stream),
         }
     }
@@ -184,13 +206,13 @@ impl PostgresBackend {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
         if self.state < ProtoState::Established {
-            match &msg {
-                FeMessage::PasswordMessage(_m) => {}
-                FeMessage::StartupMessage(_m) => {}
-                _ => {
-                    bail!("protocol violation");
-                }
-            }
+            ensure!(
+                matches!(
+                    msg,
+                    FeMessage::PasswordMessage(_) | FeMessage::StartupMessage(_)
+                ),
+                "protocol violation"
+            );
         }
 
         match msg {
@@ -224,6 +246,10 @@ impl PostgresBackend {
                                 ))?;
                                 self.state = ProtoState::Authentication;
                             }
+                            AuthType::ZenithJWT => {
+                                self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
+                                self.state = ProtoState::Authentication;
+                            }
                         }
                     }
                     StartupRequestCode::Cancel => {
@@ -237,21 +263,35 @@ impl PostgresBackend {
 
                 assert!(self.state == ProtoState::Authentication);
 
-                let (_, md5_response) = m
-                    .split_last()
-                    .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
+                match self.auth_type {
+                    AuthType::Trust => unreachable!(),
+                    AuthType::MD5 => {
+                        let (_, md5_response) = m
+                            .split_last()
+                            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
 
-                if let Err(e) = handler.check_auth_md5(self, md5_response) {
-                    self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
-                    bail!("auth failed: {}", e);
-                } else {
-                    self.write_message_noflush(&BeMessage::AuthenticationOk)?;
-                    // psycopg2 will not connect if client_encoding is not
-                    // specified by the server
-                    self.write_message_noflush(&BeMessage::ParameterStatus)?;
-                    self.write_message(&BeMessage::ReadyForQuery)?;
-                    self.state = ProtoState::Established;
+                        if let Err(e) = handler.check_auth_md5(self, md5_response) {
+                            self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                            bail!("auth failed: {}", e);
+                        }
+                    }
+                    AuthType::ZenithJWT => {
+                        let (_, jwt_response) = m
+                            .split_last()
+                            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
+
+                        if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
+                            self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                            bail!("auth failed: {}", e);
+                        }
+                    }
                 }
+                self.write_message_noflush(&BeMessage::AuthenticationOk)?;
+                // psycopg2 will not connect if client_encoding is not
+                // specified by the server
+                self.write_message_noflush(&BeMessage::ParameterStatus)?;
+                self.write_message(&BeMessage::ReadyForQuery)?;
+                self.state = ProtoState::Established;
             }
 
             FeMessage::Query(m) => {

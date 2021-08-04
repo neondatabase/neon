@@ -16,3 +16,9 @@ pub mod pq_proto;
 
 // dealing with connstring parsing and handy access to it's parts
 pub mod connstring;
+
+// common authentication routines
+pub mod auth;
+
+// utility functions and helper traits for unified unique id generation/serialization etc.
+pub mod zid;

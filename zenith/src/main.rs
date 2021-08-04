@@ -4,13 +4,15 @@ use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env::{self, LocalEnv};
 use control_plane::storage::PageServerNode;
-use pageserver::ZTenantId;
 use std::collections::btree_map::Entry;
 use std::collections::HashMap;
 use std::process::exit;
 use std::str::FromStr;
+use zenith_utils::auth::{encode_from_key_path, Claims, Scope};
+use zenith_utils::postgres_backend::AuthType;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
-use pageserver::{branches::BranchInfo, ZTimelineId};
+use pageserver::branches::BranchInfo;
 use zenith_utils::lsn::Lsn;
 
 ///
@@ -53,6 +55,12 @@ fn main() -> Result<()> {
                         .long("remote-pageserver")
                         .required(false)
                         .value_name("pageserver-url"),
+                )
+                .arg(
+                    Arg::with_name("enable-auth")
+                        .long("enable-auth")
+                        .takes_value(false)
+                        .help("Enable authentication using ZenithJWT")
                 ),
         )
         .subcommand(
@@ -115,10 +123,16 @@ fn main() -> Result<()> {
         .get_matches();
 
     // Create config file
-    if let ("init", Some(sub_args)) = matches.subcommand() {
+    if let ("init", Some(init_match)) = matches.subcommand() {
         let tenantid = ZTenantId::generate();
-        let pageserver_uri = sub_args.value_of("pageserver-url");
-        local_env::init(pageserver_uri, tenantid)
+        let pageserver_uri = init_match.value_of("pageserver-url");
+        let auth_type = if init_match.is_present("enable-auth") {
+            AuthType::ZenithJWT
+        } else {
+            AuthType::Trust
+        };
+
+        local_env::init(pageserver_uri, tenantid, auth_type)
             .with_context(|| "Failed to create config file")?;
     }
 
@@ -132,9 +146,12 @@ fn main() -> Result<()> {
     };
 
     match matches.subcommand() {
-        ("init", Some(_)) => {
+        ("init", Some(init_match)) => {
             let pageserver = PageServerNode::from_env(&env);
-            if let Err(e) = pageserver.init(Some(&env.tenantid.to_string())) {
+            if let Err(e) = pageserver.init(
+                Some(&env.tenantid.to_string()),
+                init_match.is_present("enable-auth"),
+            ) {
                 eprintln!("pageserver init failed: {}", e);
                 exit(1);
             }
@@ -447,12 +464,19 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
             let node = cplane.nodes.get(&(tenantid, timeline_name.to_owned()));
 
+            let auth_token = if matches!(env.auth_type, AuthType::ZenithJWT) {
+                let claims = Claims::new(Some(tenantid), Scope::Tenant);
+                Some(encode_from_key_path(&claims, &env.private_key_path)?)
+            } else {
+                None
+            };
+
             println!("Starting postgres on timeline {}...", timeline_name);
             if let Some(node) = node {
-                node.start()?;
+                node.start(&auth_token)?;
             } else {
                 let node = cplane.new_node(tenantid, timeline_name)?;
-                node.start()?;
+                node.start(&auth_token)?;
             }
         }
         ("stop", Some(stop_match)) => {

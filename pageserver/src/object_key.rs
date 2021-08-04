@@ -3,8 +3,8 @@
 //!
 
 use crate::relish::RelishTag;
-use crate::ZTimelineId;
 use serde::{Deserialize, Serialize};
+use zenith_utils::zid::ZTimelineId;
 
 ///
 /// ObjectKey is the key type used to identify objects stored in an object

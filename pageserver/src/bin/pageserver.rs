@@ -9,11 +9,14 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::exit,
+    str::FromStr,
+    sync::Arc,
     thread,
     time::Duration,
 };
+use zenith_utils::{auth::JwtAuth, postgres_backend::AuthType};
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
@@ -36,6 +39,8 @@ struct CfgFileParams {
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     pg_distrib_dir: Option<String>,
+    auth_validation_public_key_path: Option<String>,
+    auth_type: Option<String>,
 }
 
 impl CfgFileParams {
@@ -51,6 +56,8 @@ impl CfgFileParams {
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
             pg_distrib_dir: get_arg("postgres-distrib"),
+            auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
+            auth_type: get_arg("auth-type"),
         }
     }
 
@@ -63,11 +70,17 @@ impl CfgFileParams {
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
+            auth_validation_public_key_path: self
+                .auth_validation_public_key_path
+                .or(other.auth_validation_public_key_path),
+            auth_type: self.auth_type.or(other.auth_type),
         }
     }
 
     /// Create a PageServerConf from these string parameters
     fn try_into_config(&self) -> Result<PageServerConf> {
+        let workdir = PathBuf::from(".");
+
         let listen_addr = match self.listen_addr.as_ref() {
             Some(addr) => addr.clone(),
             None => DEFAULT_LISTEN_ADDR.to_owned(),
@@ -92,8 +105,32 @@ impl CfgFileParams {
             None => env::current_dir()?.join("tmp_install"),
         };
 
+        let auth_validation_public_key_path = self
+            .auth_validation_public_key_path
+            .as_ref()
+            .map(PathBuf::from);
+
+        let auth_type = self
+            .auth_type
+            .as_ref()
+            .map_or(Ok(AuthType::Trust), |auth_type| {
+                AuthType::from_str(&auth_type)
+            })?;
+
         if !pg_distrib_dir.join("bin/postgres").exists() {
             anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
+        }
+
+        if auth_type == AuthType::ZenithJWT {
+            ensure!(
+                auth_validation_public_key_path.is_some(),
+                "Missing auth_validation_public_key_path when auth_type is ZenithJWT"
+            );
+            let path_ref = auth_validation_public_key_path.as_ref().unwrap();
+            ensure!(
+                path_ref.exists(),
+                format!("Can't find auth_validation_public_key at {:?}", path_ref)
+            );
         }
 
         Ok(PageServerConf {
@@ -106,9 +143,13 @@ impl CfgFileParams {
 
             superuser: String::from(DEFAULT_SUPERUSER),
 
-            workdir: PathBuf::from("."),
+            workdir,
 
             pg_distrib_dir,
+
+            auth_validation_public_key_path,
+
+            auth_type,
         })
     }
 }
@@ -168,6 +209,18 @@ fn main() -> Result<()> {
                 .help("Create tenant during init")
                 .requires("init"),
         )
+        .arg(
+            Arg::with_name("auth-validation-public-key-path")
+                .long("auth-validation-public-key-path")
+                .takes_value(true)
+                .help("Path to public key used to validate jwt signature"),
+        )
+        .arg(
+            Arg::with_name("auth-type")
+                .long("auth-type")
+                .takes_value(true)
+                .help("Authentication scheme type. One of: Trust, MD5, ZenithJWT"),
+        )
         .get_matches();
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
@@ -188,6 +241,9 @@ fn main() -> Result<()> {
         args_params.or(file_params)
     };
 
+    // Set CWD to workdir for non-daemon modes
+    env::set_current_dir(&workdir)?;
+
     // Ensure the config is valid, even if just init-ing
     let mut conf = params.try_into_config()?;
 
@@ -205,16 +261,14 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_pageserver(conf, workdir, create_tenant)?;
+        branches::init_pageserver(conf, create_tenant)?;
         // write the config file
         let cfg_file_contents = toml::to_string_pretty(&params)?;
+        // TODO support enable-auth flag
         std::fs::write(&cfg_file_path, cfg_file_contents)?;
 
         return Ok(());
     }
-
-    // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&workdir)?;
 
     start_pageserver(conf)
 }
@@ -262,11 +316,23 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Initialize page cache, this will spawn walredo_thread
     page_cache::init(conf);
 
+    // initialize authentication for incoming connections
+    let auth = match &conf.auth_type {
+        AuthType::Trust | AuthType::MD5 => Arc::new(None),
+        AuthType::ZenithJWT => {
+            // unwrap is ok because check is performed when creating config, so path is set and file exists
+            let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
+            Arc::new(Some(JwtAuth::from_key_path(key_path)?))
+        }
+    };
+    info!("Using auth: {:#?}", conf.auth_type);
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.
     let page_service_thread = thread::Builder::new()
         .name("Page Service thread".into())
-        .spawn(move || page_service::thread_main(conf, pageserver_listener))?;
+        .spawn(move || {
+            page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
+        })?;
 
     page_service_thread
         .join()

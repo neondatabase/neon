@@ -4,14 +4,17 @@
 // Now it also provides init method which acts like a stub for proper installation
 // script which will use local paths.
 //
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use hex;
-use pageserver::ZTenantId;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::{collections::BTreeMap, env};
 use url::Url;
+use zenith_utils::auth::{encode_from_key_path, Claims, Scope};
+use zenith_utils::postgres_backend::AuthType;
+use zenith_utils::zid::ZTenantId;
 
 pub type Remotes = BTreeMap<String, String>;
 
@@ -38,6 +41,15 @@ pub struct LocalEnv {
     // keeping tenant id in config to reduce copy paste when running zenith locally with single tenant
     #[serde(with = "hex")]
     pub tenantid: ZTenantId,
+
+    // jwt auth token used for communication with pageserver
+    pub auth_token: String,
+
+    // used to determine which auth type is used
+    pub auth_type: AuthType,
+
+    // used to issue tokens during e.g pg start
+    pub private_key_path: PathBuf,
 
     pub remotes: Remotes,
 }
@@ -85,7 +97,11 @@ fn base_path() -> PathBuf {
 //
 // Initialize a new Zenith repository
 //
-pub fn init(remote_pageserver: Option<&str>, tenantid: ZTenantId) -> Result<()> {
+pub fn init(
+    remote_pageserver: Option<&str>,
+    tenantid: ZTenantId,
+    auth_type: AuthType,
+) -> Result<()> {
     // check if config already exists
     let base_path = base_path();
     if base_path.exists() {
@@ -94,6 +110,7 @@ pub fn init(remote_pageserver: Option<&str>, tenantid: ZTenantId) -> Result<()> 
             base_path.to_str().unwrap()
         );
     }
+    fs::create_dir(&base_path)?;
 
     // ok, now check that expected binaries are present
 
@@ -110,6 +127,44 @@ pub fn init(remote_pageserver: Option<&str>, tenantid: ZTenantId) -> Result<()> 
         anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
     }
 
+    // generate keys for jwt
+    // openssl genrsa -out private_key.pem 2048
+    let private_key_path = base_path.join("auth_private_key.pem");
+    let keygen_output = Command::new("openssl")
+        .arg("genrsa")
+        .args(&["-out", private_key_path.to_str().unwrap()])
+        .arg("2048")
+        .stdout(Stdio::null())
+        .output()
+        .with_context(|| "failed to generate auth private key")?;
+    if !keygen_output.status.success() {
+        anyhow::bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+
+    let public_key_path = base_path.join("auth_public_key.pem");
+    // openssl rsa -in private_key.pem -pubout -outform PEM -out public_key.pem
+    let keygen_output = Command::new("openssl")
+        .arg("rsa")
+        .args(&["-in", private_key_path.to_str().unwrap()])
+        .arg("-pubout")
+        .args(&["-outform", "PEM"])
+        .args(&["-out", public_key_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .output()
+        .with_context(|| "failed to generate auth private key")?;
+    if !keygen_output.status.success() {
+        anyhow::bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+
+    let auth_token =
+        encode_from_key_path(&Claims::new(None, Scope::PageServerApi), &private_key_path)?;
+
     let conf = if let Some(addr) = remote_pageserver {
         // check that addr is parsable
         let _uri = Url::parse(addr).map_err(|e| anyhow!("{}: {}", addr, e))?;
@@ -121,6 +176,9 @@ pub fn init(remote_pageserver: Option<&str>, tenantid: ZTenantId) -> Result<()> 
             base_data_dir: base_path,
             remotes: BTreeMap::default(),
             tenantid,
+            auth_token,
+            auth_type,
+            private_key_path,
         }
     } else {
         // Find zenith binaries.
@@ -136,6 +194,9 @@ pub fn init(remote_pageserver: Option<&str>, tenantid: ZTenantId) -> Result<()> 
             base_data_dir: base_path,
             remotes: BTreeMap::default(),
             tenantid,
+            auth_token,
+            auth_type,
+            private_key_path,
         }
     };
 

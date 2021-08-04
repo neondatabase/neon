@@ -13,13 +13,13 @@
 //! until we find the page we're looking for, making a separate lookup into the
 //! key-value store for each timeline.
 
+use crate::object_key::*;
 use crate::object_store::ObjectStore;
 use crate::relish::*;
 use crate::repository::*;
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
-use crate::{object_key::*, ZTenantId};
-use crate::{PageServerConf, ZTimelineId};
+use crate::PageServerConf;
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use log::*;
@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
+use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::ZTimelineId;
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
@@ -273,11 +275,13 @@ impl Timeline for ObjectTimeline {
         // Handle truncated SLRU segments.
         // XXX if this will turn out to be performance critical,
         // move this check out of the funciton.
-        if let RelishTag::Slru{slru: _slru, segno: _segno} = rel
+        if let RelishTag::Slru {
+            slru: _slru,
+            segno: _segno,
+        } = rel
         {
             info!("test SLRU rel {:?} at {}", rel, req_lsn);
-            if !self.get_rel_exists(rel, req_lsn).unwrap_or(false)
-            {
+            if !self.get_rel_exists(rel, req_lsn).unwrap_or(false) {
                 info!("SLRU rel {:?} at {} doesn't exist", rel, req_lsn);
                 return Err(anyhow!("SLRU rel doesn't exist"));
             }
@@ -350,9 +354,7 @@ impl Timeline for ObjectTimeline {
 
     /// Does relation exist at given LSN?
     fn get_rel_exists(&self, rel: RelishTag, req_lsn: Lsn) -> Result<bool> {
-
-        if let Some(_) = self.get_relish_size(rel, req_lsn)?
-        {
+        if let Some(_) = self.get_relish_size(rel, req_lsn)? {
             trace!("Relation {} exists at {}", rel, req_lsn);
             return Ok(true);
         }
@@ -714,9 +716,11 @@ impl Timeline for ObjectTimeline {
                         for vers in self.obj_store.object_versions(&key, horizon)? {
                             let lsn = vers.0;
                             prepared_horizon = Lsn::min(lsn, prepared_horizon);
-                            if !self.get_tx_is_in_progress(xid, horizon)
-                            {
-                                info!("unlink twophase_file NOT TRANSACTION_STATUS_IN_PROGRESS {}", xid);
+                            if !self.get_tx_is_in_progress(xid, horizon) {
+                                info!(
+                                    "unlink twophase_file NOT TRANSACTION_STATUS_IN_PROGRESS {}",
+                                    xid
+                                );
                                 self.obj_store.unlink(&key, lsn)?;
                                 result.prep_deleted += 1;
                             }

@@ -36,13 +36,13 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTenantId;
 
 use crate::relish::*;
 use crate::repository::WALRecord;
 use crate::waldecoder::XlXactParsedRecord;
 use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
-use crate::ZTenantId;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::XLogRecord;

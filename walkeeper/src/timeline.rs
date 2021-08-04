@@ -5,7 +5,6 @@ use anyhow::{bail, Result};
 use fs2::FileExt;
 use lazy_static::lazy_static;
 use log::*;
-use pageserver::ZTimelineId;
 use postgres_ffi::xlog_utils::{find_end_of_wal, TimeLineID};
 use std::cmp::{max, min};
 use std::collections::HashMap;
@@ -15,6 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTimelineId;
 
 use crate::receive_wal::{SafeKeeperInfo, CONTROL_FILE_NAME, SK_FORMAT_VERSION, SK_MAGIC};
 use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};

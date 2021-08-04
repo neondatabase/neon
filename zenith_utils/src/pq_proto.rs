@@ -329,6 +329,7 @@ fn read_null_terminated(buf: &mut Bytes) -> anyhow::Result<Bytes> {
 pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationMD5Password(&'a [u8; 4]),
+    AuthenticationCleartextPassword,
     BindComplete,
     CommandComplete(&'a [u8]),
     ControlFile,
@@ -466,6 +467,15 @@ impl<'a> BeMessage<'a> {
                 buf.put_u8(b'R');
                 write_body(buf, |buf| {
                     buf.put_i32(0); // Specifies that the authentication was successful.
+                    Ok::<_, io::Error>(())
+                })
+                .unwrap(); // write into BytesMut can't fail
+            }
+
+            BeMessage::AuthenticationCleartextPassword => {
+                buf.put_u8(b'R');
+                write_body(buf, |buf| {
+                    buf.put_i32(3); // Specifies that clear text password is required.
                     Ok::<_, io::Error>(())
                 })
                 .unwrap(); // write into BytesMut can't fail

@@ -7,7 +7,6 @@
 use anyhow::{bail, ensure, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::{
     fs,
     path::Path,
@@ -15,6 +14,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use log::*;
 use zenith_utils::lsn::Lsn;
@@ -24,8 +24,7 @@ use crate::object_repository::ObjectRepository;
 use crate::page_cache;
 use crate::restore_local_repo;
 use crate::walredo::WalRedoManager;
-use crate::ZTenantId;
-use crate::{repository::Repository, PageServerConf, ZTimelineId};
+use crate::{repository::Repository, PageServerConf};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -42,13 +41,7 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn init_pageserver(
-    conf: &'static PageServerConf,
-    workdir: &Path,
-    create_tenant: Option<&str>,
-) -> Result<()> {
-    env::set_current_dir(workdir)?;
-
+pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str>) -> Result<()> {
     // Initialize logger
     let (_scope_guard, _log_file) = logger::init_logging(&conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;
