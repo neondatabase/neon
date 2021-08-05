@@ -1,24 +1,64 @@
-# WAL safekeeper
+# WAL service
 
-Also know as the WAL service, WAL keeper or WAL acceptor.
-
-The WAL safekeeper acts as a holding area and redistribution center
-for recently generated WAL. The primary Postgres server streams the
-WAL to the WAL safekeeper, and treats it like a (synchronous)
+The zenith WAL service acts as a holding area and redistribution
+center for recently generated WAL. The primary Postgres server streams
+the WAL to the WAL safekeeper, and treats it like a (synchronous)
 replica. A replication slot is used in the primary to prevent the
-primary from discarding WAL that hasn't been streamed to the
-safekeeper yet.
+primary from discarding WAL that hasn't been streamed to the WAL
+service yet.
 
-The primary connects to the WAL safekeeper, so it works in a "push"
++--------------+              +------------------+
+|              |     WAL      |                  |
+| Compute node |  ----------> |   WAL Service    |
+|              |              |                  |
++--------------+              +------------------+
+                                     |
+                                     |
+                                     | WAL
+                                     |
+                                     |
+                                     V
+                              +--------------+
+                              |              |
+                              | Pageservers  |
+                              |              |
+                              +--------------+
+
+
+
+The WAL service consists of multiple WAL safekeepers that all store a
+copy of the WAL. A WAL record is considered durable when the majority
+of safekeepers have received and stored the WAL to local disk. A
+consensus algorithm based on Paxos is used to manage the quorum.
+
+  +-------------------------------------------+
+  | WAL Service                               |
+  |                                           |
+  |                                           |
+  |  +------------+                           |
+  |  | safekeeper |                           |
+  |  +------------+                           |
+  |                                           |
+  |  +------------+                           |
+  |  | safekeeper |                           |
+  |  +------------+                           |
+  |                                           |
+  |  +------------+                           |
+  |  | safekeeper |                           |
+  |  +------------+                           |
+  |                                           |
+  +-------------------------------------------+
+
+
+The primary connects to the WAL safekeepers, so it works in a "push"
 fashion.  That's different from how streaming replication usually
 works, where the replica initiates the connection. To do that, there
 is a component called the "WAL proposer". The WAL proposer is a
 background worker that runs in the primary Postgres server. It
-connects to the WAL safekeeper, and
-sends all the WAL. (PostgreSQL's archive_commands works in the
-"push" style, but it operates on a WAL segment granularity. If
-PostgreSQL had a push style API for streaming, WAL propose could be
-implemented using it.)
+connects to the WAL safekeeper, and sends all the WAL. (PostgreSQL's
+archive_commands works in the "push" style, but it operates on a WAL
+segment granularity. If PostgreSQL had a push style API for streaming,
+WAL propose could be implemented using it.)
 
 The Page Server connects to the WAL safekeeper, using the same
 streaming replication protocol that's used between Postgres primary
@@ -33,5 +73,17 @@ safekeepers. The Paxos and crash recovery algorithm ensures that only
 one primary node can be actively streaming WAL to the quorum of
 safekeepers.
 
-See README_PROTO.md for a more detailed desription of the consensus protocol. spec/
-contains TLA+ specification of it.
+See README_PROTO.md for a more detailed desription of the consensus
+protocol. spec/ contains TLA+ specification of it.
+
+
+# Terminology
+
+WAL service - The service as whole that ensures that WAL is stored durably.
+
+WAL safekeeper - One node that participates in the quorum. All the safekeepers
+together form the WAL service.
+
+WAL acceptor, WAL proposer - In the context of the consensus algorithm, the Postgres
+compute node is also known as the WAL proposer, and the safekeeper is also known
+as the acceptor. Those are the standard terms in the Paxos algorithm.
