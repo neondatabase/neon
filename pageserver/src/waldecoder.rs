@@ -4,6 +4,7 @@
 //!
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
+use crc32c::*;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::XLogLongPageHeaderData;
@@ -166,6 +167,14 @@ impl WalStreamDecoder {
                     // XLOG_SWITCH records are special. If we see one, we need to skip
                     // to the next WAL segment.
                     let xlogrec = XLogRecord::from_bytes(&mut buf);
+                    let mut crc = crc32c_append(0, &recordbuf[XLOG_RECORD_CRC_OFFS+4..]);
+                    crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
+                    if crc != xlogrec.xl_crc {
+                        return Err(WalDecodeError {
+                            msg: "WAL record crc mismatch".into(),
+                            lsn: self.lsn,
+                        });
+                    }
                     if xlogrec.is_xlog_switch_record() {
                         trace!("saw xlog switch record at {}", self.lsn);
                         self.padlen =
