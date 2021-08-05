@@ -557,7 +557,10 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
         num_rels_copied += 1;
     }
+
     // Copy relfilemap
+    // TODO This implementation is very inefficient -
+    // it scans all non-rels only to find FileNodeMaps
     for tag in timeline.list_nonrels(req_lsn)? {
         match tag {
             RelishTag::FileNodeMap { spcnode, dbnode } => {

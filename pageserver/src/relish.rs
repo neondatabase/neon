@@ -195,7 +195,7 @@ pub enum SlruKind {
 }
 
 impl SlruKind {
-    fn to_str(&self) -> &'static str {
+    pub fn to_str(&self) -> &'static str {
         match self {
             Self::Clog => "pg_xact",
             Self::MultiXactMembers => "pg_multixact/members",

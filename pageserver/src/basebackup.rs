@@ -70,9 +70,6 @@ impl<'a> Basebackup<'a> {
         }
 
         // Gather non-relational files from object storage pages.
-        // Iteration is sorted order: all objects of the same type are grouped and traversed
-        // in key ascending order. For example all pg_xact records precede pg_multixact records and are sorted by block number.
-        // It allows to easily construct SLRU segments.
         for obj in self.timeline.list_nonrels(self.lsn)? {
             match obj {
                 RelishTag::Slru { slru, segno } => {
@@ -96,7 +93,7 @@ impl<'a> Basebackup<'a> {
     }
 
     //
-    // Generate SLRU segment files from repository. Path identifies SLRU kind (pg_xact, pg_multixact/members, ...).
+    // Generate SLRU segment files from repository.
     //
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
         let nblocks = self
@@ -116,15 +113,11 @@ impl<'a> Basebackup<'a> {
             slru_buf.extend_from_slice(&img);
         }
 
-        let dir = match slru {
-            SlruKind::Clog => "pg_xact",
-            SlruKind::MultiXactMembers => "pg_multixact/members",
-            SlruKind::MultiXactOffsets => "pg_multixact/offsets",
-        };
-
-        let segname = format!("{}/{:>04X}", dir, segno);
+        let segname = format!("{}/{:>04X}", slru.to_str(), segno);
         let header = new_tar_header(&segname, slru_buf.len() as u64)?;
         self.ar.append(&header, slru_buf.as_slice())?;
+
+        trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
         Ok(())
     }
 

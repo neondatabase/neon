@@ -212,6 +212,7 @@ impl ObjectStore for RocksObjectStore {
     }
 
     /// Get a list of all distinct NON-relations in timeline
+    /// that are visible at given lsn.
     ///
     /// TODO: This implementation is very inefficient, it scans
     /// through all non-rel page versions in the system. In practice, this
