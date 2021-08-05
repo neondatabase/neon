@@ -843,7 +843,7 @@ impl ObjectTimeline {
                 }
             }
         } else {
-            info!("relation {} not found at {}", rel, lsn);
+            trace!("relation {} not found at {}", rel, lsn);
             Ok(None)
         }
     }

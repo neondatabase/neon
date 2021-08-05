@@ -72,7 +72,6 @@ pub trait ObjectStore: Send + Sync {
     /// Iterate through non-rel relishes
     ///
     /// This is used to prepare tarball for new node startup.
-    /// Returns objects in increasing key-version order.
     fn list_nonrels<'a>(&'a self, timelineid: ZTimelineId, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
     /// Iterate through objects tags. If nonrel_only, then only non-relationa data is iterated.
