@@ -320,18 +320,15 @@ impl Timeline for ObjectTimeline {
         /* return Err("could not find page image")?; */
     }
 
-    /// Get size of relation
-    fn get_rel_size(&self, rel: RelishTag, lsn: Lsn) -> Result<u32> {
+    /// Get size of a relish in number of blocks
+    /// Return None if the relish was truncated
+    fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {
         if !rel.is_blocky() {
-            bail!("invalid get_rel_size request for non-blocky relish {}", rel);
+            bail!("invalid get_relish_size request for non-blocky relish {}", rel);
         }
 
         let lsn = self.wait_lsn(lsn)?;
-
-        match self.relsize_get_nowait(rel, lsn)? {
-            Some(nblocks) => Ok(nblocks),
-            None => bail!("relation {} not found at {}", rel, lsn),
-        }
+        return self.relsize_get_nowait(rel, lsn);
     }
 
     /// Does relation exist at given LSN?
@@ -471,7 +468,10 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
-    /// Unlink relation. This method is used for marking dropped relations.
+    /// Unlink relation. This method is used for marking dropped Relishes.
+    ///
+    /// Note: each SLRU segment in PostgreSQL is considered a separate relish,
+    /// so we can use unlink to truncate SLRU segments.
     fn put_unlink(&self, rel_tag: RelishTag, lsn: Lsn) -> Result<()> {
         self.put_relsize_entry(&rel_tag, lsn, RelationSizeEntry::Unlink)?;
 
@@ -558,10 +558,15 @@ impl Timeline for ObjectTimeline {
     /// Adds a relation-wide WAL record (like truncate) to the repository,
     /// associating it with all pages started with specified block number
     ///
+    /// Note: This is only for regular relation truncations.
+    /// To truncate SLRU segments use put_unlink() function.
+    ///
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()> {
-        if !rel.is_blocky() {
-            bail!("invalid truncation for non-blocky relish {}", rel);
-        }
+
+        match rel {
+            RelishTag::Relation(_) => {},
+            _ =>  bail!("invalid truncation for non-rel relish {}", rel)
+        };
 
         info!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
 
