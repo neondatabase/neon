@@ -268,7 +268,10 @@ impl PageServerHandler {
                         .observe_closure_duration(|| {
                             // Return 0 if relation is not found.
                             // This is what postgres smgr expects.
-                            timeline.get_relish_size(tag, req.lsn).unwrap_or(Some(0)).unwrap_or(0)
+                            timeline
+                                .get_relish_size(tag, req.lsn)
+                                .unwrap_or(Some(0))
+                                .unwrap_or(0)
                         });
 
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })
