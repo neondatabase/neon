@@ -338,7 +338,10 @@ impl Timeline for ObjectTimeline {
     /// Return None if the relish was truncated
     fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {
         if !rel.is_blocky() {
-            bail!("invalid get_relish_size request for non-blocky relish {}", rel);
+            bail!(
+                "invalid get_relish_size request for non-blocky relish {}",
+                rel
+            );
         }
 
         let lsn = self.wait_lsn(lsn)?;
@@ -577,10 +580,9 @@ impl Timeline for ObjectTimeline {
     /// To truncate SLRU segments use put_unlink() function.
     ///
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()> {
-
         match rel {
-            RelishTag::Relation(_) => {},
-            _ =>  bail!("invalid truncation for non-rel relish {}", rel)
+            RelishTag::Relation(_) => {}
+            _ => bail!("invalid truncation for non-rel relish {}", rel),
         };
 
         info!("Truncate relation {} to {} blocks at {}", rel, nblocks, lsn);
