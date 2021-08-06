@@ -51,6 +51,8 @@ postgres: postgres-configure
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 install
 	+@echo "Compiling contrib/zenith"
 	$(MAKE) -C tmp_install/build/contrib/zenith install
+	+@echo "Compiling contrib/zenith_test_utils"
+	$(MAKE) -C tmp_install/build/contrib/zenith_test_utils install
 
 postgres-clean:
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 clean

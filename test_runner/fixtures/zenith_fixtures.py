@@ -284,6 +284,11 @@ class Postgres(PgProtocol):
 
         return self
 
+    def pg_xact_dir_path(self) -> str:
+        """ Path to pg_xact dir """
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'pg_xact'
+        return os.path.join(self.repo_dir, path)
+
     def config_file_path(self) -> str:
         """ Path to postgresql.conf """
         filename = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'postgresql.conf'

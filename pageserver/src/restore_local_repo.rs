@@ -708,14 +708,15 @@ fn save_xact_record(
 fn save_clog_truncate_record(
     checkpoint: &mut CheckPoint,
     _timeline: &dyn Timeline,
-    _lsn: Lsn,
+    lsn: Lsn,
     xlrec: &XlClogTruncate,
 ) -> Result<()> {
-    trace!(
-        "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {}",
+    info!(
+        "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {} lsn {}",
         xlrec.pageno,
         xlrec.oldest_xid,
-        xlrec.oldest_xid_db
+        xlrec.oldest_xid_db,
+        lsn
     );
 
     checkpoint.oldestXid = xlrec.oldest_xid;
