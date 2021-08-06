@@ -300,7 +300,6 @@ impl Timeline for ObjectTimeline {
                     // redo the WAL again.
                     self.put_page_image(rel, blknum, lsn, page_img.clone(), false)?;
                 }
-                ObjectValue::SLRUTruncate => page_img = Bytes::from_static(&ZERO_PAGE),
                 _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),
             }
             // FIXME: assumes little-endian. Only used for the debugging log though
@@ -1025,7 +1024,6 @@ pub enum ObjectValue {
     Page(PageEntry),
     RelationSize(RelationSizeEntry),
     TimelineMetadata(MetadataEntry),
-    SLRUTruncate,
 }
 
 ///
