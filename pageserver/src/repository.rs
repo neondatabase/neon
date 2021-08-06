@@ -61,8 +61,8 @@ pub trait Timeline: Send + Sync {
     /// Look up given page in the cache.
     fn get_page_at_lsn_nowait(&self, tag: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes>;
 
-    /// Get size of relation
-    fn get_rel_size(&self, tag: RelishTag, lsn: Lsn) -> Result<u32>;
+    /// Get size of a relish
+    fn get_relish_size(&self, tag: RelishTag, lsn: Lsn) -> Result<Option<u32>>;
 
     /// Does relation exist?
     fn get_rel_exists(&self, tag: RelishTag, lsn: Lsn) -> Result<bool>;
@@ -98,7 +98,8 @@ pub trait Timeline: Send + Sync {
     /// Truncate relation
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
 
-    /// Unlink relation. This method is used for marking dropped relations.
+    /// Unlink relish.
+    /// This method is used for marking dropped relations and truncated SLRU segments
     fn put_unlink(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
 
     /// Put raw data
@@ -338,11 +339,11 @@ mod tests {
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(1))?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(1)).is_err());
+        assert!(tline.get_relish_size(TESTREL_A, Lsn(1))?.is_none());
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(2))?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(2))?, 1);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(5))?, 3);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(2))?.unwrap(), 1);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(5))?.unwrap(), 3);
 
         // Check page contents at each LSN
         assert_eq!(
@@ -382,7 +383,7 @@ mod tests {
         tline.advance_last_valid_lsn(Lsn(6));
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(6))?, 2);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(6))?.unwrap(), 2);
         assert_eq!(
             tline.get_page_at_lsn(TESTREL_A, 0, Lsn(6))?,
             TEST_IMG("foo blk 0 at 3")
@@ -393,7 +394,7 @@ mod tests {
         );
 
         // should still see the truncated block with older LSN
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(5))?, 3);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(5))?.unwrap(), 3);
         assert_eq!(
             tline.get_page_at_lsn(TESTREL_A, 2, Lsn(5))?,
             TEST_IMG("foo blk 2 at 5")
@@ -424,7 +425,7 @@ mod tests {
         tline.advance_last_valid_lsn(Lsn(lsn));
 
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+            tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE + 1
         );
 
@@ -433,7 +434,7 @@ mod tests {
         tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
         tline.advance_last_valid_lsn(Lsn(lsn));
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+            tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE
         );
 
@@ -442,7 +443,7 @@ mod tests {
         tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE - 1)?;
         tline.advance_last_valid_lsn(Lsn(lsn));
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+            tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE - 1
         );
 
@@ -505,7 +506,7 @@ mod tests {
             TEST_IMG("foobar blk 0 at 2")
         );
 
-        assert_eq!(newtline.get_rel_size(TESTREL_B, Lsn(4))?, 1);
+        assert_eq!(newtline.get_relish_size(TESTREL_B, Lsn(4))?.unwrap(), 1);
 
         Ok(())
     }

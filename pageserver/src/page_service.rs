@@ -266,7 +266,9 @@ impl PageServerHandler {
                     let n_blocks = SMGR_QUERY_TIME
                         .with_label_values(&["get_rel_size"])
                         .observe_closure_duration(|| {
-                            timeline.get_rel_size(tag, req.lsn).unwrap_or(0)
+                            // Return 0 if relation is not found.
+                            // This is what postgres smgr expects.
+                            timeline.get_relish_size(tag, req.lsn).unwrap_or(Some(0)).unwrap_or(0)
                         });
 
                     PagestreamBeMessage::Nblocks(PagestreamStatusResponse { ok: true, n_blocks })

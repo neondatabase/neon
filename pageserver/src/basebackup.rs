@@ -96,9 +96,17 @@ impl<'a> Basebackup<'a> {
     // Generate SLRU segment files from repository.
     //
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let nblocks = self
+        let seg_size = self
             .timeline
-            .get_rel_size(RelishTag::Slru { slru, segno }, self.lsn)?;
+            .get_relish_size(RelishTag::Slru { slru, segno }, self.lsn)?;
+
+        if seg_size == None
+        {
+            info!("SLRU segment {}/{:>04X} was truncated", slru.to_str(), segno);
+            return Ok(());
+        }
+
+        let nblocks = seg_size.unwrap();
 
         let mut slru_buf: Vec<u8> =
             Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);

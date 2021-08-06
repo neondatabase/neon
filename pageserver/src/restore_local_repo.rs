@@ -531,7 +531,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
         assert_eq!(src_rel.spcnode, src_tablespace_id);
         assert_eq!(src_rel.dbnode, src_db_id);
 
-        let nblocks = timeline.get_rel_size(RelishTag::Relation(src_rel), req_lsn)?;
+        let nblocks = timeline.get_relish_size(RelishTag::Relation(src_rel), req_lsn)?.unwrap_or(0);
         let dst_rel = RelTag {
             spcnode: tablespace_id,
             dbnode: db_id,
