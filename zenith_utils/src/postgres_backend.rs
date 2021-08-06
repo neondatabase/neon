@@ -158,7 +158,7 @@ impl PostgresBackend {
 
     fn run_message_loop(&mut self, handler: &mut impl Handler) -> Result<()> {
         let peer_addr = self.stream_out.peer_addr()?;
-        info!("postgres backend to {:?} started", peer_addr);
+        trace!("postgres backend to {:?} started", peer_addr);
 
         let mut unnamed_query_string = Bytes::new();
 
@@ -171,7 +171,7 @@ impl PostgresBackend {
             }
         }
 
-        info!("postgres backend to {:?} exited", peer_addr);
+        trace!("postgres backend to {:?} exited", peer_addr);
         Ok(())
     }
 
