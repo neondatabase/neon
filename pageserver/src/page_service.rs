@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::thread;
 use std::{io, net::TcpStream};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
-use zenith_utils::auth::JwtAuth;
+use zenith_utils::auth::{self, JwtAuth};
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
@@ -389,19 +389,7 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        match (&claims.scope, tenantid) {
-            (Scope::Tenant, None) => {
-                bail!("Attempt to access management api with tenant scope. Permission denied")
-            }
-            (Scope::Tenant, Some(tenantid)) => {
-                if claims.tenant_id.unwrap() != tenantid {
-                    bail!("Tenant id mismatch. Permission denied")
-                }
-                Ok(())
-            }
-            (Scope::PageServerApi, None) => Ok(()), // access to management api for PageServerApi scope
-            (Scope::PageServerApi, Some(_)) => Ok(()), // access to tenant api using PageServerApi scope
-        }
+        Ok(auth::check_permission(claims, tenantid)?)
     }
 }
 

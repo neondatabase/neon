@@ -1,19 +1,20 @@
 import json
-import uuid
+from uuid import uuid4
 import pytest
 import psycopg2
-from fixtures.zenith_fixtures import ZenithPageserver
+import requests
+from fixtures.zenith_fixtures import ZenithPageserver, ZenithPageserverHttpClient
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_status(pageserver):
+def test_status_psql(pageserver):
     assert pageserver.safe_psql('status') == [
         ('hello world', ),
     ]
 
 
-def test_branch_list(pageserver: ZenithPageserver, zenith_cli):
+def test_branch_list_psql(pageserver: ZenithPageserver, zenith_cli):
     # Create a branch for us
     zenith_cli.run(["branch", "test_branch_list_main", "empty"])
 
@@ -52,7 +53,7 @@ def test_branch_list(pageserver: ZenithPageserver, zenith_cli):
     conn.close()
 
 
-def test_tenant_list(pageserver: ZenithPageserver, zenith_cli):
+def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli):
     res = zenith_cli.run(["tenant", "list"])
     res.check_returncode()
     tenants = res.stdout.splitlines()
@@ -66,7 +67,7 @@ def test_tenant_list(pageserver: ZenithPageserver, zenith_cli):
         cur.execute(f'tenant_create {pageserver.initial_tenant}')
 
     # create one more tenant
-    tenant1 = uuid.uuid4().hex
+    tenant1 = uuid4().hex
     cur.execute(f'tenant_create {tenant1}')
 
     cur.execute('tenant_list')
@@ -74,3 +75,32 @@ def test_tenant_list(pageserver: ZenithPageserver, zenith_cli):
     # compare tenants list
     new_tenants = sorted(json.loads(cur.fetchone()[0]))
     assert sorted([pageserver.initial_tenant, tenant1]) == new_tenants
+
+
+def check_client(client: ZenithPageserverHttpClient, initial_tenant: str):
+    client.check_status()
+
+    # check initial tenant is there
+    assert initial_tenant in set(client.tenant_list())
+
+    # create new tenant and check it is also there
+    tenant_id = uuid4()
+    client.tenant_create(tenant_id)
+    assert tenant_id.hex in set(client.tenant_list())
+
+    # create branch
+    branch_name = uuid4().hex
+    client.branch_create(tenant_id, branch_name, "main")
+
+    # check it is there
+    assert branch_name in {b['name'] for b in client.branch_list(tenant_id)}
+
+
+def test_pageserver_http_api_client(pageserver: ZenithPageserver):
+    client = pageserver.http_client()
+    check_client(client, pageserver.initial_tenant)
+
+
+def test_pageserver_http_api_client_auth_enabled(pageserver_auth_enabled: ZenithPageserver):
+    client = pageserver_auth_enabled.http_client(auth_token=pageserver_auth_enabled.auth_keys.generate_management_token())
+    check_client(client, pageserver_auth_enabled.initial_tenant)

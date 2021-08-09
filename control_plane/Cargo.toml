@@ -20,6 +20,7 @@ bytes = "1.0.1"
 nix = "0.20"
 url = "2.2.2"
 hex = { version = "0.4.3", features = ["serde"] }
+reqwest = { version = "0.11", features = ["blocking", "json"] }
 
 pageserver = { path = "../pageserver" }
 walkeeper = { path = "../walkeeper" }

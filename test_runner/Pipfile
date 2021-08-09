@@ -8,6 +8,7 @@ pytest = ">=6.0.0"
 psycopg2 = "*"
 typing-extensions = "*"
 pyjwt = {extras = ["crypto"], version = "*"}
+requests = "*"
 
 [dev-packages]
 yapf = "*"

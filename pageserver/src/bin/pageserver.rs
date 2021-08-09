@@ -20,8 +20,10 @@ use anyhow::{ensure, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{branches, logger, page_cache, page_service, PageServerConf, RepositoryFormat};
-use zenith_utils::http_endpoint;
+use pageserver::{
+    branches, http, logger, page_cache, page_service, PageServerConf, RepositoryFormat,
+};
+use zenith_utils::http::endpoint;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
 const DEFAULT_HTTP_ENDPOINT_ADDR: &str = "127.0.0.1:9898";
@@ -323,19 +325,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         }
     }
 
-    // Spawn a new thread for the http endpoint
-    thread::Builder::new()
-        .name("Metrics thread".into())
-        .spawn(move || http_endpoint::thread_main(conf.http_endpoint_addr.clone()))?;
-
-    // Check that we can bind to address before starting threads to simplify shutdown
-    // sequence if port is occupied.
-    info!("Starting pageserver on {}", conf.listen_addr);
-    let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
-
-    // Initialize page cache, this will spawn walredo_thread
-    page_cache::init(conf);
-
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
         AuthType::Trust | AuthType::MD5 => Arc::new(None),
@@ -346,6 +335,24 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         }
     };
     info!("Using auth: {:#?}", conf.auth_type);
+
+    // Spawn a new thread for the http endpoint
+    let cloned = Arc::clone(&auth);
+    thread::Builder::new()
+        .name("http_endpoint_thread".into())
+        .spawn(move || {
+            let router = http::get_router(conf, cloned);
+            endpoint::serve_thread_main(router, conf.http_endpoint_addr.clone())
+        })?;
+
+    // Check that we can bind to address before starting threads to simplify shutdown
+    // sequence if port is occupied.
+    info!("Starting pageserver on {}", conf.listen_addr);
+    let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
+
+    // Initialize page cache, this will spawn walredo_thread
+    page_cache::init(conf);
+
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.
     let page_service_thread = thread::Builder::new()

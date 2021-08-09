@@ -5,10 +5,13 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use pageserver::http::models::{BranchCreateRequest, TenantCreateRequest};
 use postgres::{Config, NoTls};
+use reqwest::blocking::{Client, RequestBuilder};
+use reqwest::{IntoUrl, Method, StatusCode};
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::ZTenantId;
 
@@ -16,6 +19,8 @@ use crate::local_env::LocalEnv;
 use crate::read_pidfile;
 use pageserver::branches::BranchInfo;
 use zenith_utils::connstring::connection_address;
+
+const HTTP_BASE_URL: &str = "http://127.0.0.1:9898/v1";
 
 //
 // Control routines for pageserver.
@@ -25,13 +30,15 @@ use zenith_utils::connstring::connection_address;
 #[derive(Debug)]
 pub struct PageServerNode {
     pub kill_on_exit: bool,
-    pub connection_config: Config,
+    pub pg_connection_config: Config,
     pub env: LocalEnv,
+    pub http_client: Client,
+    pub http_base_url: String,
 }
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let password = if matches!(env.auth_type, AuthType::ZenithJWT) {
+        let password = if env.auth_type == AuthType::ZenithJWT {
             &env.auth_token
         } else {
             ""
@@ -39,8 +46,10 @@ impl PageServerNode {
 
         PageServerNode {
             kill_on_exit: false,
-            connection_config: Self::default_config(password), // default
+            pg_connection_config: Self::default_config(password), // default
             env: env.clone(),
+            http_client: Client::new(),
+            http_base_url: HTTP_BASE_URL.to_owned(),
         }
     }
 
@@ -100,7 +109,7 @@ impl PageServerNode {
     pub fn start(&self) -> Result<()> {
         println!(
             "Starting pageserver at '{}' in {}",
-            connection_address(&self.connection_config),
+            connection_address(&self.pg_connection_config),
             self.repo_path().display()
         );
 
@@ -120,7 +129,7 @@ impl PageServerNode {
         // It takes a while for the page server to start up. Wait until it is
         // open for business.
         for retries in 1..15 {
-            match self.page_server_psql_client() {
+            match self.check_status() {
                 Ok(_) => {
                     println!("Pageserver started");
                     return Ok(());
@@ -145,7 +154,7 @@ impl PageServerNode {
         }
 
         // wait for pageserver stop
-        let address = connection_address(&self.connection_config);
+        let address = connection_address(&self.pg_connection_config);
         for _ in 0..5 {
             let stream = TcpStream::connect(&address);
             thread::sleep(Duration::from_secs(1));
@@ -160,50 +169,64 @@ impl PageServerNode {
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        let mut client = self.connection_config.connect(NoTls).unwrap();
+        let mut client = self.pg_connection_config.connect(NoTls).unwrap();
 
         println!("Pageserver query: '{}'", sql);
         client.simple_query(sql).unwrap()
     }
 
     pub fn page_server_psql_client(&self) -> Result<postgres::Client, postgres::Error> {
-        self.connection_config.connect(NoTls)
+        self.pg_connection_config.connect(NoTls)
     }
 
-    pub fn tenants_list(&self) -> Result<Vec<String>> {
-        let mut client = self.page_server_psql_client()?;
-        let query_result = client.simple_query("tenant_list")?;
-        let tenants_json = query_result
-            .first()
-            .map(|msg| match msg {
-                postgres::SimpleQueryMessage::Row(row) => row.get(0),
-                _ => None,
-            })
-            .flatten()
-            .ok_or_else(|| anyhow!("missing tenants"))?;
-
-        Ok(serde_json::from_str(tenants_json)?)
+    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
+        let mut builder = self.http_client.request(method, url);
+        if self.env.auth_type == AuthType::ZenithJWT {
+            builder = builder.bearer_auth(&self.env.auth_token)
+        }
+        builder
     }
 
-    pub fn tenant_create(&self, tenantid: &ZTenantId) -> Result<()> {
-        let mut client = self.page_server_psql_client()?;
-        client.simple_query(format!("tenant_create {}", tenantid).as_str())?;
+    pub fn check_status(&self) -> Result<()> {
+        let status = self
+            .http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
+            .send()?
+            .status();
+        ensure!(
+            status == StatusCode::OK,
+            format!("got unexpected response status {}", status)
+        );
         Ok(())
     }
 
-    pub fn branches_list(&self, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
-        let mut client = self.page_server_psql_client()?;
-        let query_result = client.simple_query(&format!("branch_list {}", tenantid))?;
-        let branches_json = query_result
-            .first()
-            .map(|msg| match msg {
-                postgres::SimpleQueryMessage::Row(row) => row.get(0),
-                _ => None,
-            })
-            .flatten()
-            .ok_or_else(|| anyhow!("missing branches"))?;
+    pub fn tenant_list(&self) -> Result<Vec<String>> {
+        Ok(self
+            .http_request(Method::GET, format!("{}/{}", self.http_base_url, "tenant"))
+            .send()?
+            .error_for_status()?
+            .json()?)
+    }
 
-        Ok(serde_json::from_str(branches_json)?)
+    pub fn tenant_create(&self, tenantid: ZTenantId) -> Result<()> {
+        Ok(self
+            .http_request(Method::POST, format!("{}/{}", self.http_base_url, "tenant"))
+            .json(&TenantCreateRequest {
+                tenant_id: tenantid,
+            })
+            .send()?
+            .error_for_status()?
+            .json()?)
+    }
+
+    pub fn branch_list(&self, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
+        Ok(self
+            .http_request(
+                Method::GET,
+                format!("{}/branch/{}", self.http_base_url, tenantid),
+            )
+            .send()?
+            .error_for_status()?
+            .json()?)
     }
 
     pub fn branch_create(
@@ -212,29 +235,16 @@ impl PageServerNode {
         startpoint: &str,
         tenantid: &ZTenantId,
     ) -> Result<BranchInfo> {
-        let mut client = self.page_server_psql_client()?;
-        let query_result = client.simple_query(
-            format!("branch_create {} {} {}", tenantid, branch_name, startpoint).as_str(),
-        )?;
-
-        let branch_json = query_result
-            .first()
-            .map(|msg| match msg {
-                postgres::SimpleQueryMessage::Row(row) => row.get(0),
-                _ => None,
+        Ok(self
+            .http_request(Method::POST, format!("{}/{}", self.http_base_url, "branch"))
+            .json(&BranchCreateRequest {
+                tenant_id: tenantid.to_owned(),
+                name: branch_name.to_owned(),
+                start_point: startpoint.to_owned(),
             })
-            .flatten()
-            .ok_or_else(|| anyhow!("missing branch"))?;
-
-        let res: BranchInfo = serde_json::from_str(branch_json).map_err(|e| {
-            anyhow!(
-                "failed to parse branch_create response: {}: {}",
-                branch_json,
-                e
-            )
-        })?;
-
-        Ok(res)
+            .send()?
+            .error_for_status()?
+            .json()?)
     }
 
     // TODO: make this a separate request type and avoid loading all the branches
@@ -243,14 +253,14 @@ impl PageServerNode {
         tenantid: &ZTenantId,
         branch_name: &str,
     ) -> Result<BranchInfo> {
-        let branch_infos = self.branches_list(tenantid)?;
-        let branche_by_name: Result<HashMap<String, BranchInfo>> = branch_infos
+        let branch_infos = self.branch_list(tenantid)?;
+        let branch_by_name: Result<HashMap<String, BranchInfo>> = branch_infos
             .into_iter()
             .map(|branch_info| Ok((branch_info.name.clone(), branch_info)))
             .collect();
-        let branche_by_name = branche_by_name?;
+        let branch_by_name = branch_by_name?;
 
-        let branch = branche_by_name
+        let branch = branch_by_name
             .get(branch_name)
             .ok_or_else(|| anyhow!("Branch {} not found", branch_name))?;
 

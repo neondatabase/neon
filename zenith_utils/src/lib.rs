@@ -10,7 +10,6 @@ pub mod seqwait;
 // pub mod seqwait_async;
 
 pub mod bin_ser;
-pub mod http_endpoint;
 pub mod postgres_backend;
 pub mod pq_proto;
 
@@ -22,3 +21,5 @@ pub mod auth;
 
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod zid;
+// http endpoint utils
+pub mod http;
