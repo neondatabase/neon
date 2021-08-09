@@ -1,0 +1,239 @@
+openapi: "3.0.2"
+info:
+  title: Page Server API
+  version: "1.0"
+servers:
+  - url: ""
+paths:
+  /v1/status:
+    description: Healthcheck endpoint
+    get:
+      description: Healthcheck
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/branch/{tenant_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get branches for tenant
+      responses:
+        "200":
+          description: BranchInfo
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BranchInfo"
+        "400":
+          description: Error when no tenant id found in path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/branch/:
+    post:
+      description: Create branch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - "tenant_id"
+                - "name"
+                - "start_point"
+              properties:
+                tenant_id:
+                  type: string
+                  format: hex
+                name:
+                  type: string
+                start_point:
+                  type: string
+      responses:
+        "201":
+          description: BranchInfo
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BranchInfo"
+        "400":
+          description: Malformed branch create request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/tenant/:
+    get:
+      description: Get tenants list
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      description: Create tenant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - "tenant_id"
+              properties:
+                tenant_id:
+                  type: string
+                  format: hex
+      responses:
+        "201":
+          description: CREATED
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        "400":
+          description: Malformed tenant create request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  securitySchemes:
+    JWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    BranchInfo:
+      type: object
+      required:
+        - name
+        - timeline_id
+      properties:
+        name:
+          type: string
+        timeline_id:
+          type: string
+          format: hex
+        ancestor_id:
+          type: string
+        ancestor_lsn:
+          type: string
+    Error:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    UnauthorizedError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    ForbiddenError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+
+security:
+  - JWT: []

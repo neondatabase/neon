@@ -29,6 +29,7 @@ use crate::{repository::Repository, PageServerConf, RepositoryFormat};
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
     pub name: String,
+    #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
     pub latest_valid_lsn: Option<Lsn>,
     pub ancestor_id: Option<String>,
@@ -283,7 +284,7 @@ pub(crate) fn create_branch(
         let end_of_wal = repo
             .get_timeline(startpoint.timelineid)?
             .get_last_record_lsn();
-        println!("branching at end of WAL: {}", end_of_wal);
+        info!("branching at end of WAL: {}", end_of_wal);
         startpoint.lsn = end_of_wal;
     }
 

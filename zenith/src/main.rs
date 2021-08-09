@@ -224,7 +224,7 @@ fn main() -> Result<()> {
 
         ("pg", Some(pg_match)) => {
             if let Err(e) = handle_pg(pg_match, &env) {
-                eprintln!("pg operation failed: {}", e);
+                eprintln!("pg operation failed: {:?}", e);
                 exit(1);
             }
         }
@@ -371,7 +371,7 @@ fn get_branch_infos(
     tenantid: &ZTenantId,
 ) -> Result<HashMap<ZTimelineId, BranchInfo>> {
     let page_server = PageServerNode::from_env(env);
-    let branch_infos: Vec<BranchInfo> = page_server.branches_list(tenantid)?;
+    let branch_infos: Vec<BranchInfo> = page_server.branch_list(tenantid)?;
     let branch_infos: HashMap<ZTimelineId, BranchInfo> = branch_infos
         .into_iter()
         .map(|branch_info| (branch_info.timeline_id, branch_info))
@@ -384,7 +384,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
     let pageserver = PageServerNode::from_env(&env);
     match tenant_match.subcommand() {
         ("list", Some(_)) => {
-            for tenant in pageserver.tenants_list()? {
+            for tenant in pageserver.tenant_list()? {
                 println!("{}", tenant);
             }
         }
@@ -394,7 +394,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
                 None => ZTenantId::generate(),
             };
             println!("using tenant id {}", tenantid);
-            pageserver.tenant_create(&tenantid)?;
+            pageserver.tenant_create(tenantid)?;
             println!("tenant successfully created on the pageserver");
         }
         _ => {}
@@ -424,7 +424,7 @@ fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
             .value_of("tenantid")
             .map_or(Ok(env.tenantid), |value| value.parse())?;
         // No arguments, list branches for tenant
-        let branches = pageserver.branches_list(&tenantid)?;
+        let branches = pageserver.branch_list(&tenantid)?;
         print_branches_tree(branches)?;
     }
 

@@ -9,6 +9,7 @@ use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 
 pub mod basebackup;
 pub mod branches;
+pub mod http;
 pub mod layered_repository;
 pub mod logger;
 pub mod object_key;

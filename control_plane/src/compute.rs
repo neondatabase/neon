@@ -332,7 +332,7 @@ impl PostgresNode {
         };
 
         // Configure that node to take pages from pageserver
-        let (host, port) = connection_host_port(&self.pageserver.connection_config);
+        let (host, port) = connection_host_port(&self.pageserver.pg_connection_config);
         self.append_conf(
             "postgresql.conf",
             format!(

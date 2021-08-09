@@ -1,6 +1,9 @@
+from dataclasses import dataclass
+from functools import cached_property
 import os
 import pathlib
 import uuid
+import jwt
 import psycopg2
 import pytest
 import shutil
@@ -16,6 +19,8 @@ from dataclasses import dataclass
 from psycopg2.extensions import connection as PgConnection
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast
 from typing_extensions import Literal
+
+import requests
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
 """
@@ -42,7 +47,8 @@ Fn = TypeVar('Fn', bound=Callable[..., Any])
 DEFAULT_OUTPUT_DIR = 'test_output'
 DEFAULT_POSTGRES_DIR = 'tmp_install'
 
-DEFAULT_PAGESERVER_PORT = 64000
+DEFAULT_PAGESERVER_PG_PORT = 64000
+DEFAULT_PAGESERVER_HTTP_PORT = 9898
 
 
 def determine_scope(fixture_name: str, config: Any) -> str:
@@ -175,13 +181,87 @@ def zenith_cli(zenith_binpath: str, repo_dir: str, pg_distrib_dir: str) -> Zenit
     return ZenithCli(zenith_binpath, repo_dir, pg_distrib_dir)
 
 
+class ZenithPageserverHttpClient(requests.Session):
+    def __init__(self, port: int, auth_token: Optional[str] = None) -> None:
+        super().__init__()
+        self.port = port
+        self.auth_token = auth_token
+
+        if auth_token is not None:
+            self.headers['Authorization'] = f'Bearer {auth_token}'
+
+    def check_status(self):
+        self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
+
+    def branch_list(self, tenant_id: uuid.UUID) -> List[Dict]:
+        res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
+        res.raise_for_status()
+        return res.json()
+
+    def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/branch",
+            json={
+                'tenant_id': tenant_id.hex,
+                'name': name,
+                'start_point': start_point,
+            }
+        )
+        res.raise_for_status()
+        return res.json()
+
+    def tenant_list(self) -> List[str]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant")
+        res.raise_for_status()
+        return res.json()
+
+    def tenant_create(self, tenant_id: uuid.UUID):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant",
+            json={
+                'tenant_id': tenant_id.hex,
+            },
+        )
+        res.raise_for_status()
+        return res.json()
+
+
+@dataclass
+class AuthKeys:
+    pub: bytes
+    priv: bytes
+
+    def generate_management_token(self):
+        token = jwt.encode({"scope": "pageserverapi"}, self.priv, algorithm="RS256")
+
+        # jwt.encode can return 'bytes' or 'str', depending on Python version or type
+        # hinting or something (not sure what). If it returned 'bytes', convert it to 'str'
+        # explicitly.
+        if isinstance(token, bytes):
+            token = token.decode()
+
+        return token
+
+    def generate_tenant_token(self, tenant_id):
+        token = jwt.encode({"scope": "tenant", "tenant_id": tenant_id}, self.priv, algorithm="RS256")
+
+        if isinstance(token, bytes):
+            token = token.decode()
+
+        return token
+
+
+
+
+
 class ZenithPageserver(PgProtocol):
     """ An object representing a running pageserver. """
-    def __init__(self, zenith_cli: ZenithCli):
-        super().__init__(host='localhost', port=DEFAULT_PAGESERVER_PORT)
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str):
+        super().__init__(host='localhost', port=DEFAULT_PAGESERVER_PG_PORT)
         self.zenith_cli = zenith_cli
         self.running = False
         self.initial_tenant = None
+        self.repo_dir = repo_dir
 
     def init(self, enable_auth: bool = False) -> 'ZenithPageserver':
         """
@@ -224,9 +304,21 @@ class ZenithPageserver(PgProtocol):
     def __exit__(self, exc_type, exc, tb):
         self.stop()
 
+    @cached_property
+    def auth_keys(self) -> AuthKeys:
+        pub = (Path(self.repo_dir) / 'auth_public_key.pem').read_bytes()
+        priv = (Path(self.repo_dir) / 'auth_private_key.pem').read_bytes()
+        return AuthKeys(pub=pub, priv=priv)
+
+    def http_client(self, auth_token: Optional[str] = None):
+        return ZenithPageserverHttpClient(
+            port=DEFAULT_PAGESERVER_HTTP_PORT,
+            auth_token=auth_token,
+        )
+
 
 @zenfixture
-def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
+def pageserver(zenith_cli: ZenithCli, repo_dir: str) -> Iterator[ZenithPageserver]:
     """
     The 'pageserver' fixture provides a Page Server that's up and running.
 
@@ -239,7 +331,7 @@ def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
     test called 'test_foo' would create and use branches with the 'test_foo' prefix.
     """
 
-    ps = ZenithPageserver(zenith_cli).init().start()
+    ps = ZenithPageserver(zenith_cli, repo_dir).init().start()
     # For convenience in tests, create a branch from the freshly-initialized cluster.
     zenith_cli.run(["branch", "empty", "main"])
 
@@ -248,6 +340,14 @@ def pageserver(zenith_cli: ZenithCli) -> Iterator[ZenithPageserver]:
     # After the yield comes any cleanup code we need.
     print('Starting pageserver cleanup')
     ps.stop()
+
+
+@pytest.fixture
+def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str):
+    with ZenithPageserver(zenith_cli, repo_dir).init(enable_auth=True).start() as ps:
+        # For convenience in tests, create a branch from the freshly-initialized cluster.
+        zenith_cli.run(["branch", "empty", "main"])
+        yield ps
 
 
 class Postgres(PgProtocol):
@@ -591,7 +691,7 @@ class WalAcceptor:
         cmd.append("--daemonize")
         cmd.append("--no-sync")
         # Tell page server it can receive WAL from this WAL safekeeper
-        cmd.extend(["--pageserver", "localhost:{}".format(DEFAULT_PAGESERVER_PORT)])
+        cmd.extend(["--pageserver", "localhost:{}".format(DEFAULT_PAGESERVER_PG_PORT)])
         cmd.extend(["--recall", "1 second"])
         print('Running command "{}"'.format(' '.join(cmd)))
         env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None

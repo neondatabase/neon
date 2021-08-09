@@ -96,6 +96,20 @@ macro_rules! zid_newtype {
             }
         }
 
+        impl FromHex for $t {
+            type Error = hex::FromHexError;
+
+            fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
+                Ok($t(ZId::from_hex(hex)?))
+            }
+        }
+
+        impl AsRef<[u8]> for $t {
+            fn as_ref(&self) -> &[u8] {
+                &self.0 .0
+            }
+        }
+
         impl fmt::Display for $t {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 self.0.fmt(f)
@@ -137,19 +151,3 @@ zid_newtype!(ZTimelineId);
 pub struct ZTenantId(ZId);
 
 zid_newtype!(ZTenantId);
-
-// for now the following impls are used only with ZTenantId,
-// if this impls become useful in other newtypes they can be moved under zid_newtype macro too
-impl FromHex for ZTenantId {
-    type Error = hex::FromHexError;
-
-    fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
-        Ok(ZTenantId(ZId::from_hex(hex)?))
-    }
-}
-
-impl AsRef<[u8]> for ZTenantId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0 .0
-    }
-}

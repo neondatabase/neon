@@ -10,7 +10,7 @@ use serde::de::Error;
 use serde::{self, Deserializer, Serializer};
 use std::{fs, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
@@ -20,7 +20,7 @@ use crate::zid::ZTenantId;
 
 const JWT_ALGORITHM: Algorithm = Algorithm::RS256;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     Tenant,
@@ -48,7 +48,7 @@ where
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     // this custom serialize/deserialize_with is needed because Option is not transparent to serde
     // so clearest option is serde(with = "hex") but it is not working, for details see https://github.com/serde-rs/serde/issues/1301
@@ -65,6 +65,22 @@ pub struct Claims {
 impl Claims {
     pub fn new(tenant_id: Option<ZTenantId>, scope: Scope) -> Self {
         Self { tenant_id, scope }
+    }
+}
+
+pub fn check_permission(claims: &Claims, tenantid: Option<ZTenantId>) -> Result<()> {
+    match (&claims.scope, tenantid) {
+        (Scope::Tenant, None) => {
+            bail!("Attempt to access management api with tenant scope. Permission denied")
+        }
+        (Scope::Tenant, Some(tenantid)) => {
+            if claims.tenant_id.unwrap() != tenantid {
+                bail!("Tenant id mismatch. Permission denied")
+            }
+            Ok(())
+        }
+        (Scope::PageServerApi, None) => Ok(()), // access to management api for PageServerApi scope
+        (Scope::PageServerApi, Some(_)) => Ok(()), // access to tenant api using PageServerApi scope
     }
 }
 

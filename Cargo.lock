@@ -312,6 +312,7 @@ dependencies = [
  "postgres_ffi",
  "rand",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tar",
@@ -1192,6 +1193,7 @@ dependencies = [
  "futures",
  "hex",
  "humantime",
+ "hyper",
  "lazy_static",
  "log",
  "postgres",
@@ -1201,6 +1203,7 @@ dependencies = [
  "rand",
  "regex",
  "rocksdb",
+ "routerify",
  "rust-s3",
  "scopeguard",
  "serde",
@@ -1623,6 +1626,19 @@ checksum = "c749134fda8bfc90d0de643d59bfc841dcb3ac8a1062e12b6754bd60235c48b3"
 dependencies = [
  "libc",
  "librocksdb-sys",
+]
+
+[[package]]
+name = "routerify"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c6bb49594c791cadb5ccfa5f36d41b498d40482595c199d10cd318800280bd9"
+dependencies = [
+ "http",
+ "hyper",
+ "lazy_static",
+ "percent-encoding",
+ "regex",
 ]
 
 [[package]]
@@ -2585,7 +2601,9 @@ dependencies = [
  "log",
  "postgres",
  "rand",
+ "routerify",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "workspace_hack",
