@@ -177,8 +177,7 @@ impl<'a> Basebackup<'a> {
     //
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
         // Include in tarball two-phase files only of in-progress transactions
-        if self.timeline.get_tx_status(xid, self.lsn)?
-            == pg_constants::TRANSACTION_STATUS_IN_PROGRESS
+        if self.timeline.get_tx_is_in_progress(xid, self.lsn)
         {
             let img =
                 self.timeline
