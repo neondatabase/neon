@@ -335,20 +335,12 @@ impl PostgresRedoManagerInternal {
 
                 if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
                     // Transaction manager stuff
-                    let info = xlogrec.xl_info & pg_constants::XLOG_XACT_OPMASK;
                     let rec_segno = match rel {
                         RelishTag::Slru { slru, segno } => {
                             if slru != SlruKind::Clog {
                                 panic!("Not valid XACT relish tag {:?}", rel);
                             }
                             segno
-                        }
-                        RelishTag::TwoPhase { xid: _ } => {
-                            assert!(info == pg_constants::XLOG_XACT_PREPARE);
-                            trace!("Apply prepare {} record", xlogrec.xl_xid);
-                            page.clear();
-                            page.extend_from_slice(&buf[..]);
-                            continue;
                         }
                         _ => panic!("Not valid XACT relish tag {:?}", rel),
                     };

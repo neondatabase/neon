@@ -2,9 +2,6 @@ use crate::object_key::*;
 use crate::relish::*;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use postgres_ffi::nonrelfile_utils::transaction_id_get_status;
-use postgres_ffi::pg_constants;
-use postgres_ffi::TransactionId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::iter::Iterator;
@@ -43,9 +40,11 @@ pub struct GcResult {
     pub inspected: u64,
     pub truncated: u64,
     pub deleted: u64,
-    pub prep_deleted: u64, // 2PC prepare
-    pub slru_deleted: u64, // SLRU (clog, multixact)
-    pub chkp_deleted: u64, // Checkpoints
+    pub prep_deleted: u64,        // RelishTag::Twophase
+    pub slru_deleted: u64,        // RelishTag::Slru
+    pub chkp_deleted: u64,        // RelishTag::Checkpoint
+    pub control_deleted: u64,     // RelishTag::ControlFile
+    pub filenodemap_deleted: u64, // RelishTag::FileNodeMap
     pub dropped: u64,
     pub elapsed: Duration,
 }
@@ -153,28 +152,6 @@ pub trait Timeline: Send + Sync {
     /// So right now `compact` is set to true when GC explicitly requested through page srver API,
     /// and is st to false in GC threads which infinitely repeats GC iterations in loop.
     fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult>;
-
-    // Check if transaction is in progress
-    fn get_tx_is_in_progress(&self, xid: TransactionId, lsn: Lsn) -> bool {
-        let pageno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
-        let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-        let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-
-        // Handle truncated CLOG: if no pg_xact file exists for the transaction,
-        // it is definitely not in progress.
-        if let Ok(clog_page) = self.get_page_at_lsn(
-            RelishTag::Slru {
-                slru: SlruKind::Clog,
-                segno,
-            },
-            rpageno,
-            lsn,
-        ) {
-            let status = transaction_id_get_status(xid, &clog_page[..]);
-            return status == pg_constants::TRANSACTION_STATUS_IN_PROGRESS;
-        }
-        return false;
-    }
 }
 
 pub trait History: Iterator<Item = Result<Modification>> {

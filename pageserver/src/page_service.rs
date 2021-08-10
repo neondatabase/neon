@@ -691,6 +691,8 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"prep_deleted"),
                 RowDescriptor::int8_col(b"slru_deleted"),
                 RowDescriptor::int8_col(b"chkp_deleted"),
+                RowDescriptor::int8_col(b"control_deleted"),
+                RowDescriptor::int8_col(b"filenodemap_deleted"),
                 RowDescriptor::int8_col(b"dropped"),
                 RowDescriptor::int8_col(b"elapsed"),
             ]))?
@@ -701,6 +703,8 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(&result.prep_deleted.to_string().as_bytes()),
                 Some(&result.slru_deleted.to_string().as_bytes()),
                 Some(&result.chkp_deleted.to_string().as_bytes()),
+                Some(&result.control_deleted.to_string().as_bytes()),
+                Some(&result.filenodemap_deleted.to_string().as_bytes()),
                 Some(&result.dropped.to_string().as_bytes()),
                 Some(&result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
