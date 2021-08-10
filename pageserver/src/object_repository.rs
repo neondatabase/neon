@@ -20,7 +20,7 @@ use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
 use crate::{object_key::*, ZTenantId};
 use crate::{PageServerConf, ZTimelineId};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use log::*;
 use postgres_ffi::pg_constants;
@@ -177,7 +177,7 @@ impl Repository for ObjectRepository {
 /// If page server needs to access some older version, then object storage has to be accessed.
 ///
 struct RelishMetadata {
-    size: u32,         // size of relation
+    size: Option<u32>, // size of the relish (None if unlinked)
     last_updated: Lsn, // lsn of last metadata update (used to determine when cache value can be used)
 }
 
@@ -270,6 +270,19 @@ impl Timeline for ObjectTimeline {
             );
         }
 
+        // Handle truncated SLRU segments.
+        // XXX if this will turn out to be performance critical,
+        // move this check out of the funciton.
+        if let RelishTag::Slru{slru: _slru, segno: _segno} = rel
+        {
+            info!("test SLRU rel {:?} at {}", rel, req_lsn);
+            if !self.get_rel_exists(rel, req_lsn).unwrap_or(false)
+            {
+                info!("SLRU rel {:?} at {} doesn't exist", rel, req_lsn);
+                return Err(anyhow!("SLRU rel doesn't exist"));
+            }
+        }
+
         const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
         // ask the WAL redo service to reconstruct the page image from the WAL records.
@@ -300,11 +313,12 @@ impl Timeline for ObjectTimeline {
                     // redo the WAL again.
                     self.put_page_image(rel, blknum, lsn, page_img.clone(), false)?;
                 }
-                _ => bail!("Invalid object kind, expected a page entry or SLRU truncate"),
+                _ => bail!("Invalid object kind, expected a page entry"),
             }
             // FIXME: assumes little-endian. Only used for the debugging log though
             let page_lsn_hi = u32::from_le_bytes(page_img.get(0..4).unwrap().try_into().unwrap());
             let page_lsn_lo = u32::from_le_bytes(page_img.get(4..8).unwrap().try_into().unwrap());
+
             trace!(
                 "Returning page with LSN {:X}/{:X} for {:?} from {} (request {})",
                 page_lsn_hi,
@@ -333,22 +347,14 @@ impl Timeline for ObjectTimeline {
 
     /// Does relation exist at given LSN?
     fn get_rel_exists(&self, rel: RelishTag, req_lsn: Lsn) -> Result<bool> {
-        let lsn = self.wait_lsn(req_lsn)?;
+
+        if let Some(_) = self.get_relish_size(rel, req_lsn)?
         {
-            let rel_meta = self.rel_meta.read().unwrap();
-            if let Some(meta) = rel_meta.get(&rel) {
-                if meta.last_updated <= lsn {
-                    return Ok(true);
-                }
-            }
-        }
-        let key = relation_size_key(self.timelineid, rel);
-        let mut iter = self.object_versions(&*self.obj_store, &key, lsn)?;
-        if let Some((_key, _val)) = iter.next().transpose()? {
-            debug!("Relation {} exists at {}", rel, lsn);
+            trace!("Relation {} exists at {}", rel, req_lsn);
             return Ok(true);
         }
-        debug!("Relation {} doesn't exist at {}", rel, lsn);
+
+        trace!("Relation {} doesn't exist at {}", rel, req_lsn);
         Ok(false)
     }
 
@@ -459,7 +465,7 @@ impl Timeline for ObjectTimeline {
                 rel_meta.insert(
                     rel,
                     RelishMetadata {
-                        size: new_nblocks,
+                        size: Some(new_nblocks),
                         last_updated: lsn,
                     },
                 );
@@ -475,6 +481,14 @@ impl Timeline for ObjectTimeline {
     fn put_unlink(&self, rel_tag: RelishTag, lsn: Lsn) -> Result<()> {
         self.put_relsize_entry(&rel_tag, lsn, RelationSizeEntry::Unlink)?;
 
+        let mut rel_meta = self.rel_meta.write().unwrap();
+        rel_meta.insert(
+            rel_tag,
+            RelishMetadata {
+                size: None,
+                last_updated: lsn,
+            },
+        );
         Ok(())
     }
 
@@ -525,6 +539,7 @@ impl Timeline for ObjectTimeline {
         if !update_meta {
             return Ok(());
         }
+
         if rel.is_blocky() {
             // Also check if this created or extended the file
             let old_nblocks = self.relsize_get_nowait(rel, lsn)?.unwrap_or(0);
@@ -545,7 +560,7 @@ impl Timeline for ObjectTimeline {
                 rel_meta.insert(
                     rel,
                     RelishMetadata {
-                        size: new_nblocks,
+                        size: Some(new_nblocks),
                         last_updated: lsn,
                     },
                 );
@@ -575,7 +590,7 @@ impl Timeline for ObjectTimeline {
         rel_meta.insert(
             rel,
             RelishMetadata {
-                size: nblocks,
+                size: Some(nblocks),
                 last_updated: lsn,
             },
         );
@@ -818,7 +833,7 @@ impl ObjectTimeline {
             let rel_meta = self.rel_meta.read().unwrap();
             if let Some(meta) = rel_meta.get(&rel) {
                 if meta.last_updated <= lsn {
-                    return Ok(Some(meta.size));
+                    return Ok(meta.size);
                 }
             }
         }
