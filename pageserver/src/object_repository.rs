@@ -475,6 +475,11 @@ impl Timeline for ObjectTimeline {
                     },
                 );
             }
+        } else if let RelishTag::TwoPhase { xid: _ } = rel {
+            // This is non-blocky relish, so we put dummy relsize entry
+            // just to save the fact that such a segment exists at this lsn.
+            // GC will use this information to preserve segment if necessary.
+            self.put_relsize_entry(&rel, lsn, RelationSizeEntry::Size(1))?;
         }
         Ok(())
     }
@@ -558,6 +563,11 @@ impl Timeline for ObjectTimeline {
                     },
                 );
             }
+        } else if let RelishTag::TwoPhase { xid: _ } = rel {
+            // This is non-blocky relish, so we put dummy relsize entry
+            // just to save the fact that such a segment exists at this lsn.
+            // GC will use this information to preserve segment if necessary.
+            self.put_relsize_entry(&rel, lsn, RelationSizeEntry::Size(1))?;
         }
         Ok(())
     }
@@ -690,30 +700,10 @@ impl Timeline for ObjectTimeline {
         if let Some(horizon) = last_lsn.checked_sub(horizon) {
             // WAL is large enough to perform GC
             let now = Instant::now();
-            let mut prepared_horizon = Lsn(u64::MAX);
             // Iterate through all objects in timeline
             for obj in self.obj_store.list_objects(self.timelineid, last_lsn)? {
                 result.inspected += 1;
                 match obj {
-                    // Prepared transactions
-                    ObjectTag::Buffer(RelishTag::TwoPhase { xid }, _blknum) => {
-                        let key = ObjectKey {
-                            timeline: self.timelineid,
-                            tag: obj,
-                        };
-                        for vers in self.obj_store.object_versions(&key, horizon)? {
-                            let lsn = vers.0;
-                            prepared_horizon = Lsn::min(lsn, prepared_horizon);
-                            if !self.get_tx_is_in_progress(xid, horizon) {
-                                info!(
-                                    "unlink twophase_file NOT TRANSACTION_STATUS_IN_PROGRESS {}",
-                                    xid
-                                );
-                                self.obj_store.unlink(&key, lsn)?;
-                                result.prep_deleted += 1;
-                            }
-                        }
-                    }
                     ObjectTag::RelationMetadata(_) => {
                         // Do not need to reconstruct page images,
                         // just delete all old versions over horizon
@@ -792,12 +782,42 @@ impl Timeline for ObjectTimeline {
                             for vers in self.obj_store.object_versions(&key, horizon)? {
                                 let lsn = vers.0;
                                 if last_version {
-                                    // preserve last version
                                     last_version = false;
+                                    // Don't preserve last version for unlinked relishes
+                                    match rel {
+                                        RelishTag::TwoPhase { .. } => {
+                                            if !self.get_rel_exists(rel, last_lsn)? {
+                                                self.obj_store.unlink(&key, lsn)?;
+                                                result.prep_deleted += 1;
+                                            }
+                                        }
+                                        // TODO treat unlinked FileNodeMap too
+                                        _ => (),
+                                    }
                                 } else {
                                     // delete deteriorated version
                                     self.obj_store.unlink(&key, lsn)?;
-                                    result.chkp_deleted += 1;
+
+                                    match rel {
+                                        RelishTag::TwoPhase { .. } => {
+                                            result.prep_deleted += 1;
+                                        }
+                                        RelishTag::Checkpoint => {
+                                            result.chkp_deleted += 1;
+                                        }
+                                        RelishTag::ControlFile => {
+                                            result.control_deleted += 1;
+                                        }
+                                        RelishTag::FileNodeMap { .. } => {
+                                            result.filenodemap_deleted += 1;
+                                        }
+                                        _ => {
+                                            bail!(
+                                                "unexpected non-blocky object found during GC {}",
+                                                rel
+                                            );
+                                        }
+                                    };
                                 }
                             }
                         }

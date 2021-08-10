@@ -415,26 +415,37 @@ pub fn save_decoded_record(
         }
     } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
         let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
-        if info == pg_constants::XLOG_XACT_COMMIT
-            || info == pg_constants::XLOG_XACT_COMMIT_PREPARED
-            || info == pg_constants::XLOG_XACT_ABORT
+        if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_ABORT {
+            let parsed_xact = XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
+            save_xact_record(timeline, lsn, &parsed_xact, decoded)?;
+        } else if info == pg_constants::XLOG_XACT_COMMIT_PREPARED
             || info == pg_constants::XLOG_XACT_ABORT_PREPARED
         {
             let parsed_xact = XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
             save_xact_record(timeline, lsn, &parsed_xact, decoded)?;
-        } else if info == pg_constants::XLOG_XACT_PREPARE {
-            let rec = WALRecord {
+            // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
+            info!(
+                "unlink twophaseFile for xid {} parsed_xact.xid {} here",
+                decoded.xl_xid, parsed_xact.xid
+            );
+            timeline.put_unlink(
+                RelishTag::TwoPhase {
+                    xid: decoded.xl_xid,
+                },
                 lsn,
-                will_init: true,
-                rec: recdata.clone(),
-                main_data_offset: decoded.main_data_offset as u32,
-            };
-            timeline.put_wal_record(
+            )?;
+        } else if info == pg_constants::XLOG_XACT_PREPARE {
+            let mut buf = decoded.record.clone();
+            buf.advance(decoded.main_data_offset);
+
+            timeline.put_page_image(
                 RelishTag::TwoPhase {
                     xid: decoded.xl_xid,
                 },
                 0,
-                rec,
+                lsn,
+                Bytes::copy_from_slice(&buf[..]),
+                true,
             )?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_MULTIXACT_ID {
