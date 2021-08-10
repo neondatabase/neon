@@ -180,8 +180,7 @@ impl<'a> Basebackup<'a> {
     //
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
         // Include in tarball two-phase files only of in-progress transactions
-        if self.timeline.get_tx_is_in_progress(xid, self.lsn)
-        {
+        if self.timeline.get_tx_is_in_progress(xid, self.lsn) {
             let img =
                 self.timeline
                     .get_page_at_lsn_nowait(RelishTag::TwoPhase { xid }, 0, self.lsn)?;

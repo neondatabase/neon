@@ -168,10 +168,10 @@ pub trait Timeline: Send + Sync {
                 segno,
             },
             rpageno,
-            lsn)
-        {
+            lsn,
+        ) {
             let status = transaction_id_get_status(xid, &clog_page[..]);
-            return status == pg_constants::TRANSACTION_STATUS_IN_PROGRESS
+            return status == pg_constants::TRANSACTION_STATUS_IN_PROGRESS;
         }
         return false;
     }
