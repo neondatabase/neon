@@ -23,7 +23,7 @@ use crate::{PageServerConf, ZTimelineId};
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use log::*;
-use postgres_ffi::pg_constants;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
@@ -712,9 +712,9 @@ impl Timeline for ObjectTimeline {
                         for vers in self.obj_store.object_versions(&key, horizon)? {
                             let lsn = vers.0;
                             prepared_horizon = Lsn::min(lsn, prepared_horizon);
-                            if self.get_tx_status(xid, horizon)?
-                                != pg_constants::TRANSACTION_STATUS_IN_PROGRESS
+                            if !self.get_tx_is_in_progress(xid, horizon)
                             {
+                                info!("unlink twophase_file NOT TRANSACTION_STATUS_IN_PROGRESS {}", xid);
                                 self.obj_store.unlink(&key, lsn)?;
                                 result.prep_deleted += 1;
                             }
