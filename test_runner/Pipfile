@@ -9,6 +9,7 @@ psycopg2 = "*"
 typing-extensions = "*"
 pyjwt = {extras = ["crypto"], version = "*"}
 requests = "*"
+pytest-xdist = "*"
 
 [dev-packages]
 yapf = "*"

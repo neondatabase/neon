@@ -4,6 +4,7 @@ use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env;
 use control_plane::storage::PageServerNode;
+use pageserver::defaults::{DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_PORT};
 use std::collections::HashMap;
 use std::process::exit;
 use std::str::FromStr;
@@ -43,11 +44,28 @@ fn main() -> Result<()> {
         .takes_value(true)
         .required(false);
 
+    let port_arg = Arg::with_name("port")
+        .long("port")
+        .required(false)
+        .value_name("port");
+
     let matches = App::new("Zenith CLI")
         .setting(AppSettings::ArgRequiredElseHelp)
         .subcommand(
             SubCommand::with_name("init")
                 .about("Initialize a new Zenith repository")
+                .arg(
+                    Arg::with_name("pageserver-pg-port")
+                        .long("pageserver-pg-port")
+                        .required(false)
+                        .value_name("pageserver-pg-port"),
+                )
+                .arg(
+                    Arg::with_name("pageserver-http-port")
+                        .long("pageserver-http-port")
+                        .required(false)
+                        .value_name("pageserver-http-port"),
+                )
                 .arg(
                     Arg::with_name("enable-auth")
                         .long("enable-auth")
@@ -79,7 +97,7 @@ fn main() -> Result<()> {
                 .subcommand(SubCommand::with_name("list").arg(tenantid_arg.clone()))
                 .subcommand(SubCommand::with_name("create")
                     .about("Create a postgres compute node")
-                    .arg(timeline_arg.clone()).arg(tenantid_arg.clone())
+                    .arg(timeline_arg.clone()).arg(tenantid_arg.clone()).arg(port_arg.clone())
                     .arg(
                         Arg::with_name("config-only")
                             .help("Don't do basebackup, create compute node with only config files")
@@ -88,7 +106,11 @@ fn main() -> Result<()> {
                     ))
                 .subcommand(SubCommand::with_name("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
-                    .arg(timeline_arg.clone()).arg(tenantid_arg.clone()))
+                    .arg(
+                        timeline_arg.clone()
+                    ).arg(
+                        tenantid_arg.clone()
+                    ).arg(port_arg.clone()))
                 .subcommand(
                     SubCommand::with_name("stop")
                         .arg(timeline_arg.clone())
@@ -99,19 +121,36 @@ fn main() -> Result<()> {
                                 .long("destroy")
                                 .required(false)
                         )
-                )
+                    )
+
         )
         .get_matches();
 
     // Create config file
     if let ("init", Some(init_match)) = matches.subcommand() {
         let tenantid = ZTenantId::generate();
+        let pageserver_pg_port = match init_match.value_of("pageserver-pg-port") {
+            Some(v) => v.parse()?,
+            None => DEFAULT_PG_LISTEN_PORT,
+        };
+        let pageserver_http_port = match init_match.value_of("pageserver-http-port") {
+            Some(v) => v.parse()?,
+            None => DEFAULT_HTTP_LISTEN_PORT,
+        };
+
         let auth_type = if init_match.is_present("enable-auth") {
             AuthType::ZenithJWT
         } else {
             AuthType::Trust
         };
-        local_env::init(tenantid, auth_type).with_context(|| "Failed to create config file")?;
+
+        local_env::init(
+            pageserver_pg_port,
+            pageserver_http_port,
+            tenantid,
+            auth_type,
+        )
+        .with_context(|| "Failed to create config file")?;
     }
 
     // all other commands would need config
@@ -412,13 +451,22 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
             let timeline_name = create_match.value_of("timeline").unwrap_or("main");
 
-            cplane.new_node(tenantid, timeline_name)?;
+            let port: Option<u16> = match create_match.value_of("port") {
+                Some(p) => Some(p.parse()?),
+                None => None,
+            };
+            cplane.new_node(tenantid, timeline_name, port)?;
         }
         ("start", Some(start_match)) => {
             let tenantid: ZTenantId = start_match
                 .value_of("tenantid")
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
             let timeline_name = start_match.value_of("timeline").unwrap_or("main");
+
+            let port: Option<u16> = match start_match.value_of("port") {
+                Some(p) => Some(p.parse()?),
+                None => None,
+            };
 
             let node = cplane.nodes.get(&(tenantid, timeline_name.to_owned()));
 
@@ -437,7 +485,12 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             if let Some(node) = node {
                 node.start(&auth_token)?;
             } else {
-                let node = cplane.new_node(tenantid, timeline_name)?;
+                // when used with custom port this results in non obvious behaviour
+                // port is remembered from first start command, i e
+                // start --port X
+                // stop
+                // start <-- will also use port X even without explicit port argument
+                let node = cplane.new_node(tenantid, timeline_name, port)?;
                 node.start(&auth_token)?;
             }
         }

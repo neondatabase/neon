@@ -50,7 +50,7 @@ DEFAULT_OUTPUT_DIR = 'test_output'
 DEFAULT_POSTGRES_DIR = 'tmp_install'
 
 DEFAULT_PAGESERVER_PG_PORT = 64000
-DEFAULT_PAGESERVER_HTTP_PORT = 9898
+BASE_PORT = 55000
 
 
 def determine_scope(fixture_name: str, config: Any) -> str:
@@ -73,20 +73,6 @@ def zenfixture(func: Fn) -> Fn:
         'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
 
     return pytest.fixture(func, scope=scope)
-
-
-@pytest.fixture(autouse=True, scope='session')
-def safety_check() -> None:
-    """ Ensure that no unwanted daemons are running before we start testing. """
-
-    # does not use -c as it is not supported on macOS
-    cmd = ['pgrep', 'pageserver|postgres|wal_acceptor']
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
-    if result.returncode == 0:
-        # returncode of 0 means it found something.
-        # This is bad; we don't want any of those processes polluting the
-        # result of the test.
-        raise Exception('found interfering processes running')
 
 
 class PgProtocol:
@@ -277,24 +263,48 @@ class AuthKeys:
         return token
 
 
+@zenfixture
+def worker_seq_no(worker_id: str):
+    if worker_id == 'master':
+        return 0
+    assert worker_id.startswith('gw')
+    return int(worker_id[2:])
 
+
+@zenfixture
+def worker_base_port(worker_seq_no: int):
+    # so we divide ports in ranges of 100 ports
+    # so workers have disjoint set of ports for services
+    return BASE_PORT + worker_seq_no * 100
+
+
+@zenfixture
+def port_distributor(worker_base_port):
+    yield iter(range(worker_base_port, worker_base_port + 100))
+
+
+@dataclass
+class PageserverPort:
+    pg: int
+    http: int
 
 
 class ZenithPageserver(PgProtocol):
     """ An object representing a running pageserver. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str):
-        super().__init__(host='localhost', port=DEFAULT_PAGESERVER_PG_PORT)
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, port: PageserverPort):
+        super().__init__(host='localhost', port=port.pg)
         self.zenith_cli = zenith_cli
         self.running = False
         self.initial_tenant = None
         self.repo_dir = repo_dir
+        self.service_port = port # do not shadow PgProtocol.port which is just int
 
     def init(self, enable_auth: bool = False) -> 'ZenithPageserver':
         """
         Initialize the repository, i.e. run "zenith init".
         Returns self.
         """
-        cmd = ['init']
+        cmd = ['init', f'--pageserver-pg-port={self.service_port.pg}', f'--pageserver-http-port={self.service_port.http}']
         if enable_auth:
             cmd.append('--enable-auth')
         self.zenith_cli.run(cmd)
@@ -344,13 +354,23 @@ class ZenithPageserver(PgProtocol):
 
     def http_client(self, auth_token: Optional[str] = None):
         return ZenithPageserverHttpClient(
-            port=DEFAULT_PAGESERVER_HTTP_PORT,
+            port=self.service_port.http,
             auth_token=auth_token,
         )
 
 
+
+
 @zenfixture
-def pageserver(zenith_cli: ZenithCli, repo_dir: str) -> Iterator[ZenithPageserver]:
+def pageserver_port(port_distributor: Iterator[int]) -> PageserverPort:
+    pg = next(port_distributor)
+    http = next(port_distributor)
+    print(f"pageserver_port: pg={pg} http={http}")
+    return PageserverPort(pg=pg, http=http)
+
+
+@zenfixture
+def pageserver(zenith_cli: ZenithCli, repo_dir: str, pageserver_port: PageserverPort) -> Iterator[ZenithPageserver]:
     """
     The 'pageserver' fixture provides a Page Server that's up and running.
 
@@ -362,8 +382,7 @@ def pageserver(zenith_cli: ZenithCli, repo_dir: str) -> Iterator[ZenithPageserve
     By convention, the test branches are named after the tests. For example,
     test called 'test_foo' would create and use branches with the 'test_foo' prefix.
     """
-
-    ps = ZenithPageserver(zenith_cli, repo_dir).init().start()
+    ps = ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir, port=pageserver_port).init().start()
     # For convenience in tests, create a branch from the freshly-initialized cluster.
     zenith_cli.run(["branch", "empty", "main"])
 
@@ -433,8 +452,8 @@ def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir)
 
 @pytest.fixture
-def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str):
-    with ZenithPageserver(zenith_cli, repo_dir).init(enable_auth=True).start() as ps:
+def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str, pageserver_port: PageserverPort):
+    with ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir, port=pageserver_port).init(enable_auth=True).start() as ps:
         # For convenience in tests, create a branch from the freshly-initialized cluster.
         zenith_cli.run(["branch", "empty", "main"])
         yield ps
@@ -470,7 +489,7 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
+        self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}', f'--port={self.port}'])
         self.branch = branch
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch
         self.pgdata_dir = os.path.join(self.repo_dir, path)
@@ -493,7 +512,7 @@ class Postgres(PgProtocol):
 
         print(f"Starting postgres on branch {self.branch}")
 
-        run_result = self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}'])
+        run_result = self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}', f'--port={self.port}'])
         self.running = True
 
         print(f"stdout: {run_result.stdout}")
@@ -607,13 +626,13 @@ class Postgres(PgProtocol):
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, initial_tenant: str, base_port: int = 55431):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, initial_tenant: str, port_distributor: Iterator[int]):
         self.zenith_cli = zenith_cli
         self.repo_dir = repo_dir
         self.num_instances = 0
         self.instances: List[Postgres] = []
         self.initial_tenant: str = initial_tenant
-        self.base_port = base_port
+        self.port_distributor = port_distributor
         self.pg_bin = pg_bin
 
     def create_start(
@@ -623,15 +642,13 @@ class PostgresFactory:
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None
     ) -> Postgres:
-
         pg = Postgres(
             zenith_cli=self.zenith_cli,
             repo_dir=self.repo_dir,
             pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
-            port=self.base_port + self.num_instances + 1,
+            port=next(self.port_distributor),
         )
-
         self.num_instances += 1
         self.instances.append(pg)
 
@@ -654,7 +671,7 @@ class PostgresFactory:
             repo_dir=self.repo_dir,
             pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
-            port=self.base_port + self.num_instances + 1,
+            port=next(self.port_distributor),
         )
 
         self.num_instances += 1
@@ -679,7 +696,7 @@ class PostgresFactory:
             repo_dir=self.repo_dir,
             pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
-            port=self.base_port + self.num_instances + 1,
+            port=next(self.port_distributor),
         )
 
         self.num_instances += 1
@@ -703,8 +720,14 @@ def initial_tenant(pageserver: ZenithPageserver):
 
 
 @zenfixture
-def postgres(zenith_cli: ZenithCli, initial_tenant: str, repo_dir: str, pg_bin: PgBin) -> Iterator[PostgresFactory]:
-    pgfactory = PostgresFactory(zenith_cli, repo_dir, pg_bin, initial_tenant=initial_tenant)
+def postgres(zenith_cli: ZenithCli, initial_tenant: str, repo_dir: str, pg_bin: PgBin, port_distributor: Iterator[int]) -> Iterator[PostgresFactory]:
+    pgfactory = PostgresFactory(
+        zenith_cli=zenith_cli,
+        repo_dir=repo_dir,
+        pg_bin=pg_bin,
+        initial_tenant=initial_tenant,
+        port_distributor=port_distributor,
+    )
 
     yield pgfactory
 
@@ -720,10 +743,11 @@ def read_pid(path: Path):
 @dataclass
 class WalAcceptor:
     """ An object representing a running wal acceptor daemon. """
-    bin_path: Path
+    wa_bin_path: Path
     data_dir: Path
     port: int
     num: int # identifier for logging
+    pageserver_port: int
     auth_token: Optional[str] = None
 
     def start(self) -> 'WalAcceptor':
@@ -731,13 +755,13 @@ class WalAcceptor:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pidfile.unlink(missing_ok=True)
 
-        cmd = [str(self.bin_path)]
+        cmd = [str(self.wa_bin_path)]
         cmd.extend(["-D", str(self.data_dir)])
-        cmd.extend(["-l", "localhost:{}".format(self.port)])
+        cmd.extend(["-l", f"localhost:{self.port}"])
         cmd.append("--daemonize")
         cmd.append("--no-sync")
         # Tell page server it can receive WAL from this WAL safekeeper
-        cmd.extend(["--pageserver", "localhost:{}".format(DEFAULT_PAGESERVER_PG_PORT)])
+        cmd.extend(["--pageserver", f"localhost:{self.pageserver_port}"])
         cmd.extend(["--recall", "1 second"])
         print('Running command "{}"'.format(' '.join(cmd)))
         env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None
@@ -784,24 +808,25 @@ class WalAcceptor:
 
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """
-    def __init__(self, zenith_binpath: Path, data_dir: Path):
-        self.wa_binpath = zenith_binpath / 'wal_acceptor'
+    def __init__(self, zenith_binpath: Path, data_dir: Path, pageserver_port: int, port_distributor: Iterator[int]):
+        self.wa_bin_path = zenith_binpath / 'wal_acceptor'
         self.data_dir = data_dir
         self.instances: List[WalAcceptor] = []
-        self.initial_port = 54321
+        self.port_distributor = port_distributor
+        self.pageserver_port = pageserver_port
 
     def start_new(self, auth_token: Optional[str] = None) -> WalAcceptor:
         """
         Start new wal acceptor.
         """
-
         wa_num = len(self.instances)
         wa = WalAcceptor(
-            self.wa_binpath,
-            self.data_dir / "wal_acceptor_{}".format(wa_num),
-            self.initial_port + wa_num,
-            wa_num,
-            auth_token,
+            wa_bin_path=self.wa_bin_path,
+            data_dir=self.data_dir / "wal_acceptor_{}".format(wa_num),
+            port=next(self.port_distributor),
+            num=wa_num,
+            pageserver_port=self.pageserver_port,
+            auth_token=auth_token,
         )
         wa.start()
         self.instances.append(wa)
@@ -826,9 +851,14 @@ class WalAcceptorFactory:
 
 
 @zenfixture
-def wa_factory(zenith_binpath: str, repo_dir: str) -> Iterator[WalAcceptorFactory]:
+def wa_factory(zenith_binpath: str, repo_dir: str, pageserver_port: PageserverPort, port_distributor: Iterator[int]) -> Iterator[WalAcceptorFactory]:
     """ Gives WalAcceptorFactory providing wal acceptors. """
-    wafactory = WalAcceptorFactory(Path(zenith_binpath), Path(repo_dir) / "wal_acceptors")
+    wafactory = WalAcceptorFactory(
+        zenith_binpath=Path(zenith_binpath),
+        data_dir=Path(repo_dir) / "wal_acceptors",
+        pageserver_port=pageserver_port.pg,
+        port_distributor=port_distributor,
+    )
     yield wafactory
     # After the yield comes any cleanup code we need.
     print('Starting wal acceptors cleanup')
@@ -954,7 +984,7 @@ def list_files_to_compare(pgdata_dir: str):
     return pgdata_files
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(zenith_cli, test_output_dir, pg):
+def check_restored_datadir_content(zenith_cli: ZenithCli, test_output_dir: str, pg: Postgres, pageserver_pg_port: int):
 
     # Get the timeline ID of our branch. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
@@ -969,12 +999,11 @@ def check_restored_datadir_content(zenith_cli, test_output_dir, pg):
     restored_dir_path = os.path.join(test_output_dir, "{}_restored_datadir".format(pg.branch))
     mkdir_if_needed(restored_dir_path)
 
-    cmd = "psql -h 127.0.0.1 -p {} -c 'basebackup {} {}' | tar -x -C {}".format(
-     DEFAULT_PAGESERVER_PG_PORT, pg.tenant_id, timeline, restored_dir_path)
+    cmd = f"psql -h localhost -p {pageserver_pg_port} -c 'basebackup {pg.tenant_id} {timeline}' | tar -x -C {restored_dir_path}"
 
     cmd = os.path.join(pg.pg_bin.pg_bin_path, cmd)
 
-    subprocess.run(cmd, shell=True)
+    subprocess.check_call(cmd, shell=True)
 
     # list files we're going to compare
     pgdata_files = list_files_to_compare(pg.pgdata_dir)

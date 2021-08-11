@@ -88,15 +88,17 @@ impl ComputeControlPlane {
         &mut self,
         tenantid: ZTenantId,
         branch_name: &str,
+        port: Option<u16>,
     ) -> Result<Arc<PostgresNode>> {
         let timeline_id = self
             .pageserver
             .branch_get_by_name(&tenantid, branch_name)?
             .timeline_id;
 
+        let port = port.unwrap_or(self.get_port());
         let node = Arc::new(PostgresNode {
             name: branch_name.to_owned(),
-            address: SocketAddr::new("127.0.0.1".parse().unwrap(), self.get_port()),
+            address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
             is_test: false,

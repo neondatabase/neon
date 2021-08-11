@@ -1,5 +1,3 @@
-use std::net::TcpListener;
-
 use crate::auth::{self, Claims, JwtAuth};
 use crate::http::error;
 use crate::zid::ZTenantId;
@@ -10,6 +8,7 @@ use lazy_static::lazy_static;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
+use std::net::TcpListener;
 use zenith_metrics::{register_int_counter, IntCounter};
 use zenith_metrics::{Encoder, TextEncoder};
 

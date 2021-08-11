@@ -99,4 +99,4 @@ def test_dropdb(
     assert os.path.isdir(dbpath) == False
 
     # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(zenith_cli, test_output_dir, pg)
+    check_restored_datadir_content(zenith_cli, test_output_dir, pg, pageserver.service_port.pg)
