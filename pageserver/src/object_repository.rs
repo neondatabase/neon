@@ -272,20 +272,22 @@ impl Timeline for ObjectTimeline {
             );
         }
 
-        // Handle truncated SLRU segments.
+        // Handle truncated non-rel relishes
+        // We should never return a stale or zeroed page for the truncated SLRU segment.
         // XXX if this will turn out to be performance critical,
         // move this check out of the funciton.
-        if let RelishTag::Slru {
-            slru: _slru,
-            segno: _segno,
-        } = rel
-        {
-            info!("test SLRU rel {:?} at {}", rel, req_lsn);
-            if !self.get_rel_exists(rel, req_lsn).unwrap_or(false) {
-                info!("SLRU rel {:?} at {} doesn't exist", rel, req_lsn);
-                return Err(anyhow!("SLRU rel doesn't exist"));
-            }
-        }
+        //
+        match rel {
+            RelishTag::Slru { .. } |
+            RelishTag::TwoPhase{ .. } =>
+            {
+                if !self.get_rel_exists(rel, req_lsn).unwrap_or(false) {
+                    trace!("{:?} at {} doesn't exist", rel, req_lsn);
+                    return Err(anyhow!("non-rel relish doesn't exist"));
+                }
+            },
+            _ => ()
+        };
 
         const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
         // Look up the page entry. If it's a page image, return that. If it's a WAL record,
@@ -341,9 +343,9 @@ impl Timeline for ObjectTimeline {
     /// Get size of a relish in number of blocks
     /// Return None if the relish was truncated
     fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {
-        if !rel.is_blocky() {
+        if !rel.is_physical() {
             bail!(
-                "invalid get_relish_size request for non-blocky relish {}",
+                "invalid get_relish_size request for non-physical relish {}",
                 rel
             );
         }

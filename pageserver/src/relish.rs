@@ -106,6 +106,23 @@ impl RelishTag {
             | RelishTag::Checkpoint => false,
         }
     }
+
+    // Physical relishes represent files and use
+    // RelationSizeEntry to track existing and dropped files.
+    // They can be both blocky and non-blocky.
+    pub const fn is_physical(&self) -> bool {
+        match self {
+            // These relishes represent physical files
+            RelishTag::Relation(_)
+            | RelishTag::Slru { .. }
+            | RelishTag::FileNodeMap { .. }
+            | RelishTag::TwoPhase { .. } => true,
+
+            // and these don't
+            | RelishTag::ControlFile
+            | RelishTag::Checkpoint => false,
+        }
+    }
 }
 
 ///
