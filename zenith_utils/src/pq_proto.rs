@@ -15,6 +15,9 @@ use std::str;
 pub type Oid = u32;
 pub type SystemId = u64;
 
+pub const TEXT_OID: Oid = 25;
+pub const INT8_OID: Oid = 20;
+
 #[derive(Debug)]
 pub enum FeMessage {
     StartupMessage(FeStartupMessage),
@@ -380,6 +383,21 @@ impl Default for RowDescriptor<'_> {
     }
 }
 
+impl RowDescriptor<'_> {
+    /// Convenience function to create a RowDescriptor message for an int8 column
+    pub const fn int8_col(name: &[u8]) -> RowDescriptor {
+        RowDescriptor {
+            name,
+            tableoid: 0,
+            attnum: 0,
+            typoid: INT8_OID,
+            typlen: 8,
+            typmod: 0,
+            formatcode: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct XLogDataBody<'a> {
     pub wal_start: u64,
@@ -389,7 +407,7 @@ pub struct XLogDataBody<'a> {
 }
 
 pub static HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(&[Some(b"hello world")]);
-pub const TEXT_OID: Oid = 25;
+
 // single text column
 pub static SINGLE_COL_ROWDESC: BeMessage = BeMessage::RowDescription(&[RowDescriptor {
     name: b"data",
