@@ -213,17 +213,15 @@ impl LayerMap {
                 if (spcnode == 0 || reltag.spcnode == spcnode)
                     && (dbnode == 0 || reltag.dbnode == dbnode)
                 {
-
                     // Add only if it exists at the requested LSN.
                     if let Some(open) = &segentry.open {
-                        if open.get_end_lsn() > lsn  {
+                        if open.get_end_lsn() > lsn {
                             rels.insert(reltag);
                         }
-                    }
-                    else if let Some((_k, _v)) = segentry
-                    .historic
-                    .range((Included(Lsn(0)), Included(lsn)))
-                    .next_back()
+                    } else if let Some((_k, _v)) = segentry
+                        .historic
+                        .range((Included(Lsn(0)), Included(lsn)))
+                        .next_back()
                     {
                         rels.insert(reltag);
                     }
@@ -239,19 +237,17 @@ impl LayerMap {
 
         // Scan the timeline directory to get all rels in this timeline.
         for (seg, segentry) in self.segs.iter() {
-            if let RelishTag::Relation(_) = seg.rel { }
-            else
-            {
+            if let RelishTag::Relation(_) = seg.rel {
+            } else {
                 // Add only if it exists at the requested LSN.
                 if let Some(open) = &segentry.open {
-                    if open.get_end_lsn() > lsn  {
+                    if open.get_end_lsn() > lsn {
                         rels.insert(seg.rel);
                     }
-                }
-                else if let Some((_k, _v)) = segentry
-                .historic
-                .range((Included(Lsn(0)), Included(lsn)))
-                .next_back()
+                } else if let Some((_k, _v)) = segentry
+                    .historic
+                    .range((Included(Lsn(0)), Included(lsn)))
+                    .next_back()
                 {
                     rels.insert(seg.rel);
                 }

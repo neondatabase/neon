@@ -589,7 +589,11 @@ impl Timeline for LayeredTimeline {
         let mut all_rels = HashSet::new();
         let mut timeline = self;
         loop {
-            let rels = timeline.layers.lock().unwrap().list_rels(spcnode, dbnode, lsn)?;
+            let rels = timeline
+                .layers
+                .lock()
+                .unwrap()
+                .list_rels(spcnode, dbnode, lsn)?;
 
             all_rels.extend(rels.iter());
 
