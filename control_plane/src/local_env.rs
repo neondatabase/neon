@@ -20,8 +20,9 @@ use zenith_utils::zid::ZTenantId;
 //
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LocalEnv {
-    // Pageserver connection strings
-    pub pageserver_connstring: String,
+    // Pageserver connection settings
+    pub pageserver_pg_port: u16,
+    pub pageserver_http_port: u16,
 
     // Base directory for both pageserver and compute nodes
     pub base_data_dir: PathBuf,
@@ -88,7 +89,12 @@ fn base_path() -> PathBuf {
 //
 // Initialize a new Zenith repository
 //
-pub fn init(tenantid: ZTenantId, auth_type: AuthType) -> Result<()> {
+pub fn init(
+    pageserver_pg_port: u16,
+    pageserver_http_port: u16,
+    tenantid: ZTenantId,
+    auth_type: AuthType,
+) -> Result<()> {
     // check if config already exists
     let base_path = base_path();
     if base_path.exists() {
@@ -159,7 +165,8 @@ pub fn init(tenantid: ZTenantId, auth_type: AuthType) -> Result<()> {
     }
 
     let conf = LocalEnv {
-        pageserver_connstring: "postgresql://127.0.0.1:6400".to_string(),
+        pageserver_pg_port,
+        pageserver_http_port,
         pg_distrib_dir,
         zenith_distrib_dir,
         base_data_dir: base_path,

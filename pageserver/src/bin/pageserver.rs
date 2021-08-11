@@ -3,6 +3,7 @@
 //
 
 use log::*;
+use pageserver::defaults::*;
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -11,7 +12,6 @@ use std::{
     process::exit,
     str::FromStr,
     thread,
-    time::Duration,
 };
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
 
@@ -22,19 +22,11 @@ use daemonize::Daemonize;
 use pageserver::{branches, http, page_service, tenant_mgr, PageServerConf, LOG_FILE_NAME};
 use zenith_utils::http::endpoint;
 
-const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
-const DEFAULT_HTTP_ENDPOINT_ADDR: &str = "127.0.0.1:9898";
-
-const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(10);
-
-const DEFAULT_SUPERUSER: &str = "zenith_admin";
-
 /// String arguments that can be declared via CLI or config file
 #[derive(Serialize, Deserialize)]
 struct CfgFileParams {
-    listen_addr: Option<String>,
-    http_endpoint_addr: Option<String>,
+    listen_pg_addr: Option<String>,
+    listen_http_addr: Option<String>,
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     pg_distrib_dir: Option<String>,
@@ -50,8 +42,8 @@ impl CfgFileParams {
         };
 
         Self {
-            listen_addr: get_arg("listen"),
-            http_endpoint_addr: get_arg("http_endpoint"),
+            listen_pg_addr: get_arg("listen-pg"),
+            listen_http_addr: get_arg("listen-http"),
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
             pg_distrib_dir: get_arg("postgres-distrib"),
@@ -64,8 +56,8 @@ impl CfgFileParams {
     fn or(self, other: CfgFileParams) -> Self {
         // TODO cleaner way to do this
         Self {
-            listen_addr: self.listen_addr.or(other.listen_addr),
-            http_endpoint_addr: self.http_endpoint_addr.or(other.http_endpoint_addr),
+            listen_pg_addr: self.listen_pg_addr.or(other.listen_pg_addr),
+            listen_http_addr: self.listen_http_addr.or(other.listen_http_addr),
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
@@ -80,14 +72,14 @@ impl CfgFileParams {
     fn try_into_config(&self) -> Result<PageServerConf> {
         let workdir = PathBuf::from(".");
 
-        let listen_addr = match self.listen_addr.as_ref() {
+        let listen_pg_addr = match self.listen_pg_addr.as_ref() {
             Some(addr) => addr.clone(),
-            None => DEFAULT_LISTEN_ADDR.to_owned(),
+            None => DEFAULT_PG_LISTEN_ADDR.to_owned(),
         };
 
-        let http_endpoint_addr = match self.http_endpoint_addr.as_ref() {
+        let listen_http_addr = match self.listen_http_addr.as_ref() {
             Some(addr) => addr.clone(),
-            None => DEFAULT_HTTP_ENDPOINT_ADDR.to_owned(),
+            None => DEFAULT_HTTP_LISTEN_ADDR.to_owned(),
         };
 
         let gc_horizon: u64 = match self.gc_horizon.as_ref() {
@@ -135,8 +127,8 @@ impl CfgFileParams {
         Ok(PageServerConf {
             daemonize: false,
 
-            listen_addr,
-            http_endpoint_addr,
+            listen_pg_addr,
+            listen_http_addr,
             gc_horizon,
             gc_period,
 
@@ -156,11 +148,19 @@ fn main() -> Result<()> {
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .arg(
-            Arg::with_name("listen")
+            Arg::with_name("listen-pg")
                 .short("l")
-                .long("listen")
+                .long("listen-pg")
+                .alias("listen") // keep some compatibility
                 .takes_value(true)
                 .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"),
+        )
+        .arg(
+            Arg::with_name("listen-http")
+                .long("listen-http")
+                .alias("http_endpoint") // keep some compatibility
+                .takes_value(true)
+                .help("http endpoint address for for metrics and management API calls ip:port (default: 127.0.0.1:5430)"),
         )
         .arg(
             Arg::with_name("daemonize")
@@ -280,15 +280,15 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // bind sockets before daemonizing so we report errors early and do not return until we are listening
     info!(
         "Starting pageserver http handler on {}",
-        conf.http_endpoint_addr
+        conf.listen_http_addr
     );
-    let http_listener = TcpListener::bind(conf.http_endpoint_addr.clone())?;
+    let http_listener = TcpListener::bind(conf.listen_http_addr.clone())?;
 
     info!(
         "Starting pageserver pg protocol handler on {}",
-        conf.listen_addr
+        conf.listen_pg_addr
     );
-    let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
+    let pageserver_listener = TcpListener::bind(conf.listen_pg_addr.clone())?;
 
     if conf.daemonize {
         info!("daemonizing...");

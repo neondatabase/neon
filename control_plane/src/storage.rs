@@ -22,7 +22,6 @@ use crate::read_pidfile;
 use pageserver::branches::BranchInfo;
 use zenith_utils::connstring::connection_address;
 
-const HTTP_BASE_URL: &str = "http://127.0.0.1:9898/v1";
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
@@ -81,27 +80,36 @@ impl PageServerNode {
 
         PageServerNode {
             kill_on_exit: false,
-            pg_connection_config: Self::default_config(password), // default
+            pg_connection_config: Self::pageserver_connection_config(
+                password,
+                env.pageserver_pg_port,
+            ),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: HTTP_BASE_URL.to_owned(),
+            http_base_url: format!("http://localhost:{}/v1", env.pageserver_http_port),
         }
     }
 
-    fn default_config(password: &str) -> Config {
-        format!("postgresql://no_user:{}@localhost:64000/no_db", password)
+    fn pageserver_connection_config(password: &str, port: u16) -> Config {
+        format!("postgresql://no_user:{}@localhost:{}/no_db", password, port)
             .parse()
             .unwrap()
     }
 
     pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
+        let listen_pg = format!("localhost:{}", self.env.pageserver_pg_port);
+        let listen_http = format!("localhost:{}", self.env.pageserver_http_port);
         let mut args = vec![
             "--init",
             "-D",
             self.env.base_data_dir.to_str().unwrap(),
             "--postgres-distrib",
             self.env.pg_distrib_dir.to_str().unwrap(),
+            "--listen-pg",
+            &listen_pg,
+            "--listen-http",
+            &listen_http,
         ];
 
         if enable_auth {

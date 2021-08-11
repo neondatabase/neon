@@ -20,6 +20,20 @@ pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
 
+pub mod defaults {
+    use std::time::Duration;
+
+    pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
+    pub const DEFAULT_PG_LISTEN_ADDR: &str = "127.0.0.1:64000"; // can't format! const yet...
+    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
+    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = "127.0.0.1:9898";
+
+    pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
+    pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
+
+    pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
+}
+
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_live_connections_count",
@@ -34,8 +48,8 @@ pub const LOG_FILE_NAME: &str = "pageserver.log";
 #[derive(Debug, Clone)]
 pub struct PageServerConf {
     pub daemonize: bool,
-    pub listen_addr: String,
-    pub http_endpoint_addr: String,
+    pub listen_pg_addr: String,
+    pub listen_http_addr: String,
     pub gc_horizon: u64,
     pub gc_period: Duration,
     pub superuser: String,
@@ -123,8 +137,8 @@ impl PageServerConf {
             daemonize: false,
             gc_horizon: 64 * 1024 * 1024,
             gc_period: Duration::from_secs(10),
-            listen_addr: "127.0.0.1:5430".to_string(),
-            http_endpoint_addr: "127.0.0.1:9898".to_string(),
+            listen_pg_addr: "127.0.0.1:5430".to_string(),
+            listen_http_addr: "127.0.0.1:9898".to_string(),
             superuser: "zenith_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: "".into(),

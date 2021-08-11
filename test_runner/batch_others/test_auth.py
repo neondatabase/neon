@@ -1,9 +1,13 @@
 
 from contextlib import closing
+from typing import Iterator
 from uuid import uuid4
 import psycopg2
 from fixtures.zenith_fixtures import Postgres, ZenithCli, ZenithPageserver, PgBin
 import pytest
+
+
+pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 def test_pageserver_auth(pageserver_auth_enabled: ZenithPageserver):
@@ -42,7 +46,8 @@ def test_compute_auth_to_pageserver(
     pageserver_auth_enabled: ZenithPageserver,
     repo_dir: str,
     with_wal_acceptors: bool,
-    pg_bin: PgBin
+    pg_bin: PgBin,
+    port_distributor: Iterator[int],
 ):
     ps = pageserver_auth_enabled
     # since we are in progress of refactoring protocols between compute safekeeper and page server
@@ -59,7 +64,7 @@ def test_compute_auth_to_pageserver(
         repo_dir=repo_dir,
         pg_bin=pg_bin,
         tenant_id=ps.initial_tenant,
-        port=55432, # FIXME port distribution is hardcoded in tests and in cli
+        port=next(port_distributor),
     ).create_start(
         branch,
         wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,

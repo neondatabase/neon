@@ -1,13 +1,13 @@
 import os
 
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import PostgresFactory, check_restored_datadir_content
+from fixtures.zenith_fixtures import PageserverPort, PostgresFactory, check_restored_datadir_content
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 def test_zenith_regress(postgres: PostgresFactory, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir,
-                        base_dir, capsys):
+                        base_dir, capsys, pageserver_port: PageserverPort):
 
     # Create a branch for us
     zenith_cli.run(["branch", "test_zenith_regress", "empty"])
@@ -56,4 +56,4 @@ def test_zenith_regress(postgres: PostgresFactory, pg_bin, zenith_cli, test_outp
         lsn = pg.safe_psql('select pg_current_wal_insert_lsn()')[0][0]
 
         # Check that we restore the content of the datadir correctly
-        check_restored_datadir_content(zenith_cli, test_output_dir, pg)
+        check_restored_datadir_content(zenith_cli, test_output_dir, pg, pageserver_port.pg)

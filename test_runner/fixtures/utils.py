@@ -14,10 +14,11 @@ def mkdir_if_needed(path: str) -> None:
 
     Note this won't try to create intermediate directories.
     """
-    if os.path.exists(path):
-        assert os.path.isdir(path)
-        return
-    os.mkdir(path)
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass
+    assert os.path.isdir(path)
 
 
 def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
