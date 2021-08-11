@@ -105,9 +105,6 @@ pub trait Timeline: Send + Sync {
     /// Put raw data
     fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()>;
 
-    // Get object tag greater or equal than specified
-    fn get_next_tag(&self, tag: ObjectTag) -> Result<Option<ObjectTag>>;
-
     /// Remember the all WAL before the given LSN has been processed.
     ///
     /// The WAL receiver calls this after the put_* functions, to indicate that

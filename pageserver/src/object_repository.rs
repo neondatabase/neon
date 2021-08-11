@@ -497,18 +497,6 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
-    fn get_next_tag(&self, tag: ObjectTag) -> Result<Option<ObjectTag>> {
-        let key = ObjectKey {
-            timeline: self.timelineid,
-            tag,
-        };
-        if let Some(key) = self.obj_store.get_next_key(&key)? {
-            Ok(Some(key.tag))
-        } else {
-            Ok(None)
-        }
-    }
-
     fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()> {
         let key = ObjectKey {
             timeline: self.timelineid,
