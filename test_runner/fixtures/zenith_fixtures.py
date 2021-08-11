@@ -366,8 +366,8 @@ class Postgres(PgProtocol):
         self.running = False
         self.repo_dir = repo_dir
         self.branch: Optional[str] = None  # dubious, see asserts below
+        self.pgdata_dir: Optional[str] = None # Path to computenode PGDATA
         self.tenant_id = tenant_id
-        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<branch_name>/postgresql.conf
 
     def create(
         self,
@@ -391,6 +391,9 @@ class Postgres(PgProtocol):
         else:
             self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
         self.branch = branch
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch
+        self.pgdata_dir = os.path.join(self.repo_dir, path)
+
         if wal_acceptors is not None:
             self.adjust_for_wal_acceptors(wal_acceptors)
         if config_lines is None:
@@ -413,8 +416,7 @@ class Postgres(PgProtocol):
 
     def pg_xact_dir_path(self) -> str:
         """ Path to pg_xact dir """
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'pg_xact'
-        return os.path.join(self.repo_dir, path)
+        return os.path.join(self.pgdata_dir, 'pg_xact')
 
     def pg_twophase_dir_path(self) -> str:
         """ Path to pg_twophase dir """
@@ -425,8 +427,7 @@ class Postgres(PgProtocol):
 
     def config_file_path(self) -> str:
         """ Path to postgresql.conf """
-        filename = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'postgresql.conf'
-        return os.path.join(self.repo_dir, filename)
+        return os.path.join(self.pgdata_dir, 'postgresql.conf')
 
     def adjust_for_wal_acceptors(self, wal_acceptors: str) -> 'Postgres':
         """
