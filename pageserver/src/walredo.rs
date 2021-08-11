@@ -418,11 +418,6 @@ impl PostgresRedoManager {
                     } else {
                         panic!();
                     }
-                } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
-                    // Relation map file has size 512 bytes
-                    page.clear();
-                    page.extend_from_slice(&buf[12..]); // skip xl_relmap_update
-                    assert!(page.len() == 512); // size of pg_filenode.map
                 }
             }
 

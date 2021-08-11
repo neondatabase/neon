@@ -386,9 +386,30 @@ pub fn save_decoded_record(
         if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_DBASE_CREATE {
             let createdb = XlCreateDatabase::decode(&mut buf);
             save_xlog_dbase_create(timeline, lsn, &createdb)?;
-        } else {
-            // TODO
-            trace!("XLOG_DBASE_DROP is not handled yet");
+        } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+            == pg_constants::XLOG_DBASE_DROP
+        {
+            let dropdb = XlDropDatabase::decode(&mut buf);
+
+            for tablespace_id in dropdb.tablespace_ids {
+                let rels = timeline.list_rels(tablespace_id, dropdb.db_id, lsn)?;
+                for rel in rels {
+                    timeline.put_unlink(RelishTag::Relation(rel), lsn)?;
+                }
+                trace!(
+                    "Unlink FileNodeMap {}, {} at lsn {}",
+                    tablespace_id,
+                    dropdb.db_id,
+                    lsn
+                );
+                timeline.put_unlink(
+                    RelishTag::FileNodeMap {
+                        spcnode: tablespace_id,
+                        dbnode: dropdb.db_id,
+                    },
+                    lsn,
+                )?;
+            }
         }
     } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
         trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
@@ -486,7 +507,7 @@ pub fn save_decoded_record(
         }
     } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
         let xlrec = XlRelmapUpdate::decode(&mut buf);
-        save_relmap_record(timeline, lsn, &xlrec, decoded)?;
+        save_relmap_page(timeline, lsn, &xlrec, decoded)?;
     } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_NEXTOID {
@@ -943,22 +964,23 @@ fn save_multixact_truncate_record(
     Ok(())
 }
 
-fn save_relmap_record(
+fn save_relmap_page(
     timeline: &dyn Timeline,
     lsn: Lsn,
     xlrec: &XlRelmapUpdate,
     decoded: &DecodedWALRecord,
 ) -> Result<()> {
-    let rec = WALRecord {
-        lsn,
-        will_init: true,
-        rec: decoded.record.clone(),
-        main_data_offset: decoded.main_data_offset as u32,
-    };
     let tag = RelishTag::FileNodeMap {
         spcnode: xlrec.tsid,
         dbnode: xlrec.dbid,
     };
-    timeline.put_wal_record(tag, 0, rec)?;
+
+    let mut buf = decoded.record.clone();
+    buf.advance(decoded.main_data_offset);
+    // skip xl_relmap_update
+    buf.advance(12);
+
+    timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buf[..]))?;
+
     Ok(())
 }

@@ -333,6 +333,31 @@ impl XlCreateDatabase {
 
 #[repr(C)]
 #[derive(Debug)]
+pub struct XlDropDatabase {
+    pub db_id: Oid,
+    pub n_tablespaces: Oid, /* number of tablespace IDs */
+    pub tablespace_ids: Vec<Oid>,
+}
+
+impl XlDropDatabase {
+    pub fn decode(buf: &mut Bytes) -> XlDropDatabase {
+        let mut rec = XlDropDatabase {
+            db_id: buf.get_u32_le(),
+            n_tablespaces: buf.get_u32_le(),
+            tablespace_ids: Vec::<Oid>::new(),
+        };
+
+        for _i in 0..rec.n_tablespaces {
+            let id = buf.get_u32_le();
+            rec.tablespace_ids.push(id);
+        }
+
+        rec
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
 pub struct XlHeapInsert {
     pub offnum: OffsetNumber,
     pub flags: u8,
