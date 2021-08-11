@@ -247,8 +247,8 @@ impl ReceiveWalConn {
         my_info.server.timeline = timeline;
 
         info!(
-            "find_end_of_wal in {:?}: timeline={} flush_lsn={}, restart_lsn={}",
-            &self.conf.data_dir, timeline, flush_lsn, my_info.restart_lsn
+            "find_end_of_wal in {:?}: timeline={} flush_lsn={}",
+            &self.conf.data_dir, timeline, flush_lsn
         );
 
         /* Report my identifier to proposer */
@@ -332,7 +332,6 @@ impl ReceiveWalConn {
              * maximum (vcl) determined by WAL proposer during handshake.
              * Switching epoch means that node completes recovery and start writing in the WAL new data.
              */
-            self.timeline.get().set_info(&my_info);
             if my_info.epoch < prop.epoch && end_pos > max(my_info.flush_lsn, prop.vcl) {
                 info!("Switch to new epoch {}", prop.epoch);
                 my_info.epoch = prop.epoch; /* bump epoch */
