@@ -27,6 +27,26 @@ pub trait Repository: Send + Sync {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
+    /// perform one garbage collection iteration.
+    /// garbage collection is periodically performed by gc thread,
+    /// but it can be explicitly requested through page server api.
+    ///
+    /// 'timelineid' specifies the timeline to GC, or None for all.
+    /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
+    /// `compact` parameter is used to force compaction of storage.
+    /// some storage implementation are based on lsm tree and require periodic merge (compaction).
+    /// usually storage implementation determines itself when compaction should be performed.
+    /// but for gc tests it way be useful to force compaction just after completion of gc iteration
+    /// to make sure that all detected garbage is removed.
+    /// so right now `compact` is set to true when gc explicitly requested through page srver api,
+    /// and is st to false in gc threads which infinitely repeats gc iterations in loop.
+    fn gc_iteration(
+        &self,
+        timelineid: Option<ZTimelineId>,
+        horizon: u64,
+        compact: bool,
+    ) -> Result<GcResult>;
+
     // TODO get timelines?
     //fn get_stats(&self) -> RepositoryStats;
 }
@@ -138,20 +158,6 @@ pub trait Timeline: Send + Sync {
     /// Relation size is increased implicitly and decreased with Truncate updates.
     // TODO ordering guarantee?
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>>;
-
-    /// Perform one garbage collection iteration.
-    /// Garbage collection is periodically performed by GC thread,
-    /// but it can be explicitly requested through page server API.
-    ///
-    /// `horizon` specifies delta from last LSN to preserve all object versions (PITR interval).
-    /// `compact` parameter is used to force compaction of storage.
-    /// Some storage implementation are based on LSM tree and require periodic merge (compaction).
-    /// Usually storage implementation determines itself when compaction should be performed.
-    /// But for GC tests it way be useful to force compaction just after completion of GC iteration
-    /// to make sure that all detected garbage is removed.
-    /// So right now `compact` is set to true when GC explicitly requested through page srver API,
-    /// and is st to false in GC threads which infinitely repeats GC iterations in loop.
-    fn gc_iteration(&self, horizon: u64, compact: bool) -> Result<GcResult>;
 }
 
 pub trait History: Iterator<Item = Result<Modification>> {

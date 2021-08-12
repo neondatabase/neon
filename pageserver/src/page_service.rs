@@ -679,10 +679,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 .map(|h| h.as_str().parse())
                 .unwrap_or(Ok(self.conf.gc_horizon))?;
 
-            let timeline =
-                page_cache::get_repository_for_tenant(&tenantid)?.get_timeline(timelineid)?;
+            let repo = page_cache::get_repository_for_tenant(&tenantid)?;
 
-            let result = timeline.gc_iteration(gc_horizon, true)?;
+            let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"n_relations"),
