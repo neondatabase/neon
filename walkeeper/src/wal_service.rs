@@ -4,11 +4,9 @@
 //!
 use anyhow::Result;
 use log::*;
-use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use crate::receive_wal::ReceiveWalConn;
 use crate::send_wal::SendWalHandler;
 use crate::WalAcceptorConf;
 use zenith_utils::postgres_backend::{AuthType, PostgresBackend};
@@ -37,35 +35,15 @@ pub fn thread_main(conf: WalAcceptorConf) -> Result<()> {
     }
 }
 
-/// This is run by main_loop, inside a background thread.
+/// This is run by `thread_main` above, inside a background thread.
 ///
-fn handle_socket(mut socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
+fn handle_socket(socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
     socket.set_nodelay(true)?;
 
-    // Peek at the incoming data to see what protocol is being sent.
-    let peeked = peek_u32(&mut socket)?;
-    if peeked == 0 {
-        // Consume the 4 bytes we peeked at. This protocol begins after them.
-        socket.read_exact(&mut [0u8; 4])?;
-        ReceiveWalConn::new(socket, conf)?.run()?; // internal protocol between wal_proposer and wal_acceptor
-    } else {
-        let mut conn_handler = SendWalHandler::new(conf);
-        let pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
-        // libpq replication protocol between wal_acceptor and replicas/pagers
-        pgbackend.run(&mut conn_handler)?;
-    }
-    Ok(())
-}
+    let mut conn_handler = SendWalHandler::new(conf);
+    let pgbackend = PostgresBackend::new(socket, AuthType::Trust)?;
+    // libpq replication protocol between wal_acceptor and replicas/pagers
+    pgbackend.run(&mut conn_handler)?;
 
-/// Fetch the first 4 bytes from the network (big endian), without consuming them.
-///
-/// This is used to help determine what protocol the peer is using.
-fn peek_u32(stream: &mut TcpStream) -> Result<u32> {
-    let mut buf = [0u8; 4];
-    loop {
-        let num_bytes = stream.peek(&mut buf)?;
-        if num_bytes == 4 {
-            return Ok(u32::from_be_bytes(buf));
-        }
-    }
+    Ok(())
 }

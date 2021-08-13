@@ -10,7 +10,7 @@ use log::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufReader, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
 
 pub trait Handler {
@@ -135,6 +135,10 @@ impl PostgresBackend {
             Some(ref mut stream_in) => Ok(stream_in),
             None => bail!("stream_in was taken"),
         }
+    }
+
+    pub fn get_peer_addr(&self) -> Result<SocketAddr> {
+        Ok(self.stream_out.peer_addr()?)
     }
 
     pub fn take_stream_in(&mut self) -> Option<BufReader<TcpStream>> {
