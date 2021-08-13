@@ -92,8 +92,18 @@ fn main() -> Result<()> {
                 .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage postgres instances")
                 .subcommand(SubCommand::with_name("list").arg(tenantid_arg.clone()))
-                .subcommand(SubCommand::with_name("create").arg(timeline_arg.clone()).arg(tenantid_arg.clone()))
-                .subcommand(SubCommand::with_name("start").arg(timeline_arg.clone()).arg(tenantid_arg.clone()))
+                .subcommand(SubCommand::with_name("create")
+                    .about("Create a postgres compute node")
+                    .arg(timeline_arg.clone()).arg(tenantid_arg.clone())
+                    .arg(
+                        Arg::with_name("config-only")
+                            .help("Don't do basebackup, create compute node with only config files")
+                            .long("config-only")
+                            .required(false)
+                    ))
+                .subcommand(SubCommand::with_name("start")
+                    .about("Start a postrges compute node.\n This command actually creates new node from scrath, but preserves existing config files")
+                    .arg(timeline_arg.clone()).arg(tenantid_arg.clone()))
                 .subcommand(
                     SubCommand::with_name("stop")
                         .arg(timeline_arg.clone())
@@ -459,10 +469,9 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .value_of("tenantid")
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
             let timeline_name = create_match.value_of("timeline").unwrap_or("main");
-            // check is that timeline doesnt already exist
-            // this check here is because it
+            let config_only = create_match.is_present("config-only");
 
-            cplane.new_node(tenantid, timeline_name)?;
+            cplane.new_node(tenantid, timeline_name, config_only)?;
         }
         ("start", Some(start_match)) => {
             let tenantid: ZTenantId = start_match
@@ -483,7 +492,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             if let Some(node) = node {
                 node.start(&auth_token)?;
             } else {
-                let node = cplane.new_node(tenantid, timeline_name)?;
+                let node = cplane.new_node(tenantid, timeline_name, false)?;
                 node.start(&auth_token)?;
             }
         }

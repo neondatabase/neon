@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{collections::BTreeMap, path::PathBuf};
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Read,
 };
 
@@ -85,48 +85,36 @@ impl ComputeControlPlane {
         }
     }
 
-    /// Connect to a page server, get base backup, and untar it to initialize a
-    /// new data directory
-    pub fn new_from_page_server(
-        &mut self,
-        is_test: bool,
-        timelineid: ZTimelineId,
-        name: &str,
-        tenantid: ZTenantId,
-    ) -> Result<Arc<PostgresNode>> {
-        let node = Arc::new(PostgresNode {
-            name: name.to_owned(),
-            address: SocketAddr::new("127.0.0.1".parse().unwrap(), self.get_port()),
-            env: self.env.clone(),
-            pageserver: Arc::clone(&self.pageserver),
-            is_test,
-            timelineid,
-            tenantid,
-        });
-
-        node.init_from_page_server(self.env.auth_type)?;
-        self.nodes
-            .insert((tenantid, node.name.clone()), Arc::clone(&node));
-
-        Ok(node)
-    }
-
     pub fn new_node(
         &mut self,
         tenantid: ZTenantId,
         branch_name: &str,
+        config_only: bool,
     ) -> Result<Arc<PostgresNode>> {
         let timeline_id = self
             .pageserver
             .branch_get_by_name(&tenantid, branch_name)?
             .timeline_id;
-        let node = self.new_from_page_server(false, timeline_id, branch_name, tenantid)?;
+
+        let node = Arc::new(PostgresNode {
+            name: branch_name.to_owned(),
+            address: SocketAddr::new("127.0.0.1".parse().unwrap(), self.get_port()),
+            env: self.env.clone(),
+            pageserver: Arc::clone(&self.pageserver),
+            is_test: false,
+            timelineid: timeline_id,
+            tenantid,
+        });
+
+        node.init_from_page_server(self.env.auth_type, config_only)?;
+        self.nodes
+            .insert((tenantid, node.name.clone()), Arc::clone(&node));
+
         // Configure the node to stream WAL directly to the pageserver
         node.append_conf(
             "postgresql.conf",
             format!(
                 concat!(
-                    "shared_preload_libraries = zenith\n",
                     "synchronous_standby_names = 'pageserver'\n", // TODO: add a new function arg?
                     "zenith.callmemaybe_connstring = '{}'\n",     // FIXME escaping
                 ),
@@ -246,38 +234,14 @@ impl PostgresNode {
         })
     }
 
-    // Connect to a page server, get base backup, and untar it to initialize a
-    // new data directory
-    pub fn init_from_page_server(&self, auth_type: AuthType) -> Result<()> {
+    pub fn do_basebackup(&self) -> Result<()> {
         let pgdata = self.pgdata();
-
-        println!(
-            "Extracting base backup to create postgres instance: path={} port={}",
-            pgdata.display(),
-            self.address.port()
-        );
-
-        // initialize data directory
-        if self.is_test {
-            fs::remove_dir_all(&pgdata).ok();
-        }
 
         let sql = format!("basebackup {} {}", self.tenantid, self.timelineid);
         let mut client = self
             .pageserver
             .page_server_psql_client()
             .with_context(|| "connecting to page server failed")?;
-
-        fs::create_dir_all(&pgdata)
-            .with_context(|| format!("could not create data directory {}", pgdata.display()))?;
-        fs::set_permissions(pgdata.as_path(), fs::Permissions::from_mode(0o700)).with_context(
-            || {
-                format!(
-                    "could not set permissions in data directory {}",
-                    pgdata.display()
-                )
-            },
-        )?;
 
         let mut copyreader = client
             .copy_out(sql.as_str())
@@ -293,6 +257,45 @@ impl PostgresNode {
         let mut ar = tar::Archive::new(buf.as_slice());
         ar.unpack(&pgdata)
             .with_context(|| "extracting page backup failed")?;
+
+        Ok(())
+    }
+
+    // Connect to a page server, get base backup, and untar it to initialize a
+    // new data directory
+    pub fn init_from_page_server(&self, auth_type: AuthType, config_only: bool) -> Result<()> {
+        let pgdata = self.pgdata();
+
+        println!(
+            "Extracting base backup to create postgres instance: path={} port={}",
+            pgdata.display(),
+            self.address.port()
+        );
+
+        // initialize data directory
+        if self.is_test {
+            fs::remove_dir_all(&pgdata).ok();
+        }
+
+        fs::create_dir_all(&pgdata)
+            .with_context(|| format!("could not create data directory {}", pgdata.display()))?;
+        fs::set_permissions(pgdata.as_path(), fs::Permissions::from_mode(0o700)).with_context(
+            || {
+                format!(
+                    "could not set permissions in data directory {}",
+                    pgdata.display()
+                )
+            },
+        )?;
+
+        if config_only {
+            //Just create an empty config file
+            File::create(self.pgdata().join("postgresql.conf").to_str().unwrap())?;
+        } else {
+            self.do_basebackup()?;
+            fs::create_dir_all(self.pgdata().join("pg_wal"))?;
+            fs::create_dir_all(self.pgdata().join("pg_wal").join("archive_status"))?;
+        }
 
         // wal_log_hints is mandatory when running against pageserver (see gh issue#192)
         // TODO: is it possible to check wal_log_hints at pageserver side via XLOG_PARAMETER_CHANGE?
@@ -321,8 +324,6 @@ impl PostgresNode {
         // page server yet. (gh issue #349)
         self.append_conf("postgresql.conf", "wal_keep_size='10TB'\n")?;
 
-        // Connect it to the page server.
-
         // set up authentication
         let password = if let AuthType::ZenithJWT = auth_type {
             "$ZENITH_AUTH_TOKEN"
@@ -348,8 +349,6 @@ impl PostgresNode {
             .as_str(),
         )?;
 
-        fs::create_dir_all(self.pgdata().join("pg_wal"))?;
-        fs::create_dir_all(self.pgdata().join("pg_wal").join("archive_status"))?;
         Ok(())
     }
 
@@ -410,6 +409,46 @@ impl PostgresNode {
     }
 
     pub fn start(&self, auth_token: &Option<String>) -> Result<()> {
+        // Bail if the node already running.
+        if self.status() == "running" {
+            anyhow::bail!("The node is already running");
+        }
+
+        // 1. We always start compute node from scratch, so
+        // if old dir exists, preserve config files and drop the directory
+
+        // XXX Now we only use 'postgresql.conf'.
+        // If we will need 'pg_hba.conf', support it here too
+
+        let postgresql_conf_path = self.pgdata().join("postgresql.conf");
+        let postgresql_conf = fs::read(postgresql_conf_path.clone()).with_context(|| {
+            format!(
+                "failed to read config file in {}",
+                postgresql_conf_path.to_str().unwrap()
+            )
+        })?;
+
+        println!(
+            "Destroying postgres data directory '{}'",
+            self.pgdata().to_str().unwrap()
+        );
+        fs::remove_dir_all(&self.pgdata())?;
+
+        // 2. Create new node
+        self.init_from_page_server(self.env.auth_type, false)?;
+
+        // 3. Bring back config files
+
+        if let Ok(mut file) = OpenOptions::new()
+            .append(false)
+            .write(true)
+            .open(&postgresql_conf_path)
+        {
+            file.write_all(&postgresql_conf)?;
+            file.sync_all()?;
+        }
+
+        // 4. Finally start the compute node postgres
         println!("Starting postgres node at '{}'", self.connstr());
         self.pg_ctl(&["start"], auth_token)
     }
