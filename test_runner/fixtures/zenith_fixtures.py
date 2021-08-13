@@ -309,6 +309,13 @@ class Postgres(PgProtocol):
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'pg_xact'
         return os.path.join(self.repo_dir, path)
 
+    def pg_twophase_dir_path(self) -> str:
+        """ Path to pg_twophase dir """
+        print(self.tenant_id)
+        print(self.branch)
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'pg_twophase'
+        return os.path.join(self.repo_dir, path)
+
     def config_file_path(self) -> str:
         """ Path to postgresql.conf """
         filename = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'postgresql.conf'
