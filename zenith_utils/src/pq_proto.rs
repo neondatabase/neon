@@ -348,8 +348,8 @@ pub enum BeMessage<'a> {
     // None means column is NULL
     DataRow(&'a [Option<&'a [u8]>]),
     ErrorResponse(String),
-    // see https://www.postgresql.org/docs/devel/protocol-flow.html#id-1.10.5.7.11
-    Negotiate(bool),
+    // single byte - used in response to SSLRequest/GSSENCRequest
+    EncryptionResponse(bool),
     NoData,
     ParameterDescription,
     ParameterStatus,
@@ -657,7 +657,7 @@ impl<'a> BeMessage<'a> {
                 write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
             }
 
-            BeMessage::Negotiate(should_negotiate) => {
+            BeMessage::EncryptionResponse(should_negotiate) => {
                 let response = if *should_negotiate { b'Y' } else { b'N' };
                 buf.put_u8(response);
             }

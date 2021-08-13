@@ -98,15 +98,18 @@ impl ProxyConnection {
 
                     match m.kind {
                         StartupRequestCode::NegotiateGss => {
-                            self.pgb.write_message(&BeMessage::Negotiate(false))?;
+                            self.pgb
+                                .write_message(&BeMessage::EncryptionResponse(false))?;
                         }
                         StartupRequestCode::NegotiateSsl => {
                             println!("SSL requested");
                             if self.pgb.tls_config.is_some() {
-                                self.pgb.write_message(&BeMessage::Negotiate(true))?;
+                                self.pgb
+                                    .write_message(&BeMessage::EncryptionResponse(true))?;
                                 self.pgb.start_tls()?;
                             } else {
-                                self.pgb.write_message(&BeMessage::Negotiate(false))?;
+                                self.pgb
+                                    .write_message(&BeMessage::EncryptionResponse(false))?;
                             }
                         }
                         StartupRequestCode::Normal => {
@@ -229,12 +232,15 @@ databases without opening the browser.
     }
 }
 
+/// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
 async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<tokio::net::TcpStream> {
     let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()).await?;
     let config = db_info.conn_string().parse::<tokio_postgres::Config>()?;
     let _ = config.connect_raw(&mut socket, NoTls).await?;
     Ok(socket)
 }
+
+/// Concurrently proxy both directions of the client and server connections
 fn proxy(
     client_read: OwnedReadHalf,
     client_write: OwnedWriteHalf,
@@ -257,6 +263,7 @@ fn proxy(
     Ok(())
 }
 
+/// Proxy a client connection to a postgres database
 fn proxy_pass(pgb: PostgresBackend, db_info: DatabaseInfo) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().build()?;
     let db_stream = runtime.block_on(connect_to_db(db_info))?;

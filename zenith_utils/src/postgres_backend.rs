@@ -283,15 +283,15 @@ impl PostgresBackend {
                         info!("SSL requested");
 
                         if self.tls_config.is_some() {
-                            self.write_message(&BeMessage::Negotiate(true))?;
+                            self.write_message(&BeMessage::EncryptionResponse(true))?;
                             self.start_tls()?;
                         } else {
-                            self.write_message(&BeMessage::Negotiate(false))?;
+                            self.write_message(&BeMessage::EncryptionResponse(false))?;
                         }
                     }
                     StartupRequestCode::NegotiateGss => {
                         info!("GSS requested");
-                        self.write_message(&BeMessage::Negotiate(false))?;
+                        self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
                     StartupRequestCode::Normal => {
                         // NB: startup() may change self.auth_type -- we are using that in proxy code

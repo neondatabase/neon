@@ -8,13 +8,13 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::BufReader,
+    io::{BufReader, Cursor},
     net::{SocketAddr, TcpListener},
     sync::{mpsc, Arc, Mutex},
     thread,
 };
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use clap::{App, Arg, ArgMatches};
 
 use cplane_api::DatabaseInfo;
@@ -52,9 +52,15 @@ fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<rustls::
     ) {
         (Some(ssl_key_path), Some(ssl_cert_path)) => {
             let key = {
-                let mut reader = BufReader::new(File::open(ssl_key_path)?);
-                let mut keys = rustls::internal::pemfile::rsa_private_keys(&mut reader)
-                    .map_err(|_| anyhow!("couldn't read TLS keys"))?;
+                let key_bytes = std::fs::read(ssl_key_path).context("SSL key file")?;
+                let mut keys =
+                    rustls::internal::pemfile::rsa_private_keys(&mut Cursor::new(&key_bytes))
+                        .or_else(|_| {
+                            rustls::internal::pemfile::pkcs8_private_keys(&mut Cursor::new(
+                                &key_bytes,
+                            ))
+                        })
+                        .map_err(|_| anyhow!("couldn't read TLS keys"))?;
                 if keys.len() != 1 {
                     bail!("keys.len() = {} (should be 1)", keys.len());
                 }
@@ -62,7 +68,8 @@ fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<rustls::
             };
 
             let cert_chain = {
-                let mut reader = BufReader::new(File::open(ssl_cert_path)?);
+                let mut reader =
+                    BufReader::new(File::open(ssl_cert_path).context("SSL cert file")?);
                 rustls::internal::pemfile::certs(&mut reader)
                     .map_err(|_| anyhow!("couldn't read TLS certificates"))?
             };
@@ -106,8 +113,20 @@ fn main() -> anyhow::Result<()> {
                 .help("redirect unauthenticated users to given uri")
                 .default_value("http://localhost:3000/psql_session/"),
         )
-        .arg(Arg::with_name("ssl-key"))
-        .arg(Arg::with_name("ssl-cert"))
+        .arg(
+            Arg::with_name("ssl-key")
+                .short("k")
+                .long("ssl-key")
+                .takes_value(true)
+                .help("path to SSL key for client postgres connections"),
+        )
+        .arg(
+            Arg::with_name("ssl-cert")
+                .short("c")
+                .long("ssl-cert")
+                .takes_value(true)
+                .help("path to SSL cert for client postgres connections"),
+        )
         .get_matches();
 
     let conf = ProxyConf {
