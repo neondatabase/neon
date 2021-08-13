@@ -349,7 +349,7 @@ pub enum BeMessage<'a> {
     DataRow(&'a [Option<&'a [u8]>]),
     ErrorResponse(String),
     // see https://www.postgresql.org/docs/devel/protocol-flow.html#id-1.10.5.7.11
-    Negotiate,
+    Negotiate(bool),
     NoData,
     ParameterDescription,
     ParameterStatus,
@@ -657,8 +657,9 @@ impl<'a> BeMessage<'a> {
                 write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
             }
 
-            BeMessage::Negotiate => {
-                buf.put_u8(b'N');
+            BeMessage::Negotiate(should_negotiate) => {
+                let response = if *should_negotiate { b'Y' } else { b'N' };
+                buf.put_u8(response);
             }
 
             BeMessage::ParameterStatus => {

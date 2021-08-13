@@ -7,12 +7,15 @@
 ///
 use std::{
     collections::HashMap,
+    fs::File,
+    io::BufReader,
     net::{SocketAddr, TcpListener},
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
 };
 
-use clap::{App, Arg};
+use anyhow::{anyhow, bail};
+use clap::{App, Arg, ArgMatches};
 
 use cplane_api::DatabaseInfo;
 
@@ -33,11 +36,48 @@ pub struct ProxyConf {
 
     /// control plane address where we would check auth.
     pub cplane_address: SocketAddr,
+
+    pub ssl_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 pub struct ProxyState {
     pub conf: ProxyConf,
     pub waiters: Mutex<HashMap<String, mpsc::Sender<anyhow::Result<DatabaseInfo>>>>,
+}
+
+fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<rustls::ServerConfig>>> {
+    match (
+        arg_matches.value_of("ssl-key"),
+        arg_matches.value_of("ssl-cert"),
+    ) {
+        (Some(ssl_key_path), Some(ssl_cert_path)) => {
+            let key = {
+                let mut reader = BufReader::new(File::open(ssl_key_path)?);
+                let mut keys = rustls::internal::pemfile::rsa_private_keys(&mut reader)
+                    .map_err(|_| anyhow!("couldn't read TLS keys"))?;
+                if keys.len() != 1 {
+                    bail!("keys.len() = {} (should be 1)", keys.len());
+                }
+                keys.pop().unwrap()
+            };
+
+            let cert_chain = {
+                let mut reader = BufReader::new(File::open(ssl_cert_path)?);
+                rustls::internal::pemfile::certs(&mut reader)
+                    .map_err(|_| anyhow!("couldn't read TLS certificates"))?
+            };
+
+            let mut config = rustls::ServerConfig::new(rustls::NoClientAuth::new());
+            config.set_single_cert(cert_chain, key)?;
+            config.versions = vec![rustls::ProtocolVersion::TLSv1_3];
+
+            Ok(Some(Arc::new(config)))
+        }
+        (None, None) => Ok(None),
+        _ => Err(anyhow!(
+            "either both or neither ssl-key and ssl-cert must be specified"
+        )),
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -66,6 +106,8 @@ fn main() -> anyhow::Result<()> {
                 .help("redirect unauthenticated users to given uri")
                 .default_value("http://localhost:3000/psql_session/"),
         )
+        .arg(Arg::with_name("ssl-key"))
+        .arg(Arg::with_name("ssl-cert"))
         .get_matches();
 
     let conf = ProxyConf {
@@ -73,6 +115,7 @@ fn main() -> anyhow::Result<()> {
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
         cplane_address: "127.0.0.1:3000".parse()?,
+        ssl_config: configure_ssl(&arg_matches)?,
     };
     let state = ProxyState {
         conf,

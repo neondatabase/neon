@@ -19,3 +19,6 @@ tokio-postgres = "0.7.2"
 clap = "2.33.0"
 
 zenith_utils = { path = "../zenith_utils" }
+
+rustls-split = "0.1.1"
+rustls = "0.19.1"
