@@ -2,6 +2,7 @@
 //! pageserver/any other consumer.
 //!
 
+use crate::receive_wal::ReceiveWalConn;
 use crate::replication::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
@@ -44,6 +45,9 @@ impl postgres_backend::Handler for SendWalHandler {
             Ok(())
         } else if query_string.starts_with(b"START_REPLICATION") {
             ReplicationConn::new(pgb).run(self, pgb, &query_string)?;
+            Ok(())
+        } else if query_string.starts_with(b"START_WAL_PUSH") {
+            ReceiveWalConn::new(pgb)?.run(self)?;
             Ok(())
         } else {
             bail!("Unexpected command {:?}", query_string);

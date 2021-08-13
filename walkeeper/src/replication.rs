@@ -1,5 +1,5 @@
 //! This module implements the streaming side of replication protocol, starting
-//! with the "START REPLICATION" message.
+//! with the "START_REPLICATION" message.
 
 use crate::send_wal::SendWalHandler;
 use crate::timeline::{Timeline, TimelineTools};
