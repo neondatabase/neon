@@ -4,7 +4,7 @@ import time
 
 from contextlib import closing
 from multiprocessing import Process, Value
-from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory
+from fixtures.zenith_fixtures import WalAcceptorFactory, ZenithPageserver, PostgresFactory
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -61,7 +61,7 @@ def test_many_timelines(zenith_cli, pageserver: ZenithPageserver, postgres: Post
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up
 # along the way. 2 of 3 are always alive, so the work keeps going.
-def test_restarts(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory):
+def test_restarts(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory: WalAcceptorFactory):
     fault_probability = 0.01
     n_inserts = 1000
     n_acceptors = 3
