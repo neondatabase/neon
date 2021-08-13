@@ -267,6 +267,7 @@ class Postgres(PgProtocol):
         branch: str,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
+        config_only: bool = False,
     ) -> 'Postgres':
         """
         Create the pg data directory.
@@ -278,7 +279,10 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
+        if config_only:
+            self.zenith_cli.run(['pg', 'create', '--config-only', branch, f'--tenantid={self.tenant_id}'])
+        else:
+            self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
         self.branch = branch
         if wal_acceptors is not None:
             self.adjust_for_wal_acceptors(wal_acceptors)
@@ -377,7 +381,8 @@ class Postgres(PgProtocol):
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
         """
-        Create a Postgres instance, then start it.
+        Create a Postgres instance, apply config
+        and then start it.
         Returns self.
         """
 
@@ -385,6 +390,7 @@ class Postgres(PgProtocol):
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
+            config_only=True,
         ).start()
 
         return self
@@ -425,6 +431,54 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create_start(
+            branch=branch,
+            wal_acceptors=wal_acceptors,
+            config_lines=config_lines,
+        )
+
+    def create(
+        self,
+        branch: str = "main",
+        tenant_id: Optional[str] = None,
+        wal_acceptors: Optional[str] = None,
+        config_lines: Optional[List[str]] = None
+    ) -> Postgres:
+
+        pg = Postgres(
+            zenith_cli=self.zenith_cli,
+            repo_dir=self.repo_dir,
+            tenant_id=tenant_id or self.initial_tenant,
+            port=self.base_port + self.num_instances + 1,
+        )
+
+        self.num_instances += 1
+        self.instances.append(pg)
+
+        return pg.create(
+            branch=branch,
+            wal_acceptors=wal_acceptors,
+            config_lines=config_lines,
+        )
+
+    def config(
+        self,
+        branch: str = "main",
+        tenant_id: Optional[str] = None,
+        wal_acceptors: Optional[str] = None,
+        config_lines: Optional[List[str]] = None
+    ) -> Postgres:
+
+        pg = Postgres(
+            zenith_cli=self.zenith_cli,
+            repo_dir=self.repo_dir,
+            tenant_id=tenant_id or self.initial_tenant,
+            port=self.base_port + self.num_instances + 1,
+        )
+
+        self.num_instances += 1
+        self.instances.append(pg)
+
+        return pg.config(
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
