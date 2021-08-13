@@ -31,3 +31,4 @@ rustls-split = "0.1.1"
 [dev-dependencies]
 hex-literal = "0.3"
 bytes = "1.0"
+webpki = "0.21"

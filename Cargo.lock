@@ -2646,6 +2646,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "webpki",
  "workspace_hack",
  "zenith_metrics",
 ]
