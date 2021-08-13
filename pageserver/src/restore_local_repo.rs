@@ -425,7 +425,7 @@ pub fn save_decoded_record(
             let parsed_xact = XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
             save_xact_record(timeline, lsn, &parsed_xact, decoded)?;
             // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
-            info!(
+            trace!(
                 "unlink twophaseFile for xid {} parsed_xact.xid {} here at {}",
                 decoded.xl_xid, parsed_xact.xid, lsn
             );
