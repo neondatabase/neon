@@ -299,15 +299,13 @@ impl Timeline for ObjectTimeline {
         // move this check out of the funciton.
         //
         match rel {
-            RelishTag::Slru { .. } |
-            RelishTag::TwoPhase{ .. } =>
-            {
+            RelishTag::Slru { .. } | RelishTag::TwoPhase { .. } => {
                 if !self.get_rel_exists(rel, req_lsn).unwrap_or(false) {
                     trace!("{:?} at {} doesn't exist", rel, req_lsn);
                     return Err(anyhow!("non-rel relish doesn't exist"));
                 }
-            },
-            _ => ()
+            }
+            _ => (),
         };
 
         const ZERO_PAGE: [u8; 8192] = [0u8; 8192];

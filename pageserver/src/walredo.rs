@@ -197,12 +197,10 @@ fn mx_offset_to_member_offset(xid: MultiXactId) -> usize {
 }
 
 impl PostgresRedoManager {
-
     ///
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
-
         // We block on waiting for requests on the walredo request channel, but
         // use async I/O to communicate with the child process. Initialize the
         // runtime for the async part.
@@ -244,6 +242,8 @@ impl PostgresRedoManager {
             let buf_tag = BufferTag { rel, blknum };
             apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
         } else {
+            // Non-relational WAL records are handled here, with custom code that has the
+            // same effects as the corresponding Postgres WAL redo function.
             const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
             let mut page = BytesMut::new();
             if let Some(fpi) = base_img {
@@ -378,7 +378,7 @@ impl PostgresRedoManager {
                         panic!();
                     }
                 } else if xlogrec.xl_rmid == pg_constants::RM_RELMAP_ID {
-                    // Ralation map file has size 512 bytes
+                    // Relation map file has size 512 bytes
                     page.clear();
                     page.extend_from_slice(&buf[12..]); // skip xl_relmap_update
                     assert!(page.len() == 512); // size of pg_filenode.map
