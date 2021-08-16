@@ -35,16 +35,19 @@ use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{register_histogram_vec, HistogramVec};
+use zenith_metrics::{register_histogram, Histogram};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 
 mod filename;
+mod image_layer;
 mod inmemory_layer;
 mod layer_map;
 mod snapshot_layer;
 mod storage_layer;
 
+use image_layer::ImageLayer;
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use snapshot_layer::SnapshotLayer;
@@ -70,6 +73,16 @@ lazy_static! {
         "pageserver_storage_time",
         "Time spent on storage operations",
         &["operation"]
+    )
+    .expect("failed to define a metric");
+}
+
+
+// Metrics collected on operations on the storage repository.
+lazy_static! {
+    static ref RECONSTRUCT_TIME: Histogram = register_histogram!(
+        "pageserver_getpage_reconstruct_time",
+        "FIXME Time spent on storage operations"
     )
     .expect("failed to define a metric");
 }
@@ -486,7 +499,10 @@ impl Timeline for LayeredTimeline {
         let seg = SegmentTag::from_blknum(rel, blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            self.materialize_page(seg, blknum, lsn, &*layer)
+            RECONSTRUCT_TIME
+                .observe_closure_duration(|| {
+                    self.materialize_page(seg, blknum, lsn, &*layer)
+                })
         } else {
             bail!("relish {} not found at {}", rel, lsn);
         }
@@ -885,8 +901,20 @@ impl LayeredTimeline {
             self.timelineid
         );
         let mut layers = self.layers.lock().unwrap();
-        let snapfilenames =
+        let (snapfilenames, imgfilenames) =
             filename::list_snapshot_files(self.conf, self.timelineid, self.tenantid)?;
+
+        for filename in imgfilenames.iter() {
+            let layer = ImageLayer::load_image_layer(self.conf, self.timelineid, self.tenantid, filename)?;
+
+            info!(
+                "found layer {} {} on timeline {}",
+                layer.get_seg_tag(),
+                layer.get_start_lsn(),
+                self.timelineid
+            );
+            layers.insert_historic(Arc::new(layer));
+        }
 
         for filename in snapfilenames.iter() {
             let layer = SnapshotLayer::load_snapshot_layer(self.conf, self.timelineid, self.tenantid, filename)?;
@@ -1031,10 +1059,9 @@ impl LayeredTimeline {
                 prev_layer.get_start_lsn(),
                 prev_layer.get_end_lsn()
             );
-            layer = InMemoryLayer::copy_snapshot(
+            layer = InMemoryLayer::create_successor_layer(
                 self.conf,
-                &self,
-                &*prev_layer,
+                prev_layer,
                 self.timelineid,
                 self.tenantid,
                 start_lsn,
@@ -1147,14 +1174,14 @@ impl LayeredTimeline {
                 break;
             }
 
-            let (new_historic, new_open) = oldest_layer.freeze(last_valid_lsn, &self)?;
+            let (new_historics, new_open) = oldest_layer.freeze(last_valid_lsn, &self)?;
 
             // replace this layer with the new layers that 'freeze' returned
             layers.pop_oldest();
             if let Some(n) = new_open {
                 layers.insert_open(n);
             }
-            if let Some(historic) = new_historic {
+            for historic in new_historics {
                 trace!(
                     "freeze returned layer {} {}-{}",
                     historic.get_seg_tag(),
@@ -1223,7 +1250,7 @@ impl LayeredTimeline {
             self.timelineid, cutoff
         );
 
-        let mut layers_to_remove: Vec<Arc<SnapshotLayer>> = Vec::new();
+        let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
         // Scan all snapshot files in the directory. For each file, if a newer file
         // exists, we can remove the old one.

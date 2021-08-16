@@ -147,4 +147,9 @@ pub trait Layer: Send + Sync {
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
 
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
+
+    fn is_incremental(&self) -> bool;
+
+    fn unload(&self) -> Result<()>;
+    fn delete(&self) -> Result<()>;
 }

@@ -151,6 +151,132 @@ impl fmt::Display for SnapshotFileName {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct ImageFileName {
+    pub seg: SegmentTag,
+    pub lsn: Lsn,
+}
+
+impl ImageFileName {
+    fn from_str(fname: &str) -> Option<Self> {
+        // Split the filename into parts
+        //
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<seg>_<start LSN>_<end LSN>
+        //
+        // or if it was dropped:
+        //
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<seg>_<start LSN>_<end LSN>_DROPPED
+        //
+        let rel;
+        let mut parts;
+        if let Some(rest) = fname.strip_prefix("rel_") {
+            parts = rest.split('_');
+            rel = RelishTag::Relation(RelTag {
+                spcnode: parts.next()?.parse::<u32>().ok()?,
+                dbnode: parts.next()?.parse::<u32>().ok()?,
+                relnode: parts.next()?.parse::<u32>().ok()?,
+                forknum: parts.next()?.parse::<u8>().ok()?,
+            });
+        } else if let Some(rest) = fname.strip_prefix("pg_xact_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_multixact_members_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::MultiXactMembers,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_multixact_offsets_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::MultiXactOffsets,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_filenodemap_") {
+            parts = rest.split('_');
+            rel = RelishTag::FileNodeMap {
+                spcnode: parts.next()?.parse::<u32>().ok()?,
+                dbnode: parts.next()?.parse::<u32>().ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_twophase_") {
+            parts = rest.split('_');
+            rel = RelishTag::TwoPhase {
+                xid: parts.next()?.parse::<u32>().ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_control_checkpoint_") {
+            parts = rest.split('_');
+            rel = RelishTag::Checkpoint;
+        } else if let Some(rest) = fname.strip_prefix("pg_control_") {
+            parts = rest.split('_');
+            rel = RelishTag::ControlFile;
+        } else {
+            return None;
+        }
+
+        let segno = parts.next()?.parse::<u32>().ok()?;
+
+        let seg = SegmentTag {
+            rel,
+            segno
+        };
+
+        let lsn = Lsn::from_hex(parts.next()?).ok()?;
+
+        if parts.next().is_some() {
+            warn!("unrecognized filename in timeline dir: {}", fname);
+            return None;
+        }
+
+        Some(ImageFileName {
+            seg,
+            lsn,
+        })
+    }
+
+    fn to_string(&self) -> String {
+        let basename = match self.seg.rel {
+            RelishTag::Relation(reltag) => format!(
+                "rel_{}_{}_{}_{}",
+                reltag.spcnode, reltag.dbnode, reltag.relnode, reltag.forknum
+            ),
+            RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno,
+            } => format!("pg_xact_{:04X}", segno),
+            RelishTag::Slru {
+                slru: SlruKind::MultiXactMembers,
+                segno,
+            } => format!("pg_multixact_members_{:04X}", segno),
+            RelishTag::Slru {
+                slru: SlruKind::MultiXactOffsets,
+                segno,
+            } => format!("pg_multixact_offsets_{:04X}", segno),
+            RelishTag::FileNodeMap { spcnode, dbnode } => {
+                format!("pg_filenodemap_{}_{}", spcnode, dbnode)
+            }
+            RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
+            RelishTag::Checkpoint => format!("pg_control_checkpoint"),
+            RelishTag::ControlFile => format!("pg_control"),
+        };
+
+        format!(
+            "{}_{}_{:016X}",
+            basename,
+            self.seg.segno,
+            u64::from(self.lsn),
+        )
+    }
+}
+
+impl fmt::Display for ImageFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
+}
+
 
 /// Create SnapshotLayers representing all files on disk
 ///
@@ -159,10 +285,11 @@ pub fn list_snapshot_files(
     conf: &'static PageServerConf,
     timelineid: ZTimelineId,
     tenantid: ZTenantId,
-) -> Result<Vec<SnapshotFileName>> {
+) -> Result<(Vec<SnapshotFileName>, Vec<ImageFileName>)> {
     let path = conf.timeline_path(&timelineid, &tenantid);
 
     let mut snapfiles: Vec<SnapshotFileName> = Vec::new();
+    let mut imgfiles: Vec<ImageFileName> = Vec::new();
     for direntry in fs::read_dir(path)? {
         let fname = direntry?.file_name();
         let fname = fname.to_str().unwrap();
@@ -170,6 +297,10 @@ pub fn list_snapshot_files(
         if let Some(snapfilename) = SnapshotFileName::from_str(fname) {
             snapfiles.push(snapfilename);
         }
+
+        if let Some(imgfilename) = ImageFileName::from_str(fname) {
+            imgfiles.push(imgfilename);
+        }
     }
-    return Ok(snapfiles);
+    return Ok((snapfiles, imgfiles));
 }

@@ -1,4 +1,4 @@
-//!
+//! FIXME
 //! A SnapshotLayer represents one snapshot file on disk. One file holds all page
 //! version and size information of one relation, in a range of LSN.
 //! The name "snapshot file" is a bit of a misnomer because a snapshot file doesn't
@@ -38,32 +38,42 @@
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
 //! FIXME
 //!
-use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageVersion, SegmentTag,
-};
-use crate::layered_repository::filename::{SnapshotFileName};
+use crate::layered_repository::storage_layer::{Layer, PageReconstructData, SegmentTag};
+use crate::layered_repository::LayeredTimeline;
+use crate::layered_repository::filename::{ImageFileName};
+use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
+use bytes::Bytes;
+use lazy_static::lazy_static;
 use log::*;
-use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::ops::Bound::Included;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
 
+use zenith_metrics::{register_histogram, Histogram};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-// Magic constant to identify a Zenith snapshot file
-static SNAPSHOT_FILE_MAGIC: u32 = 0x5A616E01;
+// Magic constant to identify a Zenith segment image file
+static IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
 
-static PAGE_VERSIONS_CHAPTER: u64 = 1;
-static REL_SIZES_CHAPTER: u64 = 2;
+static BASE_IMAGES_CHAPTER: u64 = 1;
+
+
+// Metrics collected on operations on the storage repository.
+lazy_static! {
+    static ref RECONSTRUCT_TIME: Histogram = register_histogram!(
+        "pageserver_image_reconstruct_time",
+        "FIXME Time spent on storage operations"
+    )
+    .expect("failed to define a metric");
+}
 
 ///
 /// SnapshotLayer is the in-memory data structure associated with an
@@ -73,39 +83,28 @@ static REL_SIZES_CHAPTER: u64 = 2;
 /// just a placeholder for a file that exists on disk, and it needs to
 /// be loaded before using it in queries.
 ///
-pub struct SnapshotLayer {
+pub struct ImageLayer {
     conf: &'static PageServerConf,
     pub tenantid: ZTenantId,
     pub timelineid: ZTimelineId,
     pub seg: SegmentTag,
 
-    //
-    // This entry contains all the changes from 'start_lsn' to 'end_lsn'. The
-    // start is inclusive, and end is exclusive.
-    pub start_lsn: Lsn,
-    pub end_lsn: Lsn,
+    // This entry contains an image of all pages as of this LSN
+    pub lsn: Lsn,
 
-    dropped: bool,
-
-    inner: Mutex<SnapshotLayerInner>,
-
-    img_layer: Option<Arc<dyn Layer>>,
+    inner: Mutex<ImageLayerInner>,
 }
 
-pub struct SnapshotLayerInner {
+pub struct ImageLayerInner {
     /// If false, the 'page_versions' and 'relsizes' have not been
     /// loaded into memory yet.
     loaded: bool,
 
-    /// All versions of all pages in the file are are kept here.
-    /// Indexed by block number and LSN.
-    page_versions: BTreeMap<(u32, Lsn), PageVersion>,
-
-    /// `relsizes` tracks the size of the relation at different points in time.
-    relsizes: BTreeMap<Lsn, u32>,
+    // indexed by block number (within segment)
+    base_images: Vec<Bytes>,
 }
 
-impl Layer for SnapshotLayer {
+impl Layer for ImageLayer {
     fn get_timeline_id(&self) -> ZTimelineId {
         return self.timelineid;
     }
@@ -115,15 +114,15 @@ impl Layer for SnapshotLayer {
     }
 
     fn is_dropped(&self) -> bool {
-        return self.dropped;
+        return false;
     }
 
     fn get_start_lsn(&self) -> Lsn {
-        return self.start_lsn;
+        return self.lsn;
     }
 
     fn get_end_lsn(&self) -> Lsn {
-        return self.end_lsn;
+        return self.lsn;
     }
 
     /// Look up given page in the cache.
@@ -133,44 +132,20 @@ impl Layer for SnapshotLayer {
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<Option<Lsn>> {
-        // Scan the BTreeMap backwards, starting from the given entry.
-        let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
+        let need_base_image_lsn: Option<Lsn>;
+
+        assert!(lsn >= self.lsn);
+
         {
             let inner = self.load()?;
-            let minkey = (blknum, Lsn(0));
-            let maxkey = (blknum, lsn);
-            let mut iter = inner
-                .page_versions
-                .range((Included(&minkey), Included(&maxkey)));
-            while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
-                if let Some(img) = &entry.page_image {
-                    reconstruct_data.page_img = Some(img.clone());
-                    need_base_image_lsn = None;
-                    break;
-                } else if let Some(rec) = &entry.record {
-                    reconstruct_data.records.push(rec.clone());
-                    if rec.will_init {
-                        // This WAL record initializes the page, so no need to go further back
-                        need_base_image_lsn = None;
-                        break;
-                    } else {
-                        need_base_image_lsn = Some(*entry_lsn);
-                    }
-                } else {
-                    // No base image, and no WAL record. Huh?
-                    bail!("no page image or WAL record for requested page");
-                }
-            }
 
-            // Use the base image, if needed
-            if let Some(need_lsn) = need_base_image_lsn {
-                if let Some(img_layer) = &self.img_layer {
-                    need_base_image_lsn = img_layer.get_page_reconstruct_data(blknum, need_lsn, reconstruct_data)?;
-                } else {
-                    bail!("no base img found for {} at blk {} at LSN {}", self.seg, blknum, lsn);
-                }
+            let base_blknum: usize = (blknum % RELISH_SEG_SIZE) as usize;
+            if let Some(img) = inner.base_images.get(base_blknum) {
+                reconstruct_data.page_img = Some(img.clone());
+                need_base_image_lsn = None;
+            } else {
+                bail!("no base img found for {} at blk {} at LSN {}", self.seg, base_blknum, lsn);
             }
-
             // release lock on 'inner'
         }
 
@@ -178,36 +153,19 @@ impl Layer for SnapshotLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, _lsn: Lsn) -> Result<u32> {
 
-        assert!(lsn >= self.start_lsn);
-
-        // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
-        let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let result = inner.base_images.len() as u32;
 
-        let result;
-        if let Some((_entry_lsn, entry)) = iter.next_back() {
-            result = *entry;
-        // Use the base image if needed
-        } else if let Some(img_layer) = &self.img_layer {
-            result = img_layer.get_seg_size(lsn)?;
-        } else {
-            result = 0;
-        }
         Ok(result)
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
-        // Is the requested LSN after the rel was dropped?
-        if self.dropped && lsn >= self.end_lsn {
-            return Ok(false);
-        }
-
-        // Otherwise, it exists.
+    fn get_seg_exists(&self, _lsn: Lsn) -> Result<bool> {
         Ok(true)
     }
+
 
     ///
     /// Release most of the memory used by this layer. If it's accessed again later,
@@ -215,8 +173,7 @@ impl Layer for SnapshotLayer {
     ///
     fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.page_versions = BTreeMap::new();
-        inner.relsizes = BTreeMap::new();
+        inner.base_images = Vec::new();
         inner.loaded = false;
         Ok(())
     }
@@ -228,21 +185,19 @@ impl Layer for SnapshotLayer {
     }
 
     fn is_incremental(&self) -> bool {
-        true
+        false
     }
 }
 
-impl SnapshotLayer {
+impl ImageLayer {
     fn path(&self) -> PathBuf {
         Self::path_for(
             self.conf,
             self.timelineid,
             self.tenantid,
-            &SnapshotFileName {
+            &ImageFileName {
                 seg: self.seg,
-                start_lsn: self.start_lsn,
-                end_lsn: self.end_lsn,
-                dropped: self.dropped,
+                lsn: self.lsn,
             },
         )
     }
@@ -251,7 +206,7 @@ impl SnapshotLayer {
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        fname: &SnapshotFileName,
+        fname: &ImageFileName,
     ) -> PathBuf {
         conf.timeline_path(&timelineid, &tenantid)
             .join(fname.to_string())
@@ -259,7 +214,7 @@ impl SnapshotLayer {
 
     /// Create a new snapshot file, using the given btreemaps containing the page versions and
     /// relsizes.
-    ///
+    /// FIXME comment
     /// This is used to write the in-memory layer to disk. The in-memory layer uses the same
     /// data structure with two btreemaps as we do, so passing the btreemaps is currently
     /// expedient.
@@ -268,48 +223,35 @@ impl SnapshotLayer {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         seg: SegmentTag,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
-        dropped: bool,
-        img_layer: Option<Arc<dyn Layer>>,
-        page_versions: BTreeMap<(u32, Lsn), PageVersion>,
-        relsizes: BTreeMap<Lsn, u32>,
-    ) -> Result<SnapshotLayer> {
+        lsn: Lsn,
+        base_images: Vec<Bytes>,
+    ) -> Result<ImageLayer> {
 
-        let snapfile = SnapshotLayer {
+        let layer = ImageLayer {
             conf: conf,
             timelineid: timelineid,
             tenantid: tenantid,
             seg: seg,
-            start_lsn: start_lsn,
-            end_lsn,
-            dropped,
-            inner: Mutex::new(SnapshotLayerInner {
+            lsn: lsn,
+            inner: Mutex::new(ImageLayerInner {
                 loaded: true,
-                page_versions: page_versions,
-                relsizes: relsizes,
+                base_images: base_images,
             }),
-            img_layer,
         };
-        let inner = snapfile.inner.lock().unwrap();
+        let inner = layer.inner.lock().unwrap();
 
-        // Write the in-memory btreemaps into a file
-        let path = snapfile.path();
+        // Write the images into a file
+        let path = layer.path();
 
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
         let file = File::create(&path)?;
-        let book = BookWriter::new(file, SNAPSHOT_FILE_MAGIC)?;
+        let book = BookWriter::new(file, IMAGE_FILE_MAGIC)?;
 
-        // Write out the other page versions
-        let mut chapter = book.new_chapter(PAGE_VERSIONS_CHAPTER);
-        let buf = BTreeMap::ser(&inner.page_versions)?;
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
+        // Write out the base images
+        let mut chapter = book.new_chapter(BASE_IMAGES_CHAPTER);
+        let buf = Vec::ser(&inner.base_images)?;
 
-        // and relsizes to separate chapter
-        let mut chapter = book.new_chapter(REL_SIZES_CHAPTER);
-        let buf = BTreeMap::ser(&inner.relsizes)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
@@ -319,13 +261,55 @@ impl SnapshotLayer {
 
         drop(inner);
 
-        Ok(snapfile)
+        Ok(layer)
     }
+
+    pub fn create_from_src(
+        conf: &'static PageServerConf,
+        timeline: &LayeredTimeline,
+        src: &dyn Layer,
+        lsn: Lsn,
+    ) -> Result<ImageLayer> {
+        let seg = src.get_seg_tag();
+        let timelineid = timeline.timelineid;
+
+        let startblk;
+        let size;
+        if seg.rel.is_blocky() {
+            size = src.get_seg_size(lsn)?;
+            startblk = seg.segno * RELISH_SEG_SIZE;
+        } else {
+            size = 1;
+            startblk = 0;
+        }
+
+        trace!(
+            "creating new ImageLayer for {} on timeline {} at {}",
+            seg,
+            timelineid,
+            lsn,
+        );
+ 
+        let mut base_images: Vec<Bytes> = Vec::new();
+        for blknum in startblk..(startblk+size) {
+            let img = 
+            RECONSTRUCT_TIME
+                .observe_closure_duration(|| {
+                    timeline.materialize_page(seg, blknum, lsn, &*src)
+                })?;
+
+            base_images.push(img);
+        }
+
+        Self::create(conf, timelineid, timeline.tenantid, seg, lsn,
+                     base_images)
+    }
+
 
     ///
     /// Load the contents of the file into memory
     ///
-    fn load(&self) -> Result<MutexGuard<SnapshotLayerInner>> {
+    fn load(&self) -> Result<MutexGuard<ImageLayerInner>> {
         // quick exit if already loaded
         let mut inner = self.inner.lock().unwrap();
 
@@ -337,75 +321,60 @@ impl SnapshotLayer {
             self.conf,
             self.timelineid,
             self.tenantid,
-            &SnapshotFileName {
+            &ImageFileName {
                 seg: self.seg,
-                start_lsn: self.start_lsn,
-                end_lsn: self.end_lsn,
-                dropped: self.dropped,
+                lsn: self.lsn,
             },
         );
 
         let file = File::open(&path)?;
         let book = Book::new(file)?;
 
-        let chapter = book.read_chapter(PAGE_VERSIONS_CHAPTER)?;
-        let page_versions = BTreeMap::des(&chapter)?;
-
-        let chapter = book.read_chapter(REL_SIZES_CHAPTER)?;
-        let relsizes = BTreeMap::des(&chapter)?;
+        let chapter = book.read_chapter(BASE_IMAGES_CHAPTER)?;
+        let base_images = Vec::des(&chapter)?;
 
         debug!("loaded from {}", &path.display());
 
-        *inner = SnapshotLayerInner {
+        *inner = ImageLayerInner {
             loaded: true,
-            page_versions,
-            relsizes,
+            base_images,
         };
 
         Ok(inner)
     }
 
-    /// Create SnapshotLayers representing all files on disk
-    ///
-    // TODO: returning an Iterator would be more idiomatic
-    pub fn load_snapshot_layer(
+    /// Create an ImageLayer represent a file on disk
+    pub fn load_image_layer(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        filename: &SnapshotFileName,
-    ) -> Result<SnapshotLayer> {
-        let snapfile = SnapshotLayer {
+        filename: &ImageFileName,
+    ) -> Result<ImageLayer> {
+        let layer = ImageLayer {
             conf,
             timelineid,
             tenantid,
             seg: filename.seg,
-            start_lsn: filename.start_lsn,
-            end_lsn: filename.end_lsn,
-            dropped: filename.dropped,
-            inner: Mutex::new(SnapshotLayerInner {
+            lsn: filename.lsn,
+            inner: Mutex::new(ImageLayerInner {
                 loaded: false,
-                page_versions: BTreeMap::new(),
-                relsizes: BTreeMap::new(),
+                base_images: Vec::new(),
             }),
-            // FIXME: This doesn't work across restarts.
-            img_layer: None,
         };
 
-        Ok(snapfile)
+        Ok(layer)
     }
 
     /// debugging function to print out the contents of the layer
     #[allow(unused)]
     pub fn dump(&self) -> String {
         let mut result = format!(
-            "----- snapshot layer for {} {}-{} ----\n",
-            self.seg, self.start_lsn, self.end_lsn
+            "----- image layer for {} at {} ----\n",
+            self.seg, self.lsn,
         );
 
-        let inner = self.inner.lock().unwrap();
-        for (k, v) in inner.relsizes.iter() {
-            result += &format!("{}: {}\n", k, v);
-        }
+        //let inner = self.inner.lock().unwrap();
+
         //for (k, v) in inner.page_versions.iter() {
         //    result += &format!("blk {} at {}: {}/{}\n", k.0, k.1, v.page_image.is_some(), v.record.is_some());
         //}

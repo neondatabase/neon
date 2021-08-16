@@ -3,14 +3,14 @@
 //!
 //! When the timeline is first accessed, the server lists of all snapshot files
 //! in the timelines/<timelineid> directory, and populates this map with
-//! SnapshotLayers corresponding to each file. When new WAL is received,
+//! SnapshotLayers corresponding to each file. When new WAL is received, FIXME
 //! we create InMemoryLayers to hold the incoming records. Now and then,
 //! in the checkpoint() function, the in-memory layers are frozen, forming
 //! new snapshot layers and corresponding files are written to disk.
 //!
 
 use crate::layered_repository::storage_layer::{Layer, SegmentTag};
-use crate::layered_repository::{InMemoryLayer, SnapshotLayer};
+use crate::layered_repository::{InMemoryLayer};
 use crate::relish::*;
 use anyhow::Result;
 use lazy_static::lazy_static;
@@ -48,7 +48,7 @@ pub struct LayerMap {
 
 struct SegEntry {
     pub open: Option<Arc<InMemoryLayer>>,
-    pub historic: BTreeMap<Lsn, Arc<SnapshotLayer>>,
+    pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
 }
 
 struct OpenSegEntry {
@@ -160,7 +160,7 @@ impl LayerMap {
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<SnapshotLayer>) {
+    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
         let tag = layer.get_seg_tag();
         let start_lsn = layer.get_start_lsn();
 
@@ -184,7 +184,7 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: &SnapshotLayer) {
+    pub fn remove_historic(&mut self, layer: &dyn Layer) {
         let tag = layer.get_seg_tag();
         let start_lsn = layer.get_start_lsn();
 
@@ -230,14 +230,16 @@ impl LayerMap {
     /// Is there a newer layer for given segment?
     pub fn newer_layer_exists(&self, seg: SegmentTag, lsn: Lsn) -> bool {
         if let Some(segentry) = self.segs.get(&seg) {
-            if let Some(_open) = &segentry.open {
-                return true;
-            }
+            // open layer is always incremental so it doesn't count
 
             for (newer_lsn, layer) in segentry
                 .historic
                 .range((Included(lsn), Included(Lsn(u64::MAX))))
             {
+                // FIXME: incremental layers don't count
+                if layer.is_incremental() {
+                    continue;
+                }
                 if layer.get_end_lsn() > lsn {
                     trace!(
                         "found later layer for {}, {} {}-{}",
@@ -284,11 +286,11 @@ impl Default for LayerMap {
 
 pub struct HistoricLayerIter<'a> {
     segiter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
-    iter: Option<std::collections::btree_map::Iter<'a, Lsn, Arc<SnapshotLayer>>>,
+    iter: Option<std::collections::btree_map::Iter<'a, Lsn, Arc<dyn Layer>>>,
 }
 
 impl<'a> Iterator for HistoricLayerIter<'a> {
-    type Item = Arc<SnapshotLayer>;
+    type Item = Arc<dyn Layer>;
 
     fn next(&mut self) -> std::option::Option<<Self as std::iter::Iterator>::Item> {
         loop {

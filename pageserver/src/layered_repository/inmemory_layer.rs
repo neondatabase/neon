@@ -6,8 +6,7 @@ use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
-use crate::layered_repository::SnapshotLayer;
-use crate::repository::WALRecord;
+use crate::layered_repository::{ImageLayer, SnapshotLayer};
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
@@ -37,13 +36,13 @@ pub struct InMemoryLayer {
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
     inner: Mutex<InMemoryLayerInner>,
+
+    img_layer: Option<Arc<dyn Layer>>,
 }
 
 pub struct InMemoryLayerInner {
     /// If this relation was dropped, remember when that happened.
     drop_lsn: Option<Lsn>,
-
-    base_images: Vec<Bytes>,
 
     ///
     /// All versions of all pages in the layer are are kept here.
@@ -130,13 +129,11 @@ impl Layer for InMemoryLayer {
             }
 
             // Use the base image, if needed
-            if need_base_image_lsn.is_some() {
-                let base_blknum: usize = (blknum % RELISH_SEG_SIZE) as usize;
-                if let Some(img) = inner.base_images.get(base_blknum) {
-                    reconstruct_data.page_img = Some(img.clone());
-                    need_base_image_lsn = None;
+            if let Some(need_lsn) = need_base_image_lsn {
+                if let Some(img_layer) = &self.img_layer {
+                    need_base_image_lsn = img_layer.get_page_reconstruct_data(blknum, need_lsn, reconstruct_data)?;
                 } else {
-                    bail!("inmem: no base img found for {} at blk {} at LSN {}", self.seg, base_blknum, lsn);
+                    bail!("no base img found for {} at blk {} at LSN {}", self.seg, blknum, lsn);
                 }
             }
 
@@ -157,8 +154,11 @@ impl Layer for InMemoryLayer {
         let result;
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             result = *entry;
+        // Use the base image if needed
+        } else if let Some(img_layer) = &self.img_layer {
+            result = img_layer.get_seg_size(lsn)?;
         } else {
-            result = inner.base_images.len() as u32;
+            result = 0;
         }
         trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
         Ok(result)
@@ -177,6 +177,23 @@ impl Layer for InMemoryLayer {
 
         // Otherwise, it exists
         Ok(true)
+    }
+
+
+    ///
+    /// Release most of the memory used by this layer. If it's accessed again later,
+    /// it will need to be loaded back.
+    ///
+    fn unload(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn delete(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
     }
 }
 
@@ -213,11 +230,11 @@ impl InMemoryLayer {
             oldest_pending_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
-                base_images: Vec::new(),
                 page_versions: BTreeMap::new(),
                 segsizes: BTreeMap::new(),
                 mem_used: 0,
             }),
+            img_layer: None,
         })
     }
 
@@ -285,8 +302,10 @@ impl InMemoryLayer {
             let oldsize;
             if let Some((_entry_lsn, entry)) = iter.next_back() {
                 oldsize = *entry;
+            } else if let Some(img_layer) = &self.img_layer {
+                oldsize = img_layer.get_seg_size(lsn)?;
             } else {
-                oldsize = inner.base_images.len() as u32;
+                oldsize = 0;
                 //bail!("No old size found for {} at {}", self.tag, lsn);
             }
             if newsize > oldsize {
@@ -333,60 +352,37 @@ impl InMemoryLayer {
     /// Initialize a new InMemoryLayer for, by copying the state at the given
     /// point in time from given existing layer.
     ///
-    pub fn copy_snapshot(
+    pub fn create_successor_layer(
         conf: &'static PageServerConf,
-        timeline: &LayeredTimeline,
-        src: &dyn Layer,
+        src: Arc<dyn Layer>,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         start_lsn: Lsn,
         oldest_pending_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
-        let mut mem_used = 0;
-
         let seg = src.get_seg_tag();
 
-        let startblk;
-        let size;
-        if seg.rel.is_blocky() {
-            size = src.get_seg_size(start_lsn)?;
-            startblk = seg.segno * RELISH_SEG_SIZE;
-        } else {
-            size = 1;
-            startblk = 0;
-        }
-
         trace!(
-            "initializing new InMemoryLayer for writing {} on timeline {} at {}, size {}",
-            src.get_seg_tag(),
+            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
+            seg,
             timelineid,
             start_lsn,
-            size,
         );
-
-        let mut base_images: Vec<Bytes> = Vec::new();
-        for blknum in startblk..(startblk+size) {
-            let img = timeline.materialize_page(seg, blknum, start_lsn, src)?;
-
-            mem_used += img.len();
-
-            base_images.push(img);
-        }
 
         Ok(InMemoryLayer {
             conf,
             timelineid,
             tenantid,
-            seg: src.get_seg_tag(),
+            seg,
             start_lsn,
             oldest_pending_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
-                base_images: base_images,
                 page_versions: BTreeMap::new(),
                 segsizes: BTreeMap::new(),
-                mem_used: mem_used,
+                mem_used: 0,
             }),
+            img_layer: Some(src),
         })
     }
 
@@ -406,7 +402,7 @@ impl InMemoryLayer {
         cutoff_lsn: Lsn,
         // This is needed just to call materialize_page()
         timeline: &LayeredTimeline,
-    ) -> Result<(Option<Arc<SnapshotLayer>>, Option<Arc<InMemoryLayer>>)> {
+    ) -> Result<(Vec<Arc<dyn Layer>>, Option<Arc<InMemoryLayer>>)> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.seg, self.timelineid, cutoff_lsn
@@ -428,7 +424,6 @@ impl InMemoryLayer {
         };
 
         // Divide all the page versions into old and new at the 'end_lsn' cutoff point.
-        let before_base_images = inner.base_images.clone();
         let mut before_page_versions;
         let mut before_segsizes;
         let mut after_page_versions;
@@ -463,6 +458,18 @@ impl InMemoryLayer {
         // we can release the lock now.
         drop(inner);
 
+        let mut historics: Vec<Arc<dyn Layer>> = Vec::new();
+
+        // write a new base image layer at the cutoff point
+        let imgfile = ImageLayer::create_from_src(
+            self.conf,
+            timeline,
+            self,
+            end_lsn,
+        )?;
+        let imgfile_rc: Arc<dyn Layer> = Arc::new(imgfile);
+        historics.push(Arc::clone(&imgfile_rc));
+
         // Write the page versions before the cutoff to disk.
         let snapfile = SnapshotLayer::create(
             self.conf,
@@ -472,10 +479,12 @@ impl InMemoryLayer {
             self.start_lsn,
             end_lsn,
             dropped,
-            before_base_images,
+            self.img_layer.clone(),
             before_page_versions,
             before_segsizes,
         )?;
+        let snapfile_rc: Arc<dyn Layer> = Arc::new(snapfile);
+        historics.push(snapfile_rc);
 
         // If there were any "new" page versions, initialize a new in-memory layer to hold
         // them
@@ -483,10 +492,9 @@ impl InMemoryLayer {
             if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
                 info!("created new in-mem layer for {} {}-", self.seg, end_lsn);
 
-                let new_open = Self::copy_snapshot(
+                let new_open = Self::create_successor_layer(
                     self.conf,
-                    timeline,
-                    &snapfile,
+                    imgfile_rc,
                     self.timelineid,
                     self.tenantid,
                     end_lsn,
@@ -502,9 +510,7 @@ impl InMemoryLayer {
                 None
             };
 
-        let new_historic = Some(Arc::new(snapfile));
-
-        Ok((new_historic, new_open))
+        Ok((historics, new_open))
     }
 
     /// debugging function to print out the contents of the layer
