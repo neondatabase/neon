@@ -51,6 +51,11 @@ pub struct InMemoryLayerInner {
     /// `segsizes` tracks the size of the segment at different points in time.
     ///
     segsizes: BTreeMap<Lsn, u32>,
+
+    ///
+    /// Memory usage
+    ///
+    mem_used: usize,
 }
 
 impl Layer for InMemoryLayer {
@@ -186,6 +191,7 @@ impl InMemoryLayer {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
                 segsizes: BTreeMap::new(),
+                mem_used: 0,
             }),
         })
     }
@@ -228,6 +234,9 @@ impl InMemoryLayer {
             self.timelineid,
             lsn
         );
+
+        let mem_size = pv.get_mem_size();
+
         let mut inner = self.inner.lock().unwrap();
 
         let old = inner.page_versions.insert((blknum, lsn), pv);
@@ -238,6 +247,8 @@ impl InMemoryLayer {
                 "Page version of rel {} blk {} at {} already exists",
                 self.seg.rel, blknum, lsn
             );
+        } else {
+            inner.mem_used += mem_size;
         }
 
         // Also update the relation size, if this extended the relation.
@@ -313,6 +324,7 @@ impl InMemoryLayer {
         );
         let mut page_versions = BTreeMap::new();
         let mut segsizes = BTreeMap::new();
+        let mut mem_used = 0;
 
         let seg = src.get_seg_tag();
 
@@ -333,6 +345,7 @@ impl InMemoryLayer {
                 page_image: Some(img),
                 record: None,
             };
+            mem_used += pv.get_mem_size();
             page_versions.insert((blknum, lsn), pv);
         }
 
@@ -346,6 +359,7 @@ impl InMemoryLayer {
                 drop_lsn: None,
                 page_versions: page_versions,
                 segsizes: segsizes,
+                mem_used: mem_used,
             }),
         })
     }
