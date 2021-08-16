@@ -36,14 +36,17 @@
 //!
 //! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
+//! FIXME
 //!
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag,
 };
 use crate::layered_repository::filename::{SnapshotFileName};
+use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
+use bytes::Bytes;
 use log::*;
 use std::collections::BTreeMap;
 use std::fs;
@@ -61,8 +64,9 @@ use zenith_utils::lsn::Lsn;
 // Magic constant to identify a Zenith snapshot file
 static SNAPSHOT_FILE_MAGIC: u32 = 0x5A616E01;
 
-static PAGE_VERSIONS_CHAPTER: u64 = 1;
-static REL_SIZES_CHAPTER: u64 = 2;
+static BASE_IMAGES_CHAPTER: u64 = 1;
+static PAGE_VERSIONS_CHAPTER: u64 = 2;
+static REL_SIZES_CHAPTER: u64 = 3;
 
 ///
 /// SnapshotLayer is the in-memory data structure associated with an
@@ -93,6 +97,9 @@ pub struct SnapshotLayerInner {
     /// If false, the 'page_versions' and 'relsizes' have not been
     /// loaded into memory yet.
     loaded: bool,
+
+    // indexed by block number (within segment)
+    base_images: Vec<Bytes>,
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
@@ -159,6 +166,17 @@ impl Layer for SnapshotLayer {
                 }
             }
 
+            // Use the base image, if needed
+            if need_base_image_lsn.is_some() {
+                let base_blknum: usize = (blknum % RELISH_SEG_SIZE) as usize;
+                if let Some(img) = inner.base_images.get(base_blknum) {
+                    reconstruct_data.page_img = Some(img.clone());
+                    need_base_image_lsn = None;
+                } else {
+                    bail!("no base img found for {} at blk {} at LSN {}", self.seg, base_blknum, lsn);
+                }
+            }
+
             // release lock on 'inner'
         }
 
@@ -167,26 +185,21 @@ impl Layer for SnapshotLayer {
 
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+
+        assert!(lsn >= self.start_lsn);
+
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
         let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
+        let result;
         if let Some((_entry_lsn, entry)) = iter.next_back() {
-            let result = *entry;
-            drop(inner);
-            trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
-            Ok(result)
+            result = *entry;
         } else {
-            error!(
-                "No size found for {} at {} in snapshot layer {} {}-{}",
-                self.seg, lsn, self.seg, self.start_lsn, self.end_lsn
-            );
-            bail!(
-                "No size found for {} at {} in snapshot layer",
-                self.seg,
-                lsn
-            );
+            result = inner.base_images.len() as u32;
         }
+        info!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
+        Ok(result)
     }
 
     /// Does this segment exist at given LSN?
@@ -240,9 +253,11 @@ impl SnapshotLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
+        base_images: Vec<Bytes>,
         page_versions: BTreeMap<(u32, Lsn), PageVersion>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<SnapshotLayer> {
+
         let snapfile = SnapshotLayer {
             conf: conf,
             timelineid: timelineid,
@@ -253,6 +268,7 @@ impl SnapshotLayer {
             dropped,
             inner: Mutex::new(SnapshotLayerInner {
                 loaded: true,
+                base_images: base_images,
                 page_versions: page_versions,
                 relsizes: relsizes,
             }),
@@ -267,7 +283,14 @@ impl SnapshotLayer {
         let file = File::create(&path)?;
         let book = BookWriter::new(file, SNAPSHOT_FILE_MAGIC)?;
 
-        // Write out page versions
+        // Write out the base images
+        let mut chapter = book.new_chapter(BASE_IMAGES_CHAPTER);
+        let buf = Vec::ser(&inner.base_images)?;
+
+        chapter.write_all(&buf)?;
+        let book = chapter.close()?;
+
+        // Write out the other page versions
         let mut chapter = book.new_chapter(PAGE_VERSIONS_CHAPTER);
         let buf = BTreeMap::ser(&inner.page_versions)?;
         chapter.write_all(&buf)?;
@@ -314,6 +337,9 @@ impl SnapshotLayer {
         let file = File::open(&path)?;
         let book = Book::new(file)?;
 
+        let chapter = book.read_chapter(BASE_IMAGES_CHAPTER)?;
+        let base_images = Vec::des(&chapter)?;
+
         let chapter = book.read_chapter(PAGE_VERSIONS_CHAPTER)?;
         let page_versions = BTreeMap::des(&chapter)?;
 
@@ -324,6 +350,7 @@ impl SnapshotLayer {
 
         *inner = SnapshotLayerInner {
             loaded: true,
+            base_images,
             page_versions,
             relsizes,
         };
@@ -350,6 +377,7 @@ impl SnapshotLayer {
             dropped: filename.dropped,
             inner: Mutex::new(SnapshotLayerInner {
                 loaded: false,
+                base_images: Vec::new(),
                 page_versions: BTreeMap::new(),
                 relsizes: BTreeMap::new(),
             }),
@@ -370,6 +398,7 @@ impl SnapshotLayer {
     ///
     pub fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.base_images = Vec::new();
         inner.page_versions = BTreeMap::new();
         inner.relsizes = BTreeMap::new();
         inner.loaded = false;

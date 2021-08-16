@@ -43,6 +43,8 @@ pub struct InMemoryLayerInner {
     /// If this relation was dropped, remember when that happened.
     drop_lsn: Option<Lsn>,
 
+    base_images: Vec<Bytes>,
+
     ///
     /// All versions of all pages in the layer are are kept here.
     /// Indexed by block number and LSN.
@@ -127,7 +129,18 @@ impl Layer for InMemoryLayer {
                 }
             }
 
-            // release lock on 'page_versions'
+            // Use the base image, if needed
+            if need_base_image_lsn.is_some() {
+                let base_blknum: usize = (blknum % RELISH_SEG_SIZE) as usize;
+                if let Some(img) = inner.base_images.get(base_blknum) {
+                    reconstruct_data.page_img = Some(img.clone());
+                    need_base_image_lsn = None;
+                } else {
+                    bail!("inmem: no base img found for {} at blk {} at LSN {}", self.seg, base_blknum, lsn);
+                }
+            }
+
+            // release lock on 'inner'
         }
 
         Ok(need_base_image_lsn)
@@ -135,18 +148,20 @@ impl Layer for InMemoryLayer {
 
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+        assert!(lsn >= self.start_lsn);
+
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.inner.lock().unwrap();
         let mut iter = inner.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
+        let result;
         if let Some((_entry_lsn, entry)) = iter.next_back() {
-            let result = *entry;
-            drop(inner);
-            trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
-            Ok(result)
+            result = *entry;
         } else {
-            bail!("No size found for {} at {} in memory", self.seg, lsn);
+            result = inner.base_images.len() as u32;
         }
+        trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
+        Ok(result)
     }
 
     /// Does this segment exist at given LSN?
@@ -198,6 +213,7 @@ impl InMemoryLayer {
             oldest_pending_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
+                base_images: Vec::new(),
                 page_versions: BTreeMap::new(),
                 segsizes: BTreeMap::new(),
                 mem_used: 0,
@@ -270,7 +286,7 @@ impl InMemoryLayer {
             if let Some((_entry_lsn, entry)) = iter.next_back() {
                 oldsize = *entry;
             } else {
-                oldsize = 0;
+                oldsize = inner.base_images.len() as u32;
                 //bail!("No old size found for {} at {}", self.tag, lsn);
             }
             if newsize > oldsize {
@@ -326,14 +342,6 @@ impl InMemoryLayer {
         start_lsn: Lsn,
         oldest_pending_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
-        trace!(
-            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
-            src.get_seg_tag(),
-            timelineid,
-            start_lsn
-        );
-        let mut page_versions = BTreeMap::new();
-        let mut segsizes = BTreeMap::new();
         let mut mem_used = 0;
 
         let seg = src.get_seg_tag();
@@ -342,21 +350,27 @@ impl InMemoryLayer {
         let size;
         if seg.rel.is_blocky() {
             size = src.get_seg_size(start_lsn)?;
-            segsizes.insert(start_lsn, size);
             startblk = seg.segno * RELISH_SEG_SIZE;
         } else {
             size = 1;
             startblk = 0;
         }
 
-        for blknum in startblk..(startblk + size) {
+        trace!(
+            "initializing new InMemoryLayer for writing {} on timeline {} at {}, size {}",
+            src.get_seg_tag(),
+            timelineid,
+            start_lsn,
+            size,
+        );
+
+        let mut base_images: Vec<Bytes> = Vec::new();
+        for blknum in startblk..(startblk+size) {
             let img = timeline.materialize_page(seg, blknum, start_lsn, src)?;
-            let pv = PageVersion {
-                page_image: Some(img),
-                record: None,
-            };
-            mem_used += pv.get_mem_size();
-            page_versions.insert((blknum, start_lsn), pv);
+
+            mem_used += img.len();
+
+            base_images.push(img);
         }
 
         Ok(InMemoryLayer {
@@ -368,8 +382,9 @@ impl InMemoryLayer {
             oldest_pending_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
-                page_versions: page_versions,
-                segsizes: segsizes,
+                base_images: base_images,
+                page_versions: BTreeMap::new(),
+                segsizes: BTreeMap::new(),
                 mem_used: mem_used,
             }),
         })
@@ -413,6 +428,7 @@ impl InMemoryLayer {
         };
 
         // Divide all the page versions into old and new at the 'end_lsn' cutoff point.
+        let before_base_images = inner.base_images.clone();
         let mut before_page_versions;
         let mut before_segsizes;
         let mut after_page_versions;
@@ -456,6 +472,7 @@ impl InMemoryLayer {
             self.start_lsn,
             end_lsn,
             dropped,
+            before_base_images,
             before_page_versions,
             before_segsizes,
         )?;
