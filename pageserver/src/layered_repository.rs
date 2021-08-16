@@ -54,14 +54,14 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
 
-// Perform a checkpoint in the GC thread, when the LSN has advanced this much since
-// last checkpoint. This puts a backstop on how much WAL needs to be re-digested if
-// the page server is restarted.
+// Flush out an inmemory layer, if it's holding WAL older than
+// this. This puts a backstop on how much WAL needs to be re-digested
+// if the page server is restarted.
 //
 // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
 // would be more appropriate. But a low value forces the code to be exercised more,
 // which is good for now to trigger bugs.
-static CHECKPOINT_INTERVAL: u64 = 16 * 1024 * 1024;
+static OLDEST_INMEM_DISTANCE: u64 = 16 * 1024 * 1024;
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
@@ -261,11 +261,11 @@ impl LayeredRepository {
             {
                 let timelines = self.timelines.lock().unwrap();
                 for (_timelineid, timeline) in timelines.iter() {
-                    let distance = u64::from(timeline.last_valid_lsn.load())
-                        - u64::from(timeline.last_checkpoint_lsn.load());
-                    if distance > CHECKPOINT_INTERVAL {
-                        timeline.checkpoint()?;
-                    }
+                    STORAGE_TIME
+                        .with_label_values(&["checkpoint_timed"])
+                        .observe_closure_duration(
+                            || timeline.checkpoint_internal(false)
+                        )?
                 }
                 // release lock on 'timelines'
             }
@@ -456,7 +456,7 @@ pub struct LayeredTimeline {
     last_record_lsn: AtomicLsn,
     prev_record_lsn: AtomicLsn,
 
-    last_checkpoint_lsn: AtomicLsn,
+    oldest_pending_lsn: AtomicLsn,
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
@@ -774,8 +774,8 @@ impl Timeline for LayeredTimeline {
     /// metrics collection.
     fn checkpoint(&self) -> Result<()> {
         STORAGE_TIME
-            .with_label_values(&["checkpoint"])
-            .observe_closure_duration(|| self.checkpoint_internal())
+            .with_label_values(&["checkpoint_force"])
+            .observe_closure_duration(|| self.checkpoint_internal(true))
     }
 
     /// Remember that WAL has been received and added to the page cache up to the given LSN
@@ -867,7 +867,7 @@ impl LayeredTimeline {
             last_valid_lsn: SeqWait::new(metadata.last_valid_lsn),
             last_record_lsn: AtomicLsn::new(metadata.last_record_lsn.0),
             prev_record_lsn: AtomicLsn::new(metadata.prev_record_lsn.0),
-            last_checkpoint_lsn: AtomicLsn::new(metadata.last_valid_lsn.0),
+            oldest_pending_lsn: AtomicLsn::new(metadata.last_valid_lsn.0),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn,
@@ -1003,23 +1003,23 @@ impl LayeredTimeline {
         let layer;
         if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read(seg, lsn)? {
             // Create new entry after the previous one.
-            let lsn;
+            let start_lsn;
             if prev_layer.get_timeline_id() != self.timelineid {
                 // First modification on this timeline
-                lsn = self.ancestor_lsn;
+                start_lsn = self.ancestor_lsn;
                 trace!(
                     "creating file for write for {} at branch point {}/{}",
                     seg,
                     self.timelineid,
-                    lsn
+                    start_lsn
                 );
             } else {
-                lsn = prev_layer.get_end_lsn();
+                start_lsn = prev_layer.get_end_lsn();
                 trace!(
                     "creating file for write for {} after previous layer {}/{}",
                     seg,
                     self.timelineid,
-                    lsn
+                    start_lsn
                 );
             }
             trace!(
@@ -1034,6 +1034,7 @@ impl LayeredTimeline {
                 &*prev_layer,
                 self.timelineid,
                 self.tenantid,
+                start_lsn,
                 lsn,
             )?;
         } else {
@@ -1045,7 +1046,7 @@ impl LayeredTimeline {
                 lsn
             );
 
-            layer = InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn)?;
+            layer = InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
         }
 
         let mut layers = self.layers.lock().unwrap();
@@ -1088,7 +1089,7 @@ impl LayeredTimeline {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
-    fn checkpoint_internal(&self) -> Result<()> {
+    fn checkpoint_internal(&self, force: bool) -> Result<()> {
         let last_valid_lsn = self.last_valid_lsn.load();
         let last_record_lsn = self.last_record_lsn.load();
         let prev_record_lsn = self.prev_record_lsn.load();
@@ -1130,14 +1131,26 @@ impl LayeredTimeline {
         // Call freeze() on any unfrozen layers (that is, layers that haven't
         // been written to disk yet).
         // Call unload() on all frozen layers, to release memory.
-        let mut iter = layers.iter_open_layers();
-        while let Some(layer) = iter.next() {
-            let (new_historic, new_open) = layer.freeze(last_valid_lsn, &self)?;
+
+        let mut oldest_pending_lsn = last_valid_lsn;
+
+        while let Some(oldest_layer) = layers.get_oldest_open_layer() {
+
+            oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
+            let distance = last_valid_lsn.0 - oldest_pending_lsn.0;
+            if !force && distance < OLDEST_INMEM_DISTANCE {
+                info!("the oldest layer is now {} which is {} bytes behind last_valid_lsn",
+                      oldest_layer.get_seg_tag(), distance);
+                break;
+            }
+
+            let (new_historic, new_open) = oldest_layer.freeze(last_valid_lsn, &self)?;
 
             // replace this layer with the new layers that 'freeze' returned
-            // (removes it if new_open is None)
-            iter.replace(new_open);
-
+            layers.pop_oldest();
+            if let Some(n) = new_open {
+                layers.insert_open(n);
+            }
             if let Some(historic) = new_historic {
                 trace!(
                     "freeze returned layer {} {}-{}",
@@ -1145,7 +1158,7 @@ impl LayeredTimeline {
                     historic.get_start_lsn(),
                     historic.get_end_lsn()
                 );
-                iter.insert_historic(historic);
+                layers.insert_historic(historic);
             }
         }
 
@@ -1171,7 +1184,7 @@ impl LayeredTimeline {
         };
         LayeredRepository::save_metadata(self.conf, self.timelineid, self.tenantid, &metadata)?;
 
-        self.last_checkpoint_lsn.store(last_valid_lsn);
+        self.oldest_pending_lsn.store(oldest_pending_lsn);
 
         Ok(())
     }
@@ -1202,12 +1215,6 @@ impl LayeredTimeline {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
 
-        // Scan all snapshot files in the directory. For each file, if a newer file
-        // exists, we can remove the old one.
-        self.checkpoint()?;
-
-        let mut layers = self.layers.lock().unwrap();
-
         info!(
             "running GC on timeline {}, cutoff {}",
             self.timelineid, cutoff
@@ -1215,9 +1222,13 @@ impl LayeredTimeline {
 
         let mut layers_to_remove: Vec<Arc<SnapshotLayer>> = Vec::new();
 
+        // Scan all snapshot files in the directory. For each file, if a newer file
+        // exists, we can remove the old one.
+        //
         // Determine for each file if it needs to be retained
         // FIXME: also scan open in-memory layers. Normally we cannot remove the
         // latest layer of any seg, but if it was unlinked it's possible
+        let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
             let seg = l.get_seg_tag();
 

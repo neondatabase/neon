@@ -32,6 +32,8 @@ pub struct InMemoryLayer {
     ///
     start_lsn: Lsn,
 
+    oldest_pending_lsn: Lsn,
+
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
     inner: Mutex<InMemoryLayerInner>,
@@ -164,6 +166,11 @@ impl Layer for InMemoryLayer {
 }
 
 impl InMemoryLayer {
+
+    pub fn get_oldest_pending_lsn(&self) -> Lsn {
+        self.oldest_pending_lsn
+    }
+
     ///
     /// Create a new, empty, in-memory layer
     ///
@@ -173,6 +180,7 @@ impl InMemoryLayer {
         tenantid: ZTenantId,
         seg: SegmentTag,
         start_lsn: Lsn,
+        oldest_pending_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
@@ -187,6 +195,7 @@ impl InMemoryLayer {
             tenantid,
             seg,
             start_lsn,
+            oldest_pending_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
@@ -314,13 +323,14 @@ impl InMemoryLayer {
         src: &dyn Layer,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        lsn: Lsn,
+        start_lsn: Lsn,
+        oldest_pending_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new InMemoryLayer for writing {} on timeline {} at {}",
             src.get_seg_tag(),
             timelineid,
-            lsn
+            start_lsn
         );
         let mut page_versions = BTreeMap::new();
         let mut segsizes = BTreeMap::new();
@@ -331,8 +341,8 @@ impl InMemoryLayer {
         let startblk;
         let size;
         if seg.rel.is_blocky() {
-            size = src.get_seg_size(lsn)?;
-            segsizes.insert(lsn, size);
+            size = src.get_seg_size(start_lsn)?;
+            segsizes.insert(start_lsn, size);
             startblk = seg.segno * RELISH_SEG_SIZE;
         } else {
             size = 1;
@@ -340,13 +350,13 @@ impl InMemoryLayer {
         }
 
         for blknum in startblk..(startblk + size) {
-            let img = timeline.materialize_page(seg, blknum, lsn, src)?;
+            let img = timeline.materialize_page(seg, blknum, start_lsn, src)?;
             let pv = PageVersion {
                 page_image: Some(img),
                 record: None,
             };
             mem_used += pv.get_mem_size();
-            page_versions.insert((blknum, lsn), pv);
+            page_versions.insert((blknum, start_lsn), pv);
         }
 
         Ok(InMemoryLayer {
@@ -354,7 +364,8 @@ impl InMemoryLayer {
             timelineid,
             tenantid,
             seg: src.get_seg_tag(),
-            start_lsn: lsn,
+            start_lsn,
+            oldest_pending_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: page_versions,
@@ -451,26 +462,28 @@ impl InMemoryLayer {
 
         // If there were any "new" page versions, initialize a new in-memory layer to hold
         // them
-        let new_open = if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
-            info!("created new in-mem layer for {} {}-", self.seg, end_lsn);
+        let new_open =
+            if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
+                info!("created new in-mem layer for {} {}-", self.seg, end_lsn);
 
-            let new_open = Self::copy_snapshot(
-                self.conf,
-                timeline,
-                &snapfile,
-                self.timelineid,
-                self.tenantid,
-                end_lsn,
-            )?;
-            let mut new_inner = new_open.inner.lock().unwrap();
-            new_inner.page_versions.append(&mut after_page_versions);
-            new_inner.segsizes.append(&mut after_segsizes);
-            drop(new_inner);
+                let new_open = Self::copy_snapshot(
+                    self.conf,
+                    timeline,
+                    &snapfile,
+                    self.timelineid,
+                    self.tenantid,
+                    end_lsn,
+                    end_lsn,
+                )?;
+                let mut new_inner = new_open.inner.lock().unwrap();
+                new_inner.page_versions.append(&mut after_page_versions);
+                new_inner.segsizes.append(&mut after_segsizes);
+                drop(new_inner);
 
-            Some(Arc::new(new_open))
-        } else {
-            None
-        };
+                Some(Arc::new(new_open))
+            } else {
+                None
+            };
 
         let new_historic = Some(Arc::new(snapfile));
 
