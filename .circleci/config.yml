@@ -158,6 +158,24 @@ jobs:
           paths:
             - "*"
 
+  check-zenith:
+    executor: zenith-build-executor
+    steps:
+      - checkout
+
+      - restore_cache:
+          name: Restore rust cache
+          keys:
+            - v03-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
+
+      # Look for security vulnerabilities in the advisory db
+      # https://github.com/rustsec/advisory-db
+      - run:
+          name: Cargo audit
+          command: |
+            cargo install cargo-audit
+            cargo audit
+
   run-pytest:
     #description: "Run pytest"
     executor: python/default
@@ -248,6 +266,9 @@ workflows:
               build_type: ["debug", "release"]
           requires:
             - build-postgres
+      - check-zenith:
+          requires:
+            - build-zenith-debug
       - run-pytest:
           name: pg_regress tests << matrix.build_type >>
           matrix:
