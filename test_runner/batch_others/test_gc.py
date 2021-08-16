@@ -14,7 +14,8 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 @pytest.mark.skip(reason=""""
     Current GC test is flaky and overly strict. Since we are migrating to the layered repo format
-    with different GC implementation let's just silence this test for now.
+    with different GC implementation let's just silence this test for now. This test only
+    works with the RocksDB implementation.
 """)
 def test_gc(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
     zenith_cli.run(["branch", "test_gc", "empty"])

@@ -120,7 +120,16 @@ impl RelishTag {
 
             // and these don't
             | RelishTag::ControlFile
-            | RelishTag::Checkpoint => false,
+                | RelishTag::Checkpoint => false,
+        }
+    }
+
+    // convenience function to check if this relish is a normal relation.
+    pub const fn is_relation(&self) -> bool {
+        if let RelishTag::Relation(_) = self {
+            true
+        } else {
+            false
         }
     }
 }

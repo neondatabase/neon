@@ -5,6 +5,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::iter::Iterator;
+use std::ops::AddAssign;
 use std::sync::Arc;
 use std::time::Duration;
 use zenith_utils::lsn::Lsn;
@@ -56,6 +57,8 @@ pub trait Repository: Send + Sync {
 ///
 #[derive(Default)]
 pub struct GcResult {
+    // FIXME: These counters make sense for the ObjectRepository. They are not used
+    // by the LayeredRepository.
     pub n_relations: u64,
     pub inspected: u64,
     pub truncated: u64,
@@ -66,7 +69,49 @@ pub struct GcResult {
     pub control_deleted: u64,     // RelishTag::ControlFile
     pub filenodemap_deleted: u64, // RelishTag::FileNodeMap
     pub dropped: u64,
+
+    // These are used for the LayeredRepository instead
+    pub snapshot_relfiles_total: u64,
+    pub snapshot_relfiles_needed_by_cutoff: u64,
+    pub snapshot_relfiles_needed_by_branches: u64,
+    pub snapshot_relfiles_not_updated: u64,
+    pub snapshot_relfiles_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
+    pub snapshot_relfiles_dropped: u64, // # of snapshot files removed because the relation was dropped
+
+    pub snapshot_nonrelfiles_total: u64,
+    pub snapshot_nonrelfiles_needed_by_cutoff: u64,
+    pub snapshot_nonrelfiles_needed_by_branches: u64,
+    pub snapshot_nonrelfiles_not_updated: u64,
+    pub snapshot_nonrelfiles_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
+    pub snapshot_nonrelfiles_dropped: u64, // # of snapshot files removed because the relation was dropped
+
     pub elapsed: Duration,
+}
+
+impl AddAssign for GcResult {
+    fn add_assign(&mut self, other: Self) {
+        self.n_relations += other.n_relations;
+        self.truncated += other.truncated;
+        self.deleted += other.deleted;
+        self.dropped += other.dropped;
+
+        self.snapshot_relfiles_total += other.snapshot_relfiles_total;
+        self.snapshot_relfiles_needed_by_cutoff += other.snapshot_relfiles_needed_by_cutoff;
+        self.snapshot_relfiles_needed_by_branches += other.snapshot_relfiles_needed_by_branches;
+        self.snapshot_relfiles_not_updated += other.snapshot_relfiles_not_updated;
+        self.snapshot_relfiles_removed += other.snapshot_relfiles_removed;
+        self.snapshot_relfiles_dropped += other.snapshot_relfiles_dropped;
+
+        self.snapshot_nonrelfiles_total += other.snapshot_nonrelfiles_total;
+        self.snapshot_nonrelfiles_needed_by_cutoff += other.snapshot_nonrelfiles_needed_by_cutoff;
+        self.snapshot_nonrelfiles_needed_by_branches +=
+            other.snapshot_nonrelfiles_needed_by_branches;
+        self.snapshot_nonrelfiles_not_updated += other.snapshot_nonrelfiles_not_updated;
+        self.snapshot_nonrelfiles_removed += other.snapshot_nonrelfiles_removed;
+        self.snapshot_nonrelfiles_dropped += other.snapshot_nonrelfiles_dropped;
+
+        self.elapsed += other.elapsed;
+    }
 }
 
 pub trait Timeline: Send + Sync {
@@ -234,11 +279,12 @@ impl WALRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layered_repository::LayeredRepository;
     use crate::object_repository::ObjectRepository;
     use crate::object_repository::{ObjectValue, PageEntry, RelationSizeEntry};
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
-    use crate::PageServerConf;
+    use crate::{PageServerConf, RepositoryFormat};
     use postgres_ffi::pg_constants;
     use std::fs;
     use std::path::PathBuf;
@@ -272,10 +318,16 @@ mod tests {
         buf.freeze()
     }
 
-    fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
+    static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+
+    fn get_test_repo(
+        test_name: &str,
+        repository_format: RepositoryFormat,
+    ) -> Result<Box<dyn Repository>> {
         let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
         let _ = fs::remove_dir_all(&repo_dir);
-        fs::create_dir_all(&repo_dir).unwrap();
+        fs::create_dir_all(&repo_dir)?;
+        fs::create_dir_all(&repo_dir.join("timelines"))?;
 
         let conf = PageServerConf {
             daemonize: false,
@@ -288,6 +340,7 @@ mod tests {
             pg_distrib_dir: "".into(),
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
+            repository_format,
         };
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
@@ -295,24 +348,47 @@ mod tests {
         let tenantid = ZTenantId::generate();
         fs::create_dir_all(conf.tenant_path(&tenantid)).unwrap();
 
-        let obj_store = RocksObjectStore::create(conf, &tenantid)?;
-
         let walredo_mgr = TestRedoManager {};
 
-        let repo =
-            ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr), tenantid);
+        let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
+            RepositoryFormat::Layered => Box::new(LayeredRepository::new(
+                conf,
+                Arc::new(walredo_mgr),
+                tenantid,
+            )),
+            RepositoryFormat::RocksDb => {
+                let obj_store = RocksObjectStore::create(conf, &tenantid)?;
 
-        Ok(Box::new(repo))
+                Box::new(ObjectRepository::new(
+                    conf,
+                    Arc::new(obj_store),
+                    Arc::new(walredo_mgr),
+                    tenantid,
+                ))
+            }
+        };
+
+        Ok(repo)
     }
 
     /// Test get_relsize() and truncation.
     #[test]
-    fn test_relsize() -> Result<()> {
+    fn test_relsize_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_relsize_rocksdb", RepositoryFormat::RocksDb)?;
+        test_relsize(&*repo)
+    }
+
+    #[test]
+    fn test_relsize_layered() -> Result<()> {
+        let repo = get_test_repo("test_relsize_layered", RepositoryFormat::Layered)?;
+        test_relsize(&*repo)
+    }
+
+    fn test_relsize(repo: &dyn Repository) -> Result<()> {
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
         // Create timeline to work on
-        let repo = get_test_repo("test_relsize")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
@@ -397,14 +473,24 @@ mod tests {
     /// This isn't very interesting with the RocksDb implementation, as we don't pay
     /// any attention to Postgres segment boundaries there.
     #[test]
-    fn test_large_rel() -> Result<()> {
-        let repo = get_test_repo("test_large_rel")?;
+    fn test_large_rel_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_large_rel_rocksdb", RepositoryFormat::RocksDb)?;
+        test_large_rel(&*repo)
+    }
+
+    #[test]
+    fn test_large_rel_layered() -> Result<()> {
+        let repo = get_test_repo("test_large_rel_layered", RepositoryFormat::Layered)?;
+        test_large_rel(&*repo)
+    }
+
+    fn test_large_rel(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
 
-        let mut lsn = 0;
+        let mut lsn = 1;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 1;
@@ -450,14 +536,28 @@ mod tests {
         }))
     }
 
+    #[test]
+    fn test_branch_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_branch_rocksdb", RepositoryFormat::RocksDb)?;
+        test_branch(&*repo)
+    }
+
+    #[test]
+    fn test_branch_layered() -> Result<()> {
+        let repo = get_test_repo("test_branch_layered", RepositoryFormat::Layered)?;
+        test_branch(&*repo)
+    }
+
     ///
     /// Test branch creation
     ///
-    #[test]
-    fn test_branch() -> Result<()> {
-        let repo = get_test_repo("test_branch")?;
+    fn test_branch(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
+
+        // Import initial dummy checkpoint record, otherwise the get_timeline() call
+        // after branching fails below
+        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(1), ZERO_PAGE.clone(), false)?;
 
         // Create a relation on the timeline
         tline.init_valid_lsn(Lsn(1));
@@ -500,8 +600,19 @@ mod tests {
     }
 
     #[test]
-    fn test_history() -> Result<()> {
-        let repo = get_test_repo("test_snapshot")?;
+    fn test_history_rocksdb() -> Result<()> {
+        let repo = get_test_repo("test_history_rocksdb", RepositoryFormat::RocksDb)?;
+        test_history(&*repo)
+    }
+    #[test]
+    // TODO: This doesn't work with the layered storage, the functions needed for push/pull
+    // functionality haven't been implemented yet.
+    #[ignore]
+    fn test_history_layered() -> Result<()> {
+        let repo = get_test_repo("test_history_layered", RepositoryFormat::Layered)?;
+        test_history(&*repo)
+    }
+    fn test_history(repo: &dyn Repository) -> Result<()> {
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 

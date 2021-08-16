@@ -2,11 +2,12 @@
 //! page server.
 
 use crate::branches;
+use crate::layered_repository::LayeredRepository;
 use crate::object_repository::ObjectRepository;
 use crate::repository::Repository;
 use crate::rocksdb_storage::RocksObjectStore;
 use crate::walredo::PostgresRedoManager;
-use crate::PageServerConf;
+use crate::{PageServerConf, RepositoryFormat};
 use anyhow::{anyhow, bail, Result};
 use lazy_static::lazy_static;
 use log::info;
@@ -27,16 +28,35 @@ pub fn init(conf: &'static PageServerConf) {
     for dir_entry in fs::read_dir(conf.tenants_path()).unwrap() {
         let tenantid =
             ZTenantId::from_str(dir_entry.unwrap().file_name().to_str().unwrap()).unwrap();
-        let obj_store = RocksObjectStore::open(conf, &tenantid).unwrap();
 
         // Set up a WAL redo manager, for applying WAL records.
         let walredo_mgr = PostgresRedoManager::new(conf, tenantid);
 
         // Set up an object repository, for actual data storage.
-        let repo =
-            ObjectRepository::new(conf, Arc::new(obj_store), Arc::new(walredo_mgr), tenantid);
+        let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
+            RepositoryFormat::Layered => {
+                let repo = Arc::new(LayeredRepository::new(
+                    conf,
+                    Arc::new(walredo_mgr),
+                    tenantid,
+                ));
+                LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
+                repo
+            }
+            RepositoryFormat::RocksDb => {
+                let obj_store = RocksObjectStore::open(conf, &tenantid).unwrap();
+
+                Arc::new(ObjectRepository::new(
+                    conf,
+                    Arc::new(obj_store),
+                    Arc::new(walredo_mgr),
+                    tenantid,
+                ))
+            }
+        };
+
         info!("initialized storage for tenant: {}", &tenantid);
-        m.insert(tenantid, Arc::new(repo));
+        m.insert(tenantid, repo);
     }
 }
 
@@ -53,7 +73,7 @@ pub fn create_repository_for_tenant(
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
     let repo = branches::create_repo(conf, tenantid, wal_redo_manager)?;
 
-    m.insert(tenantid, Arc::new(repo));
+    m.insert(tenantid, repo);
 
     Ok(())
 }

@@ -61,6 +61,13 @@ fn main() -> Result<()> {
                         .long("enable-auth")
                         .takes_value(false)
                         .help("Enable authentication using ZenithJWT")
+                )
+                .arg(
+                    Arg::with_name("repository-format")
+                        .long("repository-format")
+                        .takes_value(false)
+                        .value_name("repository-format")
+                        .help("Choose repository format, 'layered' or 'rocksdb'")
                 ),
         )
         .subcommand(
@@ -131,8 +138,8 @@ fn main() -> Result<()> {
         } else {
             AuthType::Trust
         };
-
-        local_env::init(pageserver_uri, tenantid, auth_type)
+        let repository_format = init_match.value_of("repository-format");
+        local_env::init(pageserver_uri, tenantid, auth_type, repository_format)
             .with_context(|| "Failed to create config file")?;
     }
 
@@ -151,6 +158,7 @@ fn main() -> Result<()> {
             if let Err(e) = pageserver.init(
                 Some(&env.tenantid.to_string()),
                 init_match.is_present("enable-auth"),
+                init_match.value_of("repository-format"),
             ) {
                 eprintln!("pageserver init failed: {}", e);
                 exit(1);
