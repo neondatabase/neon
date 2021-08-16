@@ -157,11 +157,9 @@ impl Repository for LayeredRepository {
     ) -> Result<GcResult> {
         STORAGE_TIME
             .with_label_values(&["gc"])
-            .observe_closure_duration(|| self.gc_iteration_internal(
-                target_timelineid,
-                horizon,
-                compact,
-            ))
+            .observe_closure_duration(|| {
+                self.gc_iteration_internal(target_timelineid, horizon, compact)
+            })
     }
 }
 
@@ -502,7 +500,10 @@ impl Timeline for LayeredTimeline {
 
     fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {
         if !rel.is_blocky() {
-            bail!("invalid get_relish_size request for non-blocky relish {}", rel);
+            bail!(
+                "invalid get_relish_size request for non-blocky relish {}",
+                rel
+            );
         }
 
         let lsn = self.wait_lsn(lsn)?;
@@ -561,11 +562,17 @@ impl Timeline for LayeredTimeline {
         // FIXME: We should pass the LSN argument to the calls above, and avoid scanning
         // dropped relations in the first place.
         let mut res: Result<()> = Ok(());
-        all_rels.retain(|reltag|
-                        match self.get_rel_exists(RelishTag::Relation(*reltag), lsn) {
-                            Ok(exists) => { info!("retain: {} -> {}", *reltag, exists); exists },
-                            Err(err) => { res = Err(err); false }
-                        }
+        all_rels.retain(
+            |reltag| match self.get_rel_exists(RelishTag::Relation(*reltag), lsn) {
+                Ok(exists) => {
+                    info!("retain: {} -> {}", *reltag, exists);
+                    exists
+                }
+                Err(err) => {
+                    res = Err(err);
+                    false
+                }
+            },
         );
         res?;
 
@@ -597,12 +604,16 @@ impl Timeline for LayeredTimeline {
         // FIXME: We should pass the LSN argument to the calls above, and avoid scanning
         // dropped relations in the first place.
         let mut res: Result<()> = Ok(());
-        all_rels.retain(|tag|
-                        match self.get_rel_exists(*tag, lsn) {
-                            Ok(exists) => { info!("retain: {} -> {}", *tag, exists); exists },
-                            Err(err) => { res = Err(err); false }
-                        }
-        );
+        all_rels.retain(|tag| match self.get_rel_exists(*tag, lsn) {
+            Ok(exists) => {
+                info!("retain: {} -> {}", *tag, exists);
+                exists
+            }
+            Err(err) => {
+                res = Err(err);
+                false
+            }
+        });
         res?;
 
         Ok(all_rels)
@@ -883,7 +894,6 @@ impl LayeredTimeline {
         // Look up the correct layer.
         let layers = self.layers.lock().unwrap();
         if let Some(layer) = layers.get(rel, lsn) {
-
             // If it's writeable, good, return it.
             if !layer.is_frozen() {
                 return Ok(Arc::clone(&layer));

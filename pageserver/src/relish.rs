@@ -119,8 +119,7 @@ impl RelishTag {
             | RelishTag::TwoPhase { .. } => true,
 
             // and these don't
-            | RelishTag::ControlFile
-                | RelishTag::Checkpoint => false,
+            RelishTag::ControlFile | RelishTag::Checkpoint => false,
         }
     }
 

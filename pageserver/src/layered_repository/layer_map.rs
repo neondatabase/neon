@@ -113,7 +113,9 @@ impl LayerMap {
             } else {
                 trace!(
                     "found singleton layer for rel {}, {} {}",
-                    rel, lsn, newer_lsn
+                    rel,
+                    lsn,
+                    newer_lsn
                 );
                 continue;
             }

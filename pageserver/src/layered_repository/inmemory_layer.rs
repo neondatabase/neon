@@ -326,12 +326,11 @@ impl Layer for InMemoryLayer {
         // the drop LSN instead. The drop-LSN could be ahead of the
         // caller-specified LSN!
         let dropped = inner.drop_lsn.is_some();
-        let end_lsn =
-            if dropped {
-                inner.drop_lsn.unwrap()
-            } else {
-                cutoff_lsn
-            };
+        let end_lsn = if dropped {
+            inner.drop_lsn.unwrap()
+        } else {
+            cutoff_lsn
+        };
 
         // Divide all the page versions into old and new at the 'end_lsn' cutoff point.
         let mut before_page_versions;

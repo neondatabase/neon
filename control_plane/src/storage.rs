@@ -50,7 +50,12 @@ impl PageServerNode {
             .unwrap()
     }
 
-    pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool, repository_format: Option<&str>) -> Result<()> {
+    pub fn init(
+        &self,
+        create_tenant: Option<&str>,
+        enable_auth: bool,
+        repository_format: Option<&str>,
+    ) -> Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         let mut args = vec![
             "--init",
