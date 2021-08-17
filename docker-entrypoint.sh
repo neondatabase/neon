@@ -1,6 +1,6 @@
 #!/bin/sh
 if [ "$1" = 'pageserver' ]; then
-    if [ ! -d "/data/timelines" ]; then
+    if [ ! -d "/data/tenants" ]; then
         echo "Initializing pageserver data directory"
         pageserver --init -D /data --postgres-distrib /usr/local
     fi
