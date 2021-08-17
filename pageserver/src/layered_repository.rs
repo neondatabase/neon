@@ -47,7 +47,9 @@ mod storage_layer;
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use snapshot_layer::SnapshotLayer;
-use storage_layer::{Layer, SegmentTag, RELISH_SEG_SIZE};
+use storage_layer::{Layer, PageReconstructData, SegmentTag, RELISH_SEG_SIZE};
+
+static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -466,22 +468,9 @@ pub struct LayeredTimeline {
 impl Timeline for LayeredTimeline {
     /// Look up given page in the cache.
     fn get_page_at_lsn(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
-        if !rel.is_blocky() && blknum != 0 {
-            bail!(
-                "invalid request for block {} for non-blocky relish {}",
-                blknum,
-                rel
-            );
-        }
         let lsn = self.wait_lsn(lsn)?;
 
-        let seg = SegmentTag::from_blknum(rel, blknum);
-
-        if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            layer.get_page_at_lsn(&*self.walredo_mgr, blknum, lsn)
-        } else {
-            bail!("relish {} not found at {}", rel, lsn);
-        }
+        self.get_page_at_lsn_nowait(rel, blknum, lsn)
     }
 
     fn get_page_at_lsn_nowait(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
@@ -496,7 +485,7 @@ impl Timeline for LayeredTimeline {
         let seg = SegmentTag::from_blknum(rel, blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            layer.get_page_at_lsn(&*self.walredo_mgr, blknum, lsn)
+            self.materialize_page(seg, blknum, lsn, &*layer)
         } else {
             bail!("relish {} not found at {}", rel, lsn);
         }
@@ -1040,7 +1029,7 @@ impl LayeredTimeline {
             );
             layer = InMemoryLayer::copy_snapshot(
                 self.conf,
-                &*self.walredo_mgr,
+                &self,
                 &*prev_layer,
                 self.timelineid,
                 self.tenantid,
@@ -1147,7 +1136,7 @@ impl LayeredTimeline {
         // Call unload() on all frozen layers, to release memory.
         for layer in old_layers.values() {
             if !layer.is_frozen() {
-                let new_layers = layer.freeze(last_valid_lsn, &*self.walredo_mgr)?;
+                let new_layers = layer.freeze(last_valid_lsn, &self)?;
 
                 // replace this layer with the new layers that 'freeze' returned
                 layers.remove(&**layer);
@@ -1317,5 +1306,105 @@ impl LayeredTimeline {
 
         result.elapsed = now.elapsed();
         Ok(result)
+    }
+
+    ///
+    /// Reconstruct a page version from given Layer
+    ///
+    fn materialize_page(
+        &self,
+        seg: SegmentTag,
+        blknum: u32,
+        lsn: Lsn,
+        layer: &dyn Layer,
+    ) -> Result<Bytes> {
+        let mut data = PageReconstructData {
+            records: Vec::new(),
+            page_img: None,
+        };
+
+        if let Some(_cont_lsn) = layer.get_page_reconstruct_data(blknum, lsn, &mut data)? {
+            // The layers are currently fully self-contained, so we should have found all
+            // the data we need to reconstruct the page in the layer.
+            if data.records.is_empty() {
+                // no records, and no base image. This can happen if PostgreSQL extends a relation
+                // but never writes the page.
+                //
+                // Would be nice to detect that situation better.
+                warn!("Page {} blk {} at {} not found", seg.rel, blknum, lsn);
+                return Ok(ZERO_PAGE.clone());
+            }
+            bail!(
+                "No base image found for page {} blk {} at {}/{}",
+                seg.rel,
+                blknum,
+                self.timelineid,
+                lsn,
+            );
+        }
+        self.reconstruct_page(seg.rel, blknum, lsn, data)
+    }
+
+    ///
+    /// Reconstruct a page version, using the given base image and WAL records in 'data'.
+    ///
+    fn reconstruct_page(
+        &self,
+        rel: RelishTag,
+        blknum: u32,
+        request_lsn: Lsn,
+        mut data: PageReconstructData,
+    ) -> Result<Bytes> {
+        // Perform WAL redo if needed
+        data.records.reverse();
+
+        // If we have a page image, and no WAL, we're all set
+        if data.records.is_empty() {
+            if let Some(img) = &data.page_img {
+                trace!(
+                    "found page image for blk {} in {} at {}/{}, no WAL redo required",
+                    blknum,
+                    rel,
+                    self.timelineid,
+                    request_lsn
+                );
+                Ok(img.clone())
+            } else {
+                // FIXME: this ought to be an error?
+                warn!("Page {} blk {} at {} not found", rel, blknum, request_lsn);
+                Ok(ZERO_PAGE.clone())
+            }
+        } else {
+            // We need to do WAL redo.
+            //
+            // If we don't have a base image, then the oldest WAL record better initialize
+            // the page
+            if data.page_img.is_none() && !data.records.first().unwrap().will_init {
+                // FIXME: this ought to be an error?
+                warn!(
+                    "Base image for page {}/{} at {} not found, but got {} WAL records",
+                    rel,
+                    blknum,
+                    request_lsn,
+                    data.records.len()
+                );
+                Ok(ZERO_PAGE.clone())
+            } else {
+                if data.page_img.is_some() {
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", data.records.len(), blknum, rel, self.timelineid, request_lsn);
+                } else {
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", data.records.len(), blknum, rel, self.timelineid, request_lsn);
+                }
+                let img = self.walredo_mgr.request_redo(
+                    rel,
+                    blknum,
+                    request_lsn,
+                    data.page_img.clone(),
+                    data.records,
+                )?;
+
+                Ok(img)
+            }
+        }
     }
 }

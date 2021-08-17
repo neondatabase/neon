@@ -37,15 +37,14 @@
 //! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
 //!
-use crate::layered_repository::storage_layer::ZERO_PAGE;
-use crate::layered_repository::storage_layer::{Layer, PageVersion, SegmentTag};
+use crate::layered_repository::storage_layer::{
+    Layer, PageReconstructData, PageVersion, SegmentTag,
+};
+use crate::layered_repository::LayeredTimeline;
 use crate::relish::*;
-use crate::repository::WALRecord;
-use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
-use bytes::Bytes;
 use log::*;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -270,15 +269,13 @@ impl Layer for SnapshotLayer {
     }
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(
+    fn get_page_reconstruct_data(
         &self,
-        walredo_mgr: &dyn WalRedoManager,
         blknum: u32,
         lsn: Lsn,
-    ) -> Result<Bytes> {
+        reconstruct_data: &mut PageReconstructData,
+    ) -> Result<Option<Lsn>> {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let mut records: Vec<WALRecord> = Vec::new();
-        let mut page_img: Option<Bytes> = None;
         let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
         {
             let inner = self.load()?;
@@ -289,11 +286,11 @@ impl Layer for SnapshotLayer {
                 .range((Included(&minkey), Included(&maxkey)));
             while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
                 if let Some(img) = &entry.page_image {
-                    page_img = Some(img.clone());
+                    reconstruct_data.page_img = Some(img.clone());
                     need_base_image_lsn = None;
                     break;
                 } else if let Some(rec) = &entry.record {
-                    records.push(rec.clone());
+                    reconstruct_data.records.push(rec.clone());
                     if rec.will_init {
                         // This WAL record initializes the page, so no need to go further back
                         need_base_image_lsn = None;
@@ -309,73 +306,8 @@ impl Layer for SnapshotLayer {
 
             // release lock on 'inner'
         }
-        records.reverse();
 
-        // If we needed a base image to apply the WAL records against, we should have found it in memory.
-        if let Some(lsn) = need_base_image_lsn {
-            if records.is_empty() {
-                // no records, and no base image. This can happen if PostgreSQL extends a relation
-                // but never writes the page.
-                //
-                // Would be nice to detect that situation better.
-                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
-                return Ok(ZERO_PAGE.clone());
-            }
-            bail!(
-                "No base image found for page {} blk {} at {}/{}",
-                self.seg.rel,
-                blknum,
-                self.timelineid,
-                lsn
-            );
-        }
-
-        // If we have a page image, and no WAL, we're all set
-        if records.is_empty() {
-            if let Some(img) = page_img {
-                trace!(
-                    "found page image for blk {} in {} at {}/{}, no WAL redo required",
-                    blknum,
-                    self.seg.rel,
-                    self.timelineid,
-                    lsn
-                );
-                Ok(img)
-            } else {
-                // FIXME: this ought to be an error?
-                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
-                Ok(ZERO_PAGE.clone())
-            }
-        } else {
-            // We need to do WAL redo.
-            //
-            // If we don't have a base image, then the oldest WAL record better initialize
-            // the page
-            if page_img.is_none() && !records.first().unwrap().will_init {
-                // FIXME: this ought to be an error?
-                warn!(
-                    "Base image for page {} blk {} at {} not found, but got {} WAL records",
-                    self.seg.rel,
-                    blknum,
-                    lsn,
-                    records.len()
-                );
-                Ok(ZERO_PAGE.clone())
-            } else {
-                if page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
-                } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
-                }
-                let img = walredo_mgr.request_redo(self.seg.rel, blknum, lsn, page_img, records)?;
-
-                // FIXME: Should we memoize the page image in memory, so that
-                // we wouldn't need to reconstruct it again, if it's requested again?
-                //self.put_page_image(blknum, lsn, img.clone())?;
-
-                Ok(img)
-            }
-        }
+        Ok(need_base_image_lsn)
     }
 
     /// Get size of the relation at given LSN
@@ -428,11 +360,7 @@ impl Layer for SnapshotLayer {
         bail!("cannot modify historical snapshot layer");
     }
 
-    fn freeze(
-        &self,
-        _end_lsn: Lsn,
-        _walredo_mgr: &dyn WalRedoManager,
-    ) -> Result<Vec<Arc<dyn Layer>>> {
+    fn freeze(&self, _end_lsn: Lsn, _timeline: &LayeredTimeline) -> Result<Vec<Arc<dyn Layer>>> {
         bail!("cannot freeze historical snapshot layer");
     }
 
@@ -585,7 +513,7 @@ impl SnapshotLayer {
         Ok(inner)
     }
 
-    /// Create SnapshotLayers representing all files on dik
+    /// Create SnapshotLayers representing all files on disk
     ///
     // TODO: returning an Iterator would be more idiomatic
     pub fn list_snapshot_files(

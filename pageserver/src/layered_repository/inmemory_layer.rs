@@ -3,22 +3,20 @@
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
 
-use crate::layered_repository::storage_layer::{Layer, PageVersion, SegmentTag, RELISH_SEG_SIZE};
+use crate::layered_repository::storage_layer::{
+    Layer, PageReconstructData, PageVersion, SegmentTag, RELISH_SEG_SIZE,
+};
+use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::SnapshotLayer;
-use crate::repository::WALRecord;
-use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
-use bytes::Bytes;
 use log::*;
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
 use std::sync::{Arc, Mutex};
 
 use zenith_utils::lsn::Lsn;
-
-static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -87,15 +85,13 @@ impl Layer for InMemoryLayer {
     }
 
     /// Look up given page in the cache.
-    fn get_page_at_lsn(
+    fn get_page_reconstruct_data(
         &self,
-        walredo_mgr: &dyn WalRedoManager,
         blknum: u32,
         lsn: Lsn,
-    ) -> Result<Bytes> {
-        // Scan the BTreeMap backwards, starting from the given entry.
-        let mut records: Vec<WALRecord> = Vec::new();
-        let mut page_img: Option<Bytes> = None;
+        reconstruct_data: &mut PageReconstructData,
+    ) -> Result<Option<Lsn>> {
+        // Scan the BTreeMap backwards, starting from reconstruct_data.lsn.
         let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
 
         assert!(self.seg.blknum_in_seg(blknum));
@@ -109,11 +105,11 @@ impl Layer for InMemoryLayer {
                 .range((Included(&minkey), Included(&maxkey)));
             while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
                 if let Some(img) = &entry.page_image {
-                    page_img = Some(img.clone());
+                    reconstruct_data.page_img = Some(img.clone());
                     need_base_image_lsn = None;
                     break;
                 } else if let Some(rec) = &entry.record {
-                    records.push(rec.clone());
+                    reconstruct_data.records.push(rec.clone());
                     if rec.will_init {
                         // This WAL record initializes the page, so no need to go further back
                         need_base_image_lsn = None;
@@ -129,71 +125,8 @@ impl Layer for InMemoryLayer {
 
             // release lock on 'page_versions'
         }
-        records.reverse();
 
-        // If we needed a base image to apply the WAL records against, we should have found it in memory.
-        if let Some(lsn) = need_base_image_lsn {
-            if records.is_empty() {
-                // no records, and no base image. This can happen if PostgreSQL extends a relation
-                // but never writes the page.
-                //
-                // Would be nice to detect that situation better.
-                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
-                return Ok(ZERO_PAGE.clone());
-            }
-            bail!(
-                "No base image found for page {} blk {} at {}/{}",
-                self.seg.rel,
-                blknum,
-                self.timelineid,
-                lsn
-            );
-        }
-
-        // If we have a page image, and no WAL, we're all set
-        if records.is_empty() {
-            if let Some(img) = page_img {
-                trace!(
-                    "found page image for blk {} in {} at {}/{}, no WAL redo required",
-                    blknum,
-                    self.seg.rel,
-                    self.timelineid,
-                    lsn
-                );
-                Ok(img)
-            } else {
-                // FIXME: this ought to be an error?
-                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
-                Ok(ZERO_PAGE.clone())
-            }
-        } else {
-            // We need to do WAL redo.
-            //
-            // If we don't have a base image, then the oldest WAL record better initialize
-            // the page
-            if page_img.is_none() && !records.first().unwrap().will_init {
-                // FIXME: this ought to be an error?
-                warn!(
-                    "Base image for page {}/{} at {} not found, but got {} WAL records",
-                    self.seg.rel,
-                    blknum,
-                    lsn,
-                    records.len()
-                );
-                Ok(ZERO_PAGE.clone())
-            } else {
-                if page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
-                } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
-                }
-                let img = walredo_mgr.request_redo(self.seg.rel, blknum, lsn, page_img, records)?;
-
-                self.put_page_image(blknum, lsn, img.clone())?;
-
-                Ok(img)
-            }
-        }
+        Ok(need_base_image_lsn)
     }
 
     /// Get size of the relation at given LSN
@@ -320,7 +253,8 @@ impl Layer for InMemoryLayer {
     fn freeze(
         &self,
         cutoff_lsn: Lsn,
-        walredo_mgr: &dyn WalRedoManager,
+        // This is needed just to call materialize_page()
+        timeline: &LayeredTimeline,
     ) -> Result<Vec<Arc<dyn Layer>>> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
@@ -398,7 +332,7 @@ impl Layer for InMemoryLayer {
 
             let new_layer = Self::copy_snapshot(
                 self.conf,
-                walredo_mgr,
+                timeline,
                 &snapfile,
                 self.timelineid,
                 self.tenantid,
@@ -465,7 +399,7 @@ impl InMemoryLayer {
     ///
     pub fn copy_snapshot(
         conf: &'static PageServerConf,
-        walredo_mgr: &dyn WalRedoManager,
+        timeline: &LayeredTimeline,
         src: &dyn Layer,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
@@ -494,7 +428,7 @@ impl InMemoryLayer {
         }
 
         for blknum in startblk..(startblk + size) {
-            let img = src.get_page_at_lsn(walredo_mgr, blknum, lsn)?;
+            let img = timeline.materialize_page(seg, blknum, lsn, src)?;
             let pv = PageVersion {
                 page_image: Some(img),
                 record: None,

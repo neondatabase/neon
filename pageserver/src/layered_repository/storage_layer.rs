@@ -2,9 +2,9 @@
 //! Common traits and structs for layers
 //!
 
+use crate::layered_repository::LayeredTimeline;
 use crate::relish::RelishTag;
 use crate::repository::WALRecord;
-use crate::walredo::WalRedoManager;
 use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::Bytes;
@@ -13,8 +13,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
-
-pub static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 // Size of one segment in pages (10 MB)
 pub const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
@@ -74,11 +72,24 @@ pub struct PageVersion {
 }
 
 ///
+/// Data needed to reconstruct a page version
+///
+/// 'page_img' is the old base image of the page to start the WAL replay with.
+/// It can be None, if the first WAL record initializes the page (will_init)
+/// 'records' contains the records to apply over the base image.
+///
+pub struct PageReconstructData {
+    pub records: Vec<WALRecord>,
+    pub page_img: Option<Bytes>,
+}
+
+///
 /// A Layer holds all page versions for one segment of a relish, in a range of LSNs.
 /// There are two kinds of layers, in-memory and snapshot layers. In-memory
 /// layers are used to ingest incoming WAL, and provide fast access
 /// to the recent page versions. Snaphot layers are stored on disk, and
-/// are immutable.
+/// are immutable. This trait presents the common functionality of
+/// in-memory and snapshot layers.
 ///
 /// Each layer contains a full snapshot of the segment at the start
 /// LSN. In addition to that, it contains WAL (or more page images)
@@ -99,18 +110,26 @@ pub trait Layer: Send + Sync {
     /// in-memory layers are always unfrozen.
     fn is_frozen(&self) -> bool;
 
-    // Functions that correspond to the Timeline trait functions.
-
-    // Note that the 'blknum' is the offset of the page from the beginning
-    // of the *relish*, not the beginning of the segment. The requested
-    // 'blknum' must be covered by this segment.
-    fn get_page_at_lsn(
+    ///
+    /// Return data needed to reconstruct given page at LSN.
+    ///
+    /// It is up to the caller to collect more data from previous layer and
+    /// perform WAL redo, if necessary.
+    ///
+    /// If returns Some, the returned data is not complete. The caller needs
+    /// to continue with the returned 'lsn'.
+    ///
+    /// Note that the 'blknum' is the offset of the page from the beginning
+    /// of the *relish*, not the beginning of the segment. The requested
+    /// 'blknum' must be covered by this segment.
+    fn get_page_reconstruct_data(
         &self,
-        walredo_mgr: &dyn WalRedoManager,
         blknum: u32,
         lsn: Lsn,
-    ) -> Result<Bytes>;
+        reconstruct_data: &mut PageReconstructData,
+    ) -> Result<Option<Lsn>>;
 
+    // Functions that correspond to the Timeline trait functions.
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
 
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
@@ -150,8 +169,7 @@ pub trait Layer: Send + Sync {
     ///
     /// Returns new layers that replace this one.
     ///
-    fn freeze(&self, end_lsn: Lsn, walredo_mgr: &dyn WalRedoManager)
-        -> Result<Vec<Arc<dyn Layer>>>;
+    fn freeze(&self, end_lsn: Lsn, walredo_mgr: &LayeredTimeline) -> Result<Vec<Arc<dyn Layer>>>;
 
     /// Permanently delete this layer
     fn delete(&self) -> Result<()>;
