@@ -31,8 +31,8 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
 
                     # Create a test table
                     cur.execute("CREATE TABLE foo(x integer)")
+                    cur.execute("INSERT INTO foo VALUES (1)")
 
-                    print("Inserting two more rows and running GC")
                     cur.execute("select relfilenode from pg_class where oid = 'foo'::regclass");
                     row = cur.fetchone();
                     print("relfilenode is {}", row[0]);
@@ -46,6 +46,10 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     # kicks in and confuses our numbers.
                     cur.execute("VACUUM")
 
+                    # delete the row, to update the Visibility Map. We don't want the VM
+                    # update to confuse our numbers either.
+                    cur.execute("DELETE FROM foo")
+
                     print("Running GC before test")
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
@@ -54,16 +58,14 @@ def test_snapfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     snapshot_relfiles_remain = row['snapshot_relfiles_total'] - row['snapshot_relfiles_removed']
                     assert snapshot_relfiles_remain > 0
 
-                    # Insert a row. The first insert will also create a metadata entry for the
-                    # relation, with size == 1 block. Hence, bump up the expected relation count.
-                    snapshot_relfiles_remain += 1;
+                    # Insert a row.
                     print("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain
-                    assert row['snapshot_relfiles_removed'] == 0
+                    assert row['snapshot_relfiles_total'] == snapshot_relfiles_remain + 1
+                    assert row['snapshot_relfiles_removed'] == 1
                     assert row['snapshot_relfiles_dropped'] == 0
 
                     # Insert two more rows and run GC.

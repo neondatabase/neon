@@ -7,22 +7,22 @@ memory. Every now and then, the accumulated changes are written out to
 new files.
 
 The files are called "snapshot files". Each snapshot file corresponds
-to one PostgreSQL relation fork. The snapshot files for each timeline
-are stored in the timeline's subdirectory under
+to one 10 MB slice of a PostgreSQL relation fork. The snapshot files
+for each timeline are stored in the timeline's subdirectory under
 .zenith/tenants/<tenantid>/timelines.
 
 The files are named like this:
 
-    rel_<spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
+    rel_<spcnode>_<dbnode>_<relnode>_<forknum>_<segno>_<start LSN>_<end LSN>
 
 For example:
 
-    rel_1663_13990_2609_0_000000000169C348_0000000001702000
+    rel_1663_13990_2609_0_10_000000000169C348_0000000001702000
 
 Some non-relation files are also stored in repository. For example,
 a CLOG segment would be named like this:
 
-    pg_xact_0000_00000000198B06B0_00000000198C2550
+    pg_xact_0000_0_00000000198B06B0_00000000198C2550
 
 There is no difference in how the relation and non-relation files are
 managed, except that the first part of file names is different.
@@ -38,7 +38,7 @@ version of the relation in the LSN range.
 If a file has been dropped, the last snapshot file for it is created
 with the _DROPPED suffix, e.g.
 
-    rel_1663_13990_2609_0_000000000169C348_0000000001702000_DROPPED
+    rel_1663_13990_2609_0_10_000000000169C348_0000000001702000_DROPPED
 
 In addition to the relations, with "rel_*" prefix, we use the same
 format for storing various smaller files from the PostgreSQL data
@@ -51,14 +51,14 @@ relation in the storage"
 
 The full path of a snapshot file looks like this:
 
-    .zenith/tenants/941ddc8604413b88b3d208bddf90396c/timelines/4af489b06af8eed9e27a841775616962/rel_1663_13990_2609_0_000000000169C348_0000000001702000
+    .zenith/tenants/941ddc8604413b88b3d208bddf90396c/timelines/4af489b06af8eed9e27a841775616962/rel_1663_13990_2609_0_10_000000000169C348_0000000001702000
 
 For simplicity, the examples below use a simplified notation for the
 paths.  The tenant ID is left out, the timeline ID is replaced with
-the human-readable branch name, and spcnode+dbnode+relnode+forkum with
-a human-readable table name. The LSNs are also shorter. For example, a
-snapshot file for 'orders' table on 'main' branch, with LSN range
-100-200 would be:
+the human-readable branch name, and spcnode+dbnode+relnode+forkum+segno
+with a human-readable table name. The LSNs are also shorter. For
+example, a snapshot file for 'orders' table on 'main' branch, with LSN
+range 100-200 would be:
 
     main/orders_100_200
 

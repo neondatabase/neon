@@ -1,3 +1,7 @@
+//!
+//! Common traits and structs for layers
+//!
+
 use crate::relish::RelishTag;
 use crate::repository::WALRecord;
 use crate::walredo::WalRedoManager;
@@ -5,11 +9,44 @@ use crate::ZTimelineId;
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
 
 pub static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+
+// Size of one segment in pages (10 MB)
+pub const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
+
+///
+/// Each relish stored in the repository is divided into fixed-sized "segments",
+/// with 10 MB of key-space, or 1280 8k pages each.
+///
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy)]
+pub struct SegmentTag {
+    pub rel: RelishTag,
+    pub segno: u32,
+}
+
+impl fmt::Display for SegmentTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.rel, self.segno)
+    }
+}
+
+impl SegmentTag {
+    pub const fn from_blknum(rel: RelishTag, blknum: u32) -> SegmentTag {
+        SegmentTag {
+            rel,
+            segno: blknum / RELISH_SEG_SIZE,
+        }
+    }
+
+    pub fn blknum_in_seg(&self, blknum: u32) -> bool {
+        blknum / RELISH_SEG_SIZE == self.segno
+    }
+}
 
 ///
 /// Represents a version of a page at a specific LSN. The LSN is the key of the
@@ -37,21 +74,21 @@ pub struct PageVersion {
 }
 
 ///
-/// A Layer holds all page versions for one relish, in a range of LSNs.
+/// A Layer holds all page versions for one segment of a relish, in a range of LSNs.
 /// There are two kinds of layers, in-memory and snapshot layers. In-memory
 /// layers are used to ingest incoming WAL, and provide fast access
 /// to the recent page versions. Snaphot layers are stored on disk, and
 /// are immutable.
 ///
-/// Each layer contains a full snapshot of the relish at the start
+/// Each layer contains a full snapshot of the segment at the start
 /// LSN. In addition to that, it contains WAL (or more page images)
 /// needed to recontruct any page version up to the end LSN.
 ///
 pub trait Layer: Send + Sync {
-    // These functions identify the relish and the LSN range that this Layer
-    // holds.
+    // These functions identify the relish segment and the LSN range
+    // that this Layer holds.
     fn get_timeline_id(&self) -> ZTimelineId;
-    fn get_relish_tag(&self) -> RelishTag;
+    fn get_seg_tag(&self) -> SegmentTag;
     fn get_start_lsn(&self) -> Lsn;
     fn get_end_lsn(&self) -> Lsn;
     fn is_dropped(&self) -> bool;
@@ -63,6 +100,10 @@ pub trait Layer: Send + Sync {
     fn is_frozen(&self) -> bool;
 
     // Functions that correspond to the Timeline trait functions.
+
+    // Note that the 'blknum' is the offset of the page from the beginning
+    // of the *relish*, not the beginning of the segment. The requested
+    // 'blknum' must be covered by this segment.
     fn get_page_at_lsn(
         &self,
         walredo_mgr: &dyn WalRedoManager,
@@ -70,9 +111,9 @@ pub trait Layer: Send + Sync {
         lsn: Lsn,
     ) -> Result<Bytes>;
 
-    fn get_relish_size(&self, lsn: Lsn) -> Result<Option<u32>>;
+    fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
 
-    fn get_rel_exists(&self, lsn: Lsn) -> Result<bool>;
+    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
 
     fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()>;
 

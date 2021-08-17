@@ -521,6 +521,21 @@ mod tests {
             pg_constants::RELSEG_SIZE - 1
         );
 
+        // Truncate to 1500, and then truncate all the way down to 0, one block at a time
+        // This tests the behavior at segment boundaries
+        let mut size: i32 = 3000;
+        while size >= 0 {
+            lsn += 1;
+            tline.put_truncation(TESTREL_A, Lsn(lsn), size as u32)?;
+            tline.advance_last_valid_lsn(Lsn(lsn));
+            assert_eq!(
+                tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
+                size as u32
+            );
+
+            size -= 1;
+        }
+
         Ok(())
     }
 

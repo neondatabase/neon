@@ -9,7 +9,7 @@
 //! new snapshot layers and corresponding files are written to disk.
 //!
 
-use crate::layered_repository::storage_layer::Layer;
+use crate::layered_repository::storage_layer::{Layer, SegmentTag};
 use crate::relish::*;
 use anyhow::Result;
 use log::*;
@@ -19,20 +19,20 @@ use std::ops::Bound::Included;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 
-/// LayerMap is a BTreeMap keyed by RelishTag and the layer's start LSN.
+/// LayerMap is a BTreeMap keyed by SegmentTag and the layer's start LSN.
 /// It provides a couple of convenience functions over a plain BTreeMap
 pub struct LayerMap {
-    pub inner: BTreeMap<(RelishTag, Lsn), Arc<dyn Layer>>,
+    pub inner: BTreeMap<(SegmentTag, Lsn), Arc<dyn Layer>>,
 }
 
 impl LayerMap {
     ///
-    /// Look up using the given rel tag and LSN. This differs from a plain
+    /// Look up using the given segment tag and LSN. This differs from a plain
     /// key-value lookup in that if there is any layer that covers the
     /// given LSN, or precedes the given LSN, it is returned. In other words,
     /// you don't need to know the exact start LSN of the layer.
     ///
-    pub fn get(&self, tag: RelishTag, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+    pub fn get(&self, tag: SegmentTag, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         let startkey = (tag, Lsn(0));
         let endkey = (tag, lsn);
 
@@ -48,32 +48,32 @@ impl LayerMap {
     }
 
     pub fn insert(&mut self, layer: Arc<dyn Layer>) {
-        let rel = layer.get_relish_tag();
+        let seg = layer.get_seg_tag();
         let start_lsn = layer.get_start_lsn();
 
-        self.inner.insert((rel, start_lsn), Arc::clone(&layer));
+        self.inner.insert((seg, start_lsn), Arc::clone(&layer));
     }
 
     pub fn remove(&mut self, layer: &dyn Layer) {
-        let rel = layer.get_relish_tag();
+        let seg = layer.get_seg_tag();
         let start_lsn = layer.get_start_lsn();
 
-        self.inner.remove(&(rel, start_lsn));
+        self.inner.remove(&(seg, start_lsn));
     }
 
     pub fn list_rels(&self, spcnode: u32, dbnode: u32) -> Result<HashSet<RelTag>> {
         let mut rels: HashSet<RelTag> = HashSet::new();
 
         // Scan the timeline directory to get all rels in this timeline.
-        for ((rel, _lsn), _l) in self.inner.iter() {
-            if let RelishTag::Relation(reltag) = rel {
+        for ((seg, _lsn), _l) in self.inner.iter() {
+            if let RelishTag::Relation(reltag) = seg.rel {
                 // FIXME: skip if it was dropped before the requested LSN. But there is no
                 // LSN argument
 
                 if (spcnode == 0 || reltag.spcnode == spcnode)
                     && (dbnode == 0 || reltag.dbnode == dbnode)
                 {
-                    rels.insert(*reltag);
+                    rels.insert(reltag);
                 }
             }
         }
@@ -84,43 +84,40 @@ impl LayerMap {
         let mut rels: HashSet<RelishTag> = HashSet::new();
 
         // Scan the timeline directory to get all rels in this timeline.
-        for ((rel, _lsn), _l) in self.inner.iter() {
+        for ((seg, _lsn), _l) in self.inner.iter() {
             // FIXME: skip if it was dropped before the requested LSN.
 
-            if let RelishTag::Relation(_) = rel {
+            if let RelishTag::Relation(_) = seg.rel {
             } else {
-                rels.insert(*rel);
+                rels.insert(seg.rel);
             }
         }
         Ok(rels)
     }
 
-    /// Is there a newer layer for given relation?
-    pub fn newer_layer_exists(&self, rel: RelishTag, lsn: Lsn) -> bool {
-        let startkey = (rel, lsn);
-        let endkey = (rel, Lsn(u64::MAX));
+    /// Is there a newer layer for given segment?
+    pub fn newer_layer_exists(&self, seg: SegmentTag, lsn: Lsn) -> bool {
+        let startkey = (seg, lsn);
+        let endkey = (seg, Lsn(u64::MAX));
 
-        for ((_rel, newer_lsn), layer) in self.inner.range((Included(startkey), Included(endkey))) {
+        for ((_newer_seg, newer_lsn), layer) in
+            self.inner.range((Included(startkey), Included(endkey)))
+        {
             if layer.get_end_lsn() > lsn {
                 trace!(
-                    "found later layer for rel {}, {} {}-{}",
-                    rel,
+                    "found later layer for {}, {} {}-{}",
+                    seg,
                     lsn,
                     newer_lsn,
                     layer.get_end_lsn()
                 );
                 return true;
             } else {
-                trace!(
-                    "found singleton layer for rel {}, {} {}",
-                    rel,
-                    lsn,
-                    newer_lsn
-                );
+                trace!("found singleton layer for {}, {} {}", seg, lsn, newer_lsn);
                 continue;
             }
         }
-        trace!("no later layer found for rel {}, {}", rel, lsn);
+        trace!("no later layer found for {}, {}", seg, lsn);
         false
     }
 }

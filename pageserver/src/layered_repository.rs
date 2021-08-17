@@ -12,7 +12,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use log::*;
@@ -47,7 +47,7 @@ mod storage_layer;
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use snapshot_layer::SnapshotLayer;
-use storage_layer::Layer;
+use storage_layer::{Layer, SegmentTag, RELISH_SEG_SIZE};
 
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
@@ -475,7 +475,9 @@ impl Timeline for LayeredTimeline {
         }
         let lsn = self.wait_lsn(lsn)?;
 
-        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
+        let seg = SegmentTag::from_blknum(rel, blknum);
+
+        if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
             layer.get_page_at_lsn(&*self.walredo_mgr, blknum, lsn)
         } else {
             bail!("relish {} not found at {}", rel, lsn);
@@ -491,7 +493,9 @@ impl Timeline for LayeredTimeline {
             );
         }
 
-        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
+        let seg = SegmentTag::from_blknum(rel, blknum);
+
+        if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
             layer.get_page_at_lsn(&*self.walredo_mgr, blknum, lsn)
         } else {
             bail!("relish {} not found at {}", rel, lsn);
@@ -508,27 +512,43 @@ impl Timeline for LayeredTimeline {
 
         let lsn = self.wait_lsn(lsn)?;
 
-        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
-            let result = layer.get_relish_size(lsn);
-            trace!(
-                "get_relish_size: rel {} at {}/{} -> {:?}",
-                rel,
-                self.timelineid,
-                lsn,
-                result
-            );
-            result
-        } else {
-            Ok(None)
+        let mut segno = 0;
+        loop {
+            let seg = SegmentTag { rel, segno };
+
+            let segsize;
+            if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
+                segsize = layer.get_seg_size(lsn)?;
+                trace!(
+                    "get_seg_size: {} at {}/{} -> {}",
+                    seg,
+                    self.timelineid,
+                    lsn,
+                    segsize
+                );
+            } else {
+                if segno == 0 {
+                    return Ok(None);
+                }
+                segsize = 0;
+            }
+
+            if segsize != RELISH_SEG_SIZE {
+                let result = segno * RELISH_SEG_SIZE + segsize;
+                return Ok(Some(result));
+            }
+            segno += 1;
         }
     }
 
     fn get_rel_exists(&self, rel: RelishTag, lsn: Lsn) -> Result<bool> {
         let lsn = self.wait_lsn(lsn)?;
 
+        let seg = SegmentTag { rel, segno: 0 };
+
         let result;
-        if let Some((layer, lsn)) = self.get_layer_for_read(rel, lsn)? {
-            result = layer.get_rel_exists(lsn)?;
+        if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
+            result = layer.get_seg_exists(lsn)?;
         } else {
             result = false;
         }
@@ -632,7 +652,10 @@ impl Timeline for LayeredTimeline {
                 rel
             );
         }
-        let layer = self.get_layer_for_write(rel, rec.lsn)?;
+
+        let seg = SegmentTag::from_blknum(rel, blknum);
+
+        let layer = self.get_layer_for_write(seg, rec.lsn)?;
         layer.put_wal_record(blknum, rec)
     }
 
@@ -643,8 +666,84 @@ impl Timeline for LayeredTimeline {
 
         debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
 
-        let layer = self.get_layer_for_write(rel, lsn)?;
-        layer.put_truncation(lsn, relsize)
+        let oldsize = self
+            .get_relish_size(rel, self.last_valid_lsn.load())?
+            .ok_or_else(|| {
+                anyhow!(
+                    "attempted to truncate non-existent relish {} at {}",
+                    rel,
+                    lsn
+                )
+            })?;
+
+        if oldsize <= relsize {
+            return Ok(());
+        }
+        let old_last_seg = (oldsize - 1) / RELISH_SEG_SIZE;
+
+        let last_remain_seg = if relsize == 0 {
+            0
+        } else {
+            (relsize - 1) / RELISH_SEG_SIZE
+        };
+
+        // Unlink segments beyond the last remaining segment.
+        for remove_segno in (last_remain_seg + 1)..=old_last_seg {
+            let seg = SegmentTag {
+                rel,
+                segno: remove_segno,
+            };
+            let layer = self.get_layer_for_write(seg, lsn)?;
+            layer.put_unlink(lsn)?;
+        }
+
+        // Truncate the last remaining segment to the specified size
+        if relsize == 0 || relsize % RELISH_SEG_SIZE != 0 {
+            let seg = SegmentTag {
+                rel,
+                segno: last_remain_seg,
+            };
+            let layer = self.get_layer_for_write(seg, lsn)?;
+            layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)?;
+        }
+
+        Ok(())
+    }
+
+    fn put_unlink(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
+        trace!("put_unlink: {} at {}", rel, lsn);
+
+        if rel.is_blocky() {
+            let oldsize_opt = self.get_relish_size(rel, self.last_valid_lsn.load())?;
+            if let Some(oldsize) = oldsize_opt {
+                let old_last_seg = if oldsize == 0 {
+                    0
+                } else {
+                    (oldsize - 1) / RELISH_SEG_SIZE
+                };
+
+                // Unlink all segments
+                for remove_segno in 0..=old_last_seg {
+                    let seg = SegmentTag {
+                        rel,
+                        segno: remove_segno,
+                    };
+                    let layer = self.get_layer_for_write(seg, lsn)?;
+                    layer.put_unlink(lsn)?;
+                }
+            } else {
+                warn!(
+                    "put_unlink called on non-existent relish {} at {}",
+                    rel, lsn
+                );
+            }
+        } else {
+            let seg = SegmentTag::from_blknum(rel, 0);
+            let layer = self.get_layer_for_write(seg, lsn)?;
+            layer.put_unlink(lsn)?;
+        }
+
+        Ok(())
     }
 
     fn put_page_image(
@@ -663,15 +762,10 @@ impl Timeline for LayeredTimeline {
             );
         }
 
-        let layer = self.get_layer_for_write(rel, lsn)?;
+        let seg = SegmentTag::from_blknum(rel, blknum);
+
+        let layer = self.get_layer_for_write(seg, lsn)?;
         layer.put_page_image(blknum, lsn, img)
-    }
-
-    fn put_unlink(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
-        trace!("put_unlink: {} at {}", rel, lsn);
-
-        let layer = self.get_layer_for_write(rel, lsn)?;
-        layer.put_unlink(lsn)
     }
 
     fn put_raw_data(
@@ -807,7 +901,7 @@ impl LayeredTimeline {
         for layer_rc in snapfiles.iter() {
             info!(
                 "found layer {} {}-{} {} on timeline {}",
-                layer_rc.get_relish_tag(),
+                layer_rc.get_seg_tag(),
                 layer_rc.get_start_lsn(),
                 layer_rc.get_end_lsn(),
                 layer_rc.is_dropped(),
@@ -822,17 +916,17 @@ impl LayeredTimeline {
     ///
     /// Get a handle to a Layer for reading.
     ///
-    /// The returned SnapshotFile might be from an ancestor timeline, if the
-    /// relation hasn't been updated on this timeline yet.
+    /// The returned Layer might be from an ancestor timeline, if the
+    /// segment hasn't been updated on this timeline yet.
     ///
     fn get_layer_for_read(
         &self,
-        rel: RelishTag,
+        seg: SegmentTag,
         lsn: Lsn,
     ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
         trace!(
             "get_layer_for_read called for {} at {}/{}",
-            rel,
+            seg,
             self.timelineid,
             lsn
         );
@@ -859,7 +953,7 @@ impl LayeredTimeline {
             //
 
             // Do we have a layer on this timeline?
-            if let Some(layer) = layers.get(rel, lsn) {
+            if let Some(layer) = layers.get(seg, lsn) {
                 trace!(
                     "found layer in cache: {} {}-{}",
                     timeline.timelineid,
@@ -868,6 +962,11 @@ impl LayeredTimeline {
                 );
 
                 assert!(layer.get_start_lsn() <= lsn);
+
+                if layer.is_dropped() && layer.get_end_lsn() <= lsn {
+                    // The segment was unlinked
+                    return Ok(None);
+                }
 
                 return Ok(Some((layer.clone(), lsn)));
             }
@@ -886,14 +985,14 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, rel: RelishTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
+    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
         if lsn < self.last_valid_lsn.load() {
             bail!("cannot modify relation after advancing last_valid_lsn");
         }
 
         // Look up the correct layer.
         let layers = self.layers.lock().unwrap();
-        if let Some(layer) = layers.get(rel, lsn) {
+        if let Some(layer) = layers.get(seg, lsn) {
             // If it's writeable, good, return it.
             if !layer.is_frozen() {
                 return Ok(Arc::clone(&layer));
@@ -912,7 +1011,7 @@ impl LayeredTimeline {
         drop(layers);
 
         let layer;
-        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read(rel, lsn)? {
+        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read(seg, lsn)? {
             // Create new entry after the previous one.
             let lsn;
             if prev_layer.get_timeline_id() != self.timelineid {
@@ -920,7 +1019,7 @@ impl LayeredTimeline {
                 lsn = self.ancestor_lsn;
                 trace!(
                     "creating file for write for {} at branch point {}/{}",
-                    rel,
+                    seg,
                     self.timelineid,
                     lsn
                 );
@@ -928,7 +1027,7 @@ impl LayeredTimeline {
                 lsn = prev_layer.get_end_lsn();
                 trace!(
                     "creating file for write for {} after previous layer {}/{}",
-                    rel,
+                    seg,
                     self.timelineid,
                     lsn
                 );
@@ -951,12 +1050,12 @@ impl LayeredTimeline {
             // New relation.
             trace!(
                 "creating layer for write for new rel {} at {}/{}",
-                rel,
+                seg,
                 self.timelineid,
                 lsn
             );
 
-            layer = InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, rel, lsn)?;
+            layer = InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn)?;
         }
 
         let mut layers = self.layers.lock().unwrap();
@@ -1055,7 +1154,7 @@ impl LayeredTimeline {
                 for new_layer in new_layers {
                     trace!(
                         "freeze returned layer {} {}-{}",
-                        new_layer.get_relish_tag(),
+                        new_layer.get_seg_tag(),
                         new_layer.get_start_lsn(),
                         new_layer.get_end_lsn()
                     );
@@ -1129,8 +1228,8 @@ impl LayeredTimeline {
         let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
         // Determine for each file if it needs to be retained
-        'outer: for ((rel, _lsn), l) in layers.inner.iter() {
-            if rel.is_relation() {
+        'outer: for ((seg, _lsn), l) in layers.inner.iter() {
+            if seg.rel.is_relation() {
                 result.snapshot_relfiles_total += 1;
             } else {
                 result.snapshot_nonrelfiles_total += 1;
@@ -1140,12 +1239,12 @@ impl LayeredTimeline {
             if l.get_end_lsn() > cutoff {
                 info!(
                     "keeping {} {}-{} because it's newer than cutoff {}",
-                    rel,
+                    seg,
                     l.get_start_lsn(),
                     l.get_end_lsn(),
                     cutoff
                 );
-                if rel.is_relation() {
+                if seg.rel.is_relation() {
                     result.snapshot_relfiles_needed_by_cutoff += 1;
                 } else {
                     result.snapshot_nonrelfiles_needed_by_cutoff += 1;
@@ -1159,12 +1258,12 @@ impl LayeredTimeline {
                 if l.get_start_lsn() <= *retain_lsn && *retain_lsn <= l.get_end_lsn() {
                     info!(
                         "keeping {} {}-{} because it's needed by branch point {}",
-                        rel,
+                        seg,
                         l.get_start_lsn(),
                         l.get_end_lsn(),
                         *retain_lsn
                     );
-                    if rel.is_relation() {
+                    if seg.rel.is_relation() {
                         result.snapshot_relfiles_needed_by_branches += 1;
                     } else {
                         result.snapshot_nonrelfiles_needed_by_branches += 1;
@@ -1174,8 +1273,8 @@ impl LayeredTimeline {
             }
 
             // Unless the relation was dropped, is there a later snapshot file for this relation?
-            if !l.is_dropped() && !layers.newer_layer_exists(l.get_relish_tag(), l.get_end_lsn()) {
-                if rel.is_relation() {
+            if !l.is_dropped() && !layers.newer_layer_exists(l.get_seg_tag(), l.get_end_lsn()) {
+                if seg.rel.is_relation() {
                     result.snapshot_relfiles_not_updated += 1;
                 } else {
                     result.snapshot_nonrelfiles_not_updated += 1;
@@ -1186,7 +1285,7 @@ impl LayeredTimeline {
             // We didn't find any reason to keep this file, so remove it.
             info!(
                 "garbage collecting {} {}-{} {}",
-                l.get_relish_tag(),
+                l.get_seg_tag(),
                 l.get_start_lsn(),
                 l.get_end_lsn(),
                 l.is_dropped()
@@ -1202,13 +1301,13 @@ impl LayeredTimeline {
             layers.remove(&*doomed_layer);
 
             if doomed_layer.is_dropped() {
-                if doomed_layer.get_relish_tag().is_relation() {
+                if doomed_layer.get_seg_tag().rel.is_relation() {
                     result.snapshot_relfiles_dropped += 1;
                 } else {
                     result.snapshot_nonrelfiles_dropped += 1;
                 }
             } else {
-                if doomed_layer.get_relish_tag().is_relation() {
+                if doomed_layer.get_seg_tag().rel.is_relation() {
                     result.snapshot_relfiles_removed += 1;
                 } else {
                     result.snapshot_nonrelfiles_removed += 1;

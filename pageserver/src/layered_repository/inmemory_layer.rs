@@ -3,10 +3,8 @@
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
 
-use crate::layered_repository::storage_layer::Layer;
-use crate::layered_repository::storage_layer::PageVersion;
+use crate::layered_repository::storage_layer::{Layer, PageVersion, SegmentTag, RELISH_SEG_SIZE};
 use crate::layered_repository::SnapshotLayer;
-use crate::relish::*;
 use crate::repository::WALRecord;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
@@ -26,7 +24,7 @@ pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
-    rel: RelishTag,
+    seg: SegmentTag,
 
     ///
     /// This layer contains all the changes from 'start_lsn'. The
@@ -51,9 +49,9 @@ pub struct InMemoryLayerInner {
     page_versions: BTreeMap<(u32, Lsn), PageVersion>,
 
     ///
-    /// `relsizes` tracks the size of the relation at different points in time.
+    /// `segsizes` tracks the size of the segment at different points in time.
     ///
-    relsizes: BTreeMap<Lsn, u32>,
+    segsizes: BTreeMap<Lsn, u32>,
 }
 
 impl Layer for InMemoryLayer {
@@ -65,8 +63,8 @@ impl Layer for InMemoryLayer {
         return self.timelineid;
     }
 
-    fn get_relish_tag(&self) -> RelishTag {
-        return self.rel;
+    fn get_seg_tag(&self) -> SegmentTag {
+        return self.seg;
     }
 
     fn get_start_lsn(&self) -> Lsn {
@@ -74,7 +72,13 @@ impl Layer for InMemoryLayer {
     }
 
     fn get_end_lsn(&self) -> Lsn {
-        return Lsn(u64::MAX);
+        let inner = self.inner.lock().unwrap();
+
+        if let Some(drop_lsn) = inner.drop_lsn {
+            drop_lsn
+        } else {
+            Lsn(u64::MAX)
+        }
     }
 
     fn is_dropped(&self) -> bool {
@@ -93,6 +97,8 @@ impl Layer for InMemoryLayer {
         let mut records: Vec<WALRecord> = Vec::new();
         let mut page_img: Option<Bytes> = None;
         let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
+
+        assert!(self.seg.blknum_in_seg(blknum));
 
         {
             let inner = self.inner.lock().unwrap();
@@ -132,12 +138,12 @@ impl Layer for InMemoryLayer {
                 // but never writes the page.
                 //
                 // Would be nice to detect that situation better.
-                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
                 return Ok(ZERO_PAGE.clone());
             }
             bail!(
                 "No base image found for page {} blk {} at {}/{}",
-                self.rel,
+                self.seg.rel,
                 blknum,
                 self.timelineid,
                 lsn
@@ -150,14 +156,14 @@ impl Layer for InMemoryLayer {
                 trace!(
                     "found page image for blk {} in {} at {}/{}, no WAL redo required",
                     blknum,
-                    self.rel,
+                    self.seg.rel,
                     self.timelineid,
                     lsn
                 );
                 Ok(img)
             } else {
                 // FIXME: this ought to be an error?
-                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
                 Ok(ZERO_PAGE.clone())
             }
         } else {
@@ -169,7 +175,7 @@ impl Layer for InMemoryLayer {
                 // FIXME: this ought to be an error?
                 warn!(
                     "Base image for page {}/{} at {} not found, but got {} WAL records",
-                    self.rel,
+                    self.seg.rel,
                     blknum,
                     lsn,
                     records.len()
@@ -177,11 +183,11 @@ impl Layer for InMemoryLayer {
                 Ok(ZERO_PAGE.clone())
             } else {
                 if page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
                 } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
                 }
-                let img = walredo_mgr.request_redo(self.rel, blknum, lsn, page_img, records)?;
+                let img = walredo_mgr.request_redo(self.seg.rel, blknum, lsn, page_img, records)?;
 
                 self.put_page_image(blknum, lsn, img.clone())?;
 
@@ -191,26 +197,26 @@ impl Layer for InMemoryLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_relish_size(&self, lsn: Lsn) -> Result<Option<u32>> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.inner.lock().unwrap();
-        let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let mut iter = inner.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             let result = *entry;
             drop(inner);
-            trace!("get_relish_size: {} at {} -> {}", self.rel, lsn, result);
-            Ok(Some(result))
+            trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
+            Ok(result)
         } else {
-            Ok(None)
+            bail!("No size found for {} at {} in memory", self.seg, lsn);
         }
     }
 
-    /// Does this relation exist at given LSN?
-    fn get_rel_exists(&self, lsn: Lsn) -> Result<bool> {
+    /// Does this segment exist at given LSN?
+    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
         let inner = self.inner.lock().unwrap();
 
-        // Is the requested LSN after the rel was dropped?
+        // Is the requested LSN after the segment was dropped?
         if let Some(drop_lsn) = inner.drop_lsn {
             if lsn >= drop_lsn {
                 return Ok(false);
@@ -226,10 +232,12 @@ impl Layer for InMemoryLayer {
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
     fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()> {
+        assert!(self.seg.blknum_in_seg(blknum));
+
         trace!(
             "put_page_version blk {} of {} at {}/{}",
             blknum,
-            self.rel,
+            self.seg.rel,
             self.timelineid,
             lsn
         );
@@ -240,14 +248,16 @@ impl Layer for InMemoryLayer {
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
             warn!(
-                "Page version of rel {:?} blk {} at {} already exists",
-                self.rel, blknum, lsn
+                "Page version of rel {} blk {} at {} already exists",
+                self.seg.rel, blknum, lsn
             );
         }
 
         // Also update the relation size, if this extended the relation.
-        if self.rel.is_blocky() {
-            let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        if self.seg.rel.is_blocky() {
+            let newsize = blknum - self.seg.segno * RELISH_SEG_SIZE + 1;
+
+            let mut iter = inner.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
             let oldsize;
             if let Some((_entry_lsn, entry)) = iter.next_back() {
@@ -256,15 +266,15 @@ impl Layer for InMemoryLayer {
                 oldsize = 0;
                 //bail!("No old size found for {} at {}", self.tag, lsn);
             }
-            if blknum >= oldsize {
+            if newsize > oldsize {
                 trace!(
-                    "enlarging relation {} from {} to {} blocks at {}",
-                    self.rel,
+                    "enlarging segment {} from {} to {} blocks at {}",
+                    self.seg,
                     oldsize,
-                    blknum + 1,
+                    newsize,
                     lsn
                 );
-                inner.relsizes.insert(lsn, blknum + 1);
+                inner.segsizes.insert(lsn, newsize);
             }
         }
 
@@ -272,9 +282,9 @@ impl Layer for InMemoryLayer {
     }
 
     /// Remember that the relation was truncated at given LSN
-    fn put_truncation(&self, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
+    fn put_truncation(&self, lsn: Lsn, segsize: u32) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        let old = inner.relsizes.insert(lsn, relsize);
+        let old = inner.segsizes.insert(lsn, segsize);
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -291,7 +301,7 @@ impl Layer for InMemoryLayer {
         assert!(inner.drop_lsn.is_none());
         inner.drop_lsn = Some(lsn);
 
-        info!("dropped relation {} at {}", self.rel, lsn);
+        info!("dropped segment {} at {}", self.seg, lsn);
 
         Ok(())
     }
@@ -314,7 +324,7 @@ impl Layer for InMemoryLayer {
     ) -> Result<Vec<Arc<dyn Layer>>> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
-            self.rel, self.timelineid, cutoff_lsn
+            self.seg, self.timelineid, cutoff_lsn
         );
 
         let inner = self.inner.lock().unwrap();
@@ -334,17 +344,17 @@ impl Layer for InMemoryLayer {
 
         // Divide all the page versions into old and new at the 'end_lsn' cutoff point.
         let mut before_page_versions;
-        let mut before_relsizes;
+        let mut before_segsizes;
         let mut after_page_versions;
-        let mut after_relsizes;
+        let mut after_segsizes;
         if !dropped {
-            before_relsizes = BTreeMap::new();
-            after_relsizes = BTreeMap::new();
-            for (lsn, size) in inner.relsizes.iter() {
+            before_segsizes = BTreeMap::new();
+            after_segsizes = BTreeMap::new();
+            for (lsn, size) in inner.segsizes.iter() {
                 if *lsn > end_lsn {
-                    after_relsizes.insert(*lsn, *size);
+                    after_segsizes.insert(*lsn, *size);
                 } else {
-                    before_relsizes.insert(*lsn, *size);
+                    before_segsizes.insert(*lsn, *size);
                 }
             }
 
@@ -359,8 +369,8 @@ impl Layer for InMemoryLayer {
             }
         } else {
             before_page_versions = inner.page_versions.clone();
-            before_relsizes = inner.relsizes.clone();
-            after_relsizes = BTreeMap::new();
+            before_segsizes = inner.segsizes.clone();
+            after_segsizes = BTreeMap::new();
             after_page_versions = BTreeMap::new();
         }
 
@@ -372,19 +382,19 @@ impl Layer for InMemoryLayer {
             self.conf,
             self.timelineid,
             self.tenantid,
-            self.rel,
+            self.seg,
             self.start_lsn,
             end_lsn,
             dropped,
             before_page_versions,
-            before_relsizes,
+            before_segsizes,
         )?;
         let mut result: Vec<Arc<dyn Layer>> = Vec::new();
 
         // If there were any page versions after the cutoff, initialize a new in-memory layer
         // to hold them
-        if !after_relsizes.is_empty() || !after_page_versions.is_empty() {
-            info!("created new in-mem layer for {} {}-", self.rel, end_lsn);
+        if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
+            info!("created new in-mem layer for {} {}-", self.seg, end_lsn);
 
             let new_layer = Self::copy_snapshot(
                 self.conf,
@@ -396,7 +406,7 @@ impl Layer for InMemoryLayer {
             )?;
             let mut new_inner = new_layer.inner.lock().unwrap();
             new_inner.page_versions.append(&mut after_page_versions);
-            new_inner.relsizes.append(&mut after_relsizes);
+            new_inner.segsizes.append(&mut after_segsizes);
             drop(new_inner);
 
             result.push(Arc::new(new_layer));
@@ -425,12 +435,12 @@ impl InMemoryLayer {
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        rel: RelishTag,
+        seg: SegmentTag,
         start_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
-            rel,
+            seg,
             timelineid,
             start_lsn
         );
@@ -439,12 +449,12 @@ impl InMemoryLayer {
             conf,
             timelineid,
             tenantid,
-            rel,
+            seg,
             start_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
-                relsizes: BTreeMap::new(),
+                segsizes: BTreeMap::new(),
             }),
         })
     }
@@ -463,26 +473,27 @@ impl InMemoryLayer {
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new InMemoryLayer for writing {} on timeline {} at {}",
-            src.get_relish_tag(),
+            src.get_seg_tag(),
             timelineid,
             lsn
         );
         let mut page_versions = BTreeMap::new();
-        let mut relsizes = BTreeMap::new();
+        let mut segsizes = BTreeMap::new();
 
+        let seg = src.get_seg_tag();
+
+        let startblk;
         let size;
-        if src.get_relish_tag().is_blocky() {
-            if let Some(sz) = src.get_relish_size(lsn)? {
-                relsizes.insert(lsn, sz);
-                size = sz;
-            } else {
-                bail!("no size found or {} at {}", src.get_relish_tag(), lsn);
-            }
+        if seg.rel.is_blocky() {
+            size = src.get_seg_size(lsn)?;
+            segsizes.insert(lsn, size);
+            startblk = seg.segno * RELISH_SEG_SIZE;
         } else {
             size = 1;
+            startblk = 0;
         }
 
-        for blknum in 0..size {
+        for blknum in startblk..(startblk + size) {
             let img = src.get_page_at_lsn(walredo_mgr, blknum, lsn)?;
             let pv = PageVersion {
                 page_image: Some(img),
@@ -495,12 +506,12 @@ impl InMemoryLayer {
             conf,
             timelineid,
             tenantid,
-            rel: src.get_relish_tag(),
+            seg: src.get_seg_tag(),
             start_lsn: lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: page_versions,
-                relsizes: relsizes,
+                segsizes: segsizes,
             }),
         })
     }
@@ -510,12 +521,12 @@ impl InMemoryLayer {
     pub fn dump(&self) -> String {
         let mut result = format!(
             "----- inmemory layer for {} {}-> ----\n",
-            self.rel, self.start_lsn
+            self.seg, self.start_lsn
         );
 
         let inner = self.inner.lock().unwrap();
 
-        for (k, v) in inner.relsizes.iter() {
+        for (k, v) in inner.segsizes.iter() {
             result += &format!("{}: {}\n", k, v);
         }
         for (k, v) in inner.page_versions.iter() {

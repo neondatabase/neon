@@ -37,9 +37,8 @@
 //! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
 //!
-use crate::layered_repository::storage_layer::Layer;
-use crate::layered_repository::storage_layer::PageVersion;
 use crate::layered_repository::storage_layer::ZERO_PAGE;
+use crate::layered_repository::storage_layer::{Layer, PageVersion, SegmentTag};
 use crate::relish::*;
 use crate::repository::WALRecord;
 use crate::walredo::WalRedoManager;
@@ -70,7 +69,7 @@ static REL_SIZES_CHAPTER: u64 = 2;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 struct SnapshotFileName {
-    rel: RelishTag,
+    seg: SegmentTag,
     start_lsn: Lsn,
     end_lsn: Lsn,
     dropped: bool,
@@ -80,11 +79,11 @@ impl SnapshotFileName {
     fn from_str(fname: &str) -> Option<Self> {
         // Split the filename into parts
         //
-        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<seg>_<start LSN>_<end LSN>
         //
         // or if it was dropped:
         //
-        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>_DROPPED
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<seg>_<start LSN>_<end LSN>_DROPPED
         //
         let rel;
         let mut parts;
@@ -135,6 +134,10 @@ impl SnapshotFileName {
             return None;
         }
 
+        let segno = parts.next()?.parse::<u32>().ok()?;
+
+        let seg = SegmentTag { rel, segno };
+
         let start_lsn = Lsn::from_hex(parts.next()?).ok()?;
         let end_lsn = Lsn::from_hex(parts.next()?).ok()?;
 
@@ -153,7 +156,7 @@ impl SnapshotFileName {
         }
 
         Some(SnapshotFileName {
-            rel,
+            seg,
             start_lsn,
             end_lsn,
             dropped,
@@ -161,7 +164,7 @@ impl SnapshotFileName {
     }
 
     fn to_string(&self) -> String {
-        let basename = match self.rel {
+        let basename = match self.seg.rel {
             RelishTag::Relation(reltag) => format!(
                 "rel_{}_{}_{}_{}",
                 reltag.spcnode, reltag.dbnode, reltag.relnode, reltag.forknum
@@ -187,8 +190,9 @@ impl SnapshotFileName {
         };
 
         format!(
-            "{}_{:016X}_{:016X}{}",
+            "{}_{}_{:016X}_{:016X}{}",
             basename,
+            self.seg.segno,
             u64::from(self.start_lsn),
             u64::from(self.end_lsn),
             if self.dropped { "_DROPPED" } else { "" }
@@ -214,7 +218,7 @@ pub struct SnapshotLayer {
     conf: &'static PageServerConf,
     pub tenantid: ZTenantId,
     pub timelineid: ZTimelineId,
-    pub rel: RelishTag,
+    pub seg: SegmentTag,
 
     //
     // This entry contains all the changes from 'start_lsn' to 'end_lsn'. The
@@ -249,8 +253,8 @@ impl Layer for SnapshotLayer {
         return self.timelineid;
     }
 
-    fn get_relish_tag(&self) -> RelishTag {
-        return self.rel;
+    fn get_seg_tag(&self) -> SegmentTag {
+        return self.seg;
     }
 
     fn is_dropped(&self) -> bool {
@@ -314,12 +318,12 @@ impl Layer for SnapshotLayer {
                 // but never writes the page.
                 //
                 // Would be nice to detect that situation better.
-                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
                 return Ok(ZERO_PAGE.clone());
             }
             bail!(
                 "No base image found for page {} blk {} at {}/{}",
-                self.rel,
+                self.seg.rel,
                 blknum,
                 self.timelineid,
                 lsn
@@ -332,14 +336,14 @@ impl Layer for SnapshotLayer {
                 trace!(
                     "found page image for blk {} in {} at {}/{}, no WAL redo required",
                     blknum,
-                    self.rel,
+                    self.seg.rel,
                     self.timelineid,
                     lsn
                 );
                 Ok(img)
             } else {
                 // FIXME: this ought to be an error?
-                warn!("Page {} blk {} at {} not found", self.rel, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", self.seg.rel, blknum, lsn);
                 Ok(ZERO_PAGE.clone())
             }
         } else {
@@ -351,7 +355,7 @@ impl Layer for SnapshotLayer {
                 // FIXME: this ought to be an error?
                 warn!(
                     "Base image for page {} blk {} at {} not found, but got {} WAL records",
-                    self.rel,
+                    self.seg.rel,
                     blknum,
                     lsn,
                     records.len()
@@ -359,11 +363,11 @@ impl Layer for SnapshotLayer {
                 Ok(ZERO_PAGE.clone())
             } else {
                 if page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
                 } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.rel, self.timelineid, lsn);
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", records.len(), blknum, self.seg.rel, self.timelineid, lsn);
                 }
-                let img = walredo_mgr.request_redo(self.rel, blknum, lsn, page_img, records)?;
+                let img = walredo_mgr.request_redo(self.seg.rel, blknum, lsn, page_img, records)?;
 
                 // FIXME: Should we memoize the page image in memory, so that
                 // we wouldn't need to reconstruct it again, if it's requested again?
@@ -375,7 +379,7 @@ impl Layer for SnapshotLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_relish_size(&self, lsn: Lsn) -> Result<Option<u32>> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
         let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
@@ -383,15 +387,23 @@ impl Layer for SnapshotLayer {
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             let result = *entry;
             drop(inner);
-            trace!("get_relsize: {} at {} -> {}", self.rel, lsn, result);
-            Ok(Some(result))
+            trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
+            Ok(result)
         } else {
-            Ok(None)
+            error!(
+                "No size found for {} at {} in snapshot layer {} {}-{}",
+                self.seg, lsn, self.seg, self.start_lsn, self.end_lsn
+            );
+            bail!(
+                "No size found for {} at {} in snapshot layer",
+                self.seg,
+                lsn
+            );
         }
     }
 
-    /// Does this relation exist at given LSN?
-    fn get_rel_exists(&self, lsn: Lsn) -> Result<bool> {
+    /// Does this segment exist at given LSN?
+    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
         // Is the requested LSN after the rel was dropped?
         if self.dropped && lsn >= self.end_lsn {
             return Ok(false);
@@ -404,8 +416,8 @@ impl Layer for SnapshotLayer {
     // Unsupported write operations
     fn put_page_version(&self, blknum: u32, lsn: Lsn, _pv: PageVersion) -> Result<()> {
         panic!(
-            "cannot modify historical snapshot layer, rel {} blk {} at {}/{}, {}-{}",
-            self.rel, blknum, self.timelineid, lsn, self.start_lsn, self.end_lsn
+            "cannot modify historical snapshot layer, {} blk {} at {}/{}, {}-{}",
+            self.seg, blknum, self.timelineid, lsn, self.start_lsn, self.end_lsn
         );
     }
     fn put_truncation(&self, _lsn: Lsn, _relsize: u32) -> anyhow::Result<()> {
@@ -450,7 +462,7 @@ impl SnapshotLayer {
             self.timelineid,
             self.tenantid,
             &SnapshotFileName {
-                rel: self.rel,
+                seg: self.seg,
                 start_lsn: self.start_lsn,
                 end_lsn: self.end_lsn,
                 dropped: self.dropped,
@@ -478,7 +490,7 @@ impl SnapshotLayer {
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        rel: RelishTag,
+        seg: SegmentTag,
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
@@ -489,7 +501,7 @@ impl SnapshotLayer {
             conf: conf,
             timelineid: timelineid,
             tenantid: tenantid,
-            rel: rel,
+            seg: seg,
             start_lsn: start_lsn,
             end_lsn,
             dropped,
@@ -546,7 +558,7 @@ impl SnapshotLayer {
             self.timelineid,
             self.tenantid,
             &SnapshotFileName {
-                rel: self.rel,
+                seg: self.seg,
                 start_lsn: self.start_lsn,
                 end_lsn: self.end_lsn,
                 dropped: self.dropped,
@@ -593,7 +605,7 @@ impl SnapshotLayer {
                     conf,
                     timelineid,
                     tenantid,
-                    rel: snapfilename.rel,
+                    seg: snapfilename.seg,
                     start_lsn: snapfilename.start_lsn,
                     end_lsn: snapfilename.end_lsn,
                     dropped: snapfilename.dropped,
@@ -615,7 +627,7 @@ impl SnapshotLayer {
     pub fn dump(&self) -> String {
         let mut result = format!(
             "----- snapshot layer for {} {}-{} ----\n",
-            self.rel, self.start_lsn, self.end_lsn
+            self.seg, self.start_lsn, self.end_lsn
         );
 
         let inner = self.inner.lock().unwrap();
