@@ -2,15 +2,16 @@
 //! An in-memory layer stores recently received page versions in memory. The page versions
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
-
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::SnapshotLayer;
+use crate::repository::WALRecord;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
+use bytes::Bytes;
 use log::*;
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
@@ -53,10 +54,6 @@ pub struct InMemoryLayerInner {
 }
 
 impl Layer for InMemoryLayer {
-    fn is_frozen(&self) -> bool {
-        return false;
-    }
-
     fn get_timeline_id(&self) -> ZTimelineId {
         return self.timelineid;
     }
@@ -159,12 +156,69 @@ impl Layer for InMemoryLayer {
         // Otherwise, it exists
         Ok(true)
     }
+}
+
+impl InMemoryLayer {
+    ///
+    /// Create a new, empty, in-memory layer
+    ///
+    pub fn create(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        seg: SegmentTag,
+        start_lsn: Lsn,
+    ) -> Result<InMemoryLayer> {
+        trace!(
+            "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
+            seg,
+            timelineid,
+            start_lsn
+        );
+
+        Ok(InMemoryLayer {
+            conf,
+            timelineid,
+            tenantid,
+            seg,
+            start_lsn,
+            inner: Mutex::new(InMemoryLayerInner {
+                drop_lsn: None,
+                page_versions: BTreeMap::new(),
+                segsizes: BTreeMap::new(),
+            }),
+        })
+    }
 
     // Write operations
 
+    /// Remember new page version, as a WAL record over previous version
+    pub fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> Result<()> {
+        self.put_page_version(
+            blknum,
+            rec.lsn,
+            PageVersion {
+                page_image: None,
+                record: Some(rec),
+            },
+        )
+    }
+
+    /// Remember new page version, as a full page image
+    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
+        self.put_page_version(
+            blknum,
+            lsn,
+            PageVersion {
+                page_image: Some(img),
+                record: None,
+            },
+        )
+    }
+
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()> {
+    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()> {
         assert!(self.seg.blknum_in_seg(blknum));
 
         trace!(
@@ -215,7 +269,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// Remember that the relation was truncated at given LSN
-    fn put_truncation(&self, lsn: Lsn, segsize: u32) -> anyhow::Result<()> {
+    pub fn put_truncation(&self, lsn: Lsn, segsize: u32) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let old = inner.segsizes.insert(lsn, segsize);
 
@@ -227,8 +281,8 @@ impl Layer for InMemoryLayer {
         Ok(())
     }
 
-    /// Remember that the relation was dropped at given LSN
-    fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()> {
+    /// Remember that the segment was dropped at given LSN
+    pub fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
         assert!(inner.drop_lsn.is_none());
@@ -237,6 +291,63 @@ impl Layer for InMemoryLayer {
         info!("dropped segment {} at {}", self.seg, lsn);
 
         Ok(())
+    }
+
+    ///
+    /// Initialize a new InMemoryLayer for, by copying the state at the given
+    /// point in time from given existing layer.
+    ///
+    pub fn copy_snapshot(
+        conf: &'static PageServerConf,
+        timeline: &LayeredTimeline,
+        src: &dyn Layer,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        lsn: Lsn,
+    ) -> Result<InMemoryLayer> {
+        trace!(
+            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
+            src.get_seg_tag(),
+            timelineid,
+            lsn
+        );
+        let mut page_versions = BTreeMap::new();
+        let mut segsizes = BTreeMap::new();
+
+        let seg = src.get_seg_tag();
+
+        let startblk;
+        let size;
+        if seg.rel.is_blocky() {
+            size = src.get_seg_size(lsn)?;
+            segsizes.insert(lsn, size);
+            startblk = seg.segno * RELISH_SEG_SIZE;
+        } else {
+            size = 1;
+            startblk = 0;
+        }
+
+        for blknum in startblk..(startblk + size) {
+            let img = timeline.materialize_page(seg, blknum, lsn, src)?;
+            let pv = PageVersion {
+                page_image: Some(img),
+                record: None,
+            };
+            page_versions.insert((blknum, lsn), pv);
+        }
+
+        Ok(InMemoryLayer {
+            conf,
+            timelineid,
+            tenantid,
+            seg: src.get_seg_tag(),
+            start_lsn: lsn,
+            inner: Mutex::new(InMemoryLayerInner {
+                drop_lsn: None,
+                page_versions: page_versions,
+                segsizes: segsizes,
+            }),
+        })
     }
 
     ///
@@ -250,12 +361,12 @@ impl Layer for InMemoryLayer {
     /// in-memory layer containing those page versions. The caller replaces
     /// this layer with the returned layers in the layer map.
     ///
-    fn freeze(
+    pub fn freeze(
         &self,
         cutoff_lsn: Lsn,
         // This is needed just to call materialize_page()
         timeline: &LayeredTimeline,
-    ) -> Result<Vec<Arc<dyn Layer>>> {
+    ) -> Result<(Option<Arc<SnapshotLayer>>, Option<Arc<InMemoryLayer>>)> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.seg, self.timelineid, cutoff_lsn
@@ -323,14 +434,13 @@ impl Layer for InMemoryLayer {
             before_page_versions,
             before_segsizes,
         )?;
-        let mut result: Vec<Arc<dyn Layer>> = Vec::new();
 
-        // If there were any page versions after the cutoff, initialize a new in-memory layer
-        // to hold them
-        if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
+        // If there were any "new" page versions, initialize a new in-memory layer to hold
+        // them
+        let new_open = if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
             info!("created new in-mem layer for {} {}-", self.seg, end_lsn);
 
-            let new_layer = Self::copy_snapshot(
+            let new_open = Self::copy_snapshot(
                 self.conf,
                 timeline,
                 &snapfile,
@@ -338,116 +448,19 @@ impl Layer for InMemoryLayer {
                 self.tenantid,
                 end_lsn,
             )?;
-            let mut new_inner = new_layer.inner.lock().unwrap();
+            let mut new_inner = new_open.inner.lock().unwrap();
             new_inner.page_versions.append(&mut after_page_versions);
             new_inner.segsizes.append(&mut after_segsizes);
             drop(new_inner);
 
-            result.push(Arc::new(new_layer));
-        }
-        result.push(Arc::new(snapfile));
-
-        Ok(result)
-    }
-
-    fn delete(&self) -> Result<()> {
-        // Nothing to do. When the reference is dropped, the memory is released.
-        Ok(())
-    }
-
-    fn unload(&self) -> Result<()> {
-        // cannot unload in-memory layer. Freeze instead
-        Ok(())
-    }
-}
-
-impl InMemoryLayer {
-    ///
-    /// Create a new, empty, in-memory layer
-    ///
-    pub fn create(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        seg: SegmentTag,
-        start_lsn: Lsn,
-    ) -> Result<InMemoryLayer> {
-        trace!(
-            "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
-            seg,
-            timelineid,
-            start_lsn
-        );
-
-        Ok(InMemoryLayer {
-            conf,
-            timelineid,
-            tenantid,
-            seg,
-            start_lsn,
-            inner: Mutex::new(InMemoryLayerInner {
-                drop_lsn: None,
-                page_versions: BTreeMap::new(),
-                segsizes: BTreeMap::new(),
-            }),
-        })
-    }
-
-    ///
-    /// Initialize a new InMemoryLayer for, by copying the state at the given
-    /// point in time from given existing layer.
-    ///
-    pub fn copy_snapshot(
-        conf: &'static PageServerConf,
-        timeline: &LayeredTimeline,
-        src: &dyn Layer,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        lsn: Lsn,
-    ) -> Result<InMemoryLayer> {
-        trace!(
-            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
-            src.get_seg_tag(),
-            timelineid,
-            lsn
-        );
-        let mut page_versions = BTreeMap::new();
-        let mut segsizes = BTreeMap::new();
-
-        let seg = src.get_seg_tag();
-
-        let startblk;
-        let size;
-        if seg.rel.is_blocky() {
-            size = src.get_seg_size(lsn)?;
-            segsizes.insert(lsn, size);
-            startblk = seg.segno * RELISH_SEG_SIZE;
+            Some(Arc::new(new_open))
         } else {
-            size = 1;
-            startblk = 0;
-        }
+            None
+        };
 
-        for blknum in startblk..(startblk + size) {
-            let img = timeline.materialize_page(seg, blknum, lsn, src)?;
-            let pv = PageVersion {
-                page_image: Some(img),
-                record: None,
-            };
-            page_versions.insert((blknum, lsn), pv);
-        }
+        let new_historic = Some(Arc::new(snapfile));
 
-        Ok(InMemoryLayer {
-            conf,
-            timelineid,
-            tenantid,
-            seg: src.get_seg_tag(),
-            start_lsn: lsn,
-            inner: Mutex::new(InMemoryLayerInner {
-                drop_lsn: None,
-                page_versions: page_versions,
-                segsizes: segsizes,
-            }),
-        })
+        Ok((new_historic, new_open))
     }
 
     /// debugging function to print out the contents of the layer

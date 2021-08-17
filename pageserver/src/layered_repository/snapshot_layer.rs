@@ -40,7 +40,6 @@
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag,
 };
-use crate::layered_repository::LayeredTimeline;
 use crate::relish::*;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
@@ -244,10 +243,6 @@ pub struct SnapshotLayerInner {
 }
 
 impl Layer for SnapshotLayer {
-    fn is_frozen(&self) -> bool {
-        return true;
-    }
-
     fn get_timeline_id(&self) -> ZTimelineId {
         return self.timelineid;
     }
@@ -343,43 +338,6 @@ impl Layer for SnapshotLayer {
 
         // Otherwise, it exists.
         Ok(true)
-    }
-
-    // Unsupported write operations
-    fn put_page_version(&self, blknum: u32, lsn: Lsn, _pv: PageVersion) -> Result<()> {
-        panic!(
-            "cannot modify historical snapshot layer, {} blk {} at {}/{}, {}-{}",
-            self.seg, blknum, self.timelineid, lsn, self.start_lsn, self.end_lsn
-        );
-    }
-    fn put_truncation(&self, _lsn: Lsn, _relsize: u32) -> anyhow::Result<()> {
-        bail!("cannot modify historical snapshot layer");
-    }
-
-    fn put_unlink(&self, _lsn: Lsn) -> anyhow::Result<()> {
-        bail!("cannot modify historical snapshot layer");
-    }
-
-    fn freeze(&self, _end_lsn: Lsn, _timeline: &LayeredTimeline) -> Result<Vec<Arc<dyn Layer>>> {
-        bail!("cannot freeze historical snapshot layer");
-    }
-
-    fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
-    ///
-    /// Release most of the memory used by this layer. If it's accessed again later,
-    /// it will need to be loaded back.
-    ///
-    fn unload(&self) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.page_versions = BTreeMap::new();
-        inner.relsizes = BTreeMap::new();
-        inner.loaded = false;
-        Ok(())
     }
 }
 
@@ -520,10 +478,10 @@ impl SnapshotLayer {
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-    ) -> Result<Vec<Arc<dyn Layer>>> {
+    ) -> Result<Vec<Arc<SnapshotLayer>>> {
         let path = conf.timeline_path(&timelineid, &tenantid);
 
-        let mut snapfiles: Vec<Arc<dyn Layer>> = Vec::new();
+        let mut snapfiles: Vec<Arc<SnapshotLayer>> = Vec::new();
         for direntry in fs::read_dir(path)? {
             let fname = direntry?.file_name();
             let fname = fname.to_str().unwrap();
@@ -548,6 +506,24 @@ impl SnapshotLayer {
             }
         }
         return Ok(snapfiles);
+    }
+
+    pub fn delete(&self) -> Result<()> {
+        // delete underlying file
+        fs::remove_file(self.path())?;
+        Ok(())
+    }
+
+    ///
+    /// Release most of the memory used by this layer. If it's accessed again later,
+    /// it will need to be loaded back.
+    ///
+    pub fn unload(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.page_versions = BTreeMap::new();
+        inner.relsizes = BTreeMap::new();
+        inner.loaded = false;
+        Ok(())
     }
 
     /// debugging function to print out the contents of the layer

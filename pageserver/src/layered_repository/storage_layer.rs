@@ -2,7 +2,6 @@
 //! Common traits and structs for layers
 //!
 
-use crate::layered_repository::LayeredTimeline;
 use crate::relish::RelishTag;
 use crate::repository::WALRecord;
 use crate::ZTimelineId;
@@ -10,7 +9,6 @@ use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
 
@@ -104,12 +102,6 @@ pub trait Layer: Send + Sync {
     fn get_end_lsn(&self) -> Lsn;
     fn is_dropped(&self) -> bool;
 
-    /// Frozen layers are stored on disk, an cannot accept cannot accept new WAL
-    /// records, whereas an unfrozen layer can still be modified, but is not
-    /// durable in case of a crash. Snapshot layers are always frozen, and
-    /// in-memory layers are always unfrozen.
-    fn is_frozen(&self) -> bool;
-
     ///
     /// Return data needed to reconstruct given page at LSN.
     ///
@@ -133,50 +125,4 @@ pub trait Layer: Send + Sync {
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
 
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
-
-    fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()>;
-
-    fn put_truncation(&self, lsn: Lsn, relsize: u32) -> anyhow::Result<()>;
-
-    fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()>;
-
-    /// Remember new page version, as a WAL record over previous version
-    fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> Result<()> {
-        self.put_page_version(
-            blknum,
-            rec.lsn,
-            PageVersion {
-                page_image: None,
-                record: Some(rec),
-            },
-        )
-    }
-
-    /// Remember new page version, as a full page image
-    fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
-        self.put_page_version(
-            blknum,
-            lsn,
-            PageVersion {
-                page_image: Some(img),
-                record: None,
-            },
-        )
-    }
-
-    ///
-    /// Split off an immutable layer from existing layer.
-    ///
-    /// Returns new layers that replace this one.
-    ///
-    fn freeze(&self, end_lsn: Lsn, walredo_mgr: &LayeredTimeline) -> Result<Vec<Arc<dyn Layer>>>;
-
-    /// Permanently delete this layer
-    fn delete(&self) -> Result<()>;
-
-    /// Try to release memory used by this layer. This is currently
-    /// only used by snapshot layers, to free the copy of the file
-    /// from memory. (TODO: a smarter, more granular caching scheme
-    /// would be nice)
-    fn unload(&self) -> Result<()>;
 }

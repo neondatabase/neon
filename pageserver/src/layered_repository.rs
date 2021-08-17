@@ -896,7 +896,7 @@ impl LayeredTimeline {
                 layer_rc.is_dropped(),
                 self.timelineid
             );
-            layers.insert(Arc::clone(layer_rc));
+            layers.insert_historic(Arc::clone(layer_rc));
         }
 
         Ok(())
@@ -942,7 +942,7 @@ impl LayeredTimeline {
             //
 
             // Do we have a layer on this timeline?
-            if let Some(layer) = layers.get(seg, lsn) {
+            if let Some(layer) = layers.get(&seg, lsn) {
                 trace!(
                     "found layer in cache: {} {}-{}",
                     timeline.timelineid,
@@ -974,18 +974,19 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
+    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+        let layers = self.layers.lock().unwrap();
+
         if lsn < self.last_valid_lsn.load() {
             bail!("cannot modify relation after advancing last_valid_lsn");
         }
 
-        // Look up the correct layer.
-        let layers = self.layers.lock().unwrap();
-        if let Some(layer) = layers.get(seg, lsn) {
-            // If it's writeable, good, return it.
-            if !layer.is_frozen() {
-                return Ok(Arc::clone(&layer));
+        // Do we have a layer open for writing already?
+        if let Some(layer) = layers.get_open(&seg) {
+            if layer.get_start_lsn() > lsn {
+                bail!("unexpected open layer in the future");
             }
+            return Ok(layer);
         }
 
         // No (writeable) layer for this relation yet. Create one.
@@ -1048,8 +1049,8 @@ impl LayeredTimeline {
         }
 
         let mut layers = self.layers.lock().unwrap();
-        let layer_rc: Arc<dyn Layer> = Arc::new(layer);
-        layers.insert(Arc::clone(&layer_rc));
+        let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
+        layers.insert_open(Arc::clone(&layer_rc));
 
         Ok(layer_rc)
     }
@@ -1126,32 +1127,30 @@ impl LayeredTimeline {
         // aggressive. Some kind of LRU policy would be appropriate.
         //
 
-        // It is not possible to modify a BTreeMap while you're iterating
-        // it. So we have to make a temporary copy, and iterate through that,
-        // while we modify the original.
-        let old_layers = layers.inner.clone();
-
         // Call freeze() on any unfrozen layers (that is, layers that haven't
         // been written to disk yet).
         // Call unload() on all frozen layers, to release memory.
-        for layer in old_layers.values() {
-            if !layer.is_frozen() {
-                let new_layers = layer.freeze(last_valid_lsn, &self)?;
+        let mut iter = layers.iter_open_layers();
+        while let Some(layer) = iter.next() {
+            let (new_historic, new_open) = layer.freeze(last_valid_lsn, &self)?;
 
-                // replace this layer with the new layers that 'freeze' returned
-                layers.remove(&**layer);
-                for new_layer in new_layers {
-                    trace!(
-                        "freeze returned layer {} {}-{}",
-                        new_layer.get_seg_tag(),
-                        new_layer.get_start_lsn(),
-                        new_layer.get_end_lsn()
-                    );
-                    layers.insert(Arc::clone(&new_layer));
-                }
-            } else {
-                layer.unload()?;
+            // replace this layer with the new layers that 'freeze' returned
+            // (removes it if new_open is None)
+            iter.replace(new_open);
+
+            if let Some(historic) = new_historic {
+                trace!(
+                    "freeze returned layer {} {}-{}",
+                    historic.get_seg_tag(),
+                    historic.get_start_lsn(),
+                    historic.get_end_lsn()
+                );
+                iter.insert_historic(historic);
             }
+        }
+
+        for layer in layers.iter_historic_layers() {
+            layer.unload()?;
         }
 
         // Also save the metadata, with updated last_valid_lsn and last_record_lsn, to a
@@ -1214,10 +1213,14 @@ impl LayeredTimeline {
             self.timelineid, cutoff
         );
 
-        let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
+        let mut layers_to_remove: Vec<Arc<SnapshotLayer>> = Vec::new();
 
         // Determine for each file if it needs to be retained
-        'outer: for ((seg, _lsn), l) in layers.inner.iter() {
+        // FIXME: also scan open in-memory layers. Normally we cannot remove the
+        // latest layer of any seg, but if it was unlinked it's possible
+        'outer: for l in layers.iter_historic_layers() {
+            let seg = l.get_seg_tag();
+
             if seg.rel.is_relation() {
                 result.snapshot_relfiles_total += 1;
             } else {
@@ -1279,7 +1282,7 @@ impl LayeredTimeline {
                 l.get_end_lsn(),
                 l.is_dropped()
             );
-            layers_to_remove.push(Arc::clone(l));
+            layers_to_remove.push(Arc::clone(&l));
         }
 
         // Actually delete the layers from disk and remove them from the map.
@@ -1287,7 +1290,7 @@ impl LayeredTimeline {
         // while iterating it. BTreeMap::retain() would be another option)
         for doomed_layer in layers_to_remove {
             doomed_layer.delete()?;
-            layers.remove(&*doomed_layer);
+            layers.remove_historic(&*doomed_layer);
 
             if doomed_layer.is_dropped() {
                 if doomed_layer.get_seg_tag().rel.is_relation() {
