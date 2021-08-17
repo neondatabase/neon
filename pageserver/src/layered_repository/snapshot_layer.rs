@@ -36,17 +36,17 @@
 //!
 //! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
-//! FIXME
 //!
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag,
 };
-use crate::layered_repository::filename::{SnapshotFileName};
+use crate::relish::*;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use log::*;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
@@ -64,6 +64,145 @@ static SNAPSHOT_FILE_MAGIC: u32 = 0x5A616E01;
 
 static PAGE_VERSIONS_CHAPTER: u64 = 1;
 static REL_SIZES_CHAPTER: u64 = 2;
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+struct SnapshotFileName {
+    seg: SegmentTag,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+    dropped: bool,
+}
+
+impl SnapshotFileName {
+    fn from_str(fname: &str) -> Option<Self> {
+        // Split the filename into parts
+        //
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<seg>_<start LSN>_<end LSN>
+        //
+        // or if it was dropped:
+        //
+        //    <spcnode>_<dbnode>_<relnode>_<forknum>_<seg>_<start LSN>_<end LSN>_DROPPED
+        //
+        let rel;
+        let mut parts;
+        if let Some(rest) = fname.strip_prefix("rel_") {
+            parts = rest.split('_');
+            rel = RelishTag::Relation(RelTag {
+                spcnode: parts.next()?.parse::<u32>().ok()?,
+                dbnode: parts.next()?.parse::<u32>().ok()?,
+                relnode: parts.next()?.parse::<u32>().ok()?,
+                forknum: parts.next()?.parse::<u8>().ok()?,
+            });
+        } else if let Some(rest) = fname.strip_prefix("pg_xact_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_multixact_members_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::MultiXactMembers,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_multixact_offsets_") {
+            parts = rest.split('_');
+            rel = RelishTag::Slru {
+                slru: SlruKind::MultiXactOffsets,
+                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_filenodemap_") {
+            parts = rest.split('_');
+            rel = RelishTag::FileNodeMap {
+                spcnode: parts.next()?.parse::<u32>().ok()?,
+                dbnode: parts.next()?.parse::<u32>().ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_twophase_") {
+            parts = rest.split('_');
+            rel = RelishTag::TwoPhase {
+                xid: parts.next()?.parse::<u32>().ok()?,
+            };
+        } else if let Some(rest) = fname.strip_prefix("pg_control_checkpoint_") {
+            parts = rest.split('_');
+            rel = RelishTag::Checkpoint;
+        } else if let Some(rest) = fname.strip_prefix("pg_control_") {
+            parts = rest.split('_');
+            rel = RelishTag::ControlFile;
+        } else {
+            return None;
+        }
+
+        let segno = parts.next()?.parse::<u32>().ok()?;
+
+        let seg = SegmentTag { rel, segno };
+
+        let start_lsn = Lsn::from_hex(parts.next()?).ok()?;
+        let end_lsn = Lsn::from_hex(parts.next()?).ok()?;
+
+        let mut dropped = false;
+        if let Some(suffix) = parts.next() {
+            if suffix == "DROPPED" {
+                dropped = true;
+            } else {
+                warn!("unrecognized filename in timeline dir: {}", fname);
+                return None;
+            }
+        }
+        if parts.next().is_some() {
+            warn!("unrecognized filename in timeline dir: {}", fname);
+            return None;
+        }
+
+        Some(SnapshotFileName {
+            seg,
+            start_lsn,
+            end_lsn,
+            dropped,
+        })
+    }
+
+    fn to_string(&self) -> String {
+        let basename = match self.seg.rel {
+            RelishTag::Relation(reltag) => format!(
+                "rel_{}_{}_{}_{}",
+                reltag.spcnode, reltag.dbnode, reltag.relnode, reltag.forknum
+            ),
+            RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno,
+            } => format!("pg_xact_{:04X}", segno),
+            RelishTag::Slru {
+                slru: SlruKind::MultiXactMembers,
+                segno,
+            } => format!("pg_multixact_members_{:04X}", segno),
+            RelishTag::Slru {
+                slru: SlruKind::MultiXactOffsets,
+                segno,
+            } => format!("pg_multixact_offsets_{:04X}", segno),
+            RelishTag::FileNodeMap { spcnode, dbnode } => {
+                format!("pg_filenodemap_{}_{}", spcnode, dbnode)
+            }
+            RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
+            RelishTag::Checkpoint => format!("pg_control_checkpoint"),
+            RelishTag::ControlFile => format!("pg_control"),
+        };
+
+        format!(
+            "{}_{}_{:016X}_{:016X}{}",
+            basename,
+            self.seg.segno,
+            u64::from(self.start_lsn),
+            u64::from(self.end_lsn),
+            if self.dropped { "_DROPPED" } else { "" }
+        )
+    }
+}
+
+impl fmt::Display for SnapshotFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
+}
 
 ///
 /// SnapshotLayer is the in-memory data structure associated with an
@@ -88,8 +227,6 @@ pub struct SnapshotLayer {
     dropped: bool,
 
     inner: Mutex<SnapshotLayerInner>,
-
-    img_layer: Option<Arc<dyn Layer>>,
 }
 
 pub struct SnapshotLayerInner {
@@ -162,15 +299,6 @@ impl Layer for SnapshotLayer {
                 }
             }
 
-            // Use the base image, if needed
-            if let Some(need_lsn) = need_base_image_lsn {
-                if let Some(img_layer) = &self.img_layer {
-                    need_base_image_lsn = img_layer.get_page_reconstruct_data(blknum, need_lsn, reconstruct_data)?;
-                } else {
-                    bail!("no base img found for {} at blk {} at LSN {}", self.seg, blknum, lsn);
-                }
-            }
-
             // release lock on 'inner'
         }
 
@@ -179,23 +307,26 @@ impl Layer for SnapshotLayer {
 
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
-
-        assert!(lsn >= self.start_lsn);
-
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
         let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
-        let result;
         if let Some((_entry_lsn, entry)) = iter.next_back() {
-            result = *entry;
-        // Use the base image if needed
-        } else if let Some(img_layer) = &self.img_layer {
-            result = img_layer.get_seg_size(lsn)?;
+            let result = *entry;
+            drop(inner);
+            trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
+            Ok(result)
         } else {
-            result = 0;
+            error!(
+                "No size found for {} at {} in snapshot layer {} {}-{}",
+                self.seg, lsn, self.seg, self.start_lsn, self.end_lsn
+            );
+            bail!(
+                "No size found for {} at {} in snapshot layer",
+                self.seg,
+                lsn
+            );
         }
-        Ok(result)
     }
 
     /// Does this segment exist at given LSN?
@@ -207,28 +338,6 @@ impl Layer for SnapshotLayer {
 
         // Otherwise, it exists.
         Ok(true)
-    }
-
-    ///
-    /// Release most of the memory used by this layer. If it's accessed again later,
-    /// it will need to be loaded back.
-    ///
-    fn unload(&self) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.page_versions = BTreeMap::new();
-        inner.relsizes = BTreeMap::new();
-        inner.loaded = false;
-        Ok(())
-    }
-
-    fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
-    fn is_incremental(&self) -> bool {
-        true
     }
 }
 
@@ -271,11 +380,9 @@ impl SnapshotLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        img_layer: Option<Arc<dyn Layer>>,
         page_versions: BTreeMap<(u32, Lsn), PageVersion>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<SnapshotLayer> {
-
         let snapfile = SnapshotLayer {
             conf: conf,
             timelineid: timelineid,
@@ -289,7 +396,6 @@ impl SnapshotLayer {
                 page_versions: page_versions,
                 relsizes: relsizes,
             }),
-            img_layer,
         };
         let inner = snapfile.inner.lock().unwrap();
 
@@ -301,7 +407,7 @@ impl SnapshotLayer {
         let file = File::create(&path)?;
         let book = BookWriter::new(file, SNAPSHOT_FILE_MAGIC)?;
 
-        // Write out the other page versions
+        // Write out page versions
         let mut chapter = book.new_chapter(PAGE_VERSIONS_CHAPTER);
         let buf = BTreeMap::ser(&inner.page_versions)?;
         chapter.write_all(&buf)?;
@@ -368,30 +474,56 @@ impl SnapshotLayer {
     /// Create SnapshotLayers representing all files on disk
     ///
     // TODO: returning an Iterator would be more idiomatic
-    pub fn load_snapshot_layer(
+    pub fn list_snapshot_files(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        filename: &SnapshotFileName,
-    ) -> Result<SnapshotLayer> {
-        let snapfile = SnapshotLayer {
-            conf,
-            timelineid,
-            tenantid,
-            seg: filename.seg,
-            start_lsn: filename.start_lsn,
-            end_lsn: filename.end_lsn,
-            dropped: filename.dropped,
-            inner: Mutex::new(SnapshotLayerInner {
-                loaded: false,
-                page_versions: BTreeMap::new(),
-                relsizes: BTreeMap::new(),
-            }),
-            // FIXME: This doesn't work across restarts.
-            img_layer: None,
-        };
+    ) -> Result<Vec<Arc<SnapshotLayer>>> {
+        let path = conf.timeline_path(&timelineid, &tenantid);
 
-        Ok(snapfile)
+        let mut snapfiles: Vec<Arc<SnapshotLayer>> = Vec::new();
+        for direntry in fs::read_dir(path)? {
+            let fname = direntry?.file_name();
+            let fname = fname.to_str().unwrap();
+
+            if let Some(snapfilename) = SnapshotFileName::from_str(fname) {
+                let snapfile = SnapshotLayer {
+                    conf,
+                    timelineid,
+                    tenantid,
+                    seg: snapfilename.seg,
+                    start_lsn: snapfilename.start_lsn,
+                    end_lsn: snapfilename.end_lsn,
+                    dropped: snapfilename.dropped,
+                    inner: Mutex::new(SnapshotLayerInner {
+                        loaded: false,
+                        page_versions: BTreeMap::new(),
+                        relsizes: BTreeMap::new(),
+                    }),
+                };
+
+                snapfiles.push(Arc::new(snapfile));
+            }
+        }
+        return Ok(snapfiles);
+    }
+
+    pub fn delete(&self) -> Result<()> {
+        // delete underlying file
+        fs::remove_file(self.path())?;
+        Ok(())
+    }
+
+    ///
+    /// Release most of the memory used by this layer. If it's accessed again later,
+    /// it will need to be loaded back.
+    ///
+    pub fn unload(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.page_versions = BTreeMap::new();
+        inner.relsizes = BTreeMap::new();
+        inner.loaded = false;
+        Ok(())
     }
 
     /// debugging function to print out the contents of the layer

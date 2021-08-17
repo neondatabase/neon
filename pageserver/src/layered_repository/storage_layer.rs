@@ -69,28 +69,6 @@ pub struct PageVersion {
     pub record: Option<WALRecord>,
 }
 
-impl PageVersion {
-    pub fn get_mem_size(&self) -> usize {
-        let mut sz = 0;
-
-        // every page version has some fixed overhead.
-        sz += 16;
-
-        if let Some(img) = &self.page_image {
-            sz += img.len();
-        }
-
-        if let Some(rec) = &self.record {
-            sz += rec.rec.len();
-
-            // Some per-record overhead. Not very accurate, but close enough
-            sz += 32;
-        }
-
-        sz
-    }
-}
-
 ///
 /// Data needed to reconstruct a page version
 ///
@@ -147,9 +125,4 @@ pub trait Layer: Send + Sync {
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
 
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
-
-    fn is_incremental(&self) -> bool;
-
-    fn unload(&self) -> Result<()>;
-    fn delete(&self) -> Result<()>;
 }

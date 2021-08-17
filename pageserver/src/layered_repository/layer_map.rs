@@ -3,78 +3,37 @@
 //!
 //! When the timeline is first accessed, the server lists of all snapshot files
 //! in the timelines/<timelineid> directory, and populates this map with
-//! SnapshotLayers corresponding to each file. When new WAL is received, FIXME
+//! SnapshotLayers corresponding to each file. When new WAL is received,
 //! we create InMemoryLayers to hold the incoming records. Now and then,
 //! in the checkpoint() function, the in-memory layers are frozen, forming
 //! new snapshot layers and corresponding files are written to disk.
 //!
 
 use crate::layered_repository::storage_layer::{Layer, SegmentTag};
-use crate::layered_repository::{InMemoryLayer};
+use crate::layered_repository::{InMemoryLayer, SnapshotLayer};
 use crate::relish::*;
 use anyhow::Result;
-use lazy_static::lazy_static;
 use log::*;
 use std::collections::HashSet;
-use std::collections::{BinaryHeap, BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound::Included;
-use std::cmp::Ordering;
 use std::sync::Arc;
-use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
 
-lazy_static! {
-    static ref NUM_INMEMORY_LAYERS: IntGauge =
-        register_int_gauge!("pageserver_inmemory_layers", "Number of layers in memory")
-        .expect("failed to define a metric");
-
-    static ref NUM_ONDISK_LAYERS: IntGauge =
-        register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")
-        .expect("failed to define a metric");
-}
-
 ///
-/// LayerMap tracks what layers exist on a timeline. The last layer that is
+/// LayerMap tracks what layers exist or a timeline. The last layer that is
 /// open for writes is always an InMemoryLayer, and is tracked separately
 /// because there can be only one for each segment. The older layers,
 /// stored on disk, are kept in a BTreeMap keyed by the layer's start LSN.
 ///
 pub struct LayerMap {
     segs: HashMap<SegmentTag, SegEntry>,
-
-    // FIXME: explain this
-    open_segs: BinaryHeap<OpenSegEntry>,
 }
 
 struct SegEntry {
     pub open: Option<Arc<InMemoryLayer>>,
-    pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
+    pub historic: BTreeMap<Lsn, Arc<SnapshotLayer>>,
 }
-
-struct OpenSegEntry {
-    pub oldest_pending_lsn: Lsn,
-    pub layer: Arc<InMemoryLayer>,
-}
-impl Ord for OpenSegEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
-        // to get that.
-        other.oldest_pending_lsn.cmp(&self.oldest_pending_lsn)
-    }
-}
-impl PartialOrd for OpenSegEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
-        // to get that.
-        other.oldest_pending_lsn.partial_cmp(&self.oldest_pending_lsn)
-    }
-}
-impl PartialEq for OpenSegEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.oldest_pending_lsn.eq(&other.oldest_pending_lsn)
-    }
-}
-impl Eq for OpenSegEntry {}
 
 impl LayerMap {
     ///
@@ -129,38 +88,20 @@ impl LayerMap {
             if let Some(_old) = &segentry.open {
                 // FIXME: shouldn't exist, but check
             }
-            segentry.open = Some(Arc::clone(&layer));
+            segentry.open = Some(layer);
         } else {
             let segentry = SegEntry {
-                open: Some(Arc::clone(&layer)),
+                open: Some(layer),
                 historic: BTreeMap::new(),
             };
             self.segs.insert(tag, segentry);
         }
-
-        let opensegentry = OpenSegEntry {
-            oldest_pending_lsn: layer.get_oldest_pending_lsn(),
-            layer: layer,
-        };
-        self.open_segs.push(opensegentry);
-
-        NUM_INMEMORY_LAYERS.inc();
-    }
-
-    // replace given open layer with other layers.
-    pub fn pop_oldest(&mut self) {
-        let opensegentry = self.open_segs.pop().unwrap();
-        let segtag = opensegentry.layer.get_seg_tag();
-
-        let mut segentry = self.segs.get_mut(&segtag).unwrap();
-        segentry.open = None;
-        NUM_INMEMORY_LAYERS.dec();
     }
 
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn insert_historic(&mut self, layer: Arc<SnapshotLayer>) {
         let tag = layer.get_seg_tag();
         let start_lsn = layer.get_start_lsn();
 
@@ -176,7 +117,6 @@ impl LayerMap {
             };
             self.segs.insert(tag, segentry);
         }
-        NUM_ONDISK_LAYERS.inc();
     }
 
     ///
@@ -184,14 +124,13 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: &dyn Layer) {
+    pub fn remove_historic(&mut self, layer: &SnapshotLayer) {
         let tag = layer.get_seg_tag();
         let start_lsn = layer.get_start_lsn();
 
         if let Some(segentry) = self.segs.get_mut(&tag) {
             segentry.historic.remove(&start_lsn);
         }
-        NUM_ONDISK_LAYERS.dec();
     }
 
     pub fn list_rels(&self, spcnode: u32, dbnode: u32) -> Result<HashSet<RelTag>> {
@@ -230,16 +169,14 @@ impl LayerMap {
     /// Is there a newer layer for given segment?
     pub fn newer_layer_exists(&self, seg: SegmentTag, lsn: Lsn) -> bool {
         if let Some(segentry) = self.segs.get(&seg) {
-            // open layer is always incremental so it doesn't count
+            if let Some(_open) = &segentry.open {
+                return true;
+            }
 
             for (newer_lsn, layer) in segentry
                 .historic
                 .range((Included(lsn), Included(Lsn(u64::MAX))))
             {
-                // FIXME: incremental layers don't count
-                if layer.is_incremental() {
-                    continue;
-                }
                 if layer.get_end_lsn() > lsn {
                     trace!(
                         "found later layer for {}, {} {}-{}",
@@ -259,11 +196,10 @@ impl LayerMap {
         false
     }
 
-    pub fn get_oldest_open_layer(&mut self) -> Option<Arc<InMemoryLayer>> {
-        if let Some(opensegentry) = self.open_segs.peek() {
-            Some(Arc::clone(&opensegentry.layer))
-        } else {
-            None
+    pub fn iter_open_layers(&mut self) -> OpenLayerIter {
+        OpenLayerIter {
+            last: None,
+            segiter: self.segs.iter_mut(),
         }
     }
 
@@ -279,18 +215,53 @@ impl Default for LayerMap {
     fn default() -> Self {
         LayerMap {
             segs: HashMap::new(),
-            open_segs: BinaryHeap::new(),
         }
+    }
+}
+
+pub struct OpenLayerIter<'a> {
+    last: Option<&'a mut SegEntry>,
+
+    segiter: std::collections::hash_map::IterMut<'a, SegmentTag, SegEntry>,
+}
+
+impl<'a> OpenLayerIter<'a> {
+    pub fn replace(&mut self, replacement: Option<Arc<InMemoryLayer>>) {
+        let segentry = self.last.as_mut().unwrap();
+        segentry.open = replacement;
+    }
+
+    pub fn insert_historic(&mut self, new_layer: Arc<SnapshotLayer>) {
+        let start_lsn = new_layer.get_start_lsn();
+
+        let segentry = self.last.as_mut().unwrap();
+        segentry.historic.insert(start_lsn, new_layer);
+    }
+}
+
+impl<'a> Iterator for OpenLayerIter<'a> {
+    type Item = Arc<InMemoryLayer>;
+
+    fn next(&mut self) -> std::option::Option<<Self as std::iter::Iterator>::Item> {
+        while let Some((_seg, entry)) = self.segiter.next() {
+            if let Some(open) = &entry.open {
+                let op = Arc::clone(&open);
+                self.last = Some(entry);
+                return Some(op);
+            }
+        }
+        self.last = None;
+        None
     }
 }
 
 pub struct HistoricLayerIter<'a> {
     segiter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
-    iter: Option<std::collections::btree_map::Iter<'a, Lsn, Arc<dyn Layer>>>,
+    iter: Option<std::collections::btree_map::Iter<'a, Lsn, Arc<SnapshotLayer>>>,
 }
 
 impl<'a> Iterator for HistoricLayerIter<'a> {
-    type Item = Arc<dyn Layer>;
+    type Item = Arc<SnapshotLayer>;
 
     fn next(&mut self) -> std::option::Option<<Self as std::iter::Iterator>::Item> {
         loop {
