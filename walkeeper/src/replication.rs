@@ -21,7 +21,7 @@ use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage, XLogDataBody};
-use zenith_utils::sock_split::OwnedReadHalf;
+use zenith_utils::sock_split::ReadHalf;
 
 pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
 
@@ -49,7 +49,7 @@ impl HotStandbyFeedback {
 pub struct ReplicationConn {
     /// This is an `Option` because we will spawn a background thread that will
     /// `take` it from us.
-    stream_in: Option<OwnedReadHalf>,
+    stream_in: Option<ReadHalf>,
 }
 
 // TODO: move this to crate::timeline when there's more users

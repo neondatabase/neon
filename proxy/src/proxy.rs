@@ -11,7 +11,7 @@ use std::{io, sync::mpsc::channel, thread};
 use zenith_utils::postgres_backend::Stream;
 use zenith_utils::postgres_backend::{PostgresBackend, ProtoState};
 use zenith_utils::pq_proto::*;
-use zenith_utils::sock_split::{OwnedReadHalf, OwnedWriteHalf};
+use zenith_utils::sock_split::{ReadHalf, WriteHalf};
 use zenith_utils::{postgres_backend, pq_proto::BeMessage};
 
 ///
@@ -242,12 +242,12 @@ async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<tokio::net::TcpS
 
 /// Concurrently proxy both directions of the client and server connections
 fn proxy(
-    client_read: OwnedReadHalf,
-    client_write: OwnedWriteHalf,
-    server_read: OwnedReadHalf,
-    server_write: OwnedWriteHalf,
+    client_read: ReadHalf,
+    client_write: WriteHalf,
+    server_read: ReadHalf,
+    server_write: WriteHalf,
 ) -> anyhow::Result<()> {
-    fn do_proxy(mut reader: OwnedReadHalf, mut writer: OwnedWriteHalf) -> io::Result<()> {
+    fn do_proxy(mut reader: ReadHalf, mut writer: WriteHalf) -> io::Result<()> {
         std::io::copy(&mut reader, &mut writer)?;
         writer.flush()?;
         writer.shutdown(std::net::Shutdown::Both)
@@ -270,7 +270,7 @@ fn proxy_pass(pgb: PostgresBackend, db_info: DatabaseInfo) -> anyhow::Result<()>
     let db_stream = db_stream.into_std()?;
     db_stream.set_nonblocking(false)?;
 
-    let db_stream = zenith_utils::sock_split::BiDiStream::RawTcp(db_stream);
+    let db_stream = zenith_utils::sock_split::BiDiStream::from_tcp(db_stream);
     let (db_read, db_write) = db_stream.split();
 
     let stream = match pgb.into_stream() {

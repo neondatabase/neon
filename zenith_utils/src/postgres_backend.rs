@@ -4,7 +4,7 @@
 //! is rather narrow, but we can extend it once required.
 
 use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode};
-use crate::sock_split::{BiDiStream, OwnedReadHalf, OwnedWriteHalf};
+use crate::sock_split::{BiDiStream, ReadHalf, WriteHalf};
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
 use log::*;
@@ -80,7 +80,7 @@ pub enum ProcessMsgResult {
 
 pub enum Stream {
     BiDirectional(BiDiStream),
-    WriteOnly(OwnedWriteHalf),
+    WriteOnly(WriteHalf),
 }
 
 impl Stream {
@@ -109,9 +109,6 @@ impl io::Write for Stream {
 }
 
 pub struct PostgresBackend {
-    // replication.rs wants to handle reading on its own in separate thread, so
-    // wrap in Option to be able to take and transfer the BufReader. Ugly, but I
-    // have no better ideas.
     stream: Option<Stream>,
     // Output buffer. c.f. BeMessage::write why we are using BytesMut here.
     buf_out: BytesMut,
@@ -169,7 +166,7 @@ impl PostgresBackend {
         &self.peer_addr
     }
 
-    pub fn take_stream_in(&mut self) -> Option<OwnedReadHalf> {
+    pub fn take_stream_in(&mut self) -> Option<ReadHalf> {
         let stream = self.stream.take();
         match stream {
             Some(Stream::BiDirectional(bidi_stream)) => {

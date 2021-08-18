@@ -1444,7 +1444,6 @@ dependencies = [
  "md5",
  "rand",
  "rustls",
- "rustls-split",
  "serde",
  "serde_json",
  "tokio",
@@ -1696,9 +1695,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-split"
-version = "0.1.1"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d7e5b0ec6b87bd57f7a04db65b2b2f00db4d60173597c2394bbc97b3a297b8d"
+checksum = "a9d63f11490b4d8d45a362e171d7fe4a9ef154770a339e696a05eb354bc36837"
 dependencies = [
  "rustls",
  "webpki",

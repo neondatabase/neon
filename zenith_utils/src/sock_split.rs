@@ -6,16 +6,16 @@ use std::{
 
 use rustls::Session;
 
-#[derive(Clone)]
-pub struct TCPArc(Arc<TcpStream>);
+/// Wrapper supporting reads of a shared TcpStream.
+pub struct ArcTcpRead(Arc<TcpStream>);
 
-impl io::Read for TCPArc {
+impl io::Read for ArcTcpRead {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         (&*self.0).read(buf)
     }
 }
 
-impl std::ops::Deref for TCPArc {
+impl std::ops::Deref for ArcTcpRead {
     type Target = TcpStream;
 
     fn deref(&self) -> &Self::Target {
@@ -23,12 +23,43 @@ impl std::ops::Deref for TCPArc {
     }
 }
 
-pub enum OwnedReadHalf {
-    Tcp(BufReader<TCPArc>),
+/// Wrapper around a TCP Stream supporting buffered reads.
+pub struct BufStream(BufReader<ArcTcpRead>);
+
+impl io::Read for BufStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl io::Write for BufStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.get_ref().write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.get_ref().flush()
+    }
+}
+
+impl BufStream {
+    /// Unwrap into the internal BufReader.
+    fn into_reader(self) -> BufReader<ArcTcpRead> {
+        self.0
+    }
+
+    /// Returns a reference to the underlying TcpStream.
+    fn get_ref(&self) -> &TcpStream {
+        &*self.0.get_ref().0
+    }
+}
+
+pub enum ReadHalf {
+    Tcp(BufReader<ArcTcpRead>),
     Tls(rustls_split::ReadHalf<rustls::ServerSession>),
 }
 
-impl io::Read for OwnedReadHalf {
+impl io::Read for ReadHalf {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(reader) => reader.read(buf),
@@ -37,7 +68,7 @@ impl io::Read for OwnedReadHalf {
     }
 }
 
-impl OwnedReadHalf {
+impl ReadHalf {
     pub fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.get_ref().shutdown(how),
@@ -46,12 +77,12 @@ impl OwnedReadHalf {
     }
 }
 
-pub enum OwnedWriteHalf {
+pub enum WriteHalf {
     Tcp(Arc<TcpStream>),
     Tls(rustls_split::WriteHalf<rustls::ServerSession>),
 }
 
-impl OwnedWriteHalf {
+impl WriteHalf {
     pub fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.shutdown(how),
@@ -60,7 +91,7 @@ impl OwnedWriteHalf {
     }
 }
 
-impl io::Write for OwnedWriteHalf {
+impl io::Write for WriteHalf {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.as_ref().write(buf),
@@ -77,72 +108,70 @@ impl io::Write for OwnedWriteHalf {
 }
 
 pub enum BiDiStream {
-    RawTcp(TcpStream),
-    BufferedTcp(BufReader<TCPArc>),
+    Tcp(BufStream),
     Tls {
-        socket: TcpStream,
+        stream: BufStream,
         session: rustls::ServerSession,
     },
 }
 
 impl BiDiStream {
     pub fn from_tcp(stream: TcpStream) -> Self {
-        Self::RawTcp(stream)
+        Self::Tcp(BufStream(BufReader::new(ArcTcpRead(Arc::new(stream)))))
     }
 
     pub fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
         match self {
-            Self::RawTcp(socket) => socket.shutdown(how),
-            Self::BufferedTcp(reader) => reader.get_ref().shutdown(how),
-            Self::Tls { socket, session } => {
+            Self::Tcp(stream) => stream.get_ref().shutdown(how),
+            Self::Tls {
+                stream: reader,
+                session,
+            } => {
                 if how == Shutdown::Read {
-                    socket.shutdown(how)
+                    reader.get_ref().shutdown(how)
                 } else {
                     session.send_close_notify();
-                    let mut stream = rustls::Stream::new(session, socket);
+                    let mut stream = rustls::Stream::new(session, reader);
                     let res = stream.flush();
-                    socket.shutdown(how)?;
+                    reader.get_ref().shutdown(how)?;
                     res
                 }
             }
         }
     }
 
-    pub fn split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
+    /// Split the bi-directional stream into two owned read and write halves.
+    pub fn split(self) -> (ReadHalf, WriteHalf) {
         match self {
-            Self::RawTcp(stream) => {
-                let stream = Arc::new(stream);
-                let reader = BufReader::new(TCPArc(stream.clone()));
-
-                (OwnedReadHalf::Tcp(reader), OwnedWriteHalf::Tcp(stream))
-            }
-            Self::BufferedTcp(reader) => {
+            Self::Tcp(stream) => {
+                let reader = stream.into_reader();
                 let stream: Arc<TcpStream> = reader.get_ref().0.clone();
 
-                (OwnedReadHalf::Tcp(reader), OwnedWriteHalf::Tcp(stream))
+                (ReadHalf::Tcp(reader), WriteHalf::Tcp(stream))
             }
-            Self::Tls { socket, session } => {
-                const BUFFER_SIZE: usize = 8192;
-                let (read_half, write_half) = rustls_split::split(socket, session, BUFFER_SIZE);
-                (
-                    OwnedReadHalf::Tls(read_half),
-                    OwnedWriteHalf::Tls(write_half),
-                )
+            Self::Tls { stream, session } => {
+                let reader = stream.into_reader();
+                let buffer_data = reader.buffer().to_owned();
+                let read_buf_cfg = rustls_split::BufCfg::with_data(buffer_data, 8192);
+                let write_buf_cfg = rustls_split::BufCfg::with_capacity(8192);
+
+                // TODO would be nice to avoid the Arc here
+                let socket = Arc::try_unwrap(reader.into_inner().0).unwrap();
+
+                let (read_half, write_half) =
+                    rustls_split::split(socket, session, read_buf_cfg, write_buf_cfg);
+                (ReadHalf::Tls(read_half), WriteHalf::Tls(write_half))
             }
         }
     }
 
     pub fn start_tls(self, mut session: rustls::ServerSession) -> io::Result<Self> {
         match self {
-            Self::RawTcp(mut socket) => {
-                session.complete_io(&mut socket)?;
+            Self::Tcp(mut stream) => {
+                session.complete_io(&mut stream)?;
                 assert!(!session.is_handshaking());
-                Ok(Self::Tls { session, socket })
+                Ok(Self::Tls { stream, session })
             }
-            Self::BufferedTcp(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "can't start TLS on a buffered stream",
-            )),
             Self::Tls { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "TLS is already started on this stream",
@@ -154,9 +183,8 @@ impl BiDiStream {
 impl io::Read for BiDiStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            Self::RawTcp(stream) => stream.read(buf),
-            Self::BufferedTcp(reader) => reader.read(buf),
-            Self::Tls { socket, session } => rustls::Stream::new(session, socket).read(buf),
+            Self::Tcp(stream) => stream.read(buf),
+            Self::Tls { stream, session } => rustls::Stream::new(session, stream).read(buf),
         }
     }
 }
@@ -164,17 +192,15 @@ impl io::Read for BiDiStream {
 impl io::Write for BiDiStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
-            Self::RawTcp(stream) => stream.write(buf),
-            Self::BufferedTcp(reader) => (&*reader.get_ref().0).write(buf),
-            Self::Tls { socket, session } => rustls::Stream::new(session, socket).write(buf),
+            Self::Tcp(stream) => stream.write(buf),
+            Self::Tls { stream, session } => rustls::Stream::new(session, stream).write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::RawTcp(stream) => stream.flush(),
-            Self::BufferedTcp(reader) => (&*reader.get_ref().0).flush(),
-            Self::Tls { socket, session } => rustls::Stream::new(session, socket).flush(),
+            Self::Tcp(stream) => stream.flush(),
+            Self::Tls { stream, session } => rustls::Stream::new(session, stream).flush(),
         }
     }
 }
