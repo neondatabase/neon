@@ -10,6 +10,16 @@ executors:
       - image: cimg/rust:1.52.1
 
 jobs:
+  check-codestyle:
+    executor: zenith-build-executor
+    steps:
+      - checkout
+
+      - run:
+          name: rustfmt
+          when: always
+          command: |
+            cargo fmt --all -- --check
 
   # A job to build postgres
   build-postgres:
@@ -257,6 +267,7 @@ jobs:
 workflows:
   build_and_test:
     jobs:
+      - check-codestyle
       - build-postgres
       - build-zenith:
           name: build-zenith-<< matrix.build_type >>

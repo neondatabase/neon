@@ -67,4 +67,14 @@ distclean:
 	rm -rf tmp_install
 	cargo clean
 
+fmt:
+	@files=$$(git diff --cached --name-only --diff-filter=ACM | grep ".rs"); \
+	if [ "$$files" ]; then \
+		rustfmt $$files --edition=2018; \
+	fi;
+
+
+setup-pre-commit-hook:
+	ln -s -f ../../pre-commit.sh.tpl .git/hooks/pre-commit
+
 .PHONY: postgres-configure postgres postgres-headers zenith
