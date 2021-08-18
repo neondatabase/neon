@@ -341,7 +341,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     thread::Builder::new()
         .name("http_endpoint_thread".into())
         .spawn(move || {
-            let router = http::get_router(conf, cloned);
+            let router = http::make_router(conf, cloned);
             endpoint::serve_thread_main(router, conf.http_endpoint_addr.clone())
         })?;
 
