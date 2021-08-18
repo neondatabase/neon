@@ -106,10 +106,9 @@ pytest
 
 ## Documentation
 
-Now we use README files to cover design ideas and overall architecture for each module.
-And rustdoc style documentation comments.
+Now we use README files to cover design ideas and overall architecture for each module and `rustdoc` style documentation comments. See also [/docs/](/docs/) a top-level overview of all available markdown documentation.
 
-To view your documentation in a browser, try running `cargo doc --no-deps --open`
+To view your `rustdoc` documentation in a browser, try running `cargo doc --no-deps --open`
 
 ## Source tree layout
 
