@@ -41,6 +41,7 @@ use zenith_utils::seqwait::SeqWait;
 
 mod inmemory_layer;
 mod layer_map;
+mod page_history;
 mod snapshot_layer;
 mod storage_layer;
 

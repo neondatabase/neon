@@ -37,6 +37,7 @@
 //! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
 //!
+use crate::layered_repository::page_history::PageHistory;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag,
 };
@@ -236,7 +237,7 @@ pub struct SnapshotLayerInner {
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
-    page_versions: BTreeMap<(u32, Lsn), PageVersion>,
+    pages: BTreeMap<u32, PageHistory>,
 
     /// `relsizes` tracks the size of the relation at different points in time.
     relsizes: BTreeMap<Lsn, u32>,
@@ -270,6 +271,7 @@ impl Layer for SnapshotLayer {
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<Option<Lsn>> {
+        /*
         // Scan the BTreeMap backwards, starting from the given entry.
         let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
         {
@@ -303,6 +305,9 @@ impl Layer for SnapshotLayer {
         }
 
         Ok(need_base_image_lsn)
+
+        */
+        todo!()
     }
 
     /// Get size of the relation at given LSN
@@ -380,7 +385,7 @@ impl SnapshotLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        page_versions: BTreeMap<(u32, Lsn), PageVersion>,
+        pages: BTreeMap<u32, PageHistory>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<SnapshotLayer> {
         let snapfile = SnapshotLayer {
@@ -393,10 +398,12 @@ impl SnapshotLayer {
             dropped,
             inner: Mutex::new(SnapshotLayerInner {
                 loaded: true,
-                page_versions: page_versions,
-                relsizes: relsizes,
+                pages,
+                relsizes,
             }),
         };
+
+        /*
         let inner = snapfile.inner.lock().unwrap();
 
         // Write the in-memory btreemaps into a file
@@ -426,12 +433,16 @@ impl SnapshotLayer {
         drop(inner);
 
         Ok(snapfile)
+        */
+
+        todo!()
     }
 
     ///
     /// Load the contents of the file into memory
     ///
     fn load(&self) -> Result<MutexGuard<SnapshotLayerInner>> {
+        /*
         // quick exit if already loaded
         let mut inner = self.inner.lock().unwrap();
 
@@ -469,6 +480,9 @@ impl SnapshotLayer {
         };
 
         Ok(inner)
+        */
+
+        todo!()
     }
 
     /// Create SnapshotLayers representing all files on disk
@@ -479,6 +493,7 @@ impl SnapshotLayer {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
     ) -> Result<Vec<Arc<SnapshotLayer>>> {
+        /*
         let path = conf.timeline_path(&timelineid, &tenantid);
 
         let mut snapfiles: Vec<Arc<SnapshotLayer>> = Vec::new();
@@ -506,6 +521,8 @@ impl SnapshotLayer {
             }
         }
         return Ok(snapfiles);
+        */
+        todo!()
     }
 
     pub fn delete(&self) -> Result<()> {
@@ -519,11 +536,14 @@ impl SnapshotLayer {
     /// it will need to be loaded back.
     ///
     pub fn unload(&self) -> Result<()> {
+        /*
         let mut inner = self.inner.lock().unwrap();
         inner.page_versions = BTreeMap::new();
         inner.relsizes = BTreeMap::new();
         inner.loaded = false;
         Ok(())
+        */
+        todo!()
     }
 
     /// debugging function to print out the contents of the layer
