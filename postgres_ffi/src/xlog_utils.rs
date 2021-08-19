@@ -271,23 +271,13 @@ pub fn main() {
 
 impl XLogRecord {
     pub fn from_bytes(buf: &mut Bytes) -> XLogRecord {
-        XLogRecord {
-            xl_tot_len: buf.get_u32_le(),
-            xl_xid: buf.get_u32_le(),
-            xl_prev: buf.get_u64_le(),
-            xl_info: buf.get_u8(),
-            xl_rmid: buf.get_u8(),
-            xl_crc: {
-                buf.advance(2);
-                buf.get_u32_le()
-            },
-        }
+        use zenith_utils::bin_ser::LeSer;
+        XLogRecord::des_from(&mut buf.reader()).unwrap()
     }
 
     pub fn encode(&self) -> Bytes {
-        let b: [u8; XLOG_SIZE_OF_XLOG_RECORD];
-        b = unsafe { std::mem::transmute::<XLogRecord, [u8; XLOG_SIZE_OF_XLOG_RECORD]>(*self) };
-        Bytes::copy_from_slice(&b[..])
+        use zenith_utils::bin_ser::LeSer;
+        self.ser().unwrap().into()
     }
 
     // Is this record an XLOG_SWITCH record? They need some special processing,
@@ -298,34 +288,20 @@ impl XLogRecord {
 
 impl XLogPageHeaderData {
     pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogPageHeaderData {
-        let hdr: XLogPageHeaderData = XLogPageHeaderData {
-            xlp_magic: buf.get_u16_le(),
-            xlp_info: buf.get_u16_le(),
-            xlp_tli: buf.get_u32_le(),
-            xlp_pageaddr: buf.get_u64_le(),
-            xlp_rem_len: buf.get_u32_le(),
-        };
-        buf.get_u32_le(); //padding
-        hdr
+        use zenith_utils::bin_ser::LeSer;
+        XLogPageHeaderData::des_from(&mut buf.reader()).unwrap()
     }
 }
 
 impl XLogLongPageHeaderData {
     pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogLongPageHeaderData {
-        XLogLongPageHeaderData {
-            std: XLogPageHeaderData::from_bytes(buf),
-            xlp_sysid: buf.get_u64_le(),
-            xlp_seg_size: buf.get_u32_le(),
-            xlp_xlog_blcksz: buf.get_u32_le(),
-        }
+        use zenith_utils::bin_ser::LeSer;
+        XLogLongPageHeaderData::des_from(&mut buf.reader()).unwrap()
     }
 
     pub fn encode(&self) -> Bytes {
-        let b: [u8; XLOG_SIZE_OF_XLOG_LONG_PHD];
-        b = unsafe {
-            std::mem::transmute::<XLogLongPageHeaderData, [u8; XLOG_SIZE_OF_XLOG_LONG_PHD]>(*self)
-        };
-        Bytes::copy_from_slice(&b[..])
+        use zenith_utils::bin_ser::LeSer;
+        self.ser().unwrap().into()
     }
 }
 
@@ -333,17 +309,13 @@ pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
 
 impl CheckPoint {
     pub fn encode(&self) -> Bytes {
-        let b: [u8; SIZEOF_CHECKPOINT];
-        b = unsafe { std::mem::transmute::<CheckPoint, [u8; SIZEOF_CHECKPOINT]>(*self) };
-        Bytes::copy_from_slice(&b[..])
+        use zenith_utils::bin_ser::LeSer;
+        self.ser().unwrap().into()
     }
 
     pub fn decode(buf: &[u8]) -> Result<CheckPoint, anyhow::Error> {
-        let mut b = [0u8; SIZEOF_CHECKPOINT];
-        b.copy_from_slice(&buf[0..SIZEOF_CHECKPOINT]);
-        let checkpoint: CheckPoint;
-        checkpoint = unsafe { std::mem::transmute::<[u8; SIZEOF_CHECKPOINT], CheckPoint>(b) };
-        Ok(checkpoint)
+        use zenith_utils::bin_ser::LeSer;
+        Ok(CheckPoint::des(buf)?)
     }
 
     // Update next XID based on provided new_xid and stored epoch.
@@ -385,6 +357,7 @@ pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
                 xlp_tli: 1, // FIXME: always use Postgres timeline 1
                 xlp_pageaddr: pg_control.checkPoint - XLOG_SIZE_OF_XLOG_LONG_PHD as u64,
                 xlp_rem_len: 0,
+                ..Default::default() // Put 0 in padding fields.
             }
         },
         xlp_sysid: pg_control.system_identifier,
@@ -404,6 +377,7 @@ pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
         xl_info: pg_constants::XLOG_CHECKPOINT_SHUTDOWN,
         xl_rmid: pg_constants::RM_XLOG_ID,
         xl_crc: 0,
+        ..Default::default() // Put 0 in padding fields.
     };
 
     let mut rec_shord_hdr_bytes = BytesMut::new();

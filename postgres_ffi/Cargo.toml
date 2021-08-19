@@ -19,8 +19,9 @@ lazy_static = "1.4"
 log = "0.4.14"
 memoffset = "0.6.2"
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 workspace_hack = { path = "../workspace_hack" }
 zenith_utils = { path = "../zenith_utils" }
 
 [build-dependencies]
-bindgen = "0.57"
+bindgen = "0.59.1"

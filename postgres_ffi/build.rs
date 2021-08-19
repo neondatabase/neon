@@ -3,6 +3,44 @@ extern crate bindgen;
 use std::env;
 use std::path::PathBuf;
 
+use bindgen::callbacks::ParseCallbacks;
+
+#[derive(Debug)]
+struct PostgresFfiCallbacks;
+
+impl ParseCallbacks for PostgresFfiCallbacks {
+    fn include_file(&self, filename: &str) {
+        // This does the equivalent of passing bindgen::CargoCallbacks
+        // to the builder .parse_callbacks() method.
+        let cargo_callbacks = bindgen::CargoCallbacks;
+        cargo_callbacks.include_file(filename)
+    }
+
+    // Add any custom #[derive] attributes to the data structures that bindgen
+    // creates.
+    fn add_derives(&self, name: &str) -> Vec<String> {
+        // This is the list of data structures that we want to serialize/deserialize.
+        let serde_list = [
+            "XLogRecord",
+            "XLogPageHeaderData",
+            "XLogLongPageHeaderData",
+            "CheckPoint",
+            "FullTransactionId",
+            "ControlFileData",
+        ];
+
+        if serde_list.contains(&name) {
+            vec![
+                "Default".into(), // Default allows us to easily fill the padding fields with 0.
+                "Serialize".into(),
+                "Deserialize".into(),
+            ]
+        } else {
+            vec![]
+        }
+    }
+}
+
 fn main() {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=pg_control_ffi.h");
@@ -19,20 +57,23 @@ fn main() {
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         //
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+        .parse_callbacks(Box::new(PostgresFfiCallbacks))
         //
         // These are the types and constants that we want to generate bindings for
         //
-        .whitelist_type("ControlFileData")
-        .whitelist_type("CheckPoint")
-        .whitelist_type("FullTransactionId")
-        .whitelist_type("XLogRecord")
-        .whitelist_type("XLogPageHeaderData")
-        .whitelist_type("XLogLongPageHeaderData")
-        .whitelist_var("XLOG_PAGE_MAGIC")
-        .whitelist_var("PG_CONTROL_FILE_SIZE")
-        .whitelist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
-        .whitelist_type("DBState")
+        .allowlist_type("ControlFileData")
+        .allowlist_type("CheckPoint")
+        .allowlist_type("FullTransactionId")
+        .allowlist_type("XLogRecord")
+        .allowlist_type("XLogPageHeaderData")
+        .allowlist_type("XLogLongPageHeaderData")
+        .allowlist_var("XLOG_PAGE_MAGIC")
+        .allowlist_var("PG_CONTROL_FILE_SIZE")
+        .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
+        .allowlist_type("DBState")
+        // Because structs are used for serialization, tell bindgen to emit
+        // explicit padding fields.
+        .explicit_padding(true)
         //
         // Path the server include dir. It is in tmp_install/include/server, if you did
         // "configure --prefix=<path to tmp_install>". But if you used "configure --prefix=/",

@@ -13,11 +13,6 @@ in each major PostgreSQL version. Currently, this module is based on
 PostgreSQL v14, but in the future we will probably need a separate
 copy for each PostgreSQL version.
 
-To interact with the C structs, there is some unsafe code in this
-module. Do not copy-paste that to the rest of the codebase! Keep the
-amount of unsafe code to a minimum, and limited to this module only,
-and only where it's truly needed.
-
 TODO: Currently, there is also some code that deals with WAL records
 in pageserver/src/waldecoder.rs.  That should be moved into this
 module. The rest of the codebase should not have intimate knowledge of

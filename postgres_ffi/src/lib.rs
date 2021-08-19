@@ -4,6 +4,9 @@
 // suppress warnings on rust 1.53 due to bindgen unit tests.
 // https://github.com/rust-lang/rust-bindgen/issues/1651
 #![allow(deref_nullptr)]
+
+use serde::{Deserialize, Serialize};
+
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 pub mod controlfile_utils;
