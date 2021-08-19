@@ -1,16 +1,5 @@
 ## Page server architecture
 
-The Page Server is responsible for all operations on a number of
-"chunks" of relation data. A chunk corresponds to a PostgreSQL
-relation segment (i.e. one max. 1 GB file in the data directory), but
-it holds all the different versions of every page in the segment that
-are still needed by the system.
-
-Currently we do not specifically organize data in chunks.
-All page images and corresponding WAL records are stored as entries in a key-value storage,
-where StorageKey is a zenith_timeline_id + BufferTag + LSN.
-
-
 The Page Server has a few different duties:
 
 - Respond to GetPage@LSN requests from the Compute Nodes
@@ -72,7 +61,7 @@ WAL Receiver
 The WAL receiver connects to the external WAL safekeeping service (or
 directly to the primary) using PostgreSQL physical streaming
 replication, and continuously receives WAL. It decodes the WAL records,
-and stores them to the page cache.
+and stores them to the page cache repository.
 
 
 Page Cache
@@ -83,6 +72,11 @@ The Page Cache is a switchboard to access different Repositories.
 #### Repository
 Repository corresponds to one .zenith directory.
 Repository is needed to manage Timelines.
+Each repository has associated WAL redo service.
+
+Now we have two implementations of Repository:
+- ObjectRepository uses RocksDB as a storage
+- LayeredRepository uses custom storage format, described in layered_repository/README.md
 
 #### Timeline
 Timeline is a page cache workhorse that accepts page changes
