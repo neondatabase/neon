@@ -2,7 +2,7 @@
 //!
 //! FIXME: better description needed here
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use bincode::config::Options;
 use bytes::{Buf, Bytes};
 use log::*;
@@ -236,7 +236,9 @@ impl<'pg> ReceiveWalConn<'pg> {
             .write_message(&BeMessage::CopyBothResponse)?;
 
         // Receive information about server
-        let server_info = self.read_msg::<ServerInfo>()?;
+        let server_info = self
+            .read_msg::<ServerInfo>()
+            .context("Failed to receive server info")?;
         info!(
             "Start handshake with wal_proposer {} sysid {} timeline {} tenant {}",
             self.peer_addr, server_info.system_id, server_info.timeline_id, server_info.tenant_id,
@@ -284,7 +286,9 @@ impl<'pg> ReceiveWalConn<'pg> {
         self.write_msg(&my_info)?;
 
         /* Wait for vote request */
-        let prop = self.read_msg::<RequestVote>()?;
+        let prop = self
+            .read_msg::<RequestVote>()
+            .context("Failed to read vote request")?;
         /* This is Paxos check which should ensure that only one master can perform commits */
         if prop.node_id < my_info.server.node_id {
             /* Send my node-id to inform proposer that it's candidate was rejected */
@@ -330,7 +334,8 @@ impl<'pg> ReceiveWalConn<'pg> {
             let msg_bytes = self.read_msg_bytes()?;
             let mut msg_reader = msg_bytes.reader();
 
-            let req = SafeKeeperRequest::des_from(&mut msg_reader)?;
+            let req = SafeKeeperRequest::des_from(&mut msg_reader)
+                .context("Failed to get WAL message header")?;
             if req.sender_id != my_info.server.node_id {
                 bail!("Sender NodeId is changed");
             }
