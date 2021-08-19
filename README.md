@@ -2,6 +2,22 @@
 
 Zenith substitutes PostgreSQL storage layer and redistributes data across a cluster of nodes
 
+## Architecture overview
+
+A Zenith installation consists of Compute nodes and Storage engine.
+
+Compute nodes are stateles PostgreSQL nodes, backed by zenith storage.
+
+Zenith storage engine consists of two major components:
+- Pageserver. Scalable storage backend for compute nodes.
+- WAL service. The service that receives WAL from compute node and ensures that it is stored durably.
+
+Pageserver consists of:
+- Page cache repository - Zenith storage implementation.
+- WAL receiver - service that recieves WAL from WAL service and stores it in the page cache repository.
+- Page service - service that communicates with compute nodes and responds with pages from the repository.
+- WAL redo - service that builds pages from base images and WAL records on Page service request.
+
 ## Running local installation
 
 1. Install build dependencies and other useful packages
@@ -105,52 +121,13 @@ pytest
 
 Now we use README files to cover design ideas and overall architecture for each module and `rustdoc` style documentation comments. See also [/docs/](/docs/) a top-level overview of all available markdown documentation.
 
+- [/docs/sourcetree.md](/docs/sourcetree.md) contains overview of source tree layout.
+
 To view your `rustdoc` documentation in a browser, try running `cargo doc --no-deps --open`
 
-## Source tree layout
+## Join the development
 
-`/control_plane`:
-
-Local control plane.
-Functions to start, configure and stop pageserver and postgres instances running as a local processes.
-Intended to be used in integration tests and in CLI tools for local installations.
-
-`/zenith`
-
-Main entry point for the 'zenith' CLI utility.
-TODO: Doesn't it belong to control_plane?
-
-`/postgres_ffi`:
-
-Utility functions for interacting with PostgreSQL file formats.
-Misc constants, copied from PostgreSQL headers.
-
-`/zenith_utils`:
-
-Helpers that are shared between other crates in this repository.
-
-`/walkeeper`:
-
-WAL safekeeper (also known as WAL acceptor). Written in Rust.
-
-`/pageserver`:
-
-Page Server. Written in Rust.
-
-Depends on the modified 'postgres' binary for WAL redo.
-
-`/vendor/postgres`:
-
-PostgreSQL source tree, with the modifications needed for Zenith.
-
-`/vendor/postgres/contrib/zenith`:
-
-PostgreSQL extension that implements storage manager API and network communications with remote page server.
-
-`/test_runner`:
-
-Integration tests, written in Python using the `pytest` framework.
-
-`test_runner/zenith_regress`:
-
-Quick way to add new SQL regression test to integration tests set.
+- Read `CONTRIBUTING.md` to learn about project code style and practices.
+- Use glossary in [/docs/glossary.md](/docs/glossary.md)
+- To get familiar with a source tree layout, use [/docs/sourcetree.md](/docs/sourcetree.md).
+- To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html 
