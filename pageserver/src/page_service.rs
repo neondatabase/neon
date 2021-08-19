@@ -145,7 +145,7 @@ impl PagestreamBeMessage {
 ///
 pub fn thread_main(
     conf: &'static PageServerConf,
-    auth: Arc<Option<JwtAuth>>,
+    auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
@@ -153,7 +153,7 @@ pub fn thread_main(
         let (socket, peer_addr) = listener.accept()?;
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
-        let local_auth = Arc::clone(&auth);
+        let local_auth = auth.clone();
         thread::spawn(move || {
             if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
                 error!("error: {}", err);
@@ -164,7 +164,7 @@ pub fn thread_main(
 
 fn page_service_conn_main(
     conf: &'static PageServerConf,
-    auth: Arc<Option<JwtAuth>>,
+    auth: Option<Arc<JwtAuth>>,
     socket: TcpStream,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
@@ -185,7 +185,7 @@ fn page_service_conn_main(
 #[derive(Debug)]
 struct PageServerHandler {
     conf: &'static PageServerConf,
-    auth: Arc<Option<JwtAuth>>,
+    auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 }
 
@@ -208,7 +208,7 @@ lazy_static! {
 }
 
 impl PageServerHandler {
-    pub fn new(conf: &'static PageServerConf, auth: Arc<Option<JwtAuth>>) -> Self {
+    pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
         PageServerHandler {
             conf,
             auth,
