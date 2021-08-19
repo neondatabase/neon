@@ -158,6 +158,11 @@ pub trait Timeline: Send + Sync {
     /// Relation size is increased implicitly and decreased with Truncate updates.
     // TODO ordering guarantee?
     fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>>;
+
+    //
+    // Wait until WAL has been received up to the given LSN.
+    //
+    fn wait_lsn(&self, lsn: Lsn) -> Result<Lsn>;
 }
 
 pub trait History: Iterator<Item = Result<Modification>> {

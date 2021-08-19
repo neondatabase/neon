@@ -76,8 +76,12 @@ impl ReplicationConn {
                     let feedback = HotStandbyFeedback::des(&m)?;
                     subscriber.add_hs_feedback(feedback);
                 }
+                FeMessage::Sync => {}
+                FeMessage::CopyFailed => {
+                    return Err(anyhow!("Copy failed"))
+                }
                 _ => {
-                    // We only handle `CopyData` messages. Anything else is ignored.
+                    // We only handle `CopyData`, 'Sync', 'CopyFailed' messages. Anything else is ignored.
                     info!("unexpected message {:?}", msg);
                 }
             }

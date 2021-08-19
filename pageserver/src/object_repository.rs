@@ -714,6 +714,41 @@ impl Timeline for ObjectTimeline {
         let iter = self.obj_store.objects(self.timelineid, lsn)?;
         Ok(Box::new(ObjectHistory { lsn, iter }))
     }
+
+    //
+    // Wait until WAL has been received up to the given LSN.
+    //
+    fn wait_lsn(&self, req_lsn: Lsn) -> Result<Lsn> {
+        let mut lsn = req_lsn;
+        // When invalid LSN is requested, it means "don't wait, return latest version of the page"
+        // This is necessary for bootstrap.
+        if lsn == Lsn(0) {
+            let last_valid_lsn = self.last_valid_lsn.load();
+            trace!(
+                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
+                last_valid_lsn,
+                lsn
+            );
+            lsn = last_valid_lsn;
+        }
+        trace!(
+            "Start waiting for LSN {}, valid LSN is {}",
+            lsn,
+            self.last_valid_lsn.load()
+        );
+        self.last_valid_lsn
+            .wait_for_timeout(lsn, TIMEOUT)
+            .with_context(|| {
+                format!(
+                    "Timed out while waiting for WAL record at LSN {} to arrive. valid LSN in {}",
+                    lsn,
+                    self.last_valid_lsn.load(),
+                )
+            })?;
+        //trace!("Stop waiting for LSN {}, valid LSN is {}", lsn,  self.last_valid_lsn.load());
+
+        Ok(lsn)
+    }
 }
 
 impl ObjectTimeline {
@@ -820,40 +855,6 @@ impl ObjectTimeline {
             thread::sleep(conf.gc_period);
             self.gc_iteration(conf.gc_horizon, false)?;
         }
-    }
-
-    //
-    // Wait until WAL has been received up to the given LSN.
-    //
-    fn wait_lsn(&self, mut lsn: Lsn) -> Result<Lsn> {
-        // When invalid LSN is requested, it means "don't wait, return latest version of the page"
-        // This is necessary for bootstrap.
-        if lsn == Lsn(0) {
-            let last_valid_lsn = self.last_valid_lsn.load();
-            trace!(
-                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                last_valid_lsn,
-                lsn
-            );
-            lsn = last_valid_lsn;
-        }
-        trace!(
-            "Start waiting for LSN {}, valid LSN is {}",
-            lsn,
-            self.last_valid_lsn.load()
-        );
-        self.last_valid_lsn
-            .wait_for_timeout(lsn, TIMEOUT)
-            .with_context(|| {
-                format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive. valid LSN in {}",
-                    lsn,
-                    self.last_valid_lsn.load(),
-                )
-            })?;
-        //trace!("Stop waiting for LSN {}, valid LSN is {}", lsn,  self.last_valid_lsn.load());
-
-        Ok(lsn)
     }
 
     ///

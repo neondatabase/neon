@@ -214,10 +214,9 @@ pub const PGDATA_SUBDIRS: [&'static str; 22] = [
     "pg_logical/mappings",
 ];
 
-pub const PGDATA_SPECIAL_FILES: [&'static str; 4] = [
+pub const PGDATA_SPECIAL_FILES: [&'static str; 3] = [
     "pg_hba.conf",
     "pg_ident.conf",
-    "postgresql.conf",
     "postgresql.auto.conf",
 ];
 

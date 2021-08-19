@@ -357,8 +357,13 @@ impl PageServerHandler {
 
         /* Send a tarball of the latest snapshot on the timeline */
 
-        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
-
+        let req_lsn = match lsn {
+            Some(lsn) => {
+                timeline.wait_lsn(lsn)?;
+                lsn
+            }
+            None => timeline.get_last_valid_lsn()
+        };
         {
             let mut writer = CopyDataSink { pgb };
             let mut basebackup = basebackup::Basebackup::new(
@@ -468,8 +473,9 @@ impl postgres_backend::Handler for PageServerHandler {
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split(" ").collect::<Vec<_>>();
+			info!("params.len()={},  params[2].len()={}", params.len(), params[2].len());
             ensure!(
-                params.len() == 2,
+                params.len() >= 2,
                 "invalid param number for basebackup command"
             );
 
@@ -479,7 +485,7 @@ impl postgres_backend::Handler for PageServerHandler {
             self.check_permission(Some(tenantid))?;
 
             // TODO are there any tests with lsn option?
-            let lsn = if params.len() == 3 {
+            let lsn = if params.len() == 3 && params[2].len() != 0 {
                 Some(Lsn::from_str(params[2])?)
             } else {
                 None
@@ -573,6 +579,10 @@ impl postgres_backend::Handler for PageServerHandler {
                     }
                     FeMessage::CopyDone => {
                         timeline.advance_last_valid_lsn(last_lsn);
+                        break;
+                    }
+                    FeMessage::CopyFailed => {
+                        info!("Copy failed");
                         break;
                     }
                     FeMessage::Sync => {}

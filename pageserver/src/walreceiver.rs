@@ -207,7 +207,7 @@ fn walreceiver_main(
 
                 waldecoder.feed_bytes(data);
 
-                while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                while let Ok(Some((lsn, recdata))) = waldecoder.poll_decode() {
                     // Save old checkpoint value to compare with it after decoding WAL record
                     let old_checkpoint_bytes = checkpoint.encode();
                     let decoded = decode_wal_record(recdata.clone());
