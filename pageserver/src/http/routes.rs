@@ -27,12 +27,12 @@ use crate::{
 #[derive(Debug)]
 struct State {
     conf: &'static PageServerConf,
-    auth: Arc<Option<JwtAuth>>,
+    auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
 }
 
 impl State {
-    fn new(conf: &'static PageServerConf, auth: Arc<Option<JwtAuth>>) -> Self {
+    fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
             .map(|v| v.parse().unwrap())
@@ -141,7 +141,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 pub fn make_router(
     conf: &'static PageServerConf,
-    auth: Arc<Option<JwtAuth>>,
+    auth: Option<Arc<JwtAuth>>,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -151,7 +151,7 @@ pub fn make_router(
             if state.allowlist_routes.contains(request.uri()) {
                 None
             } else {
-                Option::as_ref(&state.auth)
+                state.auth.as_deref()
             }
         }))
     }

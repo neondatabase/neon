@@ -10,7 +10,6 @@ use std::{
     path::{Path, PathBuf},
     process::exit,
     str::FromStr,
-    sync::Arc,
     thread,
     time::Duration,
 };
@@ -327,17 +326,17 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
-        AuthType::Trust | AuthType::MD5 => Arc::new(None),
+        AuthType::Trust | AuthType::MD5 => None,
         AuthType::ZenithJWT => {
             // unwrap is ok because check is performed when creating config, so path is set and file exists
             let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
-            Arc::new(Some(JwtAuth::from_key_path(key_path)?))
+            Some(JwtAuth::from_key_path(key_path)?.into())
         }
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
     // Spawn a new thread for the http endpoint
-    let cloned = Arc::clone(&auth);
+    let cloned = auth.clone();
     thread::Builder::new()
         .name("http_endpoint_thread".into())
         .spawn(move || {
