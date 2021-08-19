@@ -21,6 +21,7 @@ all: zenith postgres
 ### Zenith Rust bits
 #
 # The 'postgres_ffi' depends on the Postgres headers.
+.PHONY: zenith
 zenith: postgres-headers
 	cargo build
 
@@ -37,15 +38,18 @@ tmp_install/build/config.status:
 		--prefix=$(abspath tmp_install) > configure.log)
 
 # nicer alias for running 'configure'
+.PHONY: postgres-configure
 postgres-configure: tmp_install/build/config.status
 
 # Install the PostgreSQL header files into tmp_install/include
+.PHONY: postgres-headers
 postgres-headers: postgres-configure
 	+@echo "Installing PostgreSQL headers"
 	$(MAKE) -C tmp_install/build/src/include MAKELEVEL=0 install
 
 
 # Compile and install PostgreSQL and contrib/zenith
+.PHONY: postgres
 postgres: postgres-configure
 	+@echo "Compiling PostgreSQL"
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 install
@@ -67,14 +71,10 @@ distclean:
 	rm -rf tmp_install
 	cargo clean
 
+.PHONY: fmt
 fmt:
-	@files=$$(git diff --cached --name-only --diff-filter=ACM | grep ".rs"); \
-	if [ "$$files" ]; then \
-		rustfmt $$files --edition=2018; \
-	fi;
+	./pre-commit.py --fix-inplace
 
-
+.PHONY: setup-pre-commit-hook
 setup-pre-commit-hook:
-	ln -s -f ../../pre-commit.sh.tpl .git/hooks/pre-commit
-
-.PHONY: postgres-configure postgres postgres-headers zenith
+	ln -s -f ../../pre-commit.py .git/hooks/pre-commit
