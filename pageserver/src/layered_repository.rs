@@ -1138,15 +1138,13 @@ impl LayeredTimeline {
             // (removes it if new_open is None)
             iter.replace(new_open);
 
-            if let Some(historic) = new_historic {
-                trace!(
-                    "freeze returned layer {} {}-{}",
-                    historic.get_seg_tag(),
-                    historic.get_start_lsn(),
-                    historic.get_end_lsn()
-                );
-                iter.insert_historic(historic);
-            }
+            trace!(
+                "freeze returned layer {} {}-{}",
+                new_historic.get_seg_tag(),
+                new_historic.get_start_lsn(),
+                new_historic.get_end_lsn()
+            );
+            iter.insert_historic(new_historic);
         }
 
         for layer in layers.iter_historic_layers() {

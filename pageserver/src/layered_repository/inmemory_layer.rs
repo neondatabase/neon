@@ -53,6 +53,22 @@ pub struct InMemoryLayerInner {
     segsizes: BTreeMap<Lsn, u32>,
 }
 
+
+impl InMemoryLayerInner {
+    fn get_seg_size(&self, seg: SegmentTag, lsn: Lsn) -> Result<u32> {
+        // Scan the BTreeMap backwards, starting from the given entry.
+        let mut iter = self.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
+
+        if let Some((_entry_lsn, entry)) = iter.next_back() {
+            let result = *entry;
+            trace!("get_seg_size: {} at {} -> {}", seg, lsn, result);
+            Ok(result)
+        } else {
+            bail!("No size found for {} at {} in memory", seg, lsn);
+        }
+    }
+}
+
 impl Layer for InMemoryLayer {
     fn get_timeline_id(&self) -> ZTimelineId {
         return self.timelineid;
@@ -128,18 +144,8 @@ impl Layer for InMemoryLayer {
 
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
-        // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.inner.lock().unwrap();
-        let mut iter = inner.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
-
-        if let Some((_entry_lsn, entry)) = iter.next_back() {
-            let result = *entry;
-            drop(inner);
-            trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
-            Ok(result)
-        } else {
-            bail!("No size found for {} at {} in memory", self.seg, lsn);
-        }
+        inner.get_seg_size(self.seg, lsn)
     }
 
     /// Does this segment exist at given LSN?
@@ -244,15 +250,9 @@ impl InMemoryLayer {
         if self.seg.rel.is_blocky() {
             let newsize = blknum - self.seg.segno * RELISH_SEG_SIZE + 1;
 
-            let mut iter = inner.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
-
-            let oldsize;
-            if let Some((_entry_lsn, entry)) = iter.next_back() {
-                oldsize = *entry;
-            } else {
-                oldsize = 0;
-                //bail!("No old size found for {} at {}", self.tag, lsn);
-            }
+            // use inner get_seg_size, since calling self.get_seg_size will try to acquire self.inner.lock
+            // which we've just acquired above
+            let oldsize = inner.get_seg_size(self.seg, lsn).unwrap_or(0);         
             if newsize > oldsize {
                 trace!(
                     "enlarging segment {} from {} to {} blocks at {}",
@@ -366,7 +366,7 @@ impl InMemoryLayer {
         cutoff_lsn: Lsn,
         // This is needed just to call materialize_page()
         timeline: &LayeredTimeline,
-    ) -> Result<(Option<Arc<SnapshotLayer>>, Option<Arc<InMemoryLayer>>)> {
+    ) -> Result<(Arc<SnapshotLayer>, Option<Arc<InMemoryLayer>>)> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.seg, self.timelineid, cutoff_lsn
@@ -458,7 +458,7 @@ impl InMemoryLayer {
             None
         };
 
-        let new_historic = Some(Arc::new(snapfile));
+        let new_historic = Arc::new(snapfile);
 
         Ok((new_historic, new_open))
     }
