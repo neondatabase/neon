@@ -320,7 +320,7 @@ impl PostgresNode {
 
         // Never clean up old WAL. TODO: We should use a replication
         // slot or something proper, to prevent the compute node
-        // from removing WAL that hasn't been streamed to the safekeepr or
+        // from removing WAL that hasn't been streamed to the safekeeper or
         // page server yet. (gh issue #349)
         self.append_conf("postgresql.conf", "wal_keep_size='10TB'\n")?;
 

@@ -341,7 +341,7 @@ impl PostgresBackend {
 
             // We prefer explicit pattern matching to wildcards, because
             // this helps us spot the places where new variants are missing
-            FeMessage::CopyData(_) | FeMessage::CopyDone => {
+            FeMessage::CopyData(_) | FeMessage::CopyDone | FeMessage::CopyFail => {
                 bail!("unexpected message type: {:?}", msg);
             }
         }
