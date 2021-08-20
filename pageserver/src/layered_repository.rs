@@ -842,6 +842,34 @@ impl Timeline for LayeredTimeline {
     fn get_prev_record_lsn(&self) -> Lsn {
         self.prev_record_lsn.load()
     }
+
+    ///
+    /// Wait until WAL has been received up to the given LSN.
+    ///
+    fn wait_lsn(&self, mut lsn: Lsn) -> anyhow::Result<Lsn> {
+        // When invalid LSN is requested, it means "don't wait, return latest version of the page"
+        // This is necessary for bootstrap.
+        if lsn == Lsn(0) {
+            let last_valid_lsn = self.last_valid_lsn.load();
+            trace!(
+                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
+                last_valid_lsn,
+                lsn
+            );
+            lsn = last_valid_lsn;
+        }
+
+        self.last_valid_lsn
+            .wait_for_timeout(lsn, TIMEOUT)
+            .with_context(|| {
+                format!(
+                    "Timed out while waiting for WAL record at LSN {} to arrive",
+                    lsn
+                )
+            })?;
+
+        Ok(lsn)
+    }
 }
 
 impl LayeredTimeline {
@@ -1053,34 +1081,6 @@ impl LayeredTimeline {
         layers.insert_open(Arc::clone(&layer_rc));
 
         Ok(layer_rc)
-    }
-
-    ///
-    /// Wait until WAL has been received up to the given LSN.
-    ///
-    fn wait_lsn(&self, mut lsn: Lsn) -> anyhow::Result<Lsn> {
-        // When invalid LSN is requested, it means "don't wait, return latest version of the page"
-        // This is necessary for bootstrap.
-        if lsn == Lsn(0) {
-            let last_valid_lsn = self.last_valid_lsn.load();
-            trace!(
-                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                last_valid_lsn,
-                lsn
-            );
-            lsn = last_valid_lsn;
-        }
-
-        self.last_valid_lsn
-            .wait_for_timeout(lsn, TIMEOUT)
-            .with_context(|| {
-                format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive",
-                    lsn
-                )
-            })?;
-
-        Ok(lsn)
     }
 
     ///

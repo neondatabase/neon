@@ -473,7 +473,6 @@ impl postgres_backend::Handler for PageServerHandler {
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split(" ").collect::<Vec<_>>();
-			info!("params.len()={},  params[2].len()={}", params.len(), params[2].len());
             ensure!(
                 params.len() >= 2,
                 "invalid param number for basebackup command"
