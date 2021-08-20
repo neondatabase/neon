@@ -47,6 +47,7 @@ pub trait Handler {
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub enum ProtoState {
     Initialization,
+    Encrypted,
     Authentication,
     Established,
 }
@@ -187,7 +188,7 @@ impl PostgresBackend {
 
         use ProtoState::*;
         match state {
-            Initialization => FeStartupMessage::read(stream),
+            Initialization | Encrypted => FeStartupMessage::read(stream),
             Authentication | Established => FeMessage::read(stream),
         }
     }
@@ -282,6 +283,7 @@ impl PostgresBackend {
                         if self.tls_config.is_some() {
                             self.write_message(&BeMessage::EncryptionResponse(true))?;
                             self.start_tls()?;
+                            self.state = ProtoState::Encrypted;
                         } else {
                             self.write_message(&BeMessage::EncryptionResponse(false))?;
                         }
@@ -291,6 +293,14 @@ impl PostgresBackend {
                         self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
                     StartupRequestCode::Normal => {
+                        if self.tls_config.is_some() && !matches!(self.state, ProtoState::Encrypted)
+                        {
+                            self.write_message(&BeMessage::ErrorResponse(
+                                "must connect with TLS".to_string(),
+                            ))?;
+                            bail!("client did not connect with TLS");
+                        }
+
                         // NB: startup() may change self.auth_type -- we are using that in proxy code
                         // to bypass auth for new users.
                         handler.startup(self, &m)?;

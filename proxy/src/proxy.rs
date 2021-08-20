@@ -89,6 +89,7 @@ impl ProxyConnection {
     }
 
     fn handle_startup(&mut self) -> anyhow::Result<()> {
+        let mut encrypted = false;
         loop {
             let msg = self.pgb.read_message()?;
             println!("got message {:?}", msg);
@@ -107,12 +108,19 @@ impl ProxyConnection {
                                 self.pgb
                                     .write_message(&BeMessage::EncryptionResponse(true))?;
                                 self.pgb.start_tls()?;
+                                encrypted = true;
                             } else {
                                 self.pgb
                                     .write_message(&BeMessage::EncryptionResponse(false))?;
                             }
                         }
                         StartupRequestCode::Normal => {
+                            if self.state.conf.ssl_config.is_some() && !encrypted {
+                                self.pgb.write_message(&BeMessage::ErrorResponse(
+                                    "must connect with TLS".to_string(),
+                                ))?;
+                                bail!("client did not connect with TLS");
+                            }
                             self.user = m
                                 .params
                                 .get("user")
