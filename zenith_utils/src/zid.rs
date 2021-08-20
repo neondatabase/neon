@@ -126,7 +126,7 @@ macro_rules! zid_newtype {
 /// is separate from PostgreSQL timelines, and doesn't have those
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ZTimelineId(ZId);
 
 zid_newtype!(ZTimelineId);

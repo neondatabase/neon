@@ -132,6 +132,7 @@ pub fn import_timeline_from_postgres_datadir(
     }
     // TODO: Scan pg_tblspc
 
+    timeline.advance_last_valid_lsn(lsn);
     timeline.checkpoint()?;
 
     Ok(())
@@ -424,13 +425,13 @@ pub fn save_decoded_record(
             let parsed_xact = XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
             save_xact_record(timeline, lsn, &parsed_xact, decoded)?;
             // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
-            info!(
-                "unlink twophaseFile for xid {} parsed_xact.xid {} here",
-                decoded.xl_xid, parsed_xact.xid
+            trace!(
+                "unlink twophaseFile for xid {} parsed_xact.xid {} here at {}",
+                decoded.xl_xid, parsed_xact.xid, lsn
             );
             timeline.put_unlink(
                 RelishTag::TwoPhase {
-                    xid: decoded.xl_xid,
+                    xid: parsed_xact.xid,
                 },
                 lsn,
             )?;
@@ -795,7 +796,13 @@ fn save_clog_truncate_record(
     // Iterate via SLRU CLOG segments and unlink segments that we're ready to truncate
     // TODO This implementation is very inefficient -
     // it scans all non-rels only to find Clog
-    for obj in timeline.list_nonrels(lsn)? {
+    //
+    // We cannot pass 'lsn' to the Timeline.list_nonrels(), or it
+    // will block waiting for the last valid LSN to advance up to
+    // it. So we use the previous record's LSN in the get calls
+    // instead.
+    let req_lsn = min(timeline.get_last_record_lsn(), lsn);
+    for obj in timeline.list_nonrels(req_lsn)? {
         match obj {
             RelishTag::Slru { slru, segno } => {
                 if slru == SlruKind::Clog {

@@ -8,7 +8,7 @@ use crate::page_cache;
 use crate::relish::*;
 use crate::restore_local_repo;
 use crate::waldecoder::*;
-use crate::PageServerConf;
+use crate::{PageServerConf, RepositoryFormat};
 use anyhow::{Error, Result};
 use lazy_static::lazy_static;
 use log::*;
@@ -264,7 +264,11 @@ fn walreceiver_main(
                     )?;
 
                     if newest_segno - oldest_segno >= 10 {
-                        timeline.checkpoint()?;
+                        // FIXME: The layered repository performs checkpointing in a separate thread, so this
+                        // isn't needed anymore. Remove 'checkpoint' from the Timeline trait altogether?
+                        if conf.repository_format == RepositoryFormat::RocksDb {
+                            timeline.checkpoint()?;
+                        }
 
                         // TODO: This is where we could remove WAL older than last_rec_lsn.
                         //remove_wal_files(timelineid, pg_constants::WAL_SEGMENT_SIZE, last_rec_lsn)?;

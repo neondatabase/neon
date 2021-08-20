@@ -7,7 +7,7 @@ executors:
   zenith-build-executor:
     resource_class: xlarge
     docker:
-      - image: cimg/rust:1.51.0
+      - image: cimg/rust:1.52.1
 
 jobs:
 
@@ -237,6 +237,23 @@ jobs:
       - store_test_results:
           path: /tmp/test_output
 
+  # Build zenithdb/zenith:latest image and push it to Docker hub
+  docker-image:
+    docker:
+      - image: cimg/base:2021.04
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Init postgres submodule
+          command: git submodule update --init --depth 1
+      - run:
+          name: Build and push Docker image
+          command: |
+            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            docker build -t zenithdb/zenith:latest . && docker push zenithdb/zenith:latest
+
 workflows:
   build_and_test:
     jobs:
@@ -265,3 +282,14 @@ workflows:
           test_selection: batch_others
           requires:
             - build-zenith-<< matrix.build_type >>
+      - docker-image:
+          # Context gives an ability to login
+          context: Docker Hub
+          # Build image only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - pg_regress tests release
+            - other tests release

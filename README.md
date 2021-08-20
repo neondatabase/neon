@@ -12,15 +12,12 @@ apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libsec
 libssl-dev clang
 ```
 
-[Rust] 1.48 or later is also required.
+[Rust] 1.52 or later is also required.
 
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
 To run the integration tests (not required to use the code), install
-Python (3.6 or higher), and install python3 packages with `pip` (called `pip3` on some systems):
-```
-pip install pytest psycopg2
-```
+Python (3.6 or higher), and install python3 packages with `pipenv` using `pipenv install` in the project directory.
 
 2. Build zenith and patched postgres
 ```sh
@@ -106,10 +103,9 @@ pytest
 
 ## Documentation
 
-Now we use README files to cover design ideas and overall architecture for each module.
-And rustdoc style documentation comments.
+Now we use README files to cover design ideas and overall architecture for each module and `rustdoc` style documentation comments. See also [/docs/](/docs/) a top-level overview of all available markdown documentation.
 
-To view your documentation in a browser, try running `cargo doc --no-deps --open`
+To view your `rustdoc` documentation in a browser, try running `cargo doc --no-deps --open`
 
 ## Source tree layout
 

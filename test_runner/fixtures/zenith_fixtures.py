@@ -1,4 +1,3 @@
-import getpass
 import os
 import pathlib
 import uuid
@@ -7,9 +6,11 @@ import pytest
 import shutil
 import signal
 import subprocess
+import time
 
 from contextlib import closing
 from pathlib import Path
+from dataclasses import dataclass
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -266,6 +267,7 @@ class Postgres(PgProtocol):
         branch: str,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
+        config_only: bool = False,
     ) -> 'Postgres':
         """
         Create the pg data directory.
@@ -277,7 +279,10 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
+        if config_only:
+            self.zenith_cli.run(['pg', 'create', '--config-only', branch, f'--tenantid={self.tenant_id}'])
+        else:
+            self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
         self.branch = branch
         if wal_acceptors is not None:
             self.adjust_for_wal_acceptors(wal_acceptors)
@@ -302,6 +307,13 @@ class Postgres(PgProtocol):
     def pg_xact_dir_path(self) -> str:
         """ Path to pg_xact dir """
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'pg_xact'
+        return os.path.join(self.repo_dir, path)
+
+    def pg_twophase_dir_path(self) -> str:
+        """ Path to pg_twophase dir """
+        print(self.tenant_id)
+        print(self.branch)
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'pg_twophase'
         return os.path.join(self.repo_dir, path)
 
     def config_file_path(self) -> str:
@@ -376,7 +388,8 @@ class Postgres(PgProtocol):
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
         """
-        Create a Postgres instance, then start it.
+        Create a Postgres instance, apply config
+        and then start it.
         Returns self.
         """
 
@@ -384,6 +397,7 @@ class Postgres(PgProtocol):
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
+            config_only=True,
         ).start()
 
         return self
@@ -424,6 +438,54 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create_start(
+            branch=branch,
+            wal_acceptors=wal_acceptors,
+            config_lines=config_lines,
+        )
+
+    def create(
+        self,
+        branch: str = "main",
+        tenant_id: Optional[str] = None,
+        wal_acceptors: Optional[str] = None,
+        config_lines: Optional[List[str]] = None
+    ) -> Postgres:
+
+        pg = Postgres(
+            zenith_cli=self.zenith_cli,
+            repo_dir=self.repo_dir,
+            tenant_id=tenant_id or self.initial_tenant,
+            port=self.base_port + self.num_instances + 1,
+        )
+
+        self.num_instances += 1
+        self.instances.append(pg)
+
+        return pg.create(
+            branch=branch,
+            wal_acceptors=wal_acceptors,
+            config_lines=config_lines,
+        )
+
+    def config(
+        self,
+        branch: str = "main",
+        tenant_id: Optional[str] = None,
+        wal_acceptors: Optional[str] = None,
+        config_lines: Optional[List[str]] = None
+    ) -> Postgres:
+
+        pg = Postgres(
+            zenith_cli=self.zenith_cli,
+            repo_dir=self.repo_dir,
+            tenant_id=tenant_id or self.initial_tenant,
+            port=self.base_port + self.num_instances + 1,
+        )
+
+        self.num_instances += 1
+        self.instances.append(pg)
+
+        return pg.config(
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
@@ -511,26 +573,27 @@ def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir)
 
 
-def read_pid(path):
+def read_pid(path: Path):
     """ Read content of file into number """
-    return int(Path(path).read_text())
+    return int(path.read_text())
 
 
+@dataclass
 class WalAcceptor:
     """ An object representing a running wal acceptor daemon. """
-    def __init__(self, wa_binpath, data_dir, port, num, auth_token: Optional[str] = None):
-        self.wa_binpath = wa_binpath
-        self.data_dir = data_dir
-        self.port = port
-        self.num = num  # identifier for logging
-        self.auth_token = auth_token
+    bin_path: Path
+    data_dir: Path
+    port: int
+    num: int # identifier for logging
+    auth_token: Optional[str] = None
 
     def start(self) -> 'WalAcceptor':
         # create data directory if not exists
-        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.pidfile.unlink(missing_ok=True)
 
-        cmd = [self.wa_binpath]
-        cmd.extend(["-D", self.data_dir])
+        cmd = [str(self.bin_path)]
+        cmd.extend(["-D", str(self.data_dir)])
         cmd.extend(["-l", "localhost:{}".format(self.port)])
         cmd.append("--daemonize")
         cmd.append("--no-sync")
@@ -541,38 +604,51 @@ class WalAcceptor:
         env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None
         subprocess.run(cmd, check=True, env=env)
 
-        return self
+        # wait for wal acceptor start by checkking that pid is readable
+        for _ in range(3):
+            pid = self.get_pid()
+            if pid is not None:
+                return self
+            time.sleep(0.5)
+
+        raise RuntimeError("cannot get wal acceptor pid")
+
+    @property
+    def pidfile(self) -> Path:
+        return self.data_dir / "wal_acceptor.pid"
+
+    def get_pid(self) -> Optional[int]:
+        if not self.pidfile.exists():
+            return None
+
+        try:
+            pid = read_pid(self.pidfile)
+        except ValueError:
+            return None
+
+        return pid
 
     def stop(self) -> 'WalAcceptor':
         print('Stopping wal acceptor {}'.format(self.num))
-        pidfile_path = os.path.join(self.data_dir, "wal_acceptor.pid")
-        try:
-            pid = read_pid(pidfile_path)
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except Exception:
-                pass  # pidfile might be obsolete
-            # TODO: cleanup pid file on exit in wal acceptor
-            return self
-            # for _ in range(5):
-            # print('waiting wal acceptor {} (pid {}) to stop...', self.num, pid)
-            # try:
-            # read_pid(pidfile_path)
-            # except FileNotFoundError:
-            # return  # done
-            # time.sleep(1)
-            # raise Exception('Failed to wait for wal acceptor {} shutdown'.format(self.num))
-        except FileNotFoundError:
+        pid = self.get_pid()
+        if pid is None:
             print("Wal acceptor {} is not running".format(self.num))
             return self
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            # TODO: cleanup pid file on exit in wal acceptor
+            pass # pidfile might be obsolete
+        return self
 
 
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """
-    def __init__(self, zenith_binpath, data_dir):
-        self.wa_binpath = os.path.join(zenith_binpath, 'wal_acceptor')
+    def __init__(self, zenith_binpath: Path, data_dir: Path):
+        self.wa_binpath = zenith_binpath / 'wal_acceptor'
         self.data_dir = data_dir
-        self.instances = []
+        self.instances: List[WalAcceptor] = []
         self.initial_port = 54321
 
     def start_new(self, auth_token: Optional[str] = None) -> WalAcceptor:
@@ -583,7 +659,7 @@ class WalAcceptorFactory:
         wa_num = len(self.instances)
         wa = WalAcceptor(
             self.wa_binpath,
-            os.path.join(self.data_dir, "wal_acceptor_{}".format(wa_num)),
+            self.data_dir / "wal_acceptor_{}".format(wa_num),
             self.initial_port + wa_num,
             wa_num,
             auth_token,
@@ -613,7 +689,7 @@ class WalAcceptorFactory:
 @zenfixture
 def wa_factory(zenith_binpath: str, repo_dir: str) -> Iterator[WalAcceptorFactory]:
     """ Gives WalAcceptorFactory providing wal acceptors. """
-    wafactory = WalAcceptorFactory(zenith_binpath, os.path.join(repo_dir, "wal_acceptors"))
+    wafactory = WalAcceptorFactory(Path(zenith_binpath), Path(repo_dir) / "wal_acceptors")
     yield wafactory
     # After the yield comes any cleanup code we need.
     print('Starting wal acceptors cleanup')
