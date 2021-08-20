@@ -303,7 +303,6 @@ impl<'pg> ReceiveWalConn<'pg> {
         this_timeline.get().set_info(&my_info);
         /* Need to persist our vote first */
         this_timeline.get().save_control_file(true)?;
-        this_timeline.get().set_info(&my_info);
 
         let mut flushed_restart_lsn = Lsn(0);
         let wal_seg_size = server_info.wal_seg_size as usize;
