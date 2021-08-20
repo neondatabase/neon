@@ -31,6 +31,7 @@ pub enum FeMessage {
     Terminate,
     CopyData(Bytes),
     CopyDone,
+    CopyFail,
     PasswordMessage(Bytes),
 }
 
@@ -138,6 +139,7 @@ impl FeMessage {
             b'X' => Ok(Some(FeMessage::Terminate)),
             b'd' => Ok(Some(FeMessage::CopyData(body))),
             b'c' => Ok(Some(FeMessage::CopyDone)),
+            b'f' => Ok(Some(FeMessage::CopyFail)),
             b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
             tag => Err(anyhow!("unknown message tag: {},'{:?}'", tag, body)),
         }
@@ -338,6 +340,7 @@ pub enum BeMessage<'a> {
     ControlFile,
     CopyData(&'a [u8]),
     CopyDone,
+    CopyFail,
     CopyInResponse,
     CopyOutResponse,
     CopyBothResponse,
@@ -543,6 +546,11 @@ impl<'a> BeMessage<'a> {
 
             BeMessage::CopyDone => {
                 buf.put_u8(b'c');
+                write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
+            }
+
+            BeMessage::CopyFail => {
+                buf.put_u8(b'f');
                 write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
             }
 
