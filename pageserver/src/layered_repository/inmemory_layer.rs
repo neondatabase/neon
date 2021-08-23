@@ -53,7 +53,6 @@ pub struct InMemoryLayerInner {
     segsizes: BTreeMap<Lsn, u32>,
 }
 
-
 impl InMemoryLayerInner {
     fn get_seg_size(&self, seg: SegmentTag, lsn: Lsn) -> Result<u32> {
         // Scan the BTreeMap backwards, starting from the given entry.
@@ -252,7 +251,7 @@ impl InMemoryLayer {
 
             // use inner get_seg_size, since calling self.get_seg_size will try to acquire self.inner.lock
             // which we've just acquired above
-            let oldsize = inner.get_seg_size(self.seg, lsn).unwrap_or(0);         
+            let oldsize = inner.get_seg_size(self.seg, lsn).unwrap_or(0);
             if newsize > oldsize {
                 trace!(
                     "enlarging segment {} from {} to {} blocks at {}",

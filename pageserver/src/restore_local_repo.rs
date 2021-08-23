@@ -427,7 +427,9 @@ pub fn save_decoded_record(
             // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
             trace!(
                 "unlink twophaseFile for xid {} parsed_xact.xid {} here at {}",
-                decoded.xl_xid, parsed_xact.xid, lsn
+                decoded.xl_xid,
+                parsed_xact.xid,
+                lsn
             );
             timeline.put_unlink(
                 RelishTag::TwoPhase {
