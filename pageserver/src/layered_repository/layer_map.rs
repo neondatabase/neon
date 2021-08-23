@@ -204,34 +204,57 @@ impl LayerMap {
         NUM_ONDISK_LAYERS.dec();
     }
 
-    pub fn list_rels(&self, spcnode: u32, dbnode: u32) -> Result<HashSet<RelTag>> {
+    // List relations that exist at the lsn
+    pub fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
         let mut rels: HashSet<RelTag> = HashSet::new();
 
-        for (seg, _entry) in self.segs.iter() {
+        for (seg, segentry) in self.segs.iter() {
             if let RelishTag::Relation(reltag) = seg.rel {
-                // FIXME: skip if it was dropped before the requested LSN. But there is no
-                // LSN argument
-
                 if (spcnode == 0 || reltag.spcnode == spcnode)
                     && (dbnode == 0 || reltag.dbnode == dbnode)
                 {
-                    rels.insert(reltag);
+
+                    // Add only if it exists at the requested LSN.
+                    if let Some(open) = &segentry.open {
+                        if open.get_end_lsn() > lsn  {
+                            rels.insert(reltag);
+                        }
+                    }
+                    else if let Some((_k, _v)) = segentry
+                    .historic
+                    .range((Included(Lsn(0)), Included(lsn)))
+                    .next_back()
+                    {
+                        rels.insert(reltag);
+                    }
                 }
             }
         }
         Ok(rels)
     }
 
-    pub fn list_nonrels(&self, _lsn: Lsn) -> Result<HashSet<RelishTag>> {
+    // List non-relation relishes that exist at the lsn
+    pub fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
         let mut rels: HashSet<RelishTag> = HashSet::new();
 
         // Scan the timeline directory to get all rels in this timeline.
-        for (seg, _entry) in self.segs.iter() {
-            // FIXME: skip if it was dropped before the requested LSN.
-
-            if let RelishTag::Relation(_) = seg.rel {
-            } else {
-                rels.insert(seg.rel);
+        for (seg, segentry) in self.segs.iter() {
+            if let RelishTag::Relation(_) = seg.rel { }
+            else
+            {
+                // Add only if it exists at the requested LSN.
+                if let Some(open) = &segentry.open {
+                    if open.get_end_lsn() > lsn  {
+                        rels.insert(seg.rel);
+                    }
+                }
+                else if let Some((_k, _v)) = segentry
+                .historic
+                .range((Included(Lsn(0)), Included(lsn)))
+                .next_back()
+                {
+                    rels.insert(seg.rel);
+                }
             }
         }
         Ok(rels)
