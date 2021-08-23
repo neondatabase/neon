@@ -589,7 +589,7 @@ impl Timeline for LayeredTimeline {
         let mut all_rels = HashSet::new();
         let mut timeline = self;
         loop {
-            let rels = timeline.layers.lock().unwrap().list_rels(spcnode, dbnode)?;
+            let rels = timeline.layers.lock().unwrap().list_rels(spcnode, dbnode, lsn)?;
 
             all_rels.extend(rels.iter());
 
@@ -600,26 +600,6 @@ impl Timeline for LayeredTimeline {
                 break;
             }
         }
-
-        // Now we have a list of all rels that appeared anywhere in the history. Filter
-        // out relations that were dropped.
-        //
-        // FIXME: We should pass the LSN argument to the calls above, and avoid scanning
-        // dropped relations in the first place.
-        let mut res: Result<()> = Ok(());
-        all_rels.retain(
-            |reltag| match self.get_rel_exists(RelishTag::Relation(*reltag), lsn) {
-                Ok(exists) => {
-                    info!("retain: {} -> {}", *reltag, exists);
-                    exists
-                }
-                Err(err) => {
-                    res = Err(err);
-                    false
-                }
-            },
-        );
-        res?;
 
         Ok(all_rels)
     }
@@ -642,24 +622,6 @@ impl Timeline for LayeredTimeline {
                 break;
             }
         }
-
-        // Now we have a list of all nonrels that appeared anywhere in the history. Filter
-        // out dropped ones.
-        //
-        // FIXME: We should pass the LSN argument to the calls above, and avoid scanning
-        // dropped relations in the first place.
-        let mut res: Result<()> = Ok(());
-        all_rels.retain(|tag| match self.get_rel_exists(*tag, lsn) {
-            Ok(exists) => {
-                info!("retain: {} -> {}", *tag, exists);
-                exists
-            }
-            Err(err) => {
-                res = Err(err);
-                false
-            }
-        });
-        res?;
 
         Ok(all_rels)
     }
