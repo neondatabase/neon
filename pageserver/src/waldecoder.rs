@@ -368,6 +368,8 @@ impl XlHeapMultiInsert {
 pub struct XlHeapDelete {
     pub xmax: TransactionId,
     pub offnum: OffsetNumber,
+    pub _padding: u16,
+    pub t_cid: u32,
     pub infobits_set: u8,
     pub flags: u8,
 }
@@ -377,6 +379,8 @@ impl XlHeapDelete {
         XlHeapDelete {
             xmax: buf.get_u32_le(),
             offnum: buf.get_u16_le(),
+            _padding: buf.get_u16_le(),
+            t_cid: buf.get_u32_le(),
             infobits_set: buf.get_u8(),
             flags: buf.get_u8(),
         }
@@ -390,6 +394,7 @@ pub struct XlHeapUpdate {
     pub old_offnum: OffsetNumber,
     pub old_infobits_set: u8,
     pub flags: u8,
+    pub t_cid: u32,
     pub new_xmax: TransactionId,
     pub new_offnum: OffsetNumber,
 }
@@ -401,6 +406,7 @@ impl XlHeapUpdate {
             old_offnum: buf.get_u16_le(),
             old_infobits_set: buf.get_u8(),
             flags: buf.get_u8(),
+            t_cid: buf.get_u32(),
             new_xmax: buf.get_u32_le(),
             new_offnum: buf.get_u16_le(),
         }
