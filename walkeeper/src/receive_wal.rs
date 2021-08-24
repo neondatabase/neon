@@ -322,7 +322,7 @@ impl<'pg> ReceiveWalConn<'pg> {
         }
 
         info!(
-            "Start streaming from timeline {} tenant {} address {:?} flush_lsn={}",
+            "Start accepting WAL for timeline {} tenant {} address {:?} flush_lsn={}",
             server_info.timeline_id, server_info.tenant_id, self.peer_addr, my_info.flush_lsn
         );
 

@@ -9,7 +9,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test restarting and recreating a postgres instance
 #
-@pytest.mark.parametrize('with_wal_acceptors', [False, True])
+@pytest.mark.parametrize('with_wal_acceptors', [True, False])
 def test_restart_compute(
         zenith_cli,
         pageserver: ZenithPageserver,
@@ -31,31 +31,56 @@ def test_restart_compute(
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            # Create table, and insert a row
-            cur.execute('CREATE TABLE foo (t text)')
-            cur.execute("INSERT INTO foo VALUES ('bar')")
+            cur.execute('CREATE TABLE t(key int primary key, value text)')
+            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+            cur.execute('SELECT sum(key) FROM t')
+            r = cur.fetchone()
+            assert r == (5000050000, )
+            print("res = ", r)
 
-    # Stop and restart the Postgres instance
+    # Remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
                                        wal_acceptors=wal_acceptor_connstrs)
+
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             # We can still see the row
-            cur.execute('SELECT count(*) FROM foo')
-            assert cur.fetchone() == (1, )
+            cur.execute('SELECT sum(key) FROM t')
+            r = cur.fetchone()
+            assert r == (5000050000, )
+            print("res = ", r)
 
             # Insert another row
-            cur.execute("INSERT INTO foo VALUES ('bar2')")
-            cur.execute('SELECT count(*) FROM foo')
-            assert cur.fetchone() == (2, )
+            cur.execute("INSERT INTO t VALUES (100001, 'payload2')")
+            cur.execute('SELECT count(*) FROM t')
 
-    # Stop, and destroy the Postgres instance. Then recreate and restart it.
+            r = cur.fetchone()
+            assert r == (100001, )
+            print("res = ", r)
+
+    # Again remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
                                        wal_acceptors=wal_acceptor_connstrs)
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             # We can still see the rows
-            cur.execute('SELECT count(*) FROM foo')
-            assert cur.fetchone() == (2, )
+            cur.execute('SELECT count(*) FROM t')
+
+            r = cur.fetchone()
+            assert r == (100001, )
+            print("res = ", r)
+
+    # And again remove data directory and restart
+    pg.stop_and_destroy().create_start('test_restart_compute',
+                                       wal_acceptors=wal_acceptor_connstrs)
+
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            # We can still see the rows
+            cur.execute('SELECT count(*) FROM t')
+
+            r = cur.fetchone()
+            assert r == (100001, )
+            print("res = ", r)

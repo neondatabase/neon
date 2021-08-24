@@ -77,9 +77,7 @@ impl ReplicationConn {
                     subscriber.add_hs_feedback(feedback);
                 }
                 FeMessage::Sync => {}
-                FeMessage::CopyFailed => {
-                    return Err(anyhow!("Copy failed"))
-                }
+                FeMessage::CopyFailed => return Err(anyhow!("Copy failed")),
                 _ => {
                     // We only handle `CopyData`, 'Sync', 'CopyFailed' messages. Anything else is ignored.
                     info!("unexpected message {:?}", msg);
