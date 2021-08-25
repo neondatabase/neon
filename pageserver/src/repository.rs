@@ -223,7 +223,7 @@ mod tests {
     use super::*;
     use crate::layered_repository::LayeredRepository;
     use crate::walredo::{WalRedoError, WalRedoManager};
-    use crate::{PageServerConf, RepositoryFormat};
+    use crate::PageServerConf;
     use postgres_ffi::pg_constants;
     use std::fs;
     use std::path::PathBuf;
@@ -275,7 +275,6 @@ mod tests {
             pg_distrib_dir: "".into(),
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
-            repository_format: RepositoryFormat::Layered,
         };
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
@@ -285,13 +284,11 @@ mod tests {
 
         let walredo_mgr = TestRedoManager {};
 
-        let repo: Box<dyn Repository + Sync + Send> = match conf.repository_format {
-            RepositoryFormat::Layered => Box::new(LayeredRepository::new(
-                conf,
-                Arc::new(walredo_mgr),
-                tenantid,
-            )),
-        };
+        let repo = Box::new(LayeredRepository::new(
+            conf,
+            Arc::new(walredo_mgr),
+            tenantid,
+        ));
 
         Ok(repo)
     }

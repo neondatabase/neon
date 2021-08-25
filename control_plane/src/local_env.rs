@@ -42,9 +42,6 @@ pub struct LocalEnv {
     #[serde(with = "hex")]
     pub tenantid: ZTenantId,
 
-    // Repository format, only 'layered' supported currently, or None for default
-    pub repository_format: Option<String>,
-
     // jwt auth token used for communication with pageserver
     pub auth_token: String,
 
@@ -104,7 +101,6 @@ pub fn init(
     remote_pageserver: Option<&str>,
     tenantid: ZTenantId,
     auth_type: AuthType,
-    repository_format: Option<&str>,
 ) -> Result<()> {
     // check if config already exists
     let base_path = base_path();
@@ -180,7 +176,6 @@ pub fn init(
             base_data_dir: base_path,
             remotes: BTreeMap::default(),
             tenantid,
-            repository_format: repository_format.map(|x| x.into()),
             auth_token,
             auth_type,
             private_key_path,
@@ -199,7 +194,6 @@ pub fn init(
             base_data_dir: base_path,
             remotes: BTreeMap::default(),
             tenantid,
-            repository_format: repository_format.map(|x| x.into()),
             auth_token,
             auth_type,
             private_key_path,

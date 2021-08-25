@@ -59,12 +59,7 @@ impl PageServerNode {
             .unwrap()
     }
 
-    pub fn init(
-        &self,
-        create_tenant: Option<&str>,
-        enable_auth: bool,
-        repository_format: Option<&str>,
-    ) -> Result<()> {
+    pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool) -> Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         let mut args = vec![
             "--init",
@@ -77,10 +72,6 @@ impl PageServerNode {
         if enable_auth {
             args.extend(&["--auth-validation-public-key-path", "auth_public_key.pem"]);
             args.extend(&["--auth-type", "ZenithJWT"]);
-        }
-
-        if let Some(repo_format) = repository_format {
-            args.extend(&["--repository-format", repo_format]);
         }
 
         create_tenant.map(|tenantid| args.extend(&["--create-tenant", tenantid]));

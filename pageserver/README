@@ -74,8 +74,10 @@ Repository corresponds to one .zenith directory.
 Repository is needed to manage Timelines.
 Each repository has associated WAL redo service.
 
-There is currently only one implementation of the Repository trait: LayeredRepository.
-It uses custom storage format, described in layered_repository/README.md
+There is currently only one implementation of the Repository trait,
+LayeredRepository, but it's still a useful abstraction that keeps the
+interface for the low-level storage functionality clean. The layered
+storage format is described in layered_repository/README.md.
 
 #### Timeline
 Timeline is a page cache workhorse that accepts page changes

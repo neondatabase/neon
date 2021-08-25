@@ -23,7 +23,7 @@ use crate::logger;
 use crate::page_cache;
 use crate::restore_local_repo;
 use crate::walredo::WalRedoManager;
-use crate::{repository::Repository, PageServerConf, RepositoryFormat};
+use crate::{repository::Repository, PageServerConf};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -96,12 +96,11 @@ pub fn create_repo(
     // and we failed to run initdb again in the same directory. This has been solved for the
     // rapid init+start case now, but the general race condition remains if you restart the
     // server quickly.
-    let repo: Arc<dyn Repository + Sync + Send> =
-        match conf.repository_format {
-            RepositoryFormat::Layered => Arc::new(
-                crate::layered_repository::LayeredRepository::new(conf, wal_redo_manager, tenantid),
-            ),
-        };
+    let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
+        conf,
+        wal_redo_manager,
+        tenantid,
+    ));
 
     // Load data into pageserver
     // TODO To implement zenith import we need to

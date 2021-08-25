@@ -5,7 +5,7 @@ use crate::branches;
 use crate::layered_repository::LayeredRepository;
 use crate::repository::Repository;
 use crate::walredo::PostgresRedoManager;
-use crate::{PageServerConf, RepositoryFormat};
+use crate::PageServerConf;
 use anyhow::{anyhow, bail, Result};
 use lazy_static::lazy_static;
 use log::info;
@@ -31,17 +31,12 @@ pub fn init(conf: &'static PageServerConf) {
         let walredo_mgr = PostgresRedoManager::new(conf, tenantid);
 
         // Set up an object repository, for actual data storage.
-        let repo: Arc<dyn Repository + Sync + Send> = match conf.repository_format {
-            RepositoryFormat::Layered => {
-                let repo = Arc::new(LayeredRepository::new(
-                    conf,
-                    Arc::new(walredo_mgr),
-                    tenantid,
-                ));
-                LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
-                repo
-            }
-        };
+        let repo = Arc::new(LayeredRepository::new(
+            conf,
+            Arc::new(walredo_mgr),
+            tenantid,
+        ));
+        LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
 
         info!("initialized storage for tenant: {}", &tenantid);
         m.insert(tenantid, repo);

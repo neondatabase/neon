@@ -52,13 +52,6 @@ pub struct PageServerConf {
     pub auth_type: AuthType,
 
     pub auth_validation_public_key_path: Option<PathBuf>,
-
-    pub repository_format: RepositoryFormat,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum RepositoryFormat {
-    Layered,
 }
 
 impl PageServerConf {

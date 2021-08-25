@@ -19,9 +19,7 @@ use anyhow::{ensure, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{
-    branches, http, logger, page_cache, page_service, PageServerConf, RepositoryFormat,
-};
+use pageserver::{branches, http, logger, page_cache, page_service, PageServerConf};
 use zenith_utils::http::endpoint;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
@@ -42,7 +40,6 @@ struct CfgFileParams {
     pg_distrib_dir: Option<String>,
     auth_validation_public_key_path: Option<String>,
     auth_type: Option<String>,
-    repository_format: Option<String>,
 }
 
 impl CfgFileParams {
@@ -60,7 +57,6 @@ impl CfgFileParams {
             pg_distrib_dir: get_arg("postgres-distrib"),
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
             auth_type: get_arg("auth-type"),
-            repository_format: get_arg("repository-format"),
         }
     }
 
@@ -77,7 +73,6 @@ impl CfgFileParams {
                 .auth_validation_public_key_path
                 .or(other.auth_validation_public_key_path),
             auth_type: self.auth_type.or(other.auth_type),
-            repository_format: self.repository_format.or(other.repository_format),
         }
     }
 
@@ -137,15 +132,6 @@ impl CfgFileParams {
             );
         }
 
-        let repository_format = match self.repository_format.as_ref() {
-            Some(repo_format_str) if repo_format_str == "layered" => RepositoryFormat::Layered,
-            Some(repo_format_str) => anyhow::bail!(
-                "invalid --repository-format '{}', only 'layered' supported",
-                repo_format_str
-            ),
-            None => RepositoryFormat::Layered, // default
-        };
-
         Ok(PageServerConf {
             daemonize: false,
 
@@ -162,8 +148,6 @@ impl CfgFileParams {
 
             auth_validation_public_key_path,
             auth_type,
-
-            repository_format,
         })
     }
 }
@@ -234,12 +218,6 @@ fn main() -> Result<()> {
                 .long("auth-type")
                 .takes_value(true)
                 .help("Authentication scheme type. One of: Trust, MD5, ZenithJWT"),
-        )
-        .arg(
-            Arg::with_name("repository-format")
-                .long("repository-format")
-                .takes_value(true)
-                .help("Which repository implementation to use, only 'layered' supported currently"),
         )
         .get_matches();
 
