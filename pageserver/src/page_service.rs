@@ -10,7 +10,7 @@
 //     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
@@ -230,12 +230,9 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         // Check that the timeline exists
         let repository = page_cache::get_repository_for_tenant(&tenantid)?;
-        let timeline = repository.get_timeline(timelineid).map_err(|_| {
-            anyhow!(
-                "client requested pagestream on timeline {} which does not exist in page server",
-                timelineid
-            )
-        })?;
+        let timeline = repository
+            .get_timeline(timelineid)
+            .context(format!("error fetching timeline {}", timelineid))?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -342,13 +339,9 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         // check that the timeline exists
         let repository = page_cache::get_repository_for_tenant(&tenantid)?;
-        let timeline = repository.get_timeline(timelineid).map_err(|e| {
-            error!("error fetching timeline: {:?}", e);
-            anyhow!(
-                "client requested basebackup on timeline {} which does not exist in page server",
-                timelineid
-            )
-        })?;
+        let timeline = repository
+            .get_timeline(timelineid)
+            .context(format!("error fetching timeline {}", timelineid))?;
         /* switch client to COPYOUT */
         pgb.write_message(&BeMessage::CopyOutResponse)?;
         info!("sent CopyOut");
@@ -494,9 +487,9 @@ impl postgres_backend::Handler for PageServerHandler {
 
             // Check that the timeline exists
             let repository = page_cache::get_repository_for_tenant(&tenantid)?;
-            if repository.get_timeline(timelineid).is_err() {
-                bail!("client requested callmemaybe on timeline {} which does not exist in page server", timelineid);
-            }
+            repository
+                .get_timeline(timelineid)
+                .context(format!("error fetching timeline {}", timelineid))?;
 
             walreceiver::launch_wal_receiver(&self.conf, timelineid, &connstr, tenantid.to_owned());
 
