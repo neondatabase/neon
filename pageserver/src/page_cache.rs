@@ -3,9 +3,7 @@
 
 use crate::branches;
 use crate::layered_repository::LayeredRepository;
-use crate::object_repository::ObjectRepository;
 use crate::repository::Repository;
-use crate::rocksdb_storage::RocksObjectStore;
 use crate::walredo::PostgresRedoManager;
 use crate::{PageServerConf, RepositoryFormat};
 use anyhow::{anyhow, bail, Result};
@@ -42,16 +40,6 @@ pub fn init(conf: &'static PageServerConf) {
                 ));
                 LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
                 repo
-            }
-            RepositoryFormat::RocksDb => {
-                let obj_store = RocksObjectStore::open(conf, &tenantid).unwrap();
-
-                Arc::new(ObjectRepository::new(
-                    conf,
-                    Arc::new(obj_store),
-                    Arc::new(walredo_mgr),
-                    tenantid,
-                ))
             }
         };
 

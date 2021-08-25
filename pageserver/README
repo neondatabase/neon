@@ -74,9 +74,8 @@ Repository corresponds to one .zenith directory.
 Repository is needed to manage Timelines.
 Each repository has associated WAL redo service.
 
-Now we have two implementations of Repository:
-- ObjectRepository uses RocksDB as a storage
-- LayeredRepository uses custom storage format, described in layered_repository/README.md
+There is currently only one implementation of the Repository trait: LayeredRepository.
+It uses custom storage format, described in layered_repository/README.md
 
 #### Timeline
 Timeline is a page cache workhorse that accepts page changes
@@ -88,13 +87,6 @@ We can create branch at certain LSN.
 Each Branch lives in a corresponding timeline and has an ancestor.
 
 To get full snapshot of data at certain moment we need to traverse timeline and its ancestors.
-
-#### ObjectRepository
-ObjectRepository implements Repository and has associated ObjectStore and WAL redo service.
-
-#### ObjectStore
-ObjectStore is an interface for key-value store for page images and wal records.
-Currently it has one implementation - RocksDB.
 
 #### WAL redo service
 WAL redo service - service that runs PostgreSQL in a special wal_redo mode

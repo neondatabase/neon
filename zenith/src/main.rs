@@ -67,7 +67,7 @@ fn main() -> Result<()> {
                         .long("repository-format")
                         .takes_value(false)
                         .value_name("repository-format")
-                        .help("Choose repository format, 'layered' or 'rocksdb'")
+                        .help("Choose repository format, only 'layered' supported currently")
                 ),
         )
         .subcommand(

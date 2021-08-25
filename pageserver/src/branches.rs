@@ -20,7 +20,6 @@ use log::*;
 use zenith_utils::lsn::Lsn;
 
 use crate::logger;
-use crate::object_repository::ObjectRepository;
 use crate::page_cache;
 use crate::restore_local_repo;
 use crate::walredo::WalRedoManager;
@@ -102,16 +101,6 @@ pub fn create_repo(
             RepositoryFormat::Layered => Arc::new(
                 crate::layered_repository::LayeredRepository::new(conf, wal_redo_manager, tenantid),
             ),
-            RepositoryFormat::RocksDb => {
-                let obj_store = crate::rocksdb_storage::RocksObjectStore::create(conf, &tenantid)?;
-
-                Arc::new(ObjectRepository::new(
-                    conf,
-                    Arc::new(obj_store),
-                    wal_redo_manager,
-                    tenantid,
-                ))
-            }
         };
 
     // Load data into pageserver

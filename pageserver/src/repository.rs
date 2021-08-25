@@ -55,20 +55,6 @@ pub trait Repository: Send + Sync {
 ///
 #[derive(Default)]
 pub struct GcResult {
-    // FIXME: These counters make sense for the ObjectRepository. They are not used
-    // by the LayeredRepository.
-    pub n_relations: u64,
-    pub inspected: u64,
-    pub truncated: u64,
-    pub deleted: u64,
-    pub prep_deleted: u64,        // RelishTag::Twophase
-    pub slru_deleted: u64,        // RelishTag::Slru
-    pub chkp_deleted: u64,        // RelishTag::Checkpoint
-    pub control_deleted: u64,     // RelishTag::ControlFile
-    pub filenodemap_deleted: u64, // RelishTag::FileNodeMap
-    pub dropped: u64,
-
-    // These are used for the LayeredRepository instead
     pub snapshot_relfiles_total: u64,
     pub snapshot_relfiles_needed_by_cutoff: u64,
     pub snapshot_relfiles_needed_by_branches: u64,
@@ -88,11 +74,6 @@ pub struct GcResult {
 
 impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
-        self.n_relations += other.n_relations;
-        self.truncated += other.truncated;
-        self.deleted += other.deleted;
-        self.dropped += other.dropped;
-
         self.snapshot_relfiles_total += other.snapshot_relfiles_total;
         self.snapshot_relfiles_needed_by_cutoff += other.snapshot_relfiles_needed_by_cutoff;
         self.snapshot_relfiles_needed_by_branches += other.snapshot_relfiles_needed_by_branches;
@@ -241,8 +222,6 @@ impl WALRecord {
 mod tests {
     use super::*;
     use crate::layered_repository::LayeredRepository;
-    use crate::object_repository::ObjectRepository;
-    use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::{PageServerConf, RepositoryFormat};
     use postgres_ffi::pg_constants;
@@ -279,10 +258,7 @@ mod tests {
 
     static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
-    fn get_test_repo(
-        test_name: &str,
-        repository_format: RepositoryFormat,
-    ) -> Result<Box<dyn Repository>> {
+    fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
         let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
         let _ = fs::remove_dir_all(&repo_dir);
         fs::create_dir_all(&repo_dir)?;
@@ -299,7 +275,7 @@ mod tests {
             pg_distrib_dir: "".into(),
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
-            repository_format,
+            repository_format: RepositoryFormat::Layered,
         };
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
@@ -315,35 +291,14 @@ mod tests {
                 Arc::new(walredo_mgr),
                 tenantid,
             )),
-            RepositoryFormat::RocksDb => {
-                let obj_store = RocksObjectStore::create(conf, &tenantid)?;
-
-                Box::new(ObjectRepository::new(
-                    conf,
-                    Arc::new(obj_store),
-                    Arc::new(walredo_mgr),
-                    tenantid,
-                ))
-            }
         };
 
         Ok(repo)
     }
 
-    /// Test get_relsize() and truncation.
     #[test]
-    fn test_relsize_rocksdb() -> Result<()> {
-        let repo = get_test_repo("test_relsize_rocksdb", RepositoryFormat::RocksDb)?;
-        test_relsize(&*repo)
-    }
-
-    #[test]
-    fn test_relsize_layered() -> Result<()> {
-        let repo = get_test_repo("test_relsize_layered", RepositoryFormat::Layered)?;
-        test_relsize(&*repo)
-    }
-
-    fn test_relsize(repo: &dyn Repository) -> Result<()> {
+    fn test_relsize() -> Result<()> {
+        let repo = get_test_repo("test_relsize")?;
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
@@ -428,22 +383,9 @@ mod tests {
 
     /// Test get_relsize() and truncation with a file larger than 1 GB, so that it's
     /// split into multiple 1 GB segments in Postgres.
-    ///
-    /// This isn't very interesting with the RocksDb implementation, as we don't pay
-    /// any attention to Postgres segment boundaries there.
     #[test]
-    fn test_large_rel_rocksdb() -> Result<()> {
-        let repo = get_test_repo("test_large_rel_rocksdb", RepositoryFormat::RocksDb)?;
-        test_large_rel(&*repo)
-    }
-
-    #[test]
-    fn test_large_rel_layered() -> Result<()> {
-        let repo = get_test_repo("test_large_rel_layered", RepositoryFormat::Layered)?;
-        test_large_rel(&*repo)
-    }
-
-    fn test_large_rel(repo: &dyn Repository) -> Result<()> {
+    fn test_large_rel() -> Result<()> {
+        let repo = get_test_repo("test_large_rel")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
@@ -498,22 +440,12 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_branch_rocksdb() -> Result<()> {
-        let repo = get_test_repo("test_branch_rocksdb", RepositoryFormat::RocksDb)?;
-        test_branch(&*repo)
-    }
-
-    #[test]
-    fn test_branch_layered() -> Result<()> {
-        let repo = get_test_repo("test_branch_layered", RepositoryFormat::Layered)?;
-        test_branch(&*repo)
-    }
-
     ///
     /// Test branch creation
     ///
-    fn test_branch(repo: &dyn Repository) -> Result<()> {
+    #[test]
+    fn test_branch() -> Result<()> {
+        let repo = get_test_repo("test_branch")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 

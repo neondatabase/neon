@@ -42,7 +42,7 @@ pub struct LocalEnv {
     #[serde(with = "hex")]
     pub tenantid: ZTenantId,
 
-    // Repository format, 'rocksdb' or 'layered' or None for default
+    // Repository format, only 'layered' supported currently, or None for default
     pub repository_format: Option<String>,
 
     // jwt auth token used for communication with pageserver

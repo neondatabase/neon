@@ -12,15 +12,11 @@ pub mod branches;
 pub mod http;
 pub mod layered_repository;
 pub mod logger;
-pub mod object_key;
-pub mod object_repository;
-pub mod object_store;
 pub mod page_cache;
 pub mod page_service;
 pub mod relish;
 pub mod repository;
 pub mod restore_local_repo;
-pub mod rocksdb_storage;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
@@ -63,7 +59,6 @@ pub struct PageServerConf {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RepositoryFormat {
     Layered,
-    RocksDb,
 }
 
 impl PageServerConf {

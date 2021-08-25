@@ -138,10 +138,9 @@ impl CfgFileParams {
         }
 
         let repository_format = match self.repository_format.as_ref() {
-            Some(repo_format_str) if repo_format_str == "rocksdb" => RepositoryFormat::RocksDb,
             Some(repo_format_str) if repo_format_str == "layered" => RepositoryFormat::Layered,
             Some(repo_format_str) => anyhow::bail!(
-                "invalid --repository-format '{}', must be 'rocksdb' or 'layered'",
+                "invalid --repository-format '{}', only 'layered' supported",
                 repo_format_str
             ),
             None => RepositoryFormat::Layered, // default
@@ -240,7 +239,7 @@ fn main() -> Result<()> {
             Arg::with_name("repository-format")
                 .long("repository-format")
                 .takes_value(true)
-                .help("Which repository implementation to use, 'rocksdb' or 'layered'"),
+                .help("Which repository implementation to use, only 'layered' supported currently"),
         )
         .get_matches();
 

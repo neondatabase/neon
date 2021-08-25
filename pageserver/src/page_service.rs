@@ -24,13 +24,13 @@ use std::{io, net::TcpStream};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
 use zenith_utils::auth::{Claims, Scope};
+use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
 use zenith_utils::pq_proto::{
     BeMessage, FeMessage, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
 };
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
-use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
 use crate::branches;
@@ -596,15 +596,6 @@ impl postgres_backend::Handler for PageServerHandler {
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor::int8_col(b"n_relations"),
-                RowDescriptor::int8_col(b"truncated"),
-                RowDescriptor::int8_col(b"deleted"),
-                RowDescriptor::int8_col(b"prep_deleted"),
-                RowDescriptor::int8_col(b"slru_deleted"),
-                RowDescriptor::int8_col(b"chkp_deleted"),
-                RowDescriptor::int8_col(b"control_deleted"),
-                RowDescriptor::int8_col(b"filenodemap_deleted"),
-                RowDescriptor::int8_col(b"dropped"),
                 RowDescriptor::int8_col(b"snapshot_relfiles_total"),
                 RowDescriptor::int8_col(b"snapshot_relfiles_needed_by_cutoff"),
                 RowDescriptor::int8_col(b"snapshot_relfiles_needed_by_branches"),
@@ -620,15 +611,6 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"elapsed"),
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
-                Some(&result.n_relations.to_string().as_bytes()),
-                Some(&result.truncated.to_string().as_bytes()),
-                Some(&result.deleted.to_string().as_bytes()),
-                Some(&result.prep_deleted.to_string().as_bytes()),
-                Some(&result.slru_deleted.to_string().as_bytes()),
-                Some(&result.chkp_deleted.to_string().as_bytes()),
-                Some(&result.control_deleted.to_string().as_bytes()),
-                Some(&result.filenodemap_deleted.to_string().as_bytes()),
-                Some(&result.dropped.to_string().as_bytes()),
                 Some(&result.snapshot_relfiles_total.to_string().as_bytes()),
                 Some(
                     &result
