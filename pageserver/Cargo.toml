@@ -17,30 +17,25 @@ futures = "0.3.13"
 hyper = "0.14"
 lazy_static = "1.4.0"
 slog-stdlog = "4.1.0"
-slog-async = "2.6.0"
 slog-scope = "4.4.0"
 slog-term = "2.8.0"
 slog = "2.7.0"
 log = "0.4.14"
 clap = "2.33.0"
 daemonize = "0.4.1"
-rust-s3 = { version = "0.27.0-rc4", features = ["no-verify-ssl"] }
 tokio = { version = "1.5.0", features = ["full"] }
-tokio-stream = { version = "0.1.5" }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 routerify = "2"
 anyhow = "1.0"
 crc32c = "0.6.0"
-walkdir = "2"
 thiserror = "1.0"
 hex = { version = "0.4.3", features = ["serde"] }
 tar = "0.4.33"
 humantime = "2.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-fs_extra = "1.2.0"
 toml = "0.5"
 scopeguard = "1.1.0"
 
