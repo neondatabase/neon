@@ -1,13 +1,12 @@
 //!
-//! Zenith repository implementation that keeps old data in "snapshot files", and
-//! the recent changes in memory. See layered_repository/snapshot_layer.rs and
-//! layered_repository/inmemory_layer.rs, respectively. The functions here are
-//! responsible for locating the correct layer for the get/put call, tracing
-//! timeline branching history as needed.
+//! Zenith repository implementation that keeps old data in files on disk, and
+//! the recent changes in memory. See layered_repository/*_layer.rs files.
+//! The functions here are responsible for locating the correct layer for the
+//! get/put call, tracing timeline branching history as needed.
 //!
-//! The snapshot files are stored in the .zenith/tenants/<tenantid>/timelines/<timelineid>
+//! The files are stored in the .zenith/tenants/<tenantid>/timelines/<timelineid>
 //! directory. See layered_repository/README for how the files are managed.
-//! In addition to the snapshot files, there is a metadata file in the same
+//! In addition to the layer files, there is a metadata file in the same
 //! directory that contains information about the timeline, in particular its
 //! parent timeline, and the last LSN that has been written to disk.
 //!
@@ -34,20 +33,23 @@ use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
+use zenith_metrics::{register_histogram, Histogram};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod delta_layer;
 mod filename;
+mod image_layer;
 mod inmemory_layer;
 mod layer_map;
-mod snapshot_layer;
 mod storage_layer;
 
+use delta_layer::DeltaLayer;
+use image_layer::ImageLayer;
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
-use snapshot_layer::SnapshotLayer;
 use storage_layer::{Layer, PageReconstructData, SegmentTag, RELISH_SEG_SIZE};
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
@@ -70,6 +72,15 @@ lazy_static! {
         "pageserver_storage_time",
         "Time spent on storage operations",
         &["operation"]
+    )
+    .expect("failed to define a metric");
+}
+
+// Metrics collected on operations on the storage repository.
+lazy_static! {
+    static ref RECONSTRUCT_TIME: Histogram = register_histogram!(
+        "pageserver_getpage_reconstruct_time",
+        "FIXME Time spent on storage operations"
     )
     .expect("failed to define a metric");
 }
@@ -198,7 +209,7 @@ impl LayeredRepository {
                     self.walredo_mgr.clone(),
                 )?;
 
-                // List the snapshot layers on disk, and load them into the layer map
+                // List the layers on disk, and load them into the layer map
                 timeline.load_layer_map()?;
 
                 // Load any new WAL after the last checkpoint into memory.
@@ -318,7 +329,7 @@ impl LayeredRepository {
     // 2. Scan all timelines, and on each timeline, make note of the
     //    all the points where other timelines have been branched off.
     //    We will refrain from removing page versions at those LSNs.
-    // 3. For each timeline, scan all snapshot files on the timeline.
+    // 3. For each timeline, scan all layer files on the timeline.
     //    Remove all files for which a newer file exists and which
     //    don't cover any branch point LSNs.
     //
@@ -509,7 +520,8 @@ impl Timeline for LayeredTimeline {
         let seg = SegmentTag::from_blknum(rel, blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            self.materialize_page(seg, blknum, lsn, &*layer)
+            RECONSTRUCT_TIME
+                .observe_closure_duration(|| self.materialize_page(seg, blknum, lsn, &*layer))
         } else {
             bail!("relish {} not found at {}", rel, lsn);
         }
@@ -886,7 +898,7 @@ impl LayeredTimeline {
     }
 
     ///
-    /// Load the list of snapshot files from disk, populating the layer map
+    /// Scan the timeline directory to populate the layer map
     ///
     fn load_layer_map(&self) -> anyhow::Result<()> {
         info!(
@@ -894,19 +906,49 @@ impl LayeredTimeline {
             self.timelineid
         );
         let mut layers = self.layers.lock().unwrap();
-        let snapfilenames =
-            filename::list_snapshot_files(self.conf, self.timelineid, self.tenantid)?;
+        let (imgfilenames, mut deltafilenames) =
+            filename::list_files(self.conf, self.timelineid, self.tenantid)?;
 
-        for filename in snapfilenames.iter() {
-            let layer = SnapshotLayer::load_snapshot_layer(self.conf, self.timelineid, self.tenantid, filename)?;
+        // First create ImageLayer structs for each image file.
+        for filename in imgfilenames.iter() {
+            let layer = ImageLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
             info!(
-                "found layer {} {}-{} {} on timeline {}",
+                "found layer {} {} on timeline {}",
                 layer.get_seg_tag(),
                 layer.get_start_lsn(),
-                layer.get_end_lsn(),
-                layer.is_dropped(),
                 self.timelineid
+            );
+            layers.insert_historic(Arc::new(layer));
+        }
+
+        // Then for the Delta files. The delta files are created in order starting
+        // from the oldest file, because each DeltaLayer needs a reference to its
+        // predecessor.
+        deltafilenames.sort();
+
+        for filename in deltafilenames.iter() {
+            let predecessor = layers.get(&filename.seg, filename.start_lsn);
+
+            let predecessor_str: String = if let Some(prec) = &predecessor {
+                prec.filename().display().to_string()
+            } else {
+                "none".to_string()
+            };
+
+            let layer = DeltaLayer::new(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                filename,
+                predecessor,
+            );
+
+            info!(
+                "found layer {} on timeline {}, predecessor: {}",
+                layer.filename().display(),
+                self.timelineid,
+                predecessor_str,
             );
             layers.insert_historic(Arc::new(layer));
         }
@@ -1040,10 +1082,9 @@ impl LayeredTimeline {
                 prev_layer.get_start_lsn(),
                 prev_layer.get_end_lsn()
             );
-            layer = InMemoryLayer::copy_snapshot(
+            layer = InMemoryLayer::create_successor_layer(
                 self.conf,
-                &self,
-                &*prev_layer,
+                prev_layer,
                 self.timelineid,
                 self.tenantid,
                 start_lsn,
@@ -1121,7 +1162,7 @@ impl LayeredTimeline {
         let mut layers = self.layers.lock().unwrap();
 
         // Take the in-memory layer with the oldest WAL record. If it's older
-        // than the threshold, write it out to disk as a new snapshot file.
+        // than the threshold, write it out to disk as a new image and delta file.
         // Repeat until all remaining in-memory layers are within the threshold.
         //
         // That's necessary to limit the amount of WAL that needs to be kept
@@ -1145,21 +1186,23 @@ impl LayeredTimeline {
             }
 
             // freeze it
-            let (new_historic, new_open) = oldest_layer.freeze(last_valid_lsn, &self)?;
+            let (new_historics, new_open) = oldest_layer.freeze(last_valid_lsn, &self)?;
 
             // replace this layer with the new layers that 'freeze' returned
             layers.pop_oldest_open();
             if let Some(n) = new_open {
                 layers.insert_open(n);
             }
-            layers.insert_historic(new_historic);
+            for n in new_historics {
+                layers.insert_historic(n);
+            }
         }
 
         // Call unload() on all frozen layers, to release memory.
         // TODO: On-disk layers shouldn't consume much memory to begin with,
-        // so this shouldn't be necessary. But currently the SnapshotLayer
-        // code slurps the whole file into memory, so they do in fact consume
-        // a lot of memory.
+        // so this shouldn't be necessary. But currently the DeltaLayer and
+        // ImageLayer code slurps the whole file into memory, so they do in
+        // fact consume a lot of memory.
         for layer in layers.iter_historic_layers() {
             layer.unload()?;
         }
@@ -1199,7 +1242,7 @@ impl LayeredTimeline {
     }
 
     ///
-    /// Garbage collect snapshot files on a timeline that are no longer needed.
+    /// Garbage collect layer files on a timeline that are no longer needed.
     ///
     /// The caller specifies how much history is needed with the two arguments:
     ///
@@ -1217,7 +1260,7 @@ impl LayeredTimeline {
     /// to figure out what read-only nodes might actually need.)
     ///
     /// Currently, we don't make any attempt at removing unneeded page versions
-    /// within a snapshot file. We can only remove the whole file if it's fully
+    /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
     pub fn gc_timeline(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) -> Result<GcResult> {
@@ -1229,9 +1272,9 @@ impl LayeredTimeline {
             self.timelineid, cutoff
         );
 
-        let mut layers_to_remove: Vec<Arc<SnapshotLayer>> = Vec::new();
+        let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
-        // Scan all snapshot files in the directory. For each file, if a newer file
+        // Scan all layer files in the directory. For each file, if a newer file
         // exists, we can remove the old one.
         //
         // Determine for each file if it needs to be retained
@@ -1242,9 +1285,9 @@ impl LayeredTimeline {
             let seg = l.get_seg_tag();
 
             if seg.rel.is_relation() {
-                result.snapshot_relfiles_total += 1;
+                result.ondisk_relfiles_total += 1;
             } else {
-                result.snapshot_nonrelfiles_total += 1;
+                result.ondisk_nonrelfiles_total += 1;
             }
 
             // Is it newer than cutoff point?
@@ -1257,9 +1300,9 @@ impl LayeredTimeline {
                     cutoff
                 );
                 if seg.rel.is_relation() {
-                    result.snapshot_relfiles_needed_by_cutoff += 1;
+                    result.ondisk_relfiles_needed_by_cutoff += 1;
                 } else {
-                    result.snapshot_nonrelfiles_needed_by_cutoff += 1;
+                    result.ondisk_nonrelfiles_needed_by_cutoff += 1;
                 }
                 continue 'outer;
             }
@@ -1276,20 +1319,21 @@ impl LayeredTimeline {
                         *retain_lsn
                     );
                     if seg.rel.is_relation() {
-                        result.snapshot_relfiles_needed_by_branches += 1;
+                        result.ondisk_relfiles_needed_by_branches += 1;
                     } else {
-                        result.snapshot_nonrelfiles_needed_by_branches += 1;
+                        result.ondisk_nonrelfiles_needed_by_branches += 1;
                     }
                     continue 'outer;
                 }
             }
 
-            // Unless the relation was dropped, is there a later snapshot file for this relation?
-            if !l.is_dropped() && !layers.newer_layer_exists(l.get_seg_tag(), l.get_end_lsn()) {
+            // Unless the relation was dropped, is there a later image file for this relation?
+            if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
+            {
                 if seg.rel.is_relation() {
-                    result.snapshot_relfiles_not_updated += 1;
+                    result.ondisk_relfiles_not_updated += 1;
                 } else {
-                    result.snapshot_nonrelfiles_not_updated += 1;
+                    result.ondisk_nonrelfiles_not_updated += 1;
                 }
                 continue 'outer;
             }
@@ -1314,15 +1358,15 @@ impl LayeredTimeline {
 
             if doomed_layer.is_dropped() {
                 if doomed_layer.get_seg_tag().rel.is_relation() {
-                    result.snapshot_relfiles_dropped += 1;
+                    result.ondisk_relfiles_dropped += 1;
                 } else {
-                    result.snapshot_nonrelfiles_dropped += 1;
+                    result.ondisk_nonrelfiles_dropped += 1;
                 }
             } else {
                 if doomed_layer.get_seg_tag().rel.is_relation() {
-                    result.snapshot_relfiles_removed += 1;
+                    result.ondisk_relfiles_removed += 1;
                 } else {
-                    result.snapshot_nonrelfiles_removed += 1;
+                    result.ondisk_nonrelfiles_removed += 1;
                 }
             }
         }

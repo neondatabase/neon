@@ -55,39 +55,38 @@ pub trait Repository: Send + Sync {
 ///
 #[derive(Default)]
 pub struct GcResult {
-    pub snapshot_relfiles_total: u64,
-    pub snapshot_relfiles_needed_by_cutoff: u64,
-    pub snapshot_relfiles_needed_by_branches: u64,
-    pub snapshot_relfiles_not_updated: u64,
-    pub snapshot_relfiles_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
-    pub snapshot_relfiles_dropped: u64, // # of snapshot files removed because the relation was dropped
+    pub ondisk_relfiles_total: u64,
+    pub ondisk_relfiles_needed_by_cutoff: u64,
+    pub ondisk_relfiles_needed_by_branches: u64,
+    pub ondisk_relfiles_not_updated: u64,
+    pub ondisk_relfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
+    pub ondisk_relfiles_dropped: u64, // # of layer files removed because the relation was dropped
 
-    pub snapshot_nonrelfiles_total: u64,
-    pub snapshot_nonrelfiles_needed_by_cutoff: u64,
-    pub snapshot_nonrelfiles_needed_by_branches: u64,
-    pub snapshot_nonrelfiles_not_updated: u64,
-    pub snapshot_nonrelfiles_removed: u64, // # of snapshot files removed because they have been made obsolete by newer snapshot files.
-    pub snapshot_nonrelfiles_dropped: u64, // # of snapshot files removed because the relation was dropped
+    pub ondisk_nonrelfiles_total: u64,
+    pub ondisk_nonrelfiles_needed_by_cutoff: u64,
+    pub ondisk_nonrelfiles_needed_by_branches: u64,
+    pub ondisk_nonrelfiles_not_updated: u64,
+    pub ondisk_nonrelfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
+    pub ondisk_nonrelfiles_dropped: u64, // # of layer files removed because the relation was dropped
 
     pub elapsed: Duration,
 }
 
 impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
-        self.snapshot_relfiles_total += other.snapshot_relfiles_total;
-        self.snapshot_relfiles_needed_by_cutoff += other.snapshot_relfiles_needed_by_cutoff;
-        self.snapshot_relfiles_needed_by_branches += other.snapshot_relfiles_needed_by_branches;
-        self.snapshot_relfiles_not_updated += other.snapshot_relfiles_not_updated;
-        self.snapshot_relfiles_removed += other.snapshot_relfiles_removed;
-        self.snapshot_relfiles_dropped += other.snapshot_relfiles_dropped;
+        self.ondisk_relfiles_total += other.ondisk_relfiles_total;
+        self.ondisk_relfiles_needed_by_cutoff += other.ondisk_relfiles_needed_by_cutoff;
+        self.ondisk_relfiles_needed_by_branches += other.ondisk_relfiles_needed_by_branches;
+        self.ondisk_relfiles_not_updated += other.ondisk_relfiles_not_updated;
+        self.ondisk_relfiles_removed += other.ondisk_relfiles_removed;
+        self.ondisk_relfiles_dropped += other.ondisk_relfiles_dropped;
 
-        self.snapshot_nonrelfiles_total += other.snapshot_nonrelfiles_total;
-        self.snapshot_nonrelfiles_needed_by_cutoff += other.snapshot_nonrelfiles_needed_by_cutoff;
-        self.snapshot_nonrelfiles_needed_by_branches +=
-            other.snapshot_nonrelfiles_needed_by_branches;
-        self.snapshot_nonrelfiles_not_updated += other.snapshot_nonrelfiles_not_updated;
-        self.snapshot_nonrelfiles_removed += other.snapshot_nonrelfiles_removed;
-        self.snapshot_nonrelfiles_dropped += other.snapshot_nonrelfiles_dropped;
+        self.ondisk_nonrelfiles_total += other.ondisk_nonrelfiles_total;
+        self.ondisk_nonrelfiles_needed_by_cutoff += other.ondisk_nonrelfiles_needed_by_cutoff;
+        self.ondisk_nonrelfiles_needed_by_branches += other.ondisk_nonrelfiles_needed_by_branches;
+        self.ondisk_nonrelfiles_not_updated += other.ondisk_nonrelfiles_not_updated;
+        self.ondisk_nonrelfiles_removed += other.ondisk_nonrelfiles_removed;
+        self.ondisk_nonrelfiles_dropped += other.ondisk_nonrelfiles_dropped;
 
         self.elapsed += other.elapsed;
     }

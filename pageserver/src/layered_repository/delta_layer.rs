@@ -1,46 +1,43 @@
 //!
-//! A SnapshotLayer represents one snapshot file on disk. One file holds all page
-//! version and size information of one relation, in a range of LSN.
-//! The name "snapshot file" is a bit of a misnomer because a snapshot file doesn't
-//! contain a snapshot at a specific LSN, but rather all the page versions in a range
-//! of LSNs.
+//! A DeltaLayer represents a collection of WAL records or page images in a range of
+//! LSNs, for one segment. It is stored on a file on disk.
 //!
-//! Currently, a snapshot file contains full information needed to reconstruct any
-//! page version in the LSN range, without consulting any other snapshot files. When
-//! a new snapshot file is created for writing, the full contents of relation are
-//! materialized as it is at the beginning of the LSN range. That can be very expensive,
-//! we should find a way to store differential files. But this keeps the read-side
-//! of things simple. You can find the correct snapshot file based on RelishTag and
-//! timeline+LSN, and once you've located it, you have all the data you need to in that
-//! file.
+//! Usually a delta layer only contains differences - in the form of WAL records against
+//! a base LSN. However, if a segment is newly created, by creating a new relation or
+//! extending an old one, there might be no base image. In that case, all the entries in
+//! the delta layer must be page images or WAL records with the 'will_init' flag set, so
+//! that they can be replayed without referring to an older page version. Also in some
+//! circumstances, the predecessor layer might actually be another delta layer. That
+//! can happen when you create a new branch in the middle of a delta layer, and the WAL
+//! records on the new branch are put in a new delta layer.
 //!
-//! When a snapshot file needs to be accessed, we slurp the whole file into memory, into
-//! the SnapshotLayer struct. See load() and unload() functions.
+//! When a delta file needs to be accessed, we slurp the whole file into memory, into
+//! the DeltaLayer struct. See load() and unload() functions.
 //!
-//! On disk, the snapshot files are stored in timelines/<timelineid> directory.
-//! Currently, there are no subdirectories, and each snapshot file is named like this:
+//! On disk, the delta files are stored in timelines/<timelineid> directory.
+//! Currently, there are no subdirectories, and each delta file is named like this:
 //!
-//!    <spcnode>_<dbnode>_<relnode>_<forknum>_<start LSN>_<end LSN>
+//!    <spcnode>_<dbnode>_<relnode>_<forknum>_<segno>_<start LSN>_<end LSN>
 //!
 //! For example:
 //!
-//!    1663_13990_2609_0_000000000169C348_000000000169C349
+//!    1663_13990_2609_0_5_000000000169C348_000000000169C349
 //!
 //! If a relation is dropped, we add a '_DROPPED' to the end of the filename to indicate that.
 //! So the above example would become:
 //!
-//!    1663_13990_2609_0_000000000169C348_000000000169C349_DROPPED
+//!    1663_13990_2609_0_5_000000000169C348_000000000169C349_DROPPED
 //!
 //! The end LSN indicates when it was dropped in that case, we don't store it in the
 //! file contents in any way.
 //!
-//! A snapshot file is constructed using the 'bookfile' crate. Each file consists of two
+//! A detlta file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
 //!
+use crate::layered_repository::filename::DeltaFileName;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag,
 };
-use crate::layered_repository::filename::{SnapshotFileName};
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
@@ -51,28 +48,28 @@ use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-// Magic constant to identify a Zenith snapshot file
-static SNAPSHOT_FILE_MAGIC: u32 = 0x5A616E01;
+// Magic constant to identify a Zenith delta file
+static DELTA_FILE_MAGIC: u32 = 0x5A616E01;
 
 static PAGE_VERSIONS_CHAPTER: u64 = 1;
 static REL_SIZES_CHAPTER: u64 = 2;
 
 ///
-/// SnapshotLayer is the in-memory data structure associated with an
-/// on-disk snapshot file.  We keep a SnapshotLayer in memory for each
+/// DeltaLayer is the in-memory data structure associated with an
+/// on-disk delta file.  We keep a DeltaLayer in memory for each
 /// file, in the LayerMap. If a layer is in "loaded" state, we have a
 /// copy of the file in memory, in 'inner'. Otherwise the struct is
 /// just a placeholder for a file that exists on disk, and it needs to
 /// be loaded before using it in queries.
 ///
-pub struct SnapshotLayer {
+pub struct DeltaLayer {
     conf: &'static PageServerConf,
     pub tenantid: ZTenantId,
     pub timelineid: ZTimelineId,
@@ -81,15 +78,19 @@ pub struct SnapshotLayer {
     //
     // This entry contains all the changes from 'start_lsn' to 'end_lsn'. The
     // start is inclusive, and end is exclusive.
+    //
     pub start_lsn: Lsn,
     pub end_lsn: Lsn,
 
     dropped: bool,
 
-    inner: Mutex<SnapshotLayerInner>,
+    /// Base layer preceding this layer.
+    predecessor: Option<Arc<dyn Layer>>,
+
+    inner: Mutex<DeltaLayerInner>,
 }
 
-pub struct SnapshotLayerInner {
+pub struct DeltaLayerInner {
     /// If false, the 'page_versions' and 'relsizes' have not been
     /// loaded into memory yet.
     loaded: bool,
@@ -102,7 +103,7 @@ pub struct SnapshotLayerInner {
     relsizes: BTreeMap<Lsn, u32>,
 }
 
-impl Layer for SnapshotLayer {
+impl Layer for DeltaLayer {
     fn get_timeline_id(&self) -> ZTimelineId {
         return self.timelineid;
     }
@@ -121,6 +122,18 @@ impl Layer for SnapshotLayer {
 
     fn get_end_lsn(&self) -> Lsn {
         return self.end_lsn;
+    }
+
+    fn filename(&self) -> PathBuf {
+        PathBuf::from(
+            DeltaFileName {
+                seg: self.seg,
+                start_lsn: self.start_lsn,
+                end_lsn: self.end_lsn,
+                dropped: self.dropped,
+            }
+            .to_string(),
+        )
     }
 
     /// Look up given page in the cache.
@@ -159,6 +172,24 @@ impl Layer for SnapshotLayer {
                 }
             }
 
+            // Use the base image, if needed
+            if let Some(need_lsn) = need_base_image_lsn {
+                if let Some(predecessor) = &self.predecessor {
+                    need_base_image_lsn = predecessor.get_page_reconstruct_data(
+                        blknum,
+                        need_lsn,
+                        reconstruct_data,
+                    )?;
+                } else {
+                    bail!(
+                        "no base img found for {} at blk {} at LSN {}",
+                        self.seg,
+                        blknum,
+                        lsn
+                    );
+                }
+            }
+
             // release lock on 'inner'
         }
 
@@ -167,26 +198,22 @@ impl Layer for SnapshotLayer {
 
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+        assert!(lsn >= self.start_lsn);
+
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
         let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
+        let result;
         if let Some((_entry_lsn, entry)) = iter.next_back() {
-            let result = *entry;
-            drop(inner);
-            trace!("get_seg_size: {} at {} -> {}", self.seg, lsn, result);
-            Ok(result)
+            result = *entry;
+        // Use the base image if needed
+        } else if let Some(predecessor) = &self.predecessor {
+            result = predecessor.get_seg_size(lsn)?;
         } else {
-            error!(
-                "No size found for {} at {} in snapshot layer {} {}-{}",
-                self.seg, lsn, self.seg, self.start_lsn, self.end_lsn
-            );
-            bail!(
-                "No size found for {} at {} in snapshot layer",
-                self.seg,
-                lsn
-            );
+            result = 0;
         }
+        Ok(result)
     }
 
     /// Does this segment exist at given LSN?
@@ -199,15 +226,37 @@ impl Layer for SnapshotLayer {
         // Otherwise, it exists.
         Ok(true)
     }
+
+    ///
+    /// Release most of the memory used by this layer. If it's accessed again later,
+    /// it will need to be loaded back.
+    ///
+    fn unload(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.page_versions = BTreeMap::new();
+        inner.relsizes = BTreeMap::new();
+        inner.loaded = false;
+        Ok(())
+    }
+
+    fn delete(&self) -> Result<()> {
+        // delete underlying file
+        fs::remove_file(self.path())?;
+        Ok(())
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
+    }
 }
 
-impl SnapshotLayer {
+impl DeltaLayer {
     fn path(&self) -> PathBuf {
         Self::path_for(
             self.conf,
             self.timelineid,
             self.tenantid,
-            &SnapshotFileName {
+            &DeltaFileName {
                 seg: self.seg,
                 start_lsn: self.start_lsn,
                 end_lsn: self.end_lsn,
@@ -220,13 +269,13 @@ impl SnapshotLayer {
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        fname: &SnapshotFileName,
+        fname: &DeltaFileName,
     ) -> PathBuf {
         conf.timeline_path(&timelineid, &tenantid)
             .join(fname.to_string())
     }
 
-    /// Create a new snapshot file, using the given btreemaps containing the page versions and
+    /// Create a new delta file, using the given btreemaps containing the page versions and
     /// relsizes.
     ///
     /// This is used to write the in-memory layer to disk. The in-memory layer uses the same
@@ -240,10 +289,11 @@ impl SnapshotLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
+        predecessor: Option<Arc<dyn Layer>>,
         page_versions: BTreeMap<(u32, Lsn), PageVersion>,
         relsizes: BTreeMap<Lsn, u32>,
-    ) -> Result<SnapshotLayer> {
-        let snapfile = SnapshotLayer {
+    ) -> Result<DeltaLayer> {
+        let delta_layer = DeltaLayer {
             conf: conf,
             timelineid: timelineid,
             tenantid: tenantid,
@@ -251,23 +301,24 @@ impl SnapshotLayer {
             start_lsn: start_lsn,
             end_lsn,
             dropped,
-            inner: Mutex::new(SnapshotLayerInner {
+            inner: Mutex::new(DeltaLayerInner {
                 loaded: true,
                 page_versions: page_versions,
                 relsizes: relsizes,
             }),
+            predecessor,
         };
-        let inner = snapfile.inner.lock().unwrap();
+        let inner = delta_layer.inner.lock().unwrap();
 
         // Write the in-memory btreemaps into a file
-        let path = snapfile.path();
+        let path = delta_layer.path();
 
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
         let file = File::create(&path)?;
-        let book = BookWriter::new(file, SNAPSHOT_FILE_MAGIC)?;
+        let book = BookWriter::new(file, DELTA_FILE_MAGIC)?;
 
-        // Write out page versions
+        // Write out the other page versions
         let mut chapter = book.new_chapter(PAGE_VERSIONS_CHAPTER);
         let buf = BTreeMap::ser(&inner.page_versions)?;
         chapter.write_all(&buf)?;
@@ -285,13 +336,13 @@ impl SnapshotLayer {
 
         drop(inner);
 
-        Ok(snapfile)
+        Ok(delta_layer)
     }
 
     ///
     /// Load the contents of the file into memory
     ///
-    fn load(&self) -> Result<MutexGuard<SnapshotLayerInner>> {
+    fn load(&self) -> Result<MutexGuard<DeltaLayerInner>> {
         // quick exit if already loaded
         let mut inner = self.inner.lock().unwrap();
 
@@ -303,7 +354,7 @@ impl SnapshotLayer {
             self.conf,
             self.timelineid,
             self.tenantid,
-            &SnapshotFileName {
+            &DeltaFileName {
                 seg: self.seg,
                 start_lsn: self.start_lsn,
                 end_lsn: self.end_lsn,
@@ -322,7 +373,7 @@ impl SnapshotLayer {
 
         debug!("loaded from {}", &path.display());
 
-        *inner = SnapshotLayerInner {
+        *inner = DeltaLayerInner {
             loaded: true,
             page_versions,
             relsizes,
@@ -331,16 +382,15 @@ impl SnapshotLayer {
         Ok(inner)
     }
 
-    /// Create SnapshotLayers representing all files on disk
-    ///
-    // TODO: returning an Iterator would be more idiomatic
-    pub fn load_snapshot_layer(
+    /// Create a DeltaLayer struct representing an existing file on disk.
+    pub fn new(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
-        filename: &SnapshotFileName,
-    ) -> Result<SnapshotLayer> {
-        let snapfile = SnapshotLayer {
+        filename: &DeltaFileName,
+        predecessor: Option<Arc<dyn Layer>>,
+    ) -> DeltaLayer {
+        DeltaLayer {
             conf,
             timelineid,
             tenantid,
@@ -348,32 +398,13 @@ impl SnapshotLayer {
             start_lsn: filename.start_lsn,
             end_lsn: filename.end_lsn,
             dropped: filename.dropped,
-            inner: Mutex::new(SnapshotLayerInner {
+            inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
                 page_versions: BTreeMap::new(),
                 relsizes: BTreeMap::new(),
             }),
-        };
-
-        Ok(snapfile)
-    }
-
-    pub fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
-    ///
-    /// Release most of the memory used by this layer. If it's accessed again later,
-    /// it will need to be loaded back.
-    ///
-    pub fn unload(&self) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.page_versions = BTreeMap::new();
-        inner.relsizes = BTreeMap::new();
-        inner.loaded = false;
-        Ok(())
+            predecessor,
+        }
     }
 
     /// debugging function to print out the contents of the layer

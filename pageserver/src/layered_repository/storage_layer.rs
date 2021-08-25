@@ -9,6 +9,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::PathBuf;
 
 use zenith_utils::lsn::Lsn;
 
@@ -102,6 +103,11 @@ pub trait Layer: Send + Sync {
     fn get_end_lsn(&self) -> Lsn;
     fn is_dropped(&self) -> bool;
 
+    /// Filename used to store this layer on disk. (Even in-memory layers
+    /// implement this, to print a handy unique identifier for the layer for
+    /// log messages, even though they're never not on disk.)
+    fn filename(&self) -> PathBuf;
+
     ///
     /// Return data needed to reconstruct given page at LSN.
     ///
@@ -121,8 +127,22 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<Option<Lsn>>;
 
-    // Functions that correspond to the Timeline trait functions.
+    /// Return size of the segment at given LSN. (Only for blocky relations.)
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
 
+    /// Does the segment exist at given LSN? Or was it dropped before it.
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
+
+    /// Does this layer only contain some data for the segment (incremental),
+    /// or does it contain a version of every page? This is important to know
+    /// for garbage collecting old layers: an incremental layer depends on
+    /// the previous non-incremental layer.
+    fn is_incremental(&self) -> bool;
+
+    /// Release memory used by this layer. There is no corresponding 'load'
+    /// function, that's done implicitly when you call one of the get-functions.
+    fn unload(&self) -> Result<()>;
+
+    /// Permanently remove this layer from disk.
+    fn delete(&self) -> Result<()>;
 }
