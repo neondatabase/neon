@@ -40,6 +40,13 @@ struct SharedState {
     hs_feedback: HotStandbyFeedback,
 }
 
+// A named boolean.
+#[derive(Debug)]
+pub enum CreateControlFile {
+    True,
+    False,
+}
+
 impl SharedState {
     /// Restore SharedState from control file. Locks the control file along the
     /// way to prevent running more than one instance of safekeeper on the same
@@ -48,7 +55,7 @@ impl SharedState {
     fn create_restore(
         conf: &WalAcceptorConf,
         timelineid: ZTimelineId,
-        create: bool,
+        create: CreateControlFile,
     ) -> Result<Self> {
         let (cf, state) = SharedState::load_control_file(conf, timelineid, create)?;
         let storage = FileStorage {
@@ -86,20 +93,20 @@ impl SharedState {
     fn load_control_file(
         conf: &WalAcceptorConf,
         timelineid: ZTimelineId,
-        create: bool,
+        create: CreateControlFile,
     ) -> Result<(File, SafeKeeperState)> {
         let control_file_path = conf
             .data_dir
             .join(timelineid.to_string())
             .join(CONTROL_FILE_NAME);
         info!(
-            "loading control file {}, create={}",
+            "loading control file {}, create={:?}",
             control_file_path.display(),
             create
         );
         let mut opts = OpenOptions::new();
         opts.read(true).write(true);
-        if create {
+        if let CreateControlFile::True = create {
             opts.create(true);
         }
         match opts.open(&control_file_path) {
@@ -117,7 +124,7 @@ impl SharedState {
                 }
                 // Empty file is legit on 'create', don't try to deser from it.
                 if file.metadata().unwrap().len() == 0 {
-                    if !create {
+                    if let CreateControlFile::False = create {
                         bail!("control file is empty");
                     }
                     return Ok((file, SafeKeeperState::new()));
@@ -248,8 +255,12 @@ impl Timeline {
 
 // Utilities needed by various Connection-like objects
 pub trait TimelineTools {
-    fn set(&mut self, conf: &WalAcceptorConf, timeline_id: ZTimelineId, create: bool)
-        -> Result<()>;
+    fn set(
+        &mut self,
+        conf: &WalAcceptorConf,
+        timeline_id: ZTimelineId,
+        create: CreateControlFile,
+    ) -> Result<()>;
     fn get(&self) -> &Arc<Timeline>;
 }
 
@@ -258,7 +269,7 @@ impl TimelineTools for Option<Arc<Timeline>> {
         &mut self,
         conf: &WalAcceptorConf,
         timeline_id: ZTimelineId,
-        create: bool,
+        create: CreateControlFile,
     ) -> Result<()> {
         // We will only set the timeline once. If it were to ever change,
         // anyone who cloned the Arc would be out of date.
@@ -286,7 +297,7 @@ impl GlobalTimelines {
     pub fn get(
         conf: &WalAcceptorConf,
         timeline_id: ZTimelineId,
-        create: bool,
+        create: CreateControlFile,
     ) -> Result<Arc<Timeline>> {
         let mut timelines = TIMELINES.lock().unwrap();
 
@@ -294,7 +305,7 @@ impl GlobalTimelines {
             Some(result) => Ok(Arc::clone(result)),
             None => {
                 info!(
-                    "creating timeline dir {}, create is {}",
+                    "creating timeline dir {}, create is {:?}",
                     timeline_id, create
                 );
                 fs::create_dir_all(timeline_id.to_string())?;

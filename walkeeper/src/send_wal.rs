@@ -15,6 +15,8 @@ use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor};
 use zenith_utils::zid::ZTimelineId;
 
+use crate::timeline::CreateControlFile;
+
 /// Handler for streaming WAL from acceptor
 pub struct SendWalHandler {
     /// wal acceptor configuration
@@ -44,11 +46,17 @@ impl postgres_backend::Handler for SendWalHandler {
         // START_WAL_PUSH is the only command that initializes the timeline
         if self.timeline.is_none() {
             if query_string.starts_with(b"START_WAL_PUSH") {
-                self.timeline
-                    .set(&self.conf, self.timelineid.unwrap(), true)?;
+                self.timeline.set(
+                    &self.conf,
+                    self.timelineid.unwrap(),
+                    CreateControlFile::True,
+                )?;
             } else {
-                self.timeline
-                    .set(&self.conf, self.timelineid.unwrap(), false)?;
+                self.timeline.set(
+                    &self.conf,
+                    self.timelineid.unwrap(),
+                    CreateControlFile::False,
+                )?;
             }
         }
         if query_string.starts_with(b"IDENTIFY_SYSTEM") {
