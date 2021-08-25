@@ -39,6 +39,7 @@ use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod filename;
 mod inmemory_layer;
 mod layer_map;
 mod snapshot_layer;
@@ -893,19 +894,21 @@ impl LayeredTimeline {
             self.timelineid
         );
         let mut layers = self.layers.lock().unwrap();
-        let snapfiles =
-            SnapshotLayer::list_snapshot_files(self.conf, self.timelineid, self.tenantid)?;
+        let snapfilenames =
+            filename::list_snapshot_files(self.conf, self.timelineid, self.tenantid)?;
 
-        for layer_rc in snapfiles.iter() {
+        for filename in snapfilenames.iter() {
+            let layer = SnapshotLayer::load_snapshot_layer(self.conf, self.timelineid, self.tenantid, filename)?;
+
             info!(
                 "found layer {} {}-{} {} on timeline {}",
-                layer_rc.get_seg_tag(),
-                layer_rc.get_start_lsn(),
-                layer_rc.get_end_lsn(),
-                layer_rc.is_dropped(),
+                layer.get_seg_tag(),
+                layer.get_start_lsn(),
+                layer.get_end_lsn(),
+                layer.is_dropped(),
                 self.timelineid
             );
-            layers.insert_historic(Arc::clone(layer_rc));
+            layers.insert_historic(Arc::new(layer));
         }
 
         Ok(())
