@@ -523,15 +523,6 @@ impl Timeline for ObjectTimeline {
         Ok(())
     }
 
-    fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()> {
-        let key = ObjectKey {
-            timeline: self.timelineid,
-            tag,
-        };
-        self.obj_store.put(&key, lsn, data)?;
-        Ok(())
-    }
-
     ///
     /// Memorize a full image of a page version
     ///
@@ -705,12 +696,6 @@ impl Timeline for ObjectTimeline {
         self.put_timeline_metadata_entry(metadata)?;
 
         Ok(())
-    }
-
-    fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
-        let lsn = self.last_valid_lsn.load();
-        let iter = self.obj_store.objects(self.timelineid, lsn)?;
-        Ok(Box::new(ObjectHistory { lsn, iter }))
     }
 }
 
@@ -1046,27 +1031,6 @@ impl ObjectTimeline {
             }
         }
         Ok(result)
-    }
-}
-
-struct ObjectHistory<'a> {
-    iter: Box<dyn Iterator<Item = Result<(ObjectTag, Lsn, Vec<u8>)>> + 'a>,
-    lsn: Lsn,
-}
-
-impl<'a> Iterator for ObjectHistory<'a> {
-    type Item = Result<Modification>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|result| result.map(|t| Modification::new(t)))
-    }
-}
-
-impl<'a> History for ObjectHistory<'a> {
-    fn lsn(&self) -> Lsn {
-        self.lsn
     }
 }
 

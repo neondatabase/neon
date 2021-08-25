@@ -1,10 +1,8 @@
-use crate::object_key::*;
 use crate::relish::*;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::iter::Iterator;
 use std::ops::AddAssign;
 use std::sync::Arc;
 use std::time::Duration;
@@ -166,9 +164,6 @@ pub trait Timeline: Send + Sync {
     /// This method is used for marking dropped relations and truncated SLRU segments
     fn put_unlink(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
 
-    /// Put raw data
-    fn put_raw_data(&self, tag: ObjectTag, lsn: Lsn, data: &[u8]) -> Result<()>;
-
     /// Remember the all WAL before the given LSN has been processed.
     ///
     /// The WAL receiver calls this after the put_* functions, to indicate that
@@ -195,40 +190,6 @@ pub trait Timeline: Send + Sync {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self) -> Result<()>;
-
-    /// Events for all relations in the timeline.
-    /// Contains updates from start up to the last valid LSN
-    /// at time of history() call. This lsn can be read via the lsn() function.
-    ///
-    /// Relation size is increased implicitly and decreased with Truncate updates.
-    // TODO ordering guarantee?
-    fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>>;
-}
-
-pub trait History: Iterator<Item = Result<Modification>> {
-    /// The last_valid_lsn at the time of history() call.
-    fn lsn(&self) -> Lsn;
-}
-
-//
-// Structure representing any update operation of object storage.
-// It is used to copy object storage content in PUSH method.
-//
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Modification {
-    pub tag: ObjectTag,
-    pub lsn: Lsn,
-    pub data: Vec<u8>,
-}
-
-impl Modification {
-    pub fn new(entry: (ObjectTag, Lsn, Vec<u8>)) -> Modification {
-        Modification {
-            tag: entry.0,
-            lsn: entry.1,
-            data: entry.2,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -281,7 +242,6 @@ mod tests {
     use super::*;
     use crate::layered_repository::LayeredRepository;
     use crate::object_repository::ObjectRepository;
-    use crate::object_repository::{ObjectValue, PageEntry, RelationSizeEntry};
     use crate::rocksdb_storage::RocksObjectStore;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::{PageServerConf, RepositoryFormat};
@@ -290,7 +250,6 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
-    use zenith_utils::bin_ser::BeSer;
     use zenith_utils::postgres_backend::AuthType;
     use zenith_utils::zid::ZTenantId;
 
@@ -539,18 +498,6 @@ mod tests {
         Ok(())
     }
 
-    fn skip_nonrel_objects<'a>(
-        snapshot: Box<dyn History + 'a>,
-    ) -> Result<impl Iterator<Item = <dyn History as Iterator>::Item> + 'a> {
-        Ok(snapshot.skip_while(|r| match r {
-            Ok(m) => match m.tag {
-                ObjectTag::RelationMetadata(_) => false,
-                _ => true,
-            },
-            _ => panic!("Iteration error"),
-        }))
-    }
-
     #[test]
     fn test_branch_rocksdb() -> Result<()> {
         let repo = get_test_repo("test_branch_rocksdb", RepositoryFormat::RocksDb)?;
@@ -610,92 +557,6 @@ mod tests {
         );
 
         assert_eq!(newtline.get_relish_size(TESTREL_B, Lsn(4))?.unwrap(), 1);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_history_rocksdb() -> Result<()> {
-        let repo = get_test_repo("test_history_rocksdb", RepositoryFormat::RocksDb)?;
-        test_history(&*repo)
-    }
-    #[test]
-    // TODO: This doesn't work with the layered storage, the functions needed for push/pull
-    // functionality haven't been implemented yet.
-    #[ignore]
-    fn test_history_layered() -> Result<()> {
-        let repo = get_test_repo("test_history_layered", RepositoryFormat::Layered)?;
-        test_history(&*repo)
-    }
-    fn test_history(repo: &dyn Repository) -> Result<()> {
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
-
-        let snapshot = tline.history()?;
-        assert_eq!(snapshot.lsn(), Lsn(0));
-        let mut snapshot = skip_nonrel_objects(snapshot)?;
-        assert_eq!(None, snapshot.next().transpose()?);
-
-        // add a page and advance the last valid LSN
-        let rel = TESTREL_A;
-        tline.put_page_image(rel, 1, Lsn(1), TEST_IMG("blk 1 @ lsn 1"), true)?;
-        tline.advance_last_valid_lsn(Lsn(1));
-
-        let expected_page = Modification {
-            tag: ObjectTag::Buffer(rel, 1),
-            lsn: Lsn(1),
-            data: ObjectValue::ser(&ObjectValue::Page(PageEntry::Page(TEST_IMG(
-                "blk 1 @ lsn 1",
-            ))))?,
-        };
-        let expected_init_size = Modification {
-            tag: ObjectTag::RelationMetadata(rel),
-            lsn: Lsn(1),
-            data: ObjectValue::ser(&ObjectValue::RelationSize(RelationSizeEntry::Size(2)))?,
-        };
-        let expected_trunc_size = Modification {
-            tag: ObjectTag::RelationMetadata(rel),
-            lsn: Lsn(2),
-            data: ObjectValue::ser(&ObjectValue::RelationSize(RelationSizeEntry::Size(0)))?,
-        };
-
-        let snapshot = tline.history()?;
-        assert_eq!(snapshot.lsn(), Lsn(1));
-        let mut snapshot = skip_nonrel_objects(snapshot)?;
-        assert_eq!(
-            Some(&expected_init_size),
-            snapshot.next().transpose()?.as_ref()
-        );
-        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
-        assert_eq!(None, snapshot.next().transpose()?);
-
-        // truncate to zero, but don't advance the last valid LSN
-        tline.put_truncation(rel, Lsn(2), 0)?;
-        let snapshot = tline.history()?;
-        assert_eq!(snapshot.lsn(), Lsn(1));
-        let mut snapshot = skip_nonrel_objects(snapshot)?;
-        assert_eq!(
-            Some(&expected_init_size),
-            snapshot.next().transpose()?.as_ref()
-        );
-        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
-        assert_eq!(None, snapshot.next().transpose()?);
-
-        // advance the last valid LSN and the truncation should be observable
-        tline.advance_last_valid_lsn(Lsn(2));
-        let snapshot = tline.history()?;
-        assert_eq!(snapshot.lsn(), Lsn(2));
-        let mut snapshot = skip_nonrel_objects(snapshot)?;
-        assert_eq!(
-            Some(&expected_init_size),
-            snapshot.next().transpose()?.as_ref()
-        );
-        assert_eq!(
-            Some(&expected_trunc_size),
-            snapshot.next().transpose()?.as_ref()
-        );
-        assert_eq!(Some(&expected_page), snapshot.next().transpose()?.as_ref());
-        assert_eq!(None, snapshot.next().transpose()?);
 
         Ok(())
     }

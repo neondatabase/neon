@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::relish::*;
-use crate::repository::{GcResult, History, Repository, Timeline, WALRecord};
+use crate::repository::{GcResult, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
@@ -651,11 +651,6 @@ impl Timeline for LayeredTimeline {
         Ok(all_rels)
     }
 
-    fn history<'a>(&'a self) -> Result<Box<dyn History + 'a>> {
-        // This is needed by the push/pull functionality. Not implemented yet.
-        todo!();
-    }
-
     fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
         if !rel.is_blocky() && blknum != 0 {
             bail!(
@@ -778,18 +773,6 @@ impl Timeline for LayeredTimeline {
 
         let layer = self.get_layer_for_write(seg, lsn)?;
         layer.put_page_image(blknum, lsn, img)
-    }
-
-    fn put_raw_data(
-        &self,
-        _tag: crate::object_key::ObjectTag,
-        _lsn: Lsn,
-        _data: &[u8],
-    ) -> Result<()> {
-        // FIXME: This doesn't make much sense for the layered storage format,
-        // it's pretty tightly coupled with the way the object store stores
-        // things.
-        bail!("put_raw_data not implemented");
     }
 
     /// Public entry point for checkpoint(). All the logic is in the private

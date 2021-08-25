@@ -15,7 +15,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
 use regex::Regex;
-use std::io::Write;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
@@ -31,13 +30,12 @@ use zenith_utils::pq_proto::{
     BeMessage, FeMessage, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
 };
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
-use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
+use zenith_utils::lsn::Lsn;
 
 use crate::basebackup;
 use crate::branches;
 use crate::page_cache;
 use crate::relish::*;
-use crate::repository::Modification;
 use crate::walreceiver;
 use crate::PageServerConf;
 
@@ -526,80 +524,6 @@ impl postgres_backend::Handler for PageServerHandler {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(&branch)]))?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("push ") {
-            // push <zenith tenantid as hex string> <zenith timelineid as hex string>
-            let re = Regex::new(r"^push ([[:xdigit:]]+) ([[:xdigit:]]+)$").unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .ok_or_else(|| anyhow!("invalid push: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-
-            self.check_permission(Some(tenantid))?;
-
-            let start_lsn = Lsn(0); // TODO this needs to come from the repo
-            let timeline = page_cache::get_repository_for_tenant(&tenantid)?
-                .create_empty_timeline(timelineid, start_lsn)?;
-
-            pgb.write_message(&BeMessage::CopyInResponse)?;
-
-            let mut last_lsn = Lsn(0);
-
-            while let Some(msg) = pgb.read_message()? {
-                match msg {
-                    FeMessage::CopyData(bytes) => {
-                        let modification = Modification::des(&bytes)?;
-
-                        last_lsn = modification.lsn;
-                        timeline.put_raw_data(
-                            modification.tag,
-                            modification.lsn,
-                            &modification.data,
-                        )?;
-                    }
-                    FeMessage::CopyDone => {
-                        timeline.advance_last_valid_lsn(last_lsn);
-                        break;
-                    }
-                    FeMessage::Sync => {}
-                    _ => bail!("unexpected message {:?}", msg),
-                }
-            }
-
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("request_push ") {
-            // request_push <zenith tenantid as hex string> <zenith timelineid as hex string> <postgres_connection_uri>
-            let re = Regex::new(r"^request_push ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .ok_or_else(|| anyhow!("invalid request_push: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let postgres_connection_uri = caps.get(3).unwrap().as_str();
-
-            self.check_permission(Some(tenantid))?;
-
-            let timeline =
-                page_cache::get_repository_for_tenant(&tenantid)?.get_timeline(timelineid)?;
-
-            let mut conn = postgres::Client::connect(postgres_connection_uri, postgres::NoTls)?;
-            let mut copy_in = conn.copy_in(format!("push {}", timelineid.to_string()).as_str())?;
-
-            let history = timeline.history()?;
-            for update_res in history {
-                let update = update_res?;
-                let update_bytes = update.ser()?;
-                copy_in.write_all(&update_bytes)?;
-                copy_in.flush()?; // ensure that messages are sent inside individual CopyData packets
-            }
-
-            copy_in.finish()?;
-
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("branch_list ") {
             // branch_list <zenith tenantid as hex string>
             let re = Regex::new(r"^branch_list ([[:xdigit:]]+)$").unwrap();

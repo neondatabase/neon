@@ -131,12 +131,6 @@ fn main() -> Result<()> {
                         ),
                 ),
         )
-        .subcommand(
-            SubCommand::with_name("push")
-                .about("Push timeline to remote pageserver")
-                .arg(Arg::with_name("timeline").required(true))
-                .arg(Arg::with_name("remote").required(true)),
-        )
         .get_matches();
 
     // Create config file
@@ -232,13 +226,6 @@ fn main() -> Result<()> {
         ("remote", Some(remote_match)) => {
             if let Err(e) = handle_remote(remote_match, &env) {
                 eprintln!("remote operation failed: {}", e);
-                exit(1);
-            }
-        }
-
-        ("push", Some(push_match)) => {
-            if let Err(e) = handle_push(push_match, &env) {
-                eprintln!("push operation failed: {}", e);
                 exit(1);
             }
         }
@@ -538,23 +525,6 @@ fn handle_remote(remote_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> 
         }
         _ => bail!("unknown command"),
     }
-
-    Ok(())
-}
-
-fn handle_push(push_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> {
-    let timeline_id_str = push_match.value_of("timeline").unwrap();
-    ZTimelineId::from_str(timeline_id_str)?;
-
-    let remote_name = push_match.value_of("remote").unwrap();
-    let remote = local_env
-        .remotes
-        .get(remote_name)
-        .ok_or_else(|| anyhow!("remote {} not found", remote_name))?;
-
-    let page_server = PageServerNode::from_env(local_env);
-    let mut client = page_server.page_server_psql_client()?;
-    client.simple_query(&format!("request_push {} {}", timeline_id_str, remote))?;
 
     Ok(())
 }
