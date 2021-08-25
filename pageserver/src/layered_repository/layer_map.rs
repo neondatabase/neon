@@ -14,31 +14,71 @@ use crate::layered_repository::{InMemoryLayer, SnapshotLayer};
 use crate::relish::*;
 use anyhow::Result;
 use log::*;
+use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::ops::Bound::Included;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 
 ///
-/// LayerMap tracks what layers exist or a timeline. The last layer that is
-/// open for writes is always an InMemoryLayer, and is tracked separately
-/// because there can be only one for each segment. The older layers,
-/// stored on disk, are kept in a BTreeMap keyed by the layer's start LSN.
+/// LayerMap tracks what layers exist on a timeline.
 ///
 pub struct LayerMap {
+    /// All the layers keyed by segment tag
     segs: HashMap<SegmentTag, SegEntry>,
+
+    /// All in-memory layers, ordered by 'oldest_pending_lsn' of each layer.
+    /// This allows easy access to the in-memory layer that contains the
+    /// oldest WAL record.
+    open_segs: BinaryHeap<OpenSegEntry>,
 }
 
+///
+/// Per-segment entry in the LayerMap.segs hash map
+///
+/// The last layer that is open for writes is always an InMemoryLayer,
+/// and is kept in a separate field, because there can be only one for
+/// each segment. The older layers, stored on disk, are kept in a
+/// BTreeMap keyed by the layer's start LSN.
 struct SegEntry {
     pub open: Option<Arc<InMemoryLayer>>,
     pub historic: BTreeMap<Lsn, Arc<SnapshotLayer>>,
 }
 
+/// Entry held LayerMap.open_segs, with boilerplate comparison
+/// routines to implement a min-heap ordered by 'oldest_pending_lsn'
+struct OpenSegEntry {
+    pub oldest_pending_lsn: Lsn,
+    pub layer: Arc<InMemoryLayer>,
+}
+impl Ord for OpenSegEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
+        // to get that.
+        other.oldest_pending_lsn.cmp(&self.oldest_pending_lsn)
+    }
+}
+impl PartialOrd for OpenSegEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
+        // to get that.
+        other
+            .oldest_pending_lsn
+            .partial_cmp(&self.oldest_pending_lsn)
+    }
+}
+impl PartialEq for OpenSegEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.oldest_pending_lsn.eq(&other.oldest_pending_lsn)
+    }
+}
+impl Eq for OpenSegEntry {}
+
 impl LayerMap {
     ///
-    /// Look up using the given segment tag and LSN. This differs from a plain
-    /// key-value lookup in that if there is any layer that covers the
+    /// Look up a layer using the given segment tag and LSN. This differs from a
+    /// plain key-value lookup in that if there is any layer that covers the
     /// given LSN, or precedes the given LSN, it is returned. In other words,
     /// you don't need to know the exact start LSN of the layer.
     ///
@@ -88,14 +128,29 @@ impl LayerMap {
             if let Some(_old) = &segentry.open {
                 // FIXME: shouldn't exist, but check
             }
-            segentry.open = Some(layer);
+            segentry.open = Some(Arc::clone(&layer));
         } else {
             let segentry = SegEntry {
-                open: Some(layer),
+                open: Some(Arc::clone(&layer)),
                 historic: BTreeMap::new(),
             };
             self.segs.insert(tag, segentry);
         }
+
+        let opensegentry = OpenSegEntry {
+            oldest_pending_lsn: layer.get_oldest_pending_lsn(),
+            layer: layer,
+        };
+        self.open_segs.push(opensegentry);
+    }
+
+    /// Remove the oldest in-memory layer
+    pub fn pop_oldest_open(&mut self) {
+        let opensegentry = self.open_segs.pop().unwrap();
+        let segtag = opensegentry.layer.get_seg_tag();
+
+        let mut segentry = self.segs.get_mut(&segtag).unwrap();
+        segentry.open = None;
     }
 
     ///
@@ -196,10 +251,12 @@ impl LayerMap {
         false
     }
 
-    pub fn iter_open_layers(&mut self) -> OpenLayerIter {
-        OpenLayerIter {
-            last: None,
-            segiter: self.segs.iter_mut(),
+    /// Return the oldest in-memory layer.
+    pub fn peek_oldest_open(&self) -> Option<Arc<InMemoryLayer>> {
+        if let Some(opensegentry) = self.open_segs.peek() {
+            Some(Arc::clone(&opensegentry.layer))
+        } else {
+            None
         }
     }
 
@@ -215,43 +272,8 @@ impl Default for LayerMap {
     fn default() -> Self {
         LayerMap {
             segs: HashMap::new(),
+            open_segs: BinaryHeap::new(),
         }
-    }
-}
-
-pub struct OpenLayerIter<'a> {
-    last: Option<&'a mut SegEntry>,
-
-    segiter: std::collections::hash_map::IterMut<'a, SegmentTag, SegEntry>,
-}
-
-impl<'a> OpenLayerIter<'a> {
-    pub fn replace(&mut self, replacement: Option<Arc<InMemoryLayer>>) {
-        let segentry = self.last.as_mut().unwrap();
-        segentry.open = replacement;
-    }
-
-    pub fn insert_historic(&mut self, new_layer: Arc<SnapshotLayer>) {
-        let start_lsn = new_layer.get_start_lsn();
-
-        let segentry = self.last.as_mut().unwrap();
-        segentry.historic.insert(start_lsn, new_layer);
-    }
-}
-
-impl<'a> Iterator for OpenLayerIter<'a> {
-    type Item = Arc<InMemoryLayer>;
-
-    fn next(&mut self) -> std::option::Option<<Self as std::iter::Iterator>::Item> {
-        while let Some((_seg, entry)) = self.segiter.next() {
-            if let Some(open) = &entry.open {
-                let op = Arc::clone(&open);
-                self.last = Some(entry);
-                return Some(op);
-            }
-        }
-        self.last = None;
-        None
     }
 }
 
