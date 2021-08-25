@@ -351,6 +351,7 @@ impl XlHeapInsert {
 #[derive(Debug)]
 pub struct XlHeapMultiInsert {
     pub flags: u8,
+    pub _padding: u8,
     pub ntuples: u16,
 }
 
@@ -358,6 +359,7 @@ impl XlHeapMultiInsert {
     pub fn decode(buf: &mut Bytes) -> XlHeapMultiInsert {
         XlHeapMultiInsert {
             flags: buf.get_u8(),
+            _padding: buf.get_u8(),
             ntuples: buf.get_u16_le(),
         }
     }
@@ -850,6 +852,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
         if info == pg_constants::XLOG_HEAP_INSERT {
             let xlrec = XlHeapInsert::decode(&mut buf);
+            assert_eq!(0, buf.remaining());
             if (xlrec.flags
                 & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
                     | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
@@ -865,6 +868,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             }
         } else if info == pg_constants::XLOG_HEAP_DELETE {
             let xlrec = XlHeapDelete::decode(&mut buf);
+            assert_eq!(0, buf.remaining());
             if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                 let mut blk = DecodedBkpBlock::new();
                 blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
@@ -878,6 +882,9 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             || info == pg_constants::XLOG_HEAP_HOT_UPDATE
         {
             let xlrec = XlHeapUpdate::decode(&mut buf);
+            // the size of tuple data is inferred from the size of the record.
+            // we can't validate the remaining number of bytes without parsing
+            // the tuple data.
             if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
                 let mut blk = DecodedBkpBlock::new();
                 blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
@@ -903,6 +910,15 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         let info = xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK;
         if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
             let xlrec = XlHeapMultiInsert::decode(&mut buf);
+
+            let offset_array_len = if xlogrec.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                0
+            } else {
+                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+            };
+            assert_eq!(offset_array_len, buf.remaining());
+
             if (xlrec.flags
                 & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
                     | pg_constants::XLH_INSERT_ALL_FROZEN_SET))

@@ -116,6 +116,7 @@ pub const XLOG_HEAP_INSERT: u8 = 0x00;
 pub const XLOG_HEAP_DELETE: u8 = 0x10;
 pub const XLOG_HEAP_UPDATE: u8 = 0x20;
 pub const XLOG_HEAP_HOT_UPDATE: u8 = 0x40;
+pub const XLOG_HEAP_INIT_PAGE: u8 = 0x80;
 pub const XLOG_HEAP2_VISIBLE: u8 = 0x40;
 pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
 pub const XLH_INSERT_ALL_FROZEN_SET: u8 = (1 << 5) as u8;
