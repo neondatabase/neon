@@ -69,7 +69,7 @@ RUN rm -rf postgres_install/build && \
     cd postgres_install && tar -czf /data/postgres_install.tar.gz . && cd .. && \
     rm -rf postgres_install
 
-RUN useradd -m -d /data zenith
+RUN useradd -d /data zenith && chown -R zenith:zenith /data
 
 VOLUME ["/data"]
 USER zenith
