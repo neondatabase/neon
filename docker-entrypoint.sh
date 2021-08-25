@@ -1,4 +1,6 @@
 #!/bin/sh
+set -eux
+
 if [ "$1" = 'pageserver' ]; then
     if [ ! -d "/data/tenants" ]; then
         echo "Initializing pageserver data directory"
