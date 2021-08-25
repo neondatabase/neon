@@ -25,13 +25,13 @@ pub type MultiXactStatus = u32;
 pub struct WalStreamDecoder {
     lsn: Lsn,
 
-    startlsn: Lsn, // LSN where this record starts
     contlen: u32,
     padlen: u32,
 
     inputbuf: BytesMut,
-
     recordbuf: BytesMut,
+
+	crc_check: bool,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -46,21 +46,28 @@ pub struct WalDecodeError {
 // FIXME: This isn't a proper rust stream
 //
 impl WalStreamDecoder {
-    pub fn new(lsn: Lsn) -> WalStreamDecoder {
+    pub fn new(lsn: Lsn, crc_check: bool) -> WalStreamDecoder {
         WalStreamDecoder {
             lsn,
 
-            startlsn: Lsn(0),
             contlen: 0,
             padlen: 0,
 
             inputbuf: BytesMut::new(),
             recordbuf: BytesMut::new(),
+
+			crc_check,
         }
     }
 
+	pub fn available(&self) -> Lsn {
+		self.lsn + self.inputbuf.remaining() as u64
+	}
+
     pub fn feed_bytes(&mut self, buf: &[u8]) {
         self.inputbuf.extend_from_slice(buf);
+		info!("WAL decoder: self.lsn={}, buf.len()={}, self.inputbuf.len()={}, self.inputbuf.remaining()={}",
+			  self.lsn, buf.len(), self.inputbuf.len(), self.inputbuf.remaining());
     }
 
     /// Attempt to decode another WAL record from the input that has been fed to the
@@ -78,6 +85,7 @@ impl WalStreamDecoder {
                 // parse long header
 
                 if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_LONG_PHD {
+					info!("self.inputbuf.remaining()={} < XLOG_SIZE_OF_XLOG_LONG_PHD at {}, self.recordbuf.len()={}", self.inputbuf.remaining(), self.lsn, self.recordbuf.len());
                     return Ok(None);
                 }
 
@@ -92,9 +100,9 @@ impl WalStreamDecoder {
                 // TODO: verify the remaining fields in the header
 
                 self.lsn += XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
-                continue;
             } else if self.lsn.block_offset() == 0 {
                 if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_SHORT_PHD {
+					info!("self.inputbuf.remaining()={} < XLOG_SIZE_OF_XLOG_SHORT_PHD at {}, self.recordbuf.len()={}, self.contlen={}", self.inputbuf.remaining(), self.lsn, self.recordbuf.len(), self.contlen);
                     return Ok(None);
                 }
 
@@ -109,9 +117,9 @@ impl WalStreamDecoder {
                 // TODO: verify the remaining fields in the header
 
                 self.lsn += XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
-                continue;
             } else if self.padlen > 0 {
                 if self.inputbuf.remaining() < self.padlen as usize {
+					info!("self.inputbuf.remaining()={} < self.padlen={}", self.inputbuf.remaining(), self.padlen);
                     return Ok(None);
                 }
 
@@ -123,11 +131,11 @@ impl WalStreamDecoder {
                 // need to have at least the xl_tot_len field
 
                 if self.inputbuf.remaining() < 4 {
+					info!("self.inputbuf.remaining()={} < 4", self.inputbuf.remaining());
                     return Ok(None);
                 }
 
                 // read xl_tot_len FIXME: assumes little-endian
-                self.startlsn = self.lsn;
                 let xl_tot_len = self.inputbuf.get_u32_le();
                 if (xl_tot_len as usize) < XLOG_SIZE_OF_XLOG_RECORD {
                     return Err(WalDecodeError {
@@ -142,7 +150,6 @@ impl WalStreamDecoder {
                 self.recordbuf.put_u32_le(xl_tot_len);
 
                 self.contlen = xl_tot_len - 4;
-                continue;
             } else {
                 // we're continuing a record, possibly from previous page.
                 let pageleft = self.lsn.remaining_in_block() as u32;
@@ -151,6 +158,7 @@ impl WalStreamDecoder {
                 let n = min(self.contlen, pageleft) as usize;
 
                 if self.inputbuf.remaining() < n {
+					info!("self.inputbuf.remaining()={} < n={} at {}, self.recordbuf.len()={}, self.contlen={}", self.inputbuf.remaining(), n, self.lsn, self.recordbuf.len(), self.contlen);
                     return Ok(None);
                 }
 
@@ -164,17 +172,10 @@ impl WalStreamDecoder {
                     let recordbuf = recordbuf.freeze();
                     let mut buf = recordbuf.clone();
 
+                    let xlogrec = XLogRecord::from_bytes(&mut buf);
+
                     // XLOG_SWITCH records are special. If we see one, we need to skip
                     // to the next WAL segment.
-                    let xlogrec = XLogRecord::from_bytes(&mut buf);
-                    let mut crc = crc32c_append(0, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
-                    crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
-                    if crc != xlogrec.xl_crc {
-                        return Err(WalDecodeError {
-                            msg: "WAL record crc mismatch".into(),
-                            lsn: self.lsn,
-                        });
-                    }
                     if xlogrec.is_xlog_switch_record() {
                         trace!("saw xlog switch record at {}", self.lsn);
                         self.padlen =
@@ -184,10 +185,23 @@ impl WalStreamDecoder {
                         self.padlen = self.lsn.calc_padding(8u32) as u32;
                     }
 
+					// Check record CRC
+					if self.crc_check {
+						let mut crc = crc32c_append(0, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
+						crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
+						if crc != xlogrec.xl_crc {
+							info!("WAL record crc mismatch n={}, buf.len()={}, lsn={}, rec={:?}, recordbuf={:?}",
+								  n, recordbuf.len(), self.lsn, xlogrec, recordbuf);
+							return Err(WalDecodeError {
+								msg: format!("WAL record crc mismatch n={}, buf.len()={}, lsn={}, rec={:?}", n, buf.len(), self.lsn, xlogrec),
+								lsn: self.lsn,
+							});
+						}
+					}
+
                     let result = (self.lsn, recordbuf);
                     return Ok(Some(result));
                 }
-                continue;
             }
         }
         // check record boundaries

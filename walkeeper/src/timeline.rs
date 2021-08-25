@@ -175,7 +175,7 @@ impl Timeline {
         }
     }
 
-    fn _stop_wal_senders(&self) {
+    pub fn stop_wal_senders(&self) {
         self.notify_wal_senders(END_REPLICATION_MARKER);
     }
 

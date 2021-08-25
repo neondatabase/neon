@@ -28,6 +28,7 @@ use crate::send_wal::SendWalHandler;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
 use postgres_ffi::xlog_utils::{TimeLineID, XLogFileName, MAX_SEND_SIZE, XLOG_BLCKSZ};
+use pageserver::waldecoder::WalStreamDecoder;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 1;
@@ -84,6 +85,8 @@ pub struct SafeKeeperInfo {
     pub commit_lsn: Lsn,
     /// locally flushed part of WAL
     pub flush_lsn: Lsn,
+    /// locally flushed last record LSN
+    pub safe_lsn: Lsn,
     /// minimal LSN which may be needed for recovery of some safekeeper: min(commit_lsn) for all safekeepers
     pub restart_lsn: Lsn,
 }
@@ -110,6 +113,7 @@ impl SafeKeeperInfo {
             },
             commit_lsn: Lsn(0),  /* part of WAL acknowledged by quorum */
             flush_lsn: Lsn(0),   /* locally flushed part of WAL */
+            safe_lsn: Lsn(0),    /* locally flushed last record LSN */
             restart_lsn: Lsn(0), /* minimal LSN which may be needed for recovery of some safekeeper */
         }
     }
@@ -135,6 +139,7 @@ struct SafeKeeperRequest {
 struct SafeKeeperResponse {
     epoch: u64,
     flush_lsn: Lsn,
+    safe_lsn: Lsn,
     hs_feedback: HotStandbyFeedback,
 }
 
@@ -275,6 +280,7 @@ impl<'pg> ReceiveWalConn<'pg> {
         /* Calculate WAL end based on local data */
         let (flush_lsn, timeline_id) = this_timeline.find_end_of_wal(&swh.conf.data_dir, true);
         my_info.flush_lsn = flush_lsn;
+		my_info.safe_lsn = flush_lsn; // end_of_wal actually returns last record LSN
         my_info.server.timeline = timeline_id;
 
         info!(
@@ -300,8 +306,8 @@ impl<'pg> ReceiveWalConn<'pg> {
             );
         }
         my_info.server.node_id = prop.node_id;
-        this_timeline.get().set_info(&my_info);
         /* Need to persist our vote first */
+        this_timeline.get().set_info(&my_info);
         this_timeline.get().save_control_file(true)?;
 
         let mut flushed_restart_lsn = Lsn(0);
@@ -322,9 +328,11 @@ impl<'pg> ReceiveWalConn<'pg> {
         }
 
         info!(
-            "Start accepting WAL for timeline {} tenant {} address {:?} flush_lsn={}",
-            server_info.timeline_id, server_info.tenant_id, self.peer_addr, my_info.flush_lsn
+            "Start accepting WAL for timeline {} tenant {} address {:?} flush_lsn={} safe_lsn={}",
+            server_info.timeline_id, server_info.tenant_id, self.peer_addr, my_info.flush_lsn, my_info.safe_lsn
         );
+		let mut last_rec_lsn = Lsn(0);
+		let mut decoder = WalStreamDecoder::new(last_rec_lsn, false);
 
         // Main loop
         loop {
@@ -347,27 +355,47 @@ impl<'pg> ReceiveWalConn<'pg> {
             let end_pos = req.end_lsn;
             let rec_size = end_pos.checked_sub(start_pos).unwrap().0 as usize;
             assert!(rec_size <= MAX_SEND_SIZE);
+			if rec_size != 0 {
+				debug!(
+					"received for {} bytes between {} and {}",
+					rec_size, start_pos, end_pos,
+				);
 
-            debug!(
-                "received for {} bytes between {} and {}",
-                rec_size, start_pos, end_pos,
-            );
+				/* Receive message body (from the rest of the message) */
+				let mut buf = Vec::with_capacity(rec_size);
+				msg_reader.read_to_end(&mut buf)?;
+				assert_eq!(buf.len(), rec_size);
 
-            /* Receive message body (from the rest of the message) */
-            let mut buf = Vec::with_capacity(rec_size);
-            msg_reader.read_to_end(&mut buf)?;
-            assert_eq!(buf.len(), rec_size);
+				if decoder.available() != start_pos {
+					info!("Restart decoder from {} to {}", decoder.available(), start_pos);
+					decoder = WalStreamDecoder::new(start_pos, false);
+				}
+				decoder.feed_bytes(&buf);
+				//while let Ok(Some((lsn,_rec))) = decoder.poll_decode() {
+				loop {
+					match decoder.poll_decode() {
+						Err(e) => info!("Decode error {}", e),
+						Ok(None) => info!("Decode end"),
+						Ok(Some((lsn,_rec))) => {
+							last_rec_lsn = lsn;
+							continue;
+						}
+					}
+					break;
+				}
+				last_rec_lsn = Lsn((last_rec_lsn.0 + 7) & !7); // align record start position on 8
+				info!("Receive WAL {}..{} last_rec_lsn={}", start_pos, end_pos, last_rec_lsn);
 
-            /* Save message in file */
-            Self::write_wal_file(
-                swh,
-                start_pos,
-                timeline_id,
-                this_timeline.get(),
-                wal_seg_size,
-                &buf,
-            )?;
-
+				/* Save message in file */
+				Self::write_wal_file(
+					swh,
+					start_pos,
+					timeline_id,
+					this_timeline.get(),
+					wal_seg_size,
+					&buf,
+				)?;
+			}
             my_info.restart_lsn = req.restart_lsn;
             my_info.commit_lsn = req.commit_lsn;
 
@@ -385,12 +413,16 @@ impl<'pg> ReceiveWalConn<'pg> {
             if end_pos > my_info.flush_lsn {
                 my_info.flush_lsn = end_pos;
             }
+            if last_rec_lsn > my_info.safe_lsn {
+                my_info.safe_lsn = last_rec_lsn;
+            }
             /*
              * Update restart LSN in control file.
              * To avoid negative impact on performance of extra fsync, do it only
              * when restart_lsn delta exceeds WAL segment size.
              */
             sync_control_file |= flushed_restart_lsn + (wal_seg_size as u64) < my_info.restart_lsn;
+            this_timeline.get().set_info(&my_info);
             this_timeline.get().save_control_file(sync_control_file)?;
 
             if sync_control_file {
@@ -401,7 +433,8 @@ impl<'pg> ReceiveWalConn<'pg> {
             //info!("Confirm LSN: {:X}/{:>08X}", (end_pos>>32) as u32, end_pos as u32);
             let resp = SafeKeeperResponse {
                 epoch: my_info.epoch,
-                flush_lsn: end_pos,
+                flush_lsn: my_info.flush_lsn,
+                safe_lsn: my_info.safe_lsn,
                 hs_feedback: this_timeline.get().get_hs_feedback(),
             };
             self.write_msg(&resp)?;
@@ -410,9 +443,10 @@ impl<'pg> ReceiveWalConn<'pg> {
              * Ping wal sender that new data is available.
              * FlushLSN (end_pos) can be smaller than commitLSN in case we are at catching-up safekeeper.
              */
+			info!("Notify WAL senders min({}, {})={}", req.commit_lsn, my_info.safe_lsn, min(req.commit_lsn, my_info.safe_lsn));
             this_timeline
                 .get()
-                .notify_wal_senders(min(req.commit_lsn, end_pos));
+                .notify_wal_senders(min(req.commit_lsn, my_info.safe_lsn));
         }
 
         Ok(())

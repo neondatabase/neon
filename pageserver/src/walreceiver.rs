@@ -168,7 +168,7 @@ fn walreceiver_main(
     // too. Just for the sake of paranoia.
     startpoint += startpoint.calc_padding(8u32);
 
-    debug!(
+    info!(
         "last_record_lsn {} starting replication from {} for timeline {}, server is at {}...",
         last_rec_lsn, startpoint, timelineid, end_of_wal
     );
@@ -178,7 +178,7 @@ fn walreceiver_main(
     let copy_stream = rclient.copy_both_simple(&query)?;
     let mut physical_stream = ReplicationIter::new(copy_stream);
 
-    let mut waldecoder = WalStreamDecoder::new(startpoint);
+    let mut waldecoder = WalStreamDecoder::new(startpoint, true);
 
     let checkpoint_bytes = timeline.get_page_at_lsn_nowait(RelishTag::Checkpoint, 0, startpoint)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
@@ -203,14 +203,17 @@ fn walreceiver_main(
                     tenantid,
                 )?;
 
-                trace!("received XLogData between {} and {}", startlsn, endlsn);
-
+                info!("received XLogData between {} and {}", startlsn, endlsn);
+				//assert!(waldecoder.lsn + waldecoder.padlen as u64 == startlsn);
                 waldecoder.feed_bytes(data);
 
-                while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+				loop {
+					match waldecoder.poll_decode() {
+						Ok(Some((lsn, recdata))) => {
                     // Save old checkpoint value to compare with it after decoding WAL record
                     let old_checkpoint_bytes = checkpoint.encode();
-                    let decoded = decode_wal_record(recdata.clone());
+							let decoded = decode_wal_record(recdata.clone());
+							let lsn = Lsn((lsn.0 + 7) & !7); // align on 8
                     restore_local_repo::save_decoded_record(
                         &mut checkpoint,
                         &*timeline,
@@ -231,8 +234,17 @@ fn walreceiver_main(
                             false,
                         )?;
                     }
-                }
-
+						}
+						Ok(None) => {
+							info!("End of replication stream {}..{} at {}", startlsn, endlsn, last_rec_lsn);
+							break;
+						}
+						Err(e) => {
+							info!("Decode error {}", e);
+							return Err(e.into());
+						}
+					}
+				}
                 // Update the last_valid LSN value in the page cache one more time. We updated
                 // it in the loop above, between each WAL record, but we might have received
                 // a partial record after the last completed record. Our page cache's value

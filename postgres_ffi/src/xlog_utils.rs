@@ -108,17 +108,23 @@ fn find_end_of_wal_segment(
     segno: XLogSegNo,
     tli: TimeLineID,
     wal_seg_size: usize,
+	is_partial: bool,
+	rec_offs: &mut usize,
+	rec_hdr: &mut [u8; XLOG_SIZE_OF_XLOG_RECORD],
+	crc: &mut u32,
+	check_contrec: bool
 ) -> u32 {
     let mut offs: usize = 0;
     let mut contlen: usize = 0;
-    let mut wal_crc: u32 = 0;
-    let mut crc: u32 = 0;
-    let mut rec_offs: usize = 0;
     let mut buf = [0u8; XLOG_BLCKSZ];
     let file_name = XLogFileName(tli, segno, wal_seg_size);
     let mut last_valid_rec_pos: usize = 0;
-    let mut file = File::open(data_dir.join(file_name.clone() + ".partial")).unwrap();
-    let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];
+	let file_path = data_dir.join(if is_partial {
+		file_name.clone() + ".partial"
+	} else {
+		file_name
+	});
+    let mut file = File::open(&file_path).unwrap();
 
     while offs < wal_seg_size {
         if offs % XLOG_BLCKSZ == 0 {
@@ -133,14 +139,26 @@ fn find_end_of_wal_segment(
             let xlp_info = LittleEndian::read_u16(&buf[2..4]);
             let xlp_rem_len = LittleEndian::read_u32(&buf[XLP_REM_LEN_OFFS..XLP_REM_LEN_OFFS + 4]);
             if xlp_magic != XLOG_PAGE_MAGIC as u16 {
-                info!("Invalid WAL file {}.partial magic {}", file_name, xlp_magic);
+                info!("Invalid WAL file {:?} magic {}", &file_path, xlp_magic);
                 break;
             }
             if offs == 0 {
+				info!("xlp_rem_len={}", xlp_rem_len);
                 offs = XLOG_SIZE_OF_XLOG_LONG_PHD;
                 if (xlp_info & XLP_FIRST_IS_CONTRECORD) != 0 {
-                    offs += ((xlp_rem_len + 7) & !7) as usize;
-                }
+					if check_contrec {
+						let xl_tot_len = LittleEndian::read_u32(&rec_hdr[0..4]) as usize;
+						contlen = xlp_rem_len as usize;
+						assert!(*rec_offs + contlen == xl_tot_len);
+					} else {
+						offs += ((xlp_rem_len + 7) & !7) as usize;
+					}
+                } else if *rec_offs != 0 {
+					// There is incompleted page at previous segment but not cont record:
+					// it means that current segment is not valid and we have to return back.
+					info!("CONTRECORD flag is missed in page header");
+					return 0;
+				}
             } else {
                 offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
             }
@@ -150,9 +168,8 @@ fn find_end_of_wal_segment(
             if xl_tot_len == 0 {
                 break;
             }
-            last_valid_rec_pos = offs;
             offs += 4;
-            rec_offs = 4;
+            *rec_offs = 4;
             contlen = xl_tot_len - 4;
             rec_hdr[0..4].copy_from_slice(&buf[page_offs..page_offs + 4]);
         } else {
@@ -162,34 +179,30 @@ fn find_end_of_wal_segment(
 
             // read the rest of the record, or as much as fits on this page.
             let n = min(contlen, pageleft);
-            if rec_offs < XLOG_RECORD_CRC_OFFS {
-                let len = min(XLOG_RECORD_CRC_OFFS - rec_offs, n);
-                rec_hdr[rec_offs..rec_offs + len].copy_from_slice(&buf[page_offs..page_offs + len]);
+			let mut hdr_len: usize = 0;
+            if *rec_offs < XLOG_SIZE_OF_XLOG_RECORD {
+				// copy header
+                hdr_len = min(XLOG_SIZE_OF_XLOG_RECORD - *rec_offs, n);
+                rec_hdr[*rec_offs..*rec_offs + hdr_len].copy_from_slice(&buf[page_offs..page_offs + hdr_len]);
             }
-            if rec_offs <= XLOG_RECORD_CRC_OFFS && rec_offs + n >= XLOG_SIZE_OF_XLOG_RECORD {
-                let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
-                wal_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
-                crc = crc32c_append(0, &buf[crc_offs + 4..page_offs + n]);
-                crc = !crc;
-            } else {
-                crc ^= 0xFFFFFFFFu32;
-                crc = crc32c_append(crc, &buf[page_offs..page_offs + n]);
-                crc = !crc;
-            }
-            rec_offs += n;
+            *crc = crc32c_append(*crc, &buf[page_offs+hdr_len..page_offs+n]);
+            *rec_offs += n;
             offs += n;
             contlen -= n;
 
             if contlen == 0 {
-                crc = !crc;
-                crc = crc32c_append(crc, &rec_hdr);
+                *crc = crc32c_append(*crc, &rec_hdr[0..XLOG_RECORD_CRC_OFFS]);
                 offs = (offs + 7) & !7; // pad on 8 bytes boundary */
-                if crc == wal_crc {
+				let wal_crc = LittleEndian::read_u32(&rec_hdr[XLOG_RECORD_CRC_OFFS..XLOG_RECORD_CRC_OFFS+4]);
+                if *crc == wal_crc {
                     last_valid_rec_pos = offs;
+					// Reset rec_offs and crc for start of new record
+					*rec_offs = 0;
+					*crc = 0;
                 } else {
                     info!(
-                        "CRC mismatch {} vs {} at {}",
-                        crc, wal_crc, last_valid_rec_pos
+                        "CRC mismatch {} vs {} at offset {} lsn {}",
+                        *crc, wal_crc, offs, last_valid_rec_pos
                     );
                     break;
                 }
@@ -239,21 +252,67 @@ pub fn find_end_of_wal(
         }
     }
     if high_segno > 0 {
-        let mut high_offs = 0;
-        /*
-         * Move the starting pointer to the start of the next segment, if the
-         * highest one we saw was completed.
-         */
-        if !high_ispartial {
-            high_segno += 1;
-        } else if precise {
-            /* otherwise locate last record in last partial segment */
-            high_offs = find_end_of_wal_segment(data_dir, high_segno, high_tli, wal_seg_size);
+		let mut high_offs = 0;
+		if precise {
+			let mut crc: u32 = 0;
+			let mut rec_offs: usize = 0;
+			let mut rec_hdr = [0u8; XLOG_SIZE_OF_XLOG_RECORD];
+
+			/*
+			 * To be able to calculate CRC of records crossing segment boundary,
+			 * we need to parse previous segment
+			 */
+			assert!(high_segno > 1);
+			let prev_offs = find_end_of_wal_segment(data_dir, high_segno-1, high_tli, wal_seg_size, false, &mut rec_offs, &mut rec_hdr, &mut crc, false);
+			if prev_offs as usize <= XLOG_SIZE_OF_XLOG_LONG_PHD {
+				info!("Segment {} doesn't contain any valid record {}", high_segno-1, prev_offs);
+			}
+			assert!(prev_offs as usize > XLOG_SIZE_OF_XLOG_LONG_PHD);
+			high_offs = find_end_of_wal_segment(data_dir, high_segno, high_tli, wal_seg_size, high_ispartial, &mut rec_offs, &mut rec_hdr, &mut crc, true);
+
+			let file_name = XLogFileName(high_tli, high_segno, wal_seg_size);
+			if high_offs as usize <= XLOG_SIZE_OF_XLOG_LONG_PHD {
+				// If last segment contais no valid records, then return back to previous segment
+				let wal_dir = data_dir.join("pg_wal");
+				let file_path = if high_ispartial {
+					wal_dir.join(file_name.clone() + ".partial")
+				} else {
+					wal_dir.join(file_name.clone())
+				};
+				info!("Remove empty WAL segment {:?}", &file_path);
+				if let Err(e) = fs::remove_file(&file_path) {
+					info!("Failed to remove file {:?}: {}", &file_path, e);
+				}
+				high_ispartial = false; // previous segment should not be partial
+				high_segno -= 1;
+				high_offs = prev_offs;
+			}
+			// If last segment is not marked as partial, it means that next segment
+			// was not written. Let's make this segment partial once again.
+            if !high_ispartial {
+				let wal_dir = data_dir.join("pg_wal");
+				if let Err(e) = fs::rename(
+					wal_dir.join(file_name.clone()),
+					wal_dir.join(file_name.clone() + ".partial")
+				) {
+					info!(
+						"Failed to rename {} to {}.partial: {}",
+						&file_name, &file_name, e);
+				}
+			}
+		} else {
+			/*
+			 * Move the starting pointer to the start of the next segment, if the
+			 * highest one we saw was completed.
+			 */
+            if !high_ispartial {
+				high_segno += 1;
+			}
         }
         let high_ptr = XLogSegNoOffsetToRecPtr(high_segno, high_offs, wal_seg_size);
         return (high_ptr, high_tli);
     }
-    (0, 0)
+    (0, 1) // First timeline is 1
 }
 
 pub fn main() {

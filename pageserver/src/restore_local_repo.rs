@@ -264,7 +264,7 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
 /// Scan PostgreSQL WAL files in given directory
 /// and load all records >= 'startpoint' into the repository.
 pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: Lsn) -> Result<()> {
-    let mut waldecoder = WalStreamDecoder::new(startpoint);
+    let mut waldecoder = WalStreamDecoder::new(startpoint, true);
 
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
