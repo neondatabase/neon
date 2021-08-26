@@ -7,6 +7,8 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::seqwait::MonotonicCounter;
+
 /// Transaction log block size in bytes
 pub const XLOG_BLCKSZ: u32 = 8192;
 
@@ -194,6 +196,28 @@ impl AtomicLsn {
     pub fn fetch_max(&self, lsn: Lsn) -> Lsn {
         let prev = self.inner.fetch_max(lsn.0, Ordering::AcqRel);
         Lsn(prev)
+    }
+}
+
+/// Pair of LSN's pointing to the end of the last valid record and previous one
+#[derive(Debug, Clone, Copy)]
+pub struct RecordLsn {
+    /// LSN at the end of the current record
+    pub last: Lsn,
+    /// LSN at the end of the previous record
+    pub prev: Lsn,
+}
+
+/// Expose `self.last` as counter to be able to use RecordLsn in SeqWait
+impl MonotonicCounter<Lsn> for RecordLsn {
+    fn cnt_advance(&mut self, lsn: Lsn) {
+        assert!(self.last <= lsn);
+        let new_prev = self.last;
+        self.last = lsn;
+        self.prev = new_prev;
+    }
+    fn cnt_value(&self) -> Lsn {
+        self.last
     }
 }
 
