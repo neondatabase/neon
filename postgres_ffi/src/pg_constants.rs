@@ -218,11 +218,11 @@ pub const PGDATA_SUBDIRS: [&str; 22] = [
     "pg_logical/mappings",
 ];
 
-pub const PGDATA_SPECIAL_FILES: [&str; 4] = [
-    "pg_hba.conf",
-    "pg_ident.conf",
-    "postgresql.conf",
-    "postgresql.auto.conf",
-];
+// Don't include postgresql.conf as it is inconvenient on node start:
+// we need postgresql.conf before basebackup to synchronize safekeepers
+// so no point in overwriting it during backup restore. Rest of the files
+// here are not needed before backup so it is okay to edit them after.
+pub const PGDATA_SPECIAL_FILES: [&str; 3] =
+    ["pg_hba.conf", "pg_ident.conf", "postgresql.auto.conf"];
 
 pub static PG_HBA: &str = include_str!("../samples/pg_hba.conf");
