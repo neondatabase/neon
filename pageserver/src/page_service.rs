@@ -362,7 +362,7 @@ impl PageServerHandler {
                 timeline.wait_lsn(lsn)?;
                 lsn
             }
-            None => timeline.get_last_valid_lsn(),
+            None => timeline.get_last_record_lsn(),
         };
         {
             let mut writer = CopyDataSink { pgb };

@@ -31,7 +31,7 @@ pub struct WalStreamDecoder {
     inputbuf: BytesMut,
     recordbuf: BytesMut,
 
-	crc_check: bool,
+    crc_check: bool,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -56,18 +56,16 @@ impl WalStreamDecoder {
             inputbuf: BytesMut::new(),
             recordbuf: BytesMut::new(),
 
-			crc_check,
+            crc_check,
         }
     }
 
-	pub fn available(&self) -> Lsn {
-		self.lsn + self.inputbuf.remaining() as u64
-	}
+    pub fn available(&self) -> Lsn {
+        self.lsn + self.inputbuf.remaining() as u64
+    }
 
     pub fn feed_bytes(&mut self, buf: &[u8]) {
         self.inputbuf.extend_from_slice(buf);
-		info!("WAL decoder: self.lsn={}, buf.len()={}, self.inputbuf.len()={}, self.inputbuf.remaining()={}",
-			  self.lsn, buf.len(), self.inputbuf.len(), self.inputbuf.remaining());
     }
 
     /// Attempt to decode another WAL record from the input that has been fed to the
@@ -85,7 +83,6 @@ impl WalStreamDecoder {
                 // parse long header
 
                 if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_LONG_PHD {
-					info!("self.inputbuf.remaining()={} < XLOG_SIZE_OF_XLOG_LONG_PHD at {}, self.recordbuf.len()={}", self.inputbuf.remaining(), self.lsn, self.recordbuf.len());
                     return Ok(None);
                 }
 
@@ -102,7 +99,6 @@ impl WalStreamDecoder {
                 self.lsn += XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
             } else if self.lsn.block_offset() == 0 {
                 if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_SHORT_PHD {
-					info!("self.inputbuf.remaining()={} < XLOG_SIZE_OF_XLOG_SHORT_PHD at {}, self.recordbuf.len()={}, self.contlen={}", self.inputbuf.remaining(), self.lsn, self.recordbuf.len(), self.contlen);
                     return Ok(None);
                 }
 
@@ -110,7 +106,10 @@ impl WalStreamDecoder {
 
                 if hdr.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
-                        msg: "invalid xlog page header".into(),
+                        msg: format!(
+                            "invalid xlog page header: xlp_pageaddr={} vs. lsn={}",
+                            hdr.xlp_pageaddr, self.lsn
+                        ),
                         lsn: self.lsn,
                     });
                 }
@@ -119,7 +118,6 @@ impl WalStreamDecoder {
                 self.lsn += XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
             } else if self.padlen > 0 {
                 if self.inputbuf.remaining() < self.padlen as usize {
-					info!("self.inputbuf.remaining()={} < self.padlen={}", self.inputbuf.remaining(), self.padlen);
                     return Ok(None);
                 }
 
@@ -131,7 +129,6 @@ impl WalStreamDecoder {
                 // need to have at least the xl_tot_len field
 
                 if self.inputbuf.remaining() < 4 {
-					info!("self.inputbuf.remaining()={} < 4", self.inputbuf.remaining());
                     return Ok(None);
                 }
 
@@ -158,7 +155,6 @@ impl WalStreamDecoder {
                 let n = min(self.contlen, pageleft) as usize;
 
                 if self.inputbuf.remaining() < n {
-					info!("self.inputbuf.remaining()={} < n={} at {}, self.recordbuf.len()={}, self.contlen={}", self.inputbuf.remaining(), n, self.lsn, self.recordbuf.len(), self.contlen);
                     return Ok(None);
                 }
 
@@ -185,21 +181,27 @@ impl WalStreamDecoder {
                         self.padlen = self.lsn.calc_padding(8u32) as u32;
                     }
 
-					// Check record CRC
-					if self.crc_check {
-						let mut crc = crc32c_append(0, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
-						crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
-						if crc != xlogrec.xl_crc {
-							info!("WAL record crc mismatch n={}, buf.len()={}, lsn={}, rec={:?}, recordbuf={:?}",
+                    // Check record CRC
+                    if self.crc_check {
+                        let mut crc = crc32c_append(0, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
+                        crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
+                        if crc != xlogrec.xl_crc {
+                            info!("WAL record crc mismatch n={}, buf.len()={}, lsn={}, rec={:?}, recordbuf={:?}",
 								  n, recordbuf.len(), self.lsn, xlogrec, recordbuf);
-							return Err(WalDecodeError {
-								msg: format!("WAL record crc mismatch n={}, buf.len()={}, lsn={}, rec={:?}", n, buf.len(), self.lsn, xlogrec),
-								lsn: self.lsn,
-							});
-						}
-					}
+                            return Err(WalDecodeError {
+                                msg: format!(
+                                    "WAL record crc mismatch n={}, buf.len()={}, lsn={}, rec={:?}",
+                                    n,
+                                    buf.len(),
+                                    self.lsn,
+                                    xlogrec
+                                ),
+                                lsn: self.lsn,
+                            });
+                        }
+                    }
 
-                    let result = (self.lsn, recordbuf);
+                    let result = (self.lsn.align(), recordbuf);
                     return Ok(Some(result));
                 }
             }

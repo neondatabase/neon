@@ -663,7 +663,7 @@ impl Timeline for ObjectTimeline {
         assert!(old <= lsn);
 
         // Use old value of last_record_lsn as prev_record_lsn
-        self.prev_record_lsn.fetch_max(Lsn((old.0 + 7) & !7));
+        self.prev_record_lsn.fetch_max(old.align());
 
         // Also advance last_valid_lsn
         let old = self.last_valid_lsn.advance(lsn);

@@ -217,7 +217,12 @@ impl ReplicationConn {
                 data: &file_buf,
             }))?;
 
-            info!("Sent WAL to page server {}..{}, end_pos={}", start_pos, start_pos + send_size as u64, end_pos);
+            debug!(
+                "Sent WAL to page server {}..{}, end_pos={}",
+                start_pos,
+                start_pos + send_size as u64,
+                end_pos
+            );
 
             start_pos += send_size as u64;
 

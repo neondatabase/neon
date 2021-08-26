@@ -168,7 +168,7 @@ fn walreceiver_main(
     // too. Just for the sake of paranoia.
     startpoint += startpoint.calc_padding(8u32);
 
-    info!(
+    debug!(
         "last_record_lsn {} starting replication from {} for timeline {}, server is at {}...",
         last_rec_lsn, startpoint, timelineid, end_of_wal
     );
@@ -203,48 +203,49 @@ fn walreceiver_main(
                     tenantid,
                 )?;
 
-                info!("received XLogData between {} and {}", startlsn, endlsn);
-				//assert!(waldecoder.lsn + waldecoder.padlen as u64 == startlsn);
+                trace!("received XLogData between {} and {}", startlsn, endlsn);
                 waldecoder.feed_bytes(data);
 
-				loop {
-					match waldecoder.poll_decode() {
-						Ok(Some((lsn, recdata))) => {
-                    // Save old checkpoint value to compare with it after decoding WAL record
-                    let old_checkpoint_bytes = checkpoint.encode();
-							let decoded = decode_wal_record(recdata.clone());
-							let lsn = Lsn((lsn.0 + 7) & !7); // align on 8
-                    restore_local_repo::save_decoded_record(
-                        &mut checkpoint,
-                        &*timeline,
-                        &decoded,
-                        recdata,
-                        lsn,
-                    )?;
-                    last_rec_lsn = lsn;
+                loop {
+                    match waldecoder.poll_decode() {
+                        Ok(Some((lsn, recdata))) => {
+                            // Save old checkpoint value to compare with it after decoding WAL record
+                            let old_checkpoint_bytes = checkpoint.encode();
+                            let decoded = decode_wal_record(recdata.clone());
+                            restore_local_repo::save_decoded_record(
+                                &mut checkpoint,
+                                &*timeline,
+                                &decoded,
+                                recdata,
+                                lsn,
+                            )?;
+                            last_rec_lsn = lsn;
 
-                    let new_checkpoint_bytes = checkpoint.encode();
-                    // Check if checkpoint data was updated by save_decoded_record
-                    if new_checkpoint_bytes != old_checkpoint_bytes {
-                        timeline.put_page_image(
-                            RelishTag::Checkpoint,
-                            0,
-                            lsn,
-                            new_checkpoint_bytes,
-                            false,
-                        )?;
+                            let new_checkpoint_bytes = checkpoint.encode();
+                            // Check if checkpoint data was updated by save_decoded_record
+                            if new_checkpoint_bytes != old_checkpoint_bytes {
+                                timeline.put_page_image(
+                                    RelishTag::Checkpoint,
+                                    0,
+                                    lsn,
+                                    new_checkpoint_bytes,
+                                    false,
+                                )?;
+                            }
+                        }
+                        Ok(None) => {
+                            trace!(
+                                "End of replication stream {}..{} at {}",
+                                startlsn, endlsn, last_rec_lsn
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            info!("Decode error {}", e);
+                            return Err(e.into());
+                        }
                     }
-						}
-						Ok(None) => {
-							info!("End of replication stream {}..{} at {}", startlsn, endlsn, last_rec_lsn);
-							break;
-						}
-						Err(e) => {
-							info!("Decode error {}", e);
-							return Err(e.into());
-						}
-					}
-				}
+                }
                 // Update the last_valid LSN value in the page cache one more time. We updated
                 // it in the loop above, between each WAL record, but we might have received
                 // a partial record after the last completed record. Our page cache's value

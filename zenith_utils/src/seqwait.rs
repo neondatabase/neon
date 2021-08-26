@@ -209,11 +209,6 @@ where
     pub fn load(&self) -> T {
         self.internal.lock().unwrap().current
     }
-
-    /// Set the current value.
-    pub fn store(&self, num: T) {
-        self.internal.lock().unwrap().current = num
-    }
 }
 
 #[cfg(test)]
