@@ -447,9 +447,8 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .value_of("tenantid")
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
             let timeline_name = create_match.value_of("timeline").unwrap_or("main");
-            let config_only = create_match.is_present("config-only");
 
-            cplane.new_node(tenantid, timeline_name, config_only)?;
+            cplane.new_node(tenantid, timeline_name)?;
         }
         ("start", Some(start_match)) => {
             let tenantid: ZTenantId = start_match
@@ -466,11 +465,15 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 None
             };
 
-            println!("Starting postgres on timeline {}...", timeline_name);
+            println!(
+                "Starting {} postgres on timeline {}...",
+                if node.is_some() { "existing" } else { "new" },
+                timeline_name
+            );
             if let Some(node) = node {
                 node.start(&auth_token)?;
             } else {
-                let node = cplane.new_node(tenantid, timeline_name, false)?;
+                let node = cplane.new_node(tenantid, timeline_name)?;
                 node.start(&auth_token)?;
             }
         }
