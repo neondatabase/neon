@@ -347,17 +347,9 @@ impl PageServerHandler {
         info!("sent CopyOut");
 
         /* Send a tarball of the latest snapshot on the timeline */
-
-        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
-
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(
-                &mut writer,
-                &timeline,
-                req_lsn,
-                timeline.get_prev_record_lsn(),
-            );
+            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn);
             basebackup.send_tarball()?;
         }
         pgb.write_message(&BeMessage::CopyDone)?;
@@ -446,9 +438,10 @@ impl postgres_backend::Handler for PageServerHandler {
             self.handle_pagerequests(pgb, timelineid, tenantid)?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
-            let params = params_raw.split(" ").collect::<Vec<_>>();
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+
             ensure!(
-                params.len() == 2,
+                params.len() >= 2,
                 "invalid param number for basebackup command"
             );
 
@@ -457,12 +450,12 @@ impl postgres_backend::Handler for PageServerHandler {
 
             self.check_permission(Some(tenantid))?;
 
-            // TODO are there any tests with lsn option?
             let lsn = if params.len() == 3 {
                 Some(Lsn::from_str(params[2])?)
             } else {
                 None
             };
+
             info!(
                 "got basebackup command. tenantid=\"{}\" timelineid=\"{}\" lsn=\"{:#?}\"",
                 tenantid, timelineid, lsn

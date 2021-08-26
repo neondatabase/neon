@@ -22,7 +22,7 @@ use crate::relish::*;
 use crate::repository::Timeline;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
-use zenith_utils::lsn::Lsn;
+use zenith_utils::lsn::{Lsn, RecordLsn};
 
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
@@ -34,13 +34,36 @@ pub struct Basebackup<'a> {
     prev_record_lsn: Lsn,
 }
 
+// Create basebackup with non-rel data in it. Omit relational data.
+//
+// Currently we use empty lsn in two cases:
+//  * During the basebackup right after timeline creation
+//  * When working without safekeepers. In this situation it is important to match the lsn
+//    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
+//    to start the replication.
 impl<'a> Basebackup<'a> {
     pub fn new(
         write: &'a mut dyn Write,
         timeline: &'a Arc<dyn Timeline>,
-        lsn: Lsn,
-        prev_record_lsn: Lsn,
+        req_lsn: Option<Lsn>,
     ) -> Basebackup<'a> {
+        let RecordLsn {
+            last: lsn,
+            prev: prev_record_lsn,
+        } = if let Some(lsn) = req_lsn {
+            // FIXME: that wouldn't work since we don't know prev for old LSN's.
+            // Probably it is better to avoid using prev in compute node start
+            // at all and acept the fact that first WAL record in the timeline would
+            // have zero as prev. https://github.com/zenithdb/zenith/issues/506
+            RecordLsn {
+                last: lsn,
+                prev: lsn,
+            }
+        } else {
+            // Atomically get last and prev LSN's
+            timeline.get_last_record_rlsn()
+        };
+
         Basebackup {
             ar: Builder::new(write),
             timeline,

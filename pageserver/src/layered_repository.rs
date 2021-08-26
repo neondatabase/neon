@@ -38,8 +38,8 @@ use crate::{ZTenantId, ZTimelineId};
 use zenith_metrics::{register_histogram, Histogram};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::{AtomicLsn, Lsn};
-use zenith_utils::seqwait::{MonotonicCounter, SeqWait};
+use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
+use zenith_utils::seqwait::SeqWait;
 
 mod blob;
 mod delta_layer;
@@ -147,8 +147,6 @@ impl Repository for LayeredRepository {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
         let src_timeline = self.get_timeline(src)?;
-        // This LSN comes from the user request. Make sure it is aligned.
-        let start_lsn = start_lsn.aligned();
 
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
@@ -458,24 +456,6 @@ pub struct TimelineMetadata {
     ancestor_lsn: Lsn,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RecordLsn {
-    last: Lsn,
-    prev: Lsn,
-}
-
-impl MonotonicCounter<Lsn> for RecordLsn {
-    fn cnt_advance(&mut self, lsn: Lsn) {
-        assert!(self.last <= lsn);
-        let new_prev = self.last;
-        self.last = lsn;
-        self.prev = new_prev;
-    }
-    fn cnt_value(&self) -> Lsn {
-        self.last
-    }
-}
-
 pub struct LayeredTimeline {
     conf: &'static PageServerConf,
 
@@ -628,6 +608,8 @@ impl Timeline for LayeredTimeline {
 
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
         info!("list_nonrels called at {}", lsn);
+
+        let lsn = self.wait_lsn(lsn)?;
 
         // List all nonrels in this timeline, and all its ancestors.
         let mut all_rels = HashSet::new();
@@ -793,6 +775,10 @@ impl Timeline for LayeredTimeline {
 
     fn get_prev_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().prev
+    }
+
+    fn get_last_record_rlsn(&self) -> RecordLsn {
+        self.last_record_lsn.load()
     }
 }
 
@@ -1052,20 +1038,23 @@ impl LayeredTimeline {
     ///
     /// Wait until WAL has been received up to the given LSN.
     ///
-    fn wait_lsn(&self, mut lsn: Lsn) -> anyhow::Result<Lsn> {
+    /// TODO: change lsn to be an Optional<Lsn> or even force callers to call get_last_record_lsn()
+    /// (since at least basebackup needs to call get_last_and_prev_record_lsns() instead)
+    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<Lsn> {
         // When invalid LSN is requested, it means "don't wait, return latest version of the page"
         // This is necessary for bootstrap.
         if lsn == Lsn(0) {
-            let last_valid_lsn = self.last_valid_lsn.load();
-            trace!(
-                "walreceiver doesn't work yet last_valid_lsn {}, requested {}",
-                last_valid_lsn,
-                lsn
-            );
-            lsn = last_valid_lsn;
+            return Ok(self.get_last_record_lsn());
         }
 
-        self.last_valid_lsn
+        // FIXME: we can deadlock if we call wait_lsn() from WAL receiver. And we actually
+        // it a lot from there. Only deadlock that I caught was while trying to add wait_lsn()
+        // in list_rels(). But it makes sense to make all functions in timeline non-waiting;
+        // assert that arg_lsn <= current_record_lsn; call wait_lsn explicetly where it is
+        // needed (page_service and basebackup); uncomment this check:
+        // assert_ne!(thread::current().name(), Some("WAL receiver thread"));
+
+        self.last_record_lsn
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
                 format!(

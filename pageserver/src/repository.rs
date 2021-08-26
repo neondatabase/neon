@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::ops::AddAssign;
 use std::sync::Arc;
 use std::time::Duration;
-use zenith_utils::lsn::Lsn;
+use zenith_utils::lsn::{Lsn, RecordLsn};
 use zenith_utils::zid::ZTimelineId;
 
 ///
@@ -142,6 +142,9 @@ pub trait Timeline: Send + Sync {
     /// Advance requires aligned LSN as an argument and would wake wait_lsn() callers.
     /// Previous last record LSN is stored alongside the latest and can be read.
     fn advance_last_record_lsn(&self, lsn: Lsn);
+    /// Atomically get both last and prev.
+    fn get_last_record_rlsn(&self) -> RecordLsn;
+    /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
     fn get_last_record_lsn(&self) -> Lsn;
     fn get_prev_record_lsn(&self) -> Lsn;
 
