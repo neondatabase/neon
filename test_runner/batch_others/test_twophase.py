@@ -59,9 +59,8 @@ def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFa
     # Create a branch with the transaction in prepared state
     zenith_cli.run(["branch", "test_twophase_prepared", "test_twophase"])
 
-    # Create compute node, but don't start.
-    # We want to observe pgdata before postgres starts
-    pg2 = postgres.create(
+    # Start compute on the new branch
+    pg2 = postgres.create_start(
         'test_twophase_prepared',
         config_lines=['max_prepared_transactions=5'],
     )
@@ -71,7 +70,6 @@ def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFa
     print(twophase_files2)
     assert twophase_files2.sort() == twophase_files.sort()
 
-    pg2 = pg2.start()
     conn2 = pg2.connect()
     cur2 = conn2.cursor()
 

@@ -169,12 +169,23 @@ class ZenithCli:
 
         args = [self.bin_zenith] + arguments
         print('Running command "{}"'.format(' '.join(args)))
-        return subprocess.run(args,
-                              env=self.env,
-                              check=True,
-                              universal_newlines=True,
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE)
+
+        # Interceipt CalledProcessError and print more info
+        try:
+            res = subprocess.run(args,
+                                env=self.env,
+                                check=True,
+                                universal_newlines=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as err:
+            print(f"Run failed: {err}")
+            print(f" stdout: {err.stdout}")
+            print(f" stderr: {err.stderr}")
+
+            raise err
+
+        return res
 
 
 @zenfixture
@@ -439,7 +450,6 @@ class Postgres(PgProtocol):
         branch: str,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
-        config_only: bool = False,
     ) -> 'Postgres':
         """
         Create the pg data directory.
@@ -451,10 +461,7 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        if config_only:
-            self.zenith_cli.run(['pg', 'create', '--config-only', branch, f'--tenantid={self.tenant_id}'])
-        else:
-            self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
+        self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}'])
         self.branch = branch
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch
         self.pgdata_dir = os.path.join(self.repo_dir, path)
@@ -475,10 +482,12 @@ class Postgres(PgProtocol):
 
         assert self.branch is not None
 
-        print(f"Starting postgres on brach {self.branch}")
+        print(f"Starting postgres on branch {self.branch}")
 
-        self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}'])
+        run_result = self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}'])
         self.running = True
+
+        print(f"stdout: {run_result.stdout}")
 
         self.pg_bin.run(['pg_controldata', self.pg_data_dir_path()])
 
@@ -577,7 +586,6 @@ class Postgres(PgProtocol):
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
-            config_only=True,
         ).start()
 
         return self
