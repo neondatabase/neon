@@ -2,7 +2,7 @@
 from contextlib import closing
 from uuid import uuid4
 import psycopg2
-from fixtures.zenith_fixtures import Postgres, ZenithCli, ZenithPageserver
+from fixtures.zenith_fixtures import Postgres, ZenithCli, ZenithPageserver, PgBin
 import pytest
 
 
@@ -42,6 +42,7 @@ def test_compute_auth_to_pageserver(
     pageserver_auth_enabled: ZenithPageserver,
     repo_dir: str,
     with_wal_acceptors: bool,
+    pg_bin: PgBin
 ):
     ps = pageserver_auth_enabled
     # since we are in progress of refactoring protocols between compute safekeeper and page server
@@ -56,6 +57,7 @@ def test_compute_auth_to_pageserver(
     with Postgres(
         zenith_cli=zenith_cli,
         repo_dir=repo_dir,
+        pg_bin=pg_bin,
         tenant_id=ps.initial_tenant,
         port=55432, # FIXME port distribution is hardcoded in tests and in cli
     ).create_start(
