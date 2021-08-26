@@ -348,6 +348,64 @@ def pageserver(zenith_cli: ZenithCli, repo_dir: str) -> Iterator[ZenithPageserve
     print('Starting pageserver cleanup')
     ps.stop()
 
+class PgBin:
+    """ A helper class for executing postgres binaries """
+    def __init__(self, log_dir: str, pg_distrib_dir: str):
+        self.log_dir = log_dir
+        self.pg_install_path = pg_distrib_dir
+        self.pg_bin_path = os.path.join(self.pg_install_path, 'bin')
+        self.env = os.environ.copy()
+        self.env['LD_LIBRARY_PATH'] = os.path.join(self.pg_install_path, 'lib')
+
+    def _fixpath(self, command: List[str]) -> None:
+        if '/' not in command[0]:
+            command[0] = os.path.join(self.pg_bin_path, command[0])
+
+    def _build_env(self, env_add: Optional[Env]) -> Env:
+        if env_add is None:
+            return self.env
+        env = self.env.copy()
+        env.update(env_add)
+        return env
+
+    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None) -> None:
+        """
+        Run one of the postgres binaries.
+
+        The command should be in list form, e.g. ['pgbench', '-p', '55432']
+
+        All the necessary environment variables will be set.
+
+        If the first argument (the command name) doesn't include a path (no '/'
+        characters present), then it will be edited to include the correct path.
+
+        If you want stdout/stderr captured to files, use `run_capture` instead.
+        """
+
+        self._fixpath(command)
+        print('Running command "{}"'.format(' '.join(command)))
+        env = self._build_env(env)
+        subprocess.run(command, env=env, cwd=cwd, check=True)
+
+    def run_capture(self,
+                    command: List[str],
+                    env: Optional[Env] = None,
+                    cwd: Optional[str] = None) -> None:
+        """
+        Run one of the postgres binaries, with stderr and stdout redirected to a file.
+
+        This is just like `run`, but for chatty programs.
+        """
+
+        self._fixpath(command)
+        print('Running command "{}"'.format(' '.join(command)))
+        env = self._build_env(env)
+        subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True)
+
+
+@zenfixture
+def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
+    return PgBin(test_output_dir, pg_distrib_dir)
 
 @pytest.fixture
 def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str):
@@ -359,7 +417,7 @@ def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str):
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, tenant_id: str, port: int):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, tenant_id: str, port: int):
         super().__init__(host='localhost', port=port)
 
         self.zenith_cli = zenith_cli
@@ -368,6 +426,8 @@ class Postgres(PgProtocol):
         self.branch: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None # Path to computenode PGDATA
         self.tenant_id = tenant_id
+        self.pg_bin = pg_bin
+        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<branch_name>/postgresql.conf
 
     def create(
         self,
@@ -409,25 +469,32 @@ class Postgres(PgProtocol):
         """
 
         assert self.branch is not None
+
+        print(f"Starting postgres on brach {self.branch}")
+
         self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}'])
         self.running = True
 
+        self.pg_bin.run(['pg_controldata', self.pg_data_dir_path()])
+
         return self
+
+    def pg_data_dir_path(self) -> str:
+        """ Path to data directory """
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch
+        return os.path.join(self.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
         """ Path to pg_xact dir """
-        return os.path.join(self.pgdata_dir, 'pg_xact')
+        return os.path.join(self.pg_data_dir_path(), 'pg_xact')
 
     def pg_twophase_dir_path(self) -> str:
         """ Path to pg_twophase dir """
-        print(self.tenant_id)
-        print(self.branch)
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch / 'pg_twophase'
-        return os.path.join(self.repo_dir, path)
+        return os.path.join(self.pg_data_dir_path(), 'pg_twophase')
 
     def config_file_path(self) -> str:
         """ Path to postgresql.conf """
-        return os.path.join(self.pgdata_dir, 'postgresql.conf')
+        return os.path.join(self.pg_data_dir_path(), 'postgresql.conf')
 
     def adjust_for_wal_acceptors(self, wal_acceptors: str) -> 'Postgres':
         """
@@ -519,13 +586,14 @@ class Postgres(PgProtocol):
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, initial_tenant: str, base_port: int = 55431):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, initial_tenant: str, base_port: int = 55431):
         self.zenith_cli = zenith_cli
         self.repo_dir = repo_dir
         self.num_instances = 0
         self.instances: List[Postgres] = []
         self.initial_tenant: str = initial_tenant
         self.base_port = base_port
+        self.pg_bin = pg_bin
 
     def create_start(
         self,
@@ -538,6 +606,7 @@ class PostgresFactory:
         pg = Postgres(
             zenith_cli=self.zenith_cli,
             repo_dir=self.repo_dir,
+            pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
             port=self.base_port + self.num_instances + 1,
         )
@@ -562,6 +631,7 @@ class PostgresFactory:
         pg = Postgres(
             zenith_cli=self.zenith_cli,
             repo_dir=self.repo_dir,
+            pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
             port=self.base_port + self.num_instances + 1,
         )
@@ -586,6 +656,7 @@ class PostgresFactory:
         pg = Postgres(
             zenith_cli=self.zenith_cli,
             repo_dir=self.repo_dir,
+            pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
             port=self.base_port + self.num_instances + 1,
         )
@@ -611,75 +682,14 @@ def initial_tenant(pageserver: ZenithPageserver):
 
 
 @zenfixture
-def postgres(zenith_cli: ZenithCli, initial_tenant: str, repo_dir: str) -> Iterator[PostgresFactory]:
-    pgfactory = PostgresFactory(zenith_cli, repo_dir, initial_tenant=initial_tenant)
+def postgres(zenith_cli: ZenithCli, initial_tenant: str, repo_dir: str, pg_bin: PgBin) -> Iterator[PostgresFactory]:
+    pgfactory = PostgresFactory(zenith_cli, repo_dir, pg_bin, initial_tenant=initial_tenant)
 
     yield pgfactory
 
     # After the yield comes any cleanup code we need.
     print('Starting postgres cleanup')
     pgfactory.stop_all()
-
-
-class PgBin:
-    """ A helper class for executing postgres binaries """
-    def __init__(self, log_dir: str, pg_distrib_dir: str):
-        self.log_dir = log_dir
-        self.pg_install_path = pg_distrib_dir
-        self.pg_bin_path = os.path.join(self.pg_install_path, 'bin')
-        self.env = os.environ.copy()
-        self.env['LD_LIBRARY_PATH'] = os.path.join(self.pg_install_path, 'lib')
-
-    def _fixpath(self, command: List[str]) -> None:
-        if '/' not in command[0]:
-            command[0] = os.path.join(self.pg_bin_path, command[0])
-
-    def _build_env(self, env_add: Optional[Env]) -> Env:
-        if env_add is None:
-            return self.env
-        env = self.env.copy()
-        env.update(env_add)
-        return env
-
-    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None) -> None:
-        """
-        Run one of the postgres binaries.
-
-        The command should be in list form, e.g. ['pgbench', '-p', '55432']
-
-        All the necessary environment variables will be set.
-
-        If the first argument (the command name) doesn't include a path (no '/'
-        characters present), then it will be edited to include the correct path.
-
-        If you want stdout/stderr captured to files, use `run_capture` instead.
-        """
-
-        self._fixpath(command)
-        print('Running command "{}"'.format(' '.join(command)))
-        env = self._build_env(env)
-        subprocess.run(command, env=env, cwd=cwd, check=True)
-
-    def run_capture(self,
-                    command: List[str],
-                    env: Optional[Env] = None,
-                    cwd: Optional[str] = None) -> None:
-        """
-        Run one of the postgres binaries, with stderr and stdout redirected to a file.
-
-        This is just like `run`, but for chatty programs.
-        """
-
-        self._fixpath(command)
-        print('Running command "{}"'.format(' '.join(command)))
-        env = self._build_env(env)
-        subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True)
-
-
-@zenfixture
-def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
-    return PgBin(test_output_dir, pg_distrib_dir)
-
 
 def read_pid(path: Path):
     """ Read content of file into number """
