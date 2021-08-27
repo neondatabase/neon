@@ -87,6 +87,8 @@ pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 pub const XLOG_NEXTOID: u8 = 0x30;
 pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
+pub const XLOG_FPI_FOR_HINT: u8 = 0xA0;
+pub const XLOG_FPI: u8 = 0xB0;
 pub const DB_SHUTDOWNED: u32 = 1;
 
 // From multixact.h

@@ -38,11 +38,12 @@
 //! parts: the page versions and the relation sizes. They are stored as separate chapters.
 //!
 use crate::layered_repository::blob::BlobWriter;
-use crate::layered_repository::filename::DeltaFileName;
+use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageVersion, SegmentTag,
 };
 use crate::repository::WALRecord;
+use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
@@ -50,11 +51,14 @@ use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+// avoid binding to Write (conflicts with std::io::Write)
+// while being able to use std::fmt::Write's methods
+use std::fmt::Write as _;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
@@ -90,7 +94,8 @@ struct PageVersionMeta {
 /// be loaded before using it in queries.
 ///
 pub struct DeltaLayer {
-    conf: &'static PageServerConf,
+    path_or_conf: PathOrConf,
+
     pub tenantid: ZTenantId,
     pub timelineid: ZTimelineId,
     pub seg: SegmentTag,
@@ -275,12 +280,52 @@ impl Layer for DeltaLayer {
     fn is_incremental(&self) -> bool {
         true
     }
+
+    /// debugging function to print out the contents of the layer
+    fn dump(&self) -> Result<()> {
+        println!(
+            "----- delta layer for {} {}-{} ----",
+            self.seg, self.start_lsn, self.end_lsn
+        );
+
+        println!("--- relsizes ---");
+        let inner = self.load()?;
+        for (k, v) in inner.relsizes.iter() {
+            println!("  {}: {}", k, v);
+        }
+        println!("--- page versions ---");
+        let (_path, book) = self.open_book()?;
+        let chapter = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
+        for (k, v) in inner.page_version_metas.iter() {
+            let mut desc = String::new();
+
+            if let Some(page_image_range) = v.page_image_range.as_ref() {
+                let image = read_blob(&chapter, &page_image_range)?;
+                write!(&mut desc, " img {} bytes", image.len())?;
+            }
+            if let Some(record_range) = v.record_range.as_ref() {
+                let record_bytes = read_blob(&chapter, record_range)?;
+                let rec = WALRecord::des(&record_bytes)?;
+                let wal_desc = waldecoder::describe_wal_record(&rec.rec);
+                write!(
+                    &mut desc,
+                    " rec {} bytes will_init: {} {}",
+                    rec.rec.len(),
+                    rec.will_init,
+                    wal_desc
+                )?;
+            }
+            println!("  blk {} at {}: {}", k.0, k.1, desc);
+        }
+
+        Ok(())
+    }
 }
 
 impl DeltaLayer {
     fn path(&self) -> PathBuf {
         Self::path_for(
-            self.conf,
+            &self.path_or_conf,
             self.timelineid,
             self.tenantid,
             &DeltaFileName {
@@ -293,13 +338,17 @@ impl DeltaLayer {
     }
 
     fn path_for(
-        conf: &'static PageServerConf,
+        path_or_conf: &PathOrConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         fname: &DeltaFileName,
     ) -> PathBuf {
-        conf.timeline_path(&timelineid, &tenantid)
-            .join(fname.to_string())
+        match path_or_conf {
+            PathOrConf::Path(path) => path.clone(),
+            PathOrConf::Conf(conf) => conf
+                .timeline_path(&timelineid, &tenantid)
+                .join(fname.to_string()),
+        }
     }
 
     /// Create a new delta file, using the given btreemaps containing the page versions and
@@ -321,7 +370,7 @@ impl DeltaLayer {
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         let delta_layer = DeltaLayer {
-            conf: conf,
+            path_or_conf: PathOrConf::Conf(conf),
             timelineid: timelineid,
             tenantid: tenantid,
             seg: seg,
@@ -397,7 +446,7 @@ impl DeltaLayer {
 
     fn open_book(&self) -> Result<(PathBuf, Book<File>)> {
         let path = Self::path_for(
-            self.conf,
+            &self.path_or_conf,
             self.timelineid,
             self.tenantid,
             &DeltaFileName {
@@ -453,7 +502,7 @@ impl DeltaLayer {
         predecessor: Option<Arc<dyn Layer>>,
     ) -> DeltaLayer {
         DeltaLayer {
-            conf,
+            path_or_conf: PathOrConf::Conf(conf),
             timelineid,
             tenantid,
             seg: filename.seg,
@@ -469,22 +518,29 @@ impl DeltaLayer {
         }
     }
 
-    /// debugging function to print out the contents of the layer
-    #[allow(unused)]
-    pub fn dump(&self) -> String {
-        let mut result = format!(
-            "----- snapshot layer for {} {}-{} ----\n",
-            self.seg, self.start_lsn, self.end_lsn
-        );
-
-        let inner = self.inner.lock().unwrap();
-        for (k, v) in inner.relsizes.iter() {
-            result += &format!("{}: {}\n", k, v);
+    /// Create a DeltaLayer struct representing an existing file on disk.
+    ///
+    /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
+    pub fn new_for_path(
+        path: &Path,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        filename: &DeltaFileName,
+    ) -> DeltaLayer {
+        DeltaLayer {
+            path_or_conf: PathOrConf::Path(path.to_path_buf()),
+            timelineid,
+            tenantid,
+            seg: filename.seg,
+            start_lsn: filename.start_lsn,
+            end_lsn: filename.end_lsn,
+            dropped: filename.dropped,
+            inner: Mutex::new(DeltaLayerInner {
+                loaded: false,
+                page_version_metas: BTreeMap::new(),
+                relsizes: BTreeMap::new(),
+            }),
+            predecessor: None,
         }
-        //for (k, v) in inner.page_versions.iter() {
-        //    result += &format!("blk {} at {}: {}/{}\n", k.0, k.1, v.page_image.is_some(), v.record.is_some());
-        //}
-
-        result
     }
 }
