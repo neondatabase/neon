@@ -23,6 +23,8 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
+use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -49,6 +51,8 @@ mod storage_layer;
 
 use delta_layer::DeltaLayer;
 use image_layer::ImageLayer;
+
+use filename::{DeltaFileName, ImageFileName};
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use storage_layer::{Layer, PageReconstructData, SegmentTag, RELISH_SEG_SIZE};
@@ -1465,4 +1469,22 @@ impl LayeredTimeline {
             }
         }
     }
+}
+
+/// Dump contents of a layer file to stdout.
+pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
+    let fname = path.file_name().unwrap().to_str().unwrap();
+
+    let dummy_tenantid = ZTenantId::from_str("00000000000000000000000000000000")?;
+    let dummy_timelineid = ZTimelineId::from_str("00000000000000000000000000000000")?;
+
+    if let Some(deltafilename) = DeltaFileName::from_str(fname) {
+        DeltaLayer::new_for_path(path, dummy_timelineid, dummy_tenantid, &deltafilename).dump()?;
+    } else if let Some(imgfilename) = ImageFileName::from_str(fname) {
+        ImageLayer::new_for_path(path, dummy_timelineid, dummy_tenantid, &imgfilename).dump()?;
+    } else {
+        bail!("unrecognized layer file name : {}", fname);
+    }
+
+    Ok(())
 }

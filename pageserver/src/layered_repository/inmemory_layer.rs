@@ -227,6 +227,31 @@ impl Layer for InMemoryLayer {
     fn is_incremental(&self) -> bool {
         self.img_layer.is_some()
     }
+
+    /// debugging function to print out the contents of the layer
+    fn dump(&self) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+
+        let end_str = inner
+            .drop_lsn
+            .as_ref()
+            .map(|drop_lsn| drop_lsn.to_string())
+            .unwrap_or_default();
+
+        println!(
+            "----- in-memory layer for {} {}-{} ----",
+            self.seg, self.start_lsn, end_str
+        );
+
+        for (k, v) in inner.segsizes.iter() {
+            println!("{}: {}", k, v);
+        }
+        //for (k, v) in inner.page_versions.iter() {
+        //    println!("blk {} at {}: {}/{}", k.0, k.1, v.page_image.is_some(), v.record.is_some());
+        //}
+
+        Ok(())
+    }
 }
 
 impl InMemoryLayer {

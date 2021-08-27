@@ -145,4 +145,7 @@ pub trait Layer: Send + Sync {
 
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
+
+    /// Dump summary of the contents of the layer to stdout
+    fn dump(&self) -> Result<()>;
 }

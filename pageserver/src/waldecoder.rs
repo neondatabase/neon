@@ -965,3 +965,71 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         main_data_offset,
     }
 }
+
+///
+/// Build a human-readable string to describe a WAL record
+///
+/// For debugging purposes
+pub fn describe_wal_record(record: &Bytes) -> String {
+    // TODO: It would be nice to use the PostgreSQL rmgrdesc infrastructure for this.
+    // Maybe use the postgres wal redo process, the same used for replaying WAL records?
+    // Or could we compile the rmgrdesc routines into the dump_layer_file() binary directly,
+    // without worrying about security?
+    //
+    // But for now, we have a hand-written code for a few common WAL record types here.
+
+    let mut buf = record.clone();
+
+    // 1. Parse XLogRecord struct
+
+    // FIXME: assume little-endian here
+    let xlogrec = XLogRecord::from_bytes(&mut buf);
+
+    let unknown_str: String;
+
+    let result: &str = match xlogrec.xl_rmid {
+        pg_constants::RM_HEAP2_ID => {
+            let info = xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+            match info {
+                pg_constants::XLOG_HEAP2_MULTI_INSERT => "HEAP2 MULTI_INSERT",
+                pg_constants::XLOG_HEAP2_VISIBLE => "HEAP2 VISIBLE",
+                _ => {
+                    unknown_str = format!("HEAP2 UNKNOWN_0x{:02x}", info);
+                    &unknown_str
+                }
+            }
+        }
+        pg_constants::RM_HEAP_ID => {
+            let info = xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+            match info {
+                pg_constants::XLOG_HEAP_INSERT => "HEAP INSERT",
+                pg_constants::XLOG_HEAP_DELETE => "HEAP DELETE",
+                pg_constants::XLOG_HEAP_UPDATE => "HEAP UPDATE",
+                pg_constants::XLOG_HEAP_HOT_UPDATE => "HEAP HOT_UPDATE",
+                _ => {
+                    unknown_str = format!("HEAP2 UNKNOWN_0x{:02x}", info);
+                    &unknown_str
+                }
+            }
+        }
+        pg_constants::RM_XLOG_ID => {
+            let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+            match info {
+                pg_constants::XLOG_FPI => "XLOG FPI",
+                pg_constants::XLOG_FPI_FOR_HINT => "XLOG FPI_FOR_HINT",
+                _ => {
+                    unknown_str = format!("XLOG UNKNOWN_0x{:02x}", info);
+                    &unknown_str
+                }
+            }
+        }
+        rmid => {
+            let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
+            unknown_str = format!("UNKNOWN_RM_{} INFO_0x{:02x}", rmid, info);
+            &unknown_str
+        }
+    };
+
+    String::from(result)
+}

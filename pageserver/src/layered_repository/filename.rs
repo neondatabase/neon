@@ -7,6 +7,7 @@ use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use std::fmt;
 use std::fs;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use log::*;
@@ -34,7 +35,7 @@ impl DeltaFileName {
     /// Parse a string as a delta file name. Returns None if the filename does not
     /// match the expected pattern.
     ///
-    fn from_str(fname: &str) -> Option<Self> {
+    pub fn from_str(fname: &str) -> Option<Self> {
         let rel;
         let mut parts;
         if let Some(rest) = fname.strip_prefix("rel_") {
@@ -170,7 +171,7 @@ impl ImageFileName {
     /// Parse a string as an image file name. Returns None if the filename does not
     /// match the expected pattern.
     ///
-    fn from_str(fname: &str) -> Option<Self> {
+    pub fn from_str(fname: &str) -> Option<Self> {
         let rel;
         let mut parts;
         if let Some(rest) = fname.strip_prefix("rel_") {
@@ -302,4 +303,17 @@ pub fn list_files(
         }
     }
     return Ok((imgfiles, deltafiles));
+}
+
+/// Helper enum to hold a PageServerConf, or a path
+///
+/// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
+/// global config, and paths to layer files are constructed using the tenant/timeline
+/// path from the config. But in the 'dump_layerfile' binary, we need to construct a Layer
+/// struct for a file on disk, without having a page server running, so that we have no
+/// config. In that case, we use the Path variant to hold the full path to the file on
+/// disk.
+pub enum PathOrConf {
+    Path(PathBuf),
+    Conf(&'static PageServerConf),
 }
