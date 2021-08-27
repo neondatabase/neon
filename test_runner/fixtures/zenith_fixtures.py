@@ -224,6 +224,13 @@ class ZenithPageserverHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
+    def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}",
+        )
+        res.raise_for_status()
+        return res.json()
+
     def tenant_list(self) -> List[str]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         res.raise_for_status()

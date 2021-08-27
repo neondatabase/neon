@@ -30,9 +30,64 @@ pub struct BranchInfo {
     pub name: String,
     #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
-    pub latest_valid_lsn: Option<Lsn>,
+    pub latest_valid_lsn: Lsn,
     pub ancestor_id: Option<String>,
     pub ancestor_lsn: Option<String>,
+    pub current_logical_size: usize,
+    pub current_logical_size_non_incremental: usize,
+}
+
+impl BranchInfo {
+    pub fn from_path<T: AsRef<Path>>(
+        path: T,
+        conf: &PageServerConf,
+        tenantid: &ZTenantId,
+        repo: &Arc<dyn Repository>,
+    ) -> Result<Self> {
+        let name = path
+            .as_ref()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let timeline_id = std::fs::read_to_string(path)?.parse::<ZTimelineId>()?;
+
+        let timeline = repo.get_timeline(timeline_id)?;
+
+        let ancestor_path = conf.ancestor_path(&timeline_id, tenantid);
+        let mut ancestor_id: Option<String> = None;
+        let mut ancestor_lsn: Option<String> = None;
+
+        if ancestor_path.exists() {
+            let ancestor = std::fs::read_to_string(ancestor_path)?;
+            let mut strings = ancestor.split('@');
+
+            ancestor_id = Some(
+                strings
+                    .next()
+                    .with_context(|| "wrong branch ancestor point in time format")?
+                    .to_owned(),
+            );
+            ancestor_lsn = Some(
+                strings
+                    .next()
+                    .with_context(|| "wrong branch ancestor point in time format")?
+                    .to_owned(),
+            );
+        }
+
+        Ok(BranchInfo {
+            name,
+            timeline_id,
+            latest_valid_lsn: timeline.get_last_record_lsn(),
+            ancestor_id,
+            ancestor_lsn,
+            current_logical_size: timeline.get_current_logical_size(),
+            current_logical_size_non_incremental: timeline
+                .get_current_logical_size_non_incremental(timeline.get_last_record_lsn())?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -210,43 +265,12 @@ pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Resul
     std::fs::read_dir(&branches_dir)?
         .map(|dir_entry_res| {
             let dir_entry = dir_entry_res?;
-            let name = dir_entry.file_name().to_str().unwrap().to_string();
-            let timeline_id = std::fs::read_to_string(dir_entry.path())?.parse::<ZTimelineId>()?;
-
-            let latest_valid_lsn = repo
-                .get_timeline(timeline_id)
-                .map(|timeline| timeline.get_last_record_lsn())
-                .ok();
-
-            let ancestor_path = conf.ancestor_path(&timeline_id, tenantid);
-            let mut ancestor_id: Option<String> = None;
-            let mut ancestor_lsn: Option<String> = None;
-
-            if ancestor_path.exists() {
-                let ancestor = std::fs::read_to_string(ancestor_path)?;
-                let mut strings = ancestor.split('@');
-
-                ancestor_id = Some(
-                    strings
-                        .next()
-                        .with_context(|| "wrong branch ancestor point in time format")?
-                        .to_owned(),
-                );
-                ancestor_lsn = Some(
-                    strings
-                        .next()
-                        .with_context(|| "wrong branch ancestor point in time format")?
-                        .to_owned(),
-                );
-            }
-
-            Ok(BranchInfo {
-                name,
-                timeline_id,
-                latest_valid_lsn,
-                ancestor_id,
-                ancestor_lsn,
-            })
+            Ok(BranchInfo::from_path(
+                dir_entry.path(),
+                conf,
+                tenantid,
+                &repo,
+            )?)
         })
         .collect()
 }
@@ -296,9 +320,11 @@ pub(crate) fn create_branch(
     Ok(BranchInfo {
         name: branchname.to_string(),
         timeline_id: newtli,
-        latest_valid_lsn: Some(startpoint.lsn),
+        latest_valid_lsn: startpoint.lsn,
         ancestor_id: None,
         ancestor_lsn: None,
+        current_logical_size: 0,
+        current_logical_size_non_incremental: 0,
     })
 }
 

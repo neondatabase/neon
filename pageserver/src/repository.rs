@@ -45,9 +45,6 @@ pub trait Repository: Send + Sync {
         horizon: u64,
         compact: bool,
     ) -> Result<GcResult>;
-
-    // TODO get timelines?
-    //fn get_stats(&self) -> RepositoryStats;
 }
 
 ///
@@ -133,7 +130,7 @@ pub trait Timeline: Send + Sync {
     /// Truncate relation
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
 
-    /// This method is used for marking dropped relations and truncated SLRU files
+    /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
     fn drop_relish(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
 
     /// Track end of the latest digested WAL record.
@@ -154,14 +151,16 @@ pub trait Timeline: Send + Sync {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self) -> Result<()>;
-}
 
-#[derive(Clone)]
-pub struct RepositoryStats {
-    pub num_entries: Lsn,
-    pub num_page_images: Lsn,
-    pub num_wal_records: Lsn,
-    pub num_getpage_requests: Lsn,
+    /// Retrieve current logical size of the timeline
+    ///
+    /// NOTE: counted incrementally, includes ancestors,
+    /// doesnt support TwoPhase relishes yet
+    fn get_current_logical_size(&self) -> usize;
+
+    /// Does the same as get_current_logical_size but counted on demand.
+    /// Used in tests to ensure thet incremental and non incremental variants match.
+    fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -240,6 +239,14 @@ mod tests {
         buf.freeze()
     }
 
+    fn assert_current_logical_size(timeline: &Arc<dyn Timeline>, lsn: Lsn) {
+        let incremental = timeline.get_current_logical_size();
+        let non_incremental = timeline
+            .get_current_logical_size_non_incremental(lsn)
+            .unwrap();
+        assert_eq!(incremental, non_incremental);
+    }
+
     static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
     fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
@@ -295,6 +302,8 @@ mod tests {
 
         tline.advance_last_record_lsn(Lsn(0x50));
 
+        assert_current_logical_size(&tline, Lsn(0x50));
+
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
         assert!(tline.get_relish_size(TESTREL_A, Lsn(0x10))?.is_none());
@@ -339,6 +348,7 @@ mod tests {
         // Truncate last block
         tline.put_truncation(TESTREL_A, Lsn(0x60), 2)?;
         tline.advance_last_record_lsn(Lsn(0x60));
+        assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 2);
@@ -408,6 +418,8 @@ mod tests {
         }
         tline.advance_last_record_lsn(Lsn(lsn));
 
+        assert_current_logical_size(&tline, Lsn(lsn));
+
         assert_eq!(
             tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE + 1
@@ -421,6 +433,7 @@ mod tests {
             tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE
         );
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         // Truncate another block
         lsn += 0x10;
@@ -430,6 +443,7 @@ mod tests {
             tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE - 1
         );
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         // Truncate to 1500, and then truncate all the way down to 0, one block at a time
         // This tests the behavior at segment boundaries
@@ -445,6 +459,7 @@ mod tests {
 
             size -= 1;
         }
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         Ok(())
     }
@@ -471,6 +486,7 @@ mod tests {
         tline.put_page_image(TESTREL_B, 0, Lsn(0x20), TEST_IMG("foobar blk 0 at 2"))?;
 
         tline.advance_last_record_lsn(Lsn(0x40));
+        assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
         let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
@@ -497,6 +513,8 @@ mod tests {
         );
 
         assert_eq!(newtline.get_relish_size(TESTREL_B, Lsn(0x40))?.unwrap(), 1);
+
+        assert_current_logical_size(&tline, Lsn(0x40));
 
         Ok(())
     }

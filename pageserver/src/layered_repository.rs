@@ -15,18 +15,20 @@ use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use log::*;
+use postgres_ffi::pg_constants::BLCKSZ;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 use crate::relish::*;
 use crate::repository::{GcResult, Repository, Timeline, WALRecord};
@@ -35,7 +37,7 @@ use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{register_histogram, Histogram};
+use zenith_metrics::{register_histogram, register_int_gauge_vec, Histogram, IntGaugeVec};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
@@ -92,6 +94,16 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+lazy_static! {
+    // NOTE: can be zero if pageserver was restarted an no activity happening
+    static ref LOGICAL_TIMELINE_SIZE: IntGaugeVec = register_int_gauge_vec!(
+        "pageserver_logical_timeline_size",
+        "Logical timeline size (bytes)",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
 ///
 /// Repository consists of multiple timelines. Keep them in a hash table.
 ///
@@ -138,6 +150,7 @@ impl Repository for LayeredRepository {
             timelineid,
             self.tenantid,
             self.walredo_mgr.clone(),
+            0,
         )?;
 
         let timeline_rc = Arc::new(timeline);
@@ -221,17 +234,23 @@ impl LayeredRepository {
                     None
                 };
 
-                let timeline = LayeredTimeline::new(
+                let mut timeline = LayeredTimeline::new(
                     self.conf,
                     metadata,
                     ancestor,
                     timelineid,
                     self.tenantid,
                     self.walredo_mgr.clone(),
+                    0, // init with 0 and update after layers are loaded
                 )?;
 
                 // List the layers on disk, and load them into the layer map
                 timeline.load_layer_map()?;
+
+                // needs to be after load_layer_map
+                timeline.init_current_logical_size()?;
+
+                let timeline = Arc::new(timeline);
 
                 // Load any new WAL after the last checkpoint into memory.
                 info!(
@@ -243,11 +262,15 @@ impl LayeredRepository {
                     .conf
                     .timeline_path(&timelineid, &self.tenantid)
                     .join("wal");
-                import_timeline_wal(&wal_dir, &timeline, timeline.get_last_record_lsn())?;
+                import_timeline_wal(&wal_dir, timeline.as_ref(), timeline.get_last_record_lsn())?;
 
-                let timeline_rc = Arc::new(timeline);
-                timelines.insert(timelineid, timeline_rc.clone());
-                Ok(timeline_rc)
+                if cfg!(debug_assertions) {
+                    // check again after wal loading
+                    Self::assert_size_calculation_matches_offloaded(Arc::clone(&timeline));
+                }
+
+                timelines.insert(timelineid, timeline.clone());
+                Ok(timeline.clone())
             }
         }
     }
@@ -445,6 +468,24 @@ impl LayeredRepository {
         totals.elapsed = now.elapsed();
         Ok(totals)
     }
+
+    fn assert_size_calculation_matches(incremental: usize, timeline: &LayeredTimeline) {
+        match timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn()) {
+            Ok(non_incremental) => {
+                if incremental != non_incremental {
+                    error!("timeline size calculation diverged, incremental doesn't match non incremental. incremental={} non_incremental={}", incremental, non_incremental);
+                }
+            }
+            Err(e) => error!("failed to calculate non incremental timeline size: {}", e),
+        }
+    }
+
+    fn assert_size_calculation_matches_offloaded(timeline: Arc<LayeredTimeline>) {
+        let incremental = timeline.get_current_logical_size();
+        thread::spawn(move || {
+            Self::assert_size_calculation_matches(incremental, &timeline);
+        });
+    }
 }
 
 /// Metadata stored on disk for each timeline
@@ -509,6 +550,16 @@ pub struct LayeredTimeline {
     // of the branch point.
     ancestor_timeline: Option<Arc<LayeredTimeline>>,
     ancestor_lsn: Lsn,
+
+    // this variable indicates how much space is used from user's point of view,
+    // e.g. we do not account here for multiple versions of data and so on.
+    // this is counted incrementally based on physical relishes (excluding FileNodeMap)
+    // current_logical_size is not stored no disk and initialized on timeline creation using
+    // get_current_logical_size_non_incremental in init_current_logical_size
+    // this is needed because when we save it in metadata it can become out of sync
+    // because current_logical_size is consistent on last_record_lsn, not ondisk_consistent_lsn
+    // NOTE: current_logical_size also includes size of the ancestor
+    current_logical_size: AtomicUsize, // bytes
 }
 
 /// Public interface functions
@@ -654,9 +705,9 @@ impl Timeline for LayeredTimeline {
         }
 
         let seg = SegmentTag::from_blknum(rel, blknum);
-
         let layer = self.get_layer_for_write(seg, rec.lsn)?;
-        layer.put_wal_record(blknum, rec)
+        self.increase_current_logical_size(layer.put_wal_record(blknum, rec)? * BLCKSZ as u32);
+        Ok(())
     }
 
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
@@ -706,7 +757,7 @@ impl Timeline for LayeredTimeline {
             let layer = self.get_layer_for_write(seg, lsn)?;
             layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)?;
         }
-
+        self.decrease_current_logical_size((oldsize - relsize) * BLCKSZ as u32);
         Ok(())
     }
 
@@ -714,8 +765,7 @@ impl Timeline for LayeredTimeline {
         trace!("drop_segment: {} at {}", rel, lsn);
 
         if rel.is_blocky() {
-            let oldsize_opt = self.get_relish_size(rel, self.get_last_record_lsn())?;
-            if let Some(oldsize) = oldsize_opt {
+            if let Some(oldsize) = self.get_relish_size(rel, self.get_last_record_lsn())? {
                 let old_last_seg = if oldsize == 0 {
                     0
                 } else {
@@ -731,6 +781,7 @@ impl Timeline for LayeredTimeline {
                     let layer = self.get_layer_for_write(seg, lsn)?;
                     layer.drop_segment(lsn)?;
                 }
+                self.decrease_current_logical_size(oldsize * BLCKSZ as u32);
             } else {
                 warn!(
                     "drop_segment called on non-existent relish {} at {}",
@@ -738,6 +789,7 @@ impl Timeline for LayeredTimeline {
                 );
             }
         } else {
+            // TODO handle TwoPhase relishes
             let seg = SegmentTag::from_blknum(rel, 0);
             let layer = self.get_layer_for_write(seg, lsn)?;
             layer.drop_segment(lsn)?;
@@ -758,7 +810,8 @@ impl Timeline for LayeredTimeline {
         let seg = SegmentTag::from_blknum(rel, blknum);
 
         let layer = self.get_layer_for_write(seg, lsn)?;
-        layer.put_page_image(blknum, lsn, img)
+        self.increase_current_logical_size(layer.put_page_image(blknum, lsn, img)? * BLCKSZ as u32);
+        Ok(())
     }
 
     /// Public entry point for checkpoint(). All the logic is in the private
@@ -802,6 +855,35 @@ impl Timeline for LayeredTimeline {
             self.ancestor_lsn
         }
     }
+
+    fn get_current_logical_size(&self) -> usize {
+        self.current_logical_size.load(Ordering::Acquire) as usize
+    }
+
+    fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
+        let mut total_blocks: usize = 0;
+
+        // list of all relations in this timeline, including ancestor timelines
+        let all_rels = self.list_rels(0, 0, lsn)?;
+
+        for rel in all_rels {
+            if let Some(size) = self.get_relish_size(RelishTag::Relation(rel), lsn)? {
+                total_blocks += size as usize;
+            }
+        }
+
+        let non_rels = self.list_nonrels(lsn)?;
+        for non_rel in non_rels {
+            // TODO support TwoPhase
+            if matches!(non_rel, RelishTag::Slru { slru: _, segno: _ }) {
+                if let Some(size) = self.get_relish_size(non_rel, lsn)? {
+                    total_blocks += size as usize;
+                }
+            }
+        }
+
+        Ok(total_blocks * BLCKSZ as usize)
+    }
 }
 
 impl LayeredTimeline {
@@ -815,6 +897,7 @@ impl LayeredTimeline {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+        current_logical_size: usize,
     ) -> Result<LayeredTimeline> {
         let timeline = LayeredTimeline {
             conf,
@@ -833,6 +916,7 @@ impl LayeredTimeline {
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn,
+            current_logical_size: AtomicUsize::new(current_logical_size),
         };
         Ok(timeline)
     }
@@ -893,6 +977,23 @@ impl LayeredTimeline {
             layers.insert_historic(Arc::new(layer));
         }
 
+        Ok(())
+    }
+
+    ///
+    /// Used to init current logical size on startup
+    ///
+    fn init_current_logical_size(&mut self) -> Result<()> {
+        if self.current_logical_size.load(Ordering::Relaxed) != 0 {
+            bail!("cannot init already initialized current logical size")
+        };
+        let lsn = self.get_last_record_lsn();
+        self.current_logical_size =
+            AtomicUsize::new(self.get_current_logical_size_non_incremental(lsn)?);
+        trace!(
+            "current_logical_size initialized to {}",
+            self.current_logical_size.load(Ordering::Relaxed)
+        );
         Ok(())
     }
 
@@ -1456,6 +1557,42 @@ impl LayeredTimeline {
                 Ok(img)
             }
         }
+    }
+
+    ///
+    /// This is a helper function to increase current_total_relation_size
+    ///
+    fn increase_current_logical_size(&self, diff: u32) {
+        let val = self
+            .current_logical_size
+            .fetch_add(diff as usize, Ordering::SeqCst);
+        trace!(
+            "increase_current_logical_size: {} + {} = {}",
+            val,
+            diff,
+            val + diff as usize,
+        );
+        LOGICAL_TIMELINE_SIZE
+            .with_label_values(&[&self.tenantid.to_string(), &self.timelineid.to_string()])
+            .set(val as i64 + diff as i64)
+    }
+
+    ///
+    /// This is a helper function to decrease current_total_relation_size
+    ///
+    fn decrease_current_logical_size(&self, diff: u32) {
+        let val = self
+            .current_logical_size
+            .fetch_sub(diff as usize, Ordering::SeqCst);
+        trace!(
+            "decrease_current_logical_size: {} - {} = {}",
+            val,
+            diff,
+            val - diff as usize,
+        );
+        LOGICAL_TIMELINE_SIZE
+            .with_label_values(&[&self.tenantid.to_string(), &self.timelineid.to_string()])
+            .set(val as i64 - diff as i64)
     }
 }
 
