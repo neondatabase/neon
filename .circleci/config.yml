@@ -293,6 +293,12 @@ workflows:
           test_selection: batch_others
           requires:
             - build-zenith-<< matrix.build_type >>
+      - run-pytest:
+          name: benchmarks
+          build_type: release
+          test_selection: performance
+          requires:
+            - build-zenith-release
       - docker-image:
           # Context gives an ability to login
           context: Docker Hub
