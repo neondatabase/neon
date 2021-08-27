@@ -310,7 +310,7 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> Result<()> {
+    pub fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> Result<u32> {
         self.put_page_version(
             blknum,
             rec.lsn,
@@ -322,7 +322,7 @@ impl InMemoryLayer {
     }
 
     /// Remember new page version, as a full page image
-    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
+    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<u32> {
         self.put_page_version(
             blknum,
             lsn,
@@ -335,7 +335,7 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()> {
+    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<u32> {
         assert!(self.seg.blknum_in_seg(blknum));
 
         trace!(
@@ -403,15 +403,20 @@ impl InMemoryLayer {
                 }
 
                 inner.segsizes.insert(lsn, newsize);
+                return Ok(newsize - oldsize);
             }
         }
-
-        Ok(())
+        Ok(0)
     }
 
     /// Remember that the relation was truncated at given LSN
     pub fn put_truncation(&self, lsn: Lsn, segsize: u32) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
+
+        // check that this we truncate to a smaller size than segment was before the truncation
+        let oldsize = inner.get_seg_size(lsn);
+        assert!(segsize < oldsize);
+
         let old = inner.segsizes.insert(lsn, segsize);
 
         if old.is_some() {

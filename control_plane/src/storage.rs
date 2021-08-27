@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
@@ -230,7 +229,7 @@ impl PageServerNode {
         tenantid: &ZTenantId,
     ) -> Result<BranchInfo> {
         Ok(self
-            .http_request(Method::POST, format!("{}/{}", self.http_base_url, "branch"))
+            .http_request(Method::POST, format!("{}/branch", self.http_base_url))
             .json(&BranchCreateRequest {
                 tenant_id: tenantid.to_owned(),
                 name: branch_name.to_owned(),
@@ -241,24 +240,19 @@ impl PageServerNode {
             .json()?)
     }
 
-    // TODO: make this a separate request type and avoid loading all the branches
     pub fn branch_get_by_name(
         &self,
         tenantid: &ZTenantId,
         branch_name: &str,
     ) -> Result<BranchInfo> {
-        let branch_infos = self.branch_list(tenantid)?;
-        let branch_by_name: Result<HashMap<String, BranchInfo>> = branch_infos
-            .into_iter()
-            .map(|branch_info| Ok((branch_info.name.clone(), branch_info)))
-            .collect();
-        let branch_by_name = branch_by_name?;
-
-        let branch = branch_by_name
-            .get(branch_name)
-            .ok_or_else(|| anyhow!("Branch {} not found", branch_name))?;
-
-        Ok(branch.clone())
+        Ok(self
+            .http_request(
+                Method::GET,
+                format!("{}/branch/{}/{}", self.http_base_url, tenantid, branch_name),
+            )
+            .send()?
+            .error_for_status()?
+            .json()?)
     }
 }
 

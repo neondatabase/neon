@@ -54,7 +54,52 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
-
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/branch/{tenant_id}/{branch_name}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: branch_name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      description: Get branches for tenant
+      responses:
+        "200":
+          description: BranchInfo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BranchInfo"
+        "400":
+          description: Error when no tenant id found in path or no branch name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
         "500":
           description: Generic operation error
           content:
@@ -203,6 +248,9 @@ components:
       required:
         - name
         - timeline_id
+        - latest_valid_lsn
+        - current_logical_size
+        - current_logical_size_non_incremental
       properties:
         name:
           type: string
@@ -213,6 +261,10 @@ components:
           type: string
         ancestor_lsn:
           type: string
+        current_logical_size:
+          type: integer
+        current_logical_size_non_incremental:
+          type: integer
     Error:
       type: object
       required:

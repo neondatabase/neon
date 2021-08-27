@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -18,10 +19,8 @@ use zenith_utils::http::{
 
 use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
-use crate::{
-    branches::{self},
-    tenant_mgr, PageServerConf, ZTenantId,
-};
+use crate::branches::BranchInfo;
+use crate::{branches, tenant_mgr, PageServerConf, ZTenantId};
 
 #[derive(Debug)]
 struct State {
@@ -57,6 +56,35 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
     get_state(request).conf
 }
 
+fn get_request_param<'a>(
+    request: &'a Request<Body>,
+    param_name: &str,
+) -> Result<&'a str, ApiError> {
+    match request.param(param_name) {
+        Some(arg) => Ok(arg),
+        None => {
+            return Err(ApiError::BadRequest(format!(
+                "no {} specified in path param",
+                param_name
+            )))
+        }
+    }
+}
+
+fn parse_request_param<T: FromStr>(
+    request: &Request<Body>,
+    param_name: &str,
+) -> Result<T, ApiError> {
+    match get_request_param(request, param_name)?.parse() {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            return Err(ApiError::BadRequest(
+                "failed to parse tenant id".to_string(),
+            ))
+        }
+    }
+}
+
 // healthcheck handler
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     Ok(Response::builder()
@@ -85,16 +113,7 @@ async fn branch_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 }
 
 async fn branch_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenantid: ZTenantId = match request.param("tenant_id") {
-        Some(arg) => arg
-            .parse()
-            .map_err(|_| ApiError::BadRequest("failed to parse tenant id".to_string()))?,
-        None => {
-            return Err(ApiError::BadRequest(
-                "no tenant id specified in path param".to_string(),
-            ))
-        }
-    };
+    let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
 
     check_permission(&request, Some(tenantid))?;
 
@@ -103,6 +122,23 @@ async fn branch_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     })
     .await
     .map_err(ApiError::from_err)??;
+    Ok(json_response(StatusCode::OK, response_data)?)
+}
+
+// TODO add to swagger
+async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let branch_name: &str = get_request_param(&request, "branch_name")?;
+    let conf = get_state(&request).conf;
+    let path = conf.branch_path(&branch_name, &tenantid);
+
+    let response_data = tokio::task::spawn_blocking(move || {
+        let repo = tenant_mgr::get_repository_for_tenant(&tenantid)?;
+        BranchInfo::from_path(path, conf, &tenantid, &repo)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
     Ok(json_response(StatusCode::OK, response_data)?)
 }
 
@@ -159,6 +195,7 @@ pub fn make_router(
         .data(Arc::new(State::new(conf, auth)))
         .get("/v1/status", status_handler)
         .get("/v1/branch/:tenant_id", branch_list_handler)
+        .get("/v1/branch/:tenant_id/:branch_name", branch_detail_handler)
         .post("/v1/branch", branch_create_handler)
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)

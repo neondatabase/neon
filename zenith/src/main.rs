@@ -13,7 +13,6 @@ use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use pageserver::branches::BranchInfo;
-use zenith_utils::lsn::Lsn;
 
 ///
 /// Branches tree element used as a value in the HashMap.
@@ -393,9 +392,7 @@ fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
         let branch = pageserver.branch_create(branchname, startpoint_str, &tenantid)?;
         println!(
             "Created branch '{}' at {:?} for tenant: {}",
-            branch.name,
-            branch.latest_valid_lsn.unwrap_or(Lsn(0)),
-            tenantid,
+            branch.name, branch.latest_valid_lsn, tenantid,
         );
     } else {
         let tenantid: ZTenantId = branch_match
@@ -434,9 +431,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     node.address,
                     branch_infos
                         .get(&node.timelineid)
-                        .map(|bi| bi
-                            .latest_valid_lsn
-                            .map_or("?".to_string(), |lsn| lsn.to_string()))
+                        .map(|bi| bi.latest_valid_lsn.to_string())
                         .unwrap_or_else(|| "?".to_string()),
                     node.status(),
                 );
