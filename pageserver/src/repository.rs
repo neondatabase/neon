@@ -128,14 +128,7 @@ pub trait Timeline: Send + Sync {
     fn put_wal_record(&self, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(
-        &self,
-        tag: RelishTag,
-        blknum: u32,
-        lsn: Lsn,
-        img: Bytes,
-        update_meta: bool,
-    ) -> Result<()>;
+    fn put_page_image(&self, tag: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()>;
 
     /// Truncate relation
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
@@ -303,11 +296,11 @@ mod tests {
         let tline = repo.create_empty_timeline(timelineid, Lsn(0))?;
 
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
-        tline.put_page_image(TESTREL_A, 1, Lsn(4), TEST_IMG("foo blk 1 at 4"), true)?;
-        tline.put_page_image(TESTREL_A, 2, Lsn(5), TEST_IMG("foo blk 2 at 5"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(TESTREL_A, 1, Lsn(4), TEST_IMG("foo blk 1 at 4"))?;
+        tline.put_page_image(TESTREL_A, 2, Lsn(5), TEST_IMG("foo blk 2 at 5"))?;
 
         tline.advance_last_valid_lsn(Lsn(5));
 
@@ -391,7 +384,7 @@ mod tests {
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 1;
-            tline.put_page_image(TESTREL_A, blknum as u32, Lsn(lsn), img, true)?;
+            tline.put_page_image(TESTREL_A, blknum as u32, Lsn(lsn), img)?;
         }
         tline.advance_last_valid_lsn(Lsn(lsn));
 
@@ -447,16 +440,16 @@ mod tests {
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
-        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(1), ZERO_PAGE.clone(), false)?;
+        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(1), ZERO_PAGE.clone())?;
 
         // Create a relation on the timeline
         tline.init_valid_lsn(Lsn(1));
-        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"), true)?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(3), TEST_IMG("foo blk 0 at 3"), true)?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(4), TEST_IMG("foo blk 0 at 4"), true)?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(2), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(3), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(TESTREL_A, 0, Lsn(4), TEST_IMG("foo blk 0 at 4"))?;
 
         // Create another relation
-        tline.put_page_image(TESTREL_B, 0, Lsn(2), TEST_IMG("foobar blk 0 at 2"), true)?;
+        tline.put_page_image(TESTREL_B, 0, Lsn(2), TEST_IMG("foobar blk 0 at 2"))?;
 
         tline.advance_last_valid_lsn(Lsn(4));
 
@@ -465,7 +458,7 @@ mod tests {
         repo.branch_timeline(timelineid, newtimelineid, Lsn(3))?;
         let newtline = repo.get_timeline(newtimelineid)?;
 
-        newtline.put_page_image(TESTREL_A, 0, Lsn(4), TEST_IMG("bar blk 0 at 4"), true)?;
+        newtline.put_page_image(TESTREL_A, 0, Lsn(4), TEST_IMG("bar blk 0 at 4"))?;
         newtline.advance_last_valid_lsn(Lsn(4));
 
         // Check page contents on both branches

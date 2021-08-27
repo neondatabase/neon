@@ -766,14 +766,7 @@ impl Timeline for LayeredTimeline {
         Ok(())
     }
 
-    fn put_page_image(
-        &self,
-        rel: RelishTag,
-        blknum: u32,
-        lsn: Lsn,
-        img: Bytes,
-        _update_meta: bool,
-    ) -> Result<()> {
+    fn put_page_image(&self, rel: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
         if !rel.is_blocky() && blknum != 0 {
             bail!(
                 "invalid request for block {} for non-blocky relish {}",

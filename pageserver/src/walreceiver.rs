@@ -228,7 +228,6 @@ fn walreceiver_main(
                             0,
                             lsn,
                             new_checkpoint_bytes,
-                            false,
                         )?;
                     }
                 }

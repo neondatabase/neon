@@ -50,7 +50,7 @@ pub fn import_timeline_from_postgres_datadir(
                     timeline.get_page_at_lsn_nowait(RelishTag::ControlFile, 0, lsn)?;
                 let pg_control = ControlFileData::decode(&pg_control_bytes)?;
                 let checkpoint_bytes = pg_control.checkPointCopy.encode();
-                timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, checkpoint_bytes, false)?;
+                timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, checkpoint_bytes)?;
             }
             Some("pg_filenode.map") => import_nonrel_file(
                 timeline,
@@ -170,7 +170,7 @@ fn import_relfile(
                     forknum,
                 };
                 let tag = RelishTag::Relation(rel);
-                timeline.put_page_image(tag, blknum, lsn, Bytes::copy_from_slice(&buf), true)?;
+                timeline.put_page_image(tag, blknum, lsn, Bytes::copy_from_slice(&buf))?;
             }
 
             // TODO: UnexpectedEof is expected
@@ -211,7 +211,7 @@ fn import_nonrel_file(
 
     info!("importing non-rel file {}", path.display());
 
-    timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buffer[..]), false)?;
+    timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buffer[..]))?;
     Ok(())
 }
 
@@ -236,7 +236,6 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
                     rpageno,
                     lsn,
                     Bytes::copy_from_slice(&buf),
-                    true,
                 )?;
             }
 
@@ -334,7 +333,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
 
     info!("reached end of WAL at {}", last_lsn);
     let checkpoint_bytes = checkpoint.encode();
-    timeline.put_page_image(RelishTag::Checkpoint, 0, last_lsn, checkpoint_bytes, false)?;
+    timeline.put_page_image(RelishTag::Checkpoint, 0, last_lsn, checkpoint_bytes)?;
 
     timeline.advance_last_valid_lsn(last_lsn);
     timeline.checkpoint()?;
@@ -407,7 +406,6 @@ pub fn save_decoded_record(
                 rpageno,
                 lsn,
                 ZERO_PAGE,
-                true,
             )?;
         } else {
             assert!(info == pg_constants::CLOG_TRUNCATE);
@@ -448,7 +446,6 @@ pub fn save_decoded_record(
                 0,
                 lsn,
                 Bytes::copy_from_slice(&buf[..]),
-                true,
             )?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_MULTIXACT_ID {
@@ -466,7 +463,6 @@ pub fn save_decoded_record(
                 rpageno,
                 lsn,
                 ZERO_PAGE,
-                true,
             )?;
         } else if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
             let pageno = buf.get_u32_le();
@@ -480,7 +476,6 @@ pub fn save_decoded_record(
                 rpageno,
                 lsn,
                 ZERO_PAGE,
-                true,
             )?;
         } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
             let xlrec = XlMultiXactCreate::decode(&mut buf);
@@ -562,7 +557,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
             debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
-            timeline.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content, true)?;
+            timeline.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content)?;
             num_blocks_copied += 1;
         }
 
@@ -586,7 +581,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
                         spcnode: tablespace_id,
                         dbnode: db_id,
                     };
-                    timeline.put_page_image(new_tag, 0, lsn, img, false)?;
+                    timeline.put_page_image(new_tag, 0, lsn, img)?;
                     break;
                 }
             }
