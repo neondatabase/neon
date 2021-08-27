@@ -1,3 +1,4 @@
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpStream;
@@ -6,10 +7,6 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{collections::BTreeMap, path::PathBuf};
-use std::{
-    fs::{self, File, OpenOptions},
-    io::Read,
-};
 
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -234,6 +231,8 @@ impl PostgresNode {
         })
     }
 
+    /// Get basebackup from the pageserver as a tar archive and extract it
+    /// to the `self.pgdata()` directory.
     pub fn do_basebackup(&self) -> Result<()> {
         let pgdata = self.pgdata();
 
@@ -243,26 +242,20 @@ impl PostgresNode {
             .page_server_psql_client()
             .with_context(|| "connecting to page server failed")?;
 
-        let mut copyreader = client
+        let copyreader = client
             .copy_out(sql.as_str())
             .with_context(|| "page server 'basebackup' command failed")?;
 
-        // FIXME: Currently, we slurp the whole tarball into memory, and then extract it,
-        // but we really should do this:
-        //let mut ar = tar::Archive::new(copyreader);
-        let mut buf = vec![];
-        copyreader
-            .read_to_end(&mut buf)
-            .with_context(|| "reading base backup from page server failed")?;
-        let mut ar = tar::Archive::new(buf.as_slice());
-        ar.unpack(&pgdata)
+        // Read the archive directly from the `CopyOutReader`
+        tar::Archive::new(copyreader)
+            .unpack(&pgdata)
             .with_context(|| "extracting page backup failed")?;
 
         Ok(())
     }
 
-    // Connect to a page server, get base backup, and untar it to initialize a
-    // new data directory
+    /// Connect to a pageserver, get basebackup, and untar it to initialize a
+    /// new data directory
     pub fn init_from_page_server(&self, auth_type: AuthType, config_only: bool) -> Result<()> {
         let pgdata = self.pgdata();
 
