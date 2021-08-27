@@ -266,7 +266,7 @@ pub fn find_end_of_wal(
              * we need to parse previous segment.
              * FIXME: handle case when wal record is larger than WAL segment
              */
-            if high_segno > 1 {
+            if high_segno > 2 {
                 let prev_offs = find_end_of_wal_segment(
                     data_dir,
                     high_segno - 1,
