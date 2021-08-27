@@ -570,7 +570,7 @@ mod tests {
         let (wal_end, tli) = find_end_of_wal(&wal_dir, wal_seg_size, true);
         let wal_end = Lsn(wal_end);
         println!("wal_end={}, tli={}", wal_end, tli);
-        assert_eq!(wal_end, "0/2000000".parse::<Lsn>().unwrap());
+        assert_eq!(wal_end, "0/1699D10".parse::<Lsn>().unwrap());
 
         // 4. Get the actual end of WAL by pg_waldump
         let waldump_path = top_path.join("tmp_install/bin/pg_waldump");
