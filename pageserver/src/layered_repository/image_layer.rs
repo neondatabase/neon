@@ -12,9 +12,13 @@
 //!
 //! An image file is constructed using the 'bookfile' crate.
 //!
-//! When a snapshot file needs to be accessed, we slurp the whole file into memory,
-//! into the ImageLayerInner struct. See load() and unload() functions.
-//! TODO: That's very inefficient, we should be smarter.
+//! Only metadata is loaded into memory by the load function.
+//! When images are needed, they are read directly from disk.
+//!
+//! For blocky segments, the images are stored in BLOCKY_IMAGES_CHAPTER.
+//! All the images are required to be BLOCK_SIZE, which allows for random access.
+//!
+//! For non-blocky segments, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
 //!
 use crate::layered_repository::filename::ImageFileName;
 use crate::layered_repository::storage_layer::{Layer, PageReconstructData, SegmentTag};
@@ -22,9 +26,10 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::Bytes;
 use log::*;
+use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
@@ -33,13 +38,16 @@ use std::sync::{Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
 
-use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
 // Magic constant to identify a Zenith segment image file
-static IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
+const IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
 
-static BASE_IMAGES_CHAPTER: u64 = 1;
+/// Contains each block in block # order
+const BLOCKY_IMAGES_CHAPTER: u64 = 1;
+const NONBLOCKY_IMAGE_CHAPTER: u64 = 2;
+
+const BLOCK_SIZE: usize = 8192;
 
 ///
 /// ImageLayer is the in-memory data structure associated with an on-disk image
@@ -60,15 +68,19 @@ pub struct ImageLayer {
     inner: Mutex<ImageLayerInner>,
 }
 
+#[derive(Clone)]
+enum ImageType {
+    Blocky { num_blocks: u32 },
+    NonBlocky,
+}
+
 pub struct ImageLayerInner {
-    /// If false, the 'page_versions' and 'relsizes' have not been
+    /// If false, the 'image_type' has not been
     /// loaded into memory yet.
     loaded: bool,
 
-    /// The data is held in this vector of Bytes buffers, with one
-    /// Bytes for each block. It's indexed by block number (counted from
-    /// the beginning of the segment)
-    base_images: Vec<Bytes>,
+    /// Derived from filename and bookfile chapter metadata
+    image_type: ImageType,
 }
 
 impl Layer for ImageLayer {
@@ -109,37 +121,50 @@ impl Layer for ImageLayer {
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<Option<Lsn>> {
-        let need_base_image_lsn: Option<Lsn>;
-
         assert!(lsn >= self.lsn);
 
-        {
-            let inner = self.load()?;
+        let inner = self.load()?;
 
-            let base_blknum: usize = (blknum % RELISH_SEG_SIZE) as usize;
-            if let Some(img) = inner.base_images.get(base_blknum) {
-                reconstruct_data.page_img = Some(img.clone());
-                need_base_image_lsn = None;
-            } else {
-                bail!(
-                    "no base img found for {} at blk {} at LSN {}",
-                    self.seg,
-                    base_blknum,
-                    lsn
-                );
+        let base_blknum = blknum % RELISH_SEG_SIZE;
+
+        let (_path, book) = self.open_book()?;
+
+        let buf = match &inner.image_type {
+            ImageType::Blocky { num_blocks } => {
+                if base_blknum >= *num_blocks {
+                    bail!(
+                        "no base img found for {} at blk {} at LSN {}",
+                        self.seg,
+                        base_blknum,
+                        lsn
+                    );
+                }
+
+                let mut buf = vec![0u8; BLOCK_SIZE];
+                let offset = BLOCK_SIZE as u64 * base_blknum as u64;
+
+                let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
+                chapter.read_exact_at(&mut buf, offset)?;
+
+                buf
             }
-            // release lock on 'inner'
-        }
+            ImageType::NonBlocky => {
+                ensure!(base_blknum == 0);
+                book.read_chapter(NONBLOCKY_IMAGE_CHAPTER)?.into_vec()
+            }
+        };
 
-        Ok(need_base_image_lsn)
+        reconstruct_data.page_img = Some(Bytes::from(buf));
+        Ok(None)
     }
 
     /// Get size of the segment
     fn get_seg_size(&self, _lsn: Lsn) -> Result<u32> {
         let inner = self.load()?;
-        let result = inner.base_images.len() as u32;
-
-        Ok(result)
+        match inner.image_type {
+            ImageType::Blocky { num_blocks } => Ok(num_blocks),
+            ImageType::NonBlocky => Err(anyhow!("get_seg_size called for non-blocky segment")),
+        }
     }
 
     /// Does this segment exist at given LSN?
@@ -153,7 +178,7 @@ impl Layer for ImageLayer {
     ///
     fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.base_images = Vec::new();
+        inner.image_type = ImageType::Blocky { num_blocks: 0 };
         inner.loaded = false;
         Ok(())
     }
@@ -201,6 +226,14 @@ impl ImageLayer {
         lsn: Lsn,
         base_images: Vec<Bytes>,
     ) -> Result<ImageLayer> {
+        let image_type = if seg.rel.is_blocky() {
+            let num_blocks: u32 = base_images.len().try_into()?;
+            ImageType::Blocky { num_blocks }
+        } else {
+            assert_eq!(base_images.len(), 1);
+            ImageType::NonBlocky
+        };
+
         let layer = ImageLayer {
             conf: conf,
             timelineid: timelineid,
@@ -209,7 +242,7 @@ impl ImageLayer {
             lsn: lsn,
             inner: Mutex::new(ImageLayerInner {
                 loaded: true,
-                base_images: base_images,
+                image_type: image_type.clone(),
             }),
         };
         let inner = layer.inner.lock().unwrap();
@@ -222,11 +255,21 @@ impl ImageLayer {
         let file = File::create(&path)?;
         let book = BookWriter::new(file, IMAGE_FILE_MAGIC)?;
 
-        let mut chapter = book.new_chapter(BASE_IMAGES_CHAPTER);
-        let buf = Vec::ser(&inner.base_images)?;
-
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
+        let book = match &image_type {
+            ImageType::Blocky { .. } => {
+                let mut chapter = book.new_chapter(BLOCKY_IMAGES_CHAPTER);
+                for block_bytes in base_images {
+                    assert_eq!(block_bytes.len(), BLOCK_SIZE);
+                    chapter.write_all(&block_bytes)?;
+                }
+                chapter.close()?
+            }
+            ImageType::NonBlocky => {
+                let mut chapter = book.new_chapter(NONBLOCKY_IMAGE_CHAPTER);
+                chapter.write_all(&base_images[0])?;
+                chapter.close()?
+            }
+        };
 
         book.close()?;
 
@@ -286,6 +329,30 @@ impl ImageLayer {
             return Ok(inner);
         }
 
+        let (path, book) = self.open_book()?;
+
+        let image_type = if self.seg.rel.is_blocky() {
+            let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
+            let images_len = chapter.len();
+            ensure!(images_len % BLOCK_SIZE as u64 == 0);
+            let num_blocks: u32 = (images_len / BLOCK_SIZE as u64).try_into()?;
+            ImageType::Blocky { num_blocks }
+        } else {
+            let _chapter = book.chapter_reader(NONBLOCKY_IMAGE_CHAPTER)?;
+            ImageType::NonBlocky
+        };
+
+        debug!("loaded from {}", &path.display());
+
+        *inner = ImageLayerInner {
+            loaded: true,
+            image_type,
+        };
+
+        Ok(inner)
+    }
+
+    fn open_book(&self) -> Result<(PathBuf, Book<File>)> {
         let path = Self::path_for(
             self.conf,
             self.timelineid,
@@ -299,17 +366,7 @@ impl ImageLayer {
         let file = File::open(&path)?;
         let book = Book::new(file)?;
 
-        let chapter = book.read_chapter(BASE_IMAGES_CHAPTER)?;
-        let base_images = Vec::des(&chapter)?;
-
-        debug!("loaded from {}", &path.display());
-
-        *inner = ImageLayerInner {
-            loaded: true,
-            base_images,
-        };
-
-        Ok(inner)
+        Ok((path, book))
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
@@ -327,7 +384,7 @@ impl ImageLayer {
             lsn: filename.lsn,
             inner: Mutex::new(ImageLayerInner {
                 loaded: false,
-                base_images: Vec::new(),
+                image_type: ImageType::Blocky { num_blocks: 0 },
             }),
         }
     }
