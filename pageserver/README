@@ -8,9 +8,10 @@ The Page Server has a few different duties:
 - Backup to S3
 
 
-The Page Server consists of multiple threads that operate on a shared
-cache of page versions:
 
+
+The Page Server consists of multiple threads that operate on a shared
+repository of page versions:
 
                                            | WAL
                                            V
@@ -23,16 +24,14 @@ cache of page versions:
                   +---------+                              ..........            |    |
                   |         |                              .        .            |    |
  GetPage@LSN      |         |                              . backup .  ------->  | S3 |
-------------->    |  Page   |         page cache           .        .            |    |
+------------->    |  Page   |         repository           .        .            |    |
                   | Service |                              ..........            |    |
    page           |         |                                                    +----+
 <-------------    |         |
-                  +---------+
-
-                             ...................................
-                             .                                 .
-                             . Garbage Collection / Compaction .
-                             ...................................
+                  +---------+      +--------------------+
+		                   |   Checkpointing /  |
+				   | Garbage collection |
+                                   +--------------------+
 
 Legend:
 
@@ -52,7 +51,7 @@ Page Service
 ------------
 
 The Page Service listens for GetPage@LSN requests from the Compute Nodes,
-and responds with pages from the page cache.
+and responds with pages from the repository.
 
 
 WAL Receiver
@@ -61,46 +60,59 @@ WAL Receiver
 The WAL receiver connects to the external WAL safekeeping service (or
 directly to the primary) using PostgreSQL physical streaming
 replication, and continuously receives WAL. It decodes the WAL records,
-and stores them to the page cache repository.
+and stores them to the repository.
 
 
-Page Cache
+Repository
 ----------
 
-The Page Cache is a switchboard to access different Repositories.
+The repository stores all the page versions, or WAL records needed to
+reconstruct them. Each tenant has a separate Repository, which is
+stored in the .zenith/tenants/<tenantid> directory.
 
-#### Repository
-Repository corresponds to one .zenith directory.
-Repository is needed to manage Timelines.
-Each repository has associated WAL redo service.
-
-There is currently only one implementation of the Repository trait,
-LayeredRepository, but it's still a useful abstraction that keeps the
+Repository is an abstract trait, defined in `repository.rs`. It is
+implemented by the LayeredRepository object in
+`layered_repository.rs`. There is only that one implementation of the
+Repository trait, but it's still a useful abstraction that keeps the
 interface for the low-level storage functionality clean. The layered
 storage format is described in layered_repository/README.md.
 
-#### Timeline
-Timeline is a page cache workhorse that accepts page changes
-and serves get_page_at_lsn() and get_rel_size() requests.
-Note: this has nothing to do with PostgreSQL WAL timeline.
+Each repository consists of multiple Timelines. Timeline is a
+workhorse that accepts page changes from the WAL, and serves
+get_page_at_lsn() and get_rel_size() requests. Note: this has nothing
+to do with PostgreSQL WAL timeline. The term "timeline" is mostly
+interchangeable with "branch", there is a one-to-one mapping from
+branch to timeline. A timeline has a unique ID within the tenant,
+represented as 16-byte hex string that never changes, whereas a
+branch is a user-given name for a timeline.
 
-#### Branch
-We can create branch at certain LSN.
-Each Branch lives in a corresponding timeline and has an ancestor.
-
-To get full snapshot of data at certain moment we need to traverse timeline and its ancestors.
-
-#### WAL redo service
-WAL redo service - service that runs PostgreSQL in a special wal_redo mode
-to apply given WAL records over an old page image and return new page image.
+Each repository also has a WAL redo manager associated with it, see
+`walredo.rs`. The WAL redo manager is used to replay PostgreSQL WAL
+records, whenever we need to reconstruct a page version from WAL to
+satisfy a GetPage@LSN request, or to avoid accumulating too much WAL
+for a page. The WAL redo manager uses a Postgres process running in
+special zenith wal-redo mode to do the actual WAL redo, and
+communicates with the process using a pipe.
 
 
-TODO: Garbage Collection / Compaction
--------------------------------------
+Checkpointing / Garbage Collection
+----------------------------------
 
-Periodically, the Garbage Collection / Compaction thread runs
-and applies pending WAL records, and removes old page versions that
-are no longer needed.
+Periodically, the checkpointer thread wakes up and performs housekeeping
+duties on the repository. It has two duties:
+
+### Checkpointing
+
+Flush WAL that has accumulated in memory to disk, so that the old WAL
+can be truncated away in the WAL safekeepers. Also, to free up memory
+for receiving new WAL. This process is called "checkpointing". It's
+similar to checkpointing in PostgreSQL or other DBMSs, but in the page
+server, checkpointing happens on a per-segment basis.
+
+### Garbage collection
+
+Remove old on-disk layer files that are no longer needed according to the
+PITR retention policy
 
 
 TODO: Backup service

@@ -26,8 +26,8 @@ A checkpoint record in the WAL marks a point in the WAL sequence at which it is 
 NOTE: This is an overloaded term.
 
 Whenever enough WAL has been accumulated in memory, the page server []
-writes out the changes in memory into new snapshot files[]. This process
-is called "checkpointing". The page server only creates snapshot files for
+writes out the changes in memory into new layer files[]. This process
+is called "checkpointing". The page server only creates layer files for
 relations that have been modified since the last checkpoint. 
 
 ### Compute node
@@ -40,6 +40,15 @@ Stateless Postgres node that stores data in pageserver.
 
 Each of the separate segmented file sets in which a relation is stored. The main fork is where the actual data resides. There also exist two secondary forks for metadata: the free space map and the visibility map.
 Each PostgreSQL fork is considered a separate relish.
+
+### Layer file
+
+Layered repository on-disk format is based on immutable files.  The
+files are called "layer files". Each file corresponds to one 10 MB
+segment of a PostgreSQL relation fork. There are two kinds of layer
+files: image files and delta files. An image file contains a
+"snapshot" of the segment at a particular LSN, and a delta file
+contains WAL records applicable to the segment, in a range of LSNs.
 
 ### Layered repository
 
@@ -102,6 +111,10 @@ Repository stores multiple timelines, forked off from the same initial call to '
 and has associated WAL redo service.
 One repository corresponds to one Tenant.
 
+### Retention policy
+
+How much history do we need to keep around for PITR and read-only nodes?
+
 ### SLRU
 
 SLRUs include pg_clog, pg_multixact/members, and
@@ -109,16 +122,6 @@ pg_multixact/offsets. There are other SLRUs in PostgreSQL, but
 they don't need to be stored permanently (e.g. pg_subtrans),
 or we do not support them in zenith yet (pg_commit_ts).
 Each SLRU segment is considered a separate relish[].
-
-### Snapshot file
-
-Layered repository on-disk format is based on immutable files.
-The files are called "snapshot files".
-Each snapshot file contains a full snapshot, that is, full copy of all
-pages in the relation, as of the "start LSN". It also contains all WAL
-records applicable to the relation between the start and end
-LSNs. 
-Each snapshot file corresponds to one 10 MB slice of a PostgreSQL relation fork.
 
 ### Tenant (Multitenancy)
 Tenant represents a single customer, interacting with Zenith.

@@ -13,7 +13,7 @@ Intended to be used in integration tests and in CLI tools for local installation
 Documentaion of the Zenith features and concepts.
 Now it is mostly dev documentation.
 
-`monitoring`:
+`/monitoring`:
 
 TODO
 
@@ -72,9 +72,9 @@ The workspace_hack crate exists only to pin down some dependencies.
 Main entry point for the 'zenith' CLI utility.
 TODO: Doesn't it belong to control_plane?
 
-`zenith_metrics`:
+`/zenith_metrics`:
 
-TODO
+Helpers for exposing Prometheus metrics from the server.
 
 `/zenith_utils`:
 
