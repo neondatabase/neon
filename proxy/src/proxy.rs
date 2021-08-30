@@ -182,14 +182,14 @@ impl ProxyConnection {
 
         let hello_message = format!("☀️  Welcome to Zenith!
 
-To proceed with database creation open following link:
+To proceed with database creation, open the following link:
 
-    {}{}
+    {redirect_uri}{sess_id}
 
-It needed to be done once and we will send you '.pgpass' file which will allow you to access or create
+It needs to be done once and we will send you '.pgpass' file, which will allow you to access or create
 databases without opening the browser.
 
-", self.state.conf.redirect_uri,self.psql_session_id);
+", redirect_uri = self.state.conf.redirect_uri, sess_id = self.psql_session_id);
 
         self.pgb
             .write_message_noflush(&BeMessage::AuthenticationOk)?;
