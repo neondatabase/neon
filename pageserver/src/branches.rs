@@ -46,15 +46,22 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     let (_scope_guard, _log_file) = logger::init_logging(&conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;
 
+    // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
+    // process during repository initialization.
+    //
+    // FIXME: That caused trouble, because the WAL redo manager spawned a thread that launched
+    // initdb in the background, and it kept running even after the "zenith init" had exited.
+    // In tests, we started the  page server immediately after that, so that initdb was still
+    // running in the background, and we failed to run initdb again in the same directory. This
+    // has been solved for the rapid init+start case now, but the general race condition remains
+    // if you restart the server quickly. The WAL redo manager doesn't use a separate thread
+    // anymore, but I think that could still happen.
+    let dummy_redo_mgr = Arc::new(crate::walredo::DummyRedoManager {});
+
     if let Some(tenantid) = create_tenant {
         let tenantid = ZTenantId::from_str(tenantid)?;
         println!("initializing tenantid {}", tenantid);
-        create_repo(
-            conf,
-            tenantid,
-            Arc::new(crate::walredo::DummyRedoManager {}),
-        )
-        .with_context(|| "failed to create repo")?;
+        create_repo(conf, tenantid, dummy_redo_mgr).with_context(|| "failed to create repo")?;
     }
     fs::create_dir_all(conf.tenants_path())?;
 
@@ -87,15 +94,6 @@ pub fn create_repo(
 
     let tli = create_timeline(conf, None, &tenantid)?;
 
-    // We don't use tenant manager, because we don't want to spawn the WAL redo thread during
-    // repository initialization.
-    //
-    // FIXME: That caused trouble, because the WAL redo thread launched initdb in the background,
-    // and it kept running even after the "zenith init" had exited. In tests, we started the
-    // page server immediately after that, so that initdb was still running in the background,
-    // and we failed to run initdb again in the same directory. This has been solved for the
-    // rapid init+start case now, but the general race condition remains if you restart the
-    // server quickly.
     let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
         conf,
         wal_redo_manager,
