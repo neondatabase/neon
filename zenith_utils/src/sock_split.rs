@@ -54,12 +54,12 @@ impl BufStream {
     }
 }
 
-pub enum ReadHalf {
+pub enum ReadStream {
     Tcp(BufReader<ArcTcpRead>),
     Tls(rustls_split::ReadHalf<rustls::ServerSession>),
 }
 
-impl io::Read for ReadHalf {
+impl io::Read for ReadStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(reader) => reader.read(buf),
@@ -68,7 +68,7 @@ impl io::Read for ReadHalf {
     }
 }
 
-impl ReadHalf {
+impl ReadStream {
     pub fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.get_ref().shutdown(how),
@@ -77,12 +77,12 @@ impl ReadHalf {
     }
 }
 
-pub enum WriteHalf {
+pub enum WriteStream {
     Tcp(Arc<TcpStream>),
     Tls(rustls_split::WriteHalf<rustls::ServerSession>),
 }
 
-impl WriteHalf {
+impl WriteStream {
     pub fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.shutdown(how),
@@ -91,7 +91,7 @@ impl WriteHalf {
     }
 }
 
-impl io::Write for WriteHalf {
+impl io::Write for WriteStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.as_ref().write(buf),
@@ -107,7 +107,7 @@ impl io::Write for WriteHalf {
     }
 }
 
-pub enum BiDiStream {
+pub enum BidiStream {
     Tcp(BufStream),
     Tls {
         stream: BufStream,
@@ -115,7 +115,7 @@ pub enum BiDiStream {
     },
 }
 
-impl BiDiStream {
+impl BidiStream {
     pub fn from_tcp(stream: TcpStream) -> Self {
         Self::Tcp(BufStream(BufReader::new(ArcTcpRead(Arc::new(stream)))))
     }
@@ -141,13 +141,13 @@ impl BiDiStream {
     }
 
     /// Split the bi-directional stream into two owned read and write halves.
-    pub fn split(self) -> (ReadHalf, WriteHalf) {
+    pub fn split(self) -> (ReadStream, WriteStream) {
         match self {
             Self::Tcp(stream) => {
                 let reader = stream.into_reader();
                 let stream: Arc<TcpStream> = reader.get_ref().0.clone();
 
-                (ReadHalf::Tcp(reader), WriteHalf::Tcp(stream))
+                (ReadStream::Tcp(reader), WriteStream::Tcp(stream))
             }
             Self::Tls { stream, session } => {
                 let reader = stream.into_reader();
@@ -160,7 +160,7 @@ impl BiDiStream {
 
                 let (read_half, write_half) =
                     rustls_split::split(socket, session, read_buf_cfg, write_buf_cfg);
-                (ReadHalf::Tls(read_half), WriteHalf::Tls(write_half))
+                (ReadStream::Tls(read_half), WriteStream::Tls(write_half))
             }
         }
     }
@@ -180,7 +180,7 @@ impl BiDiStream {
     }
 }
 
-impl io::Read for BiDiStream {
+impl io::Read for BidiStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.read(buf),
@@ -189,7 +189,7 @@ impl io::Read for BiDiStream {
     }
 }
 
-impl io::Write for BiDiStream {
+impl io::Write for BidiStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.write(buf),

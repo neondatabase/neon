@@ -4,7 +4,7 @@
 //! is rather narrow, but we can extend it once required.
 
 use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode};
-use crate::sock_split::{BiDiStream, ReadHalf, WriteHalf};
+use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
 use log::*;
@@ -79,16 +79,18 @@ pub enum ProcessMsgResult {
     Break,
 }
 
+/// Always-writeable sock_split stream.
+/// May not be readable. See [`PostgresBackend::take_stream_in`]
 pub enum Stream {
-    BiDirectional(BiDiStream),
-    WriteOnly(WriteHalf),
+    Bidirectional(BidiStream),
+    WriteOnly(WriteStream),
 }
 
 impl Stream {
     fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
         match self {
-            Self::BiDirectional(bidi_stream) => bidi_stream.shutdown(how),
-            Self::WriteOnly(write_half) => write_half.shutdown(how),
+            Self::Bidirectional(bidi_stream) => bidi_stream.shutdown(how),
+            Self::WriteOnly(write_stream) => write_stream.shutdown(how),
         }
     }
 }
@@ -96,15 +98,15 @@ impl Stream {
 impl io::Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
-            Self::BiDirectional(bidi_stream) => bidi_stream.write(buf),
-            Self::WriteOnly(write_half) => write_half.write(buf),
+            Self::Bidirectional(bidi_stream) => bidi_stream.write(buf),
+            Self::WriteOnly(write_stream) => write_stream.write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::BiDirectional(bidi_stream) => bidi_stream.flush(),
-            Self::WriteOnly(write_half) => write_half.flush(),
+            Self::Bidirectional(bidi_stream) => bidi_stream.flush(),
+            Self::WriteOnly(write_stream) => write_stream.flush(),
         }
     }
 }
@@ -141,7 +143,7 @@ impl PostgresBackend {
     ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
         Ok(Self {
-            stream: Some(Stream::BiDirectional(BiDiStream::from_tcp(socket))),
+            stream: Some(Stream::Bidirectional(BidiStream::from_tcp(socket))),
             buf_out: BytesMut::with_capacity(10 * 1024),
             state: ProtoState::Initialization,
             md5_salt: [0u8; 4],
@@ -156,9 +158,9 @@ impl PostgresBackend {
     }
 
     /// Get direct reference (into the Option) to the read stream.
-    fn get_stream_in(&mut self) -> Result<&mut BiDiStream> {
+    fn get_stream_in(&mut self) -> Result<&mut BidiStream> {
         match &mut self.stream {
-            Some(Stream::BiDirectional(stream)) => Ok(stream),
+            Some(Stream::Bidirectional(stream)) => Ok(stream),
             _ => Err(anyhow!("reader taken")),
         }
     }
@@ -167,10 +169,10 @@ impl PostgresBackend {
         &self.peer_addr
     }
 
-    pub fn take_stream_in(&mut self) -> Option<ReadHalf> {
+    pub fn take_stream_in(&mut self) -> Option<ReadStream> {
         let stream = self.stream.take();
         match stream {
-            Some(Stream::BiDirectional(bidi_stream)) => {
+            Some(Stream::Bidirectional(bidi_stream)) => {
                 let (read, write) = bidi_stream.split();
                 self.stream = Some(Stream::WriteOnly(write));
                 Some(read)
@@ -242,9 +244,9 @@ impl PostgresBackend {
 
     pub fn start_tls(&mut self) -> anyhow::Result<()> {
         match self.stream.take() {
-            Some(Stream::BiDirectional(bidi_stream)) => {
+            Some(Stream::Bidirectional(bidi_stream)) => {
                 let session = rustls::ServerSession::new(&self.tls_config.clone().unwrap());
-                self.stream = Some(Stream::BiDirectional(bidi_stream.start_tls(session)?));
+                self.stream = Some(Stream::Bidirectional(bidi_stream.start_tls(session)?));
                 Ok(())
             }
             stream => {
