@@ -111,7 +111,7 @@ INSERT 0 1
 ## Running tests
 
 ```sh
-git clone --recursive https://github.com/libzenith/zenith.git
+git clone --recursive https://github.com/zenithdb/zenith.git
 make # builds also postgres and installs it to ./tmp_install
 cd test_runner
 pytest
@@ -130,4 +130,4 @@ To view your `rustdoc` documentation in a browser, try running `cargo doc --no-d
 - Read `CONTRIBUTING.md` to learn about project code style and practices.
 - Use glossary in [/docs/glossary.md](/docs/glossary.md)
 - To get familiar with a source tree layout, use [/docs/sourcetree.md](/docs/sourcetree.md).
-- To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html 
+- To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html
