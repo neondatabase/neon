@@ -7,17 +7,16 @@
 ///
 use std::{
     collections::HashMap,
-    fs::File,
-    io::{BufReader, Cursor},
     net::{SocketAddr, TcpListener},
     sync::{mpsc, Arc, Mutex},
     thread,
 };
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail, ensure, Context};
 use clap::{App, Arg, ArgMatches};
 
 use cplane_api::DatabaseInfo;
+use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
 
 mod cplane_api;
 mod mgmt;
@@ -37,7 +36,7 @@ pub struct ProxyConf {
     /// control plane address where we would check auth.
     pub cplane_address: SocketAddr,
 
-    pub ssl_config: Option<Arc<rustls::ServerConfig>>,
+    pub ssl_config: Option<Arc<ServerConfig>>,
 }
 
 pub struct ProxyState {
@@ -45,46 +44,36 @@ pub struct ProxyState {
     pub waiters: Mutex<HashMap<String, mpsc::Sender<anyhow::Result<DatabaseInfo>>>>,
 }
 
-fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<rustls::ServerConfig>>> {
-    match (
+fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<ServerConfig>>> {
+    let (key_path, cert_path) = match (
         arg_matches.value_of("ssl-key"),
         arg_matches.value_of("ssl-cert"),
     ) {
-        (Some(ssl_key_path), Some(ssl_cert_path)) => {
-            let key = {
-                let key_bytes = std::fs::read(ssl_key_path).context("SSL key file")?;
-                let mut keys =
-                    rustls::internal::pemfile::rsa_private_keys(&mut Cursor::new(&key_bytes))
-                        .or_else(|_| {
-                            rustls::internal::pemfile::pkcs8_private_keys(&mut Cursor::new(
-                                &key_bytes,
-                            ))
-                        })
-                        .map_err(|_| anyhow!("couldn't read TLS keys"))?;
-                if keys.len() != 1 {
-                    bail!("keys.len() = {} (should be 1)", keys.len());
-                }
-                keys.pop().unwrap()
-            };
+        (Some(key_path), Some(cert_path)) => (key_path, cert_path),
+        (None, None) => return Ok(None),
+        _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
+    };
 
-            let cert_chain = {
-                let mut reader =
-                    BufReader::new(File::open(ssl_cert_path).context("SSL cert file")?);
-                rustls::internal::pemfile::certs(&mut reader)
-                    .map_err(|_| anyhow!("couldn't read TLS certificates"))?
-            };
+    let key = {
+        let key_bytes = std::fs::read(key_path).context("SSL key file")?;
+        let mut keys = pemfile::rsa_private_keys(&mut &key_bytes[..])
+            .or_else(|_| pemfile::pkcs8_private_keys(&mut &key_bytes[..]))
+            .map_err(|_| anyhow!("couldn't read TLS keys"))?;
+        ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
+        keys.pop().unwrap()
+    };
 
-            let mut config = rustls::ServerConfig::new(rustls::NoClientAuth::new());
-            config.set_single_cert(cert_chain, key)?;
-            config.versions = vec![rustls::ProtocolVersion::TLSv1_3];
+    let cert_chain = {
+        let cert_chain_bytes = std::fs::read(cert_path).context("SSL cert file")?;
+        pemfile::certs(&mut &cert_chain_bytes[..])
+            .map_err(|_| anyhow!("couldn't read TLS certificates"))?
+    };
 
-            Ok(Some(Arc::new(config)))
-        }
-        (None, None) => Ok(None),
-        _ => Err(anyhow!(
-            "either both or neither ssl-key and ssl-cert must be specified"
-        )),
-    }
+    let mut config = ServerConfig::new(NoClientAuth::new());
+    config.set_single_cert(cert_chain, key)?;
+    config.versions = vec![ProtocolVersion::TLSv1_3];
+
+    Ok(Some(Arc::new(config)))
 }
 
 fn main() -> anyhow::Result<()> {
