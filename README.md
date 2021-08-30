@@ -13,8 +13,8 @@ Zenith storage engine consists of two major components:
 - WAL service. The service that receives WAL from compute node and ensures that it is stored durably.
 
 Pageserver consists of:
-- Page cache repository - Zenith storage implementation.
-- WAL receiver - service that recieves WAL from WAL service and stores it in the page cache repository.
+- Repository - Zenith storage implementation.
+- WAL receiver - service that receives WAL from WAL service and stores it in the repository.
 - Page service - service that communicates with compute nodes and responds with pages from the repository.
 - WAL redo - service that builds pages from base images and WAL records on Page service request.
 

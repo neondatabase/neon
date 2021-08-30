@@ -1,12 +1,13 @@
 //!
-//! WAL receiver connects to the WAL safekeeper service,
-//! streams WAL, decodes records and saves them in page cache.
+//! WAL receiver connects to the WAL safekeeper service, streams WAL,
+//! decodes records and saves them in the repository for the correct
+//! timeline.
 //!
 //! We keep one WAL receiver active per timeline.
 
-use crate::page_cache;
 use crate::relish::*;
 use crate::restore_local_repo;
+use crate::tenant_mgr;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use anyhow::{Error, Result};
@@ -145,7 +146,7 @@ fn walreceiver_main(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
-    let repository = page_cache::get_repository_for_tenant(tenantid)?;
+    let repository = tenant_mgr::get_repository_for_tenant(tenantid)?;
     let timeline = repository.get_timeline(timelineid).unwrap();
 
     //
@@ -232,9 +233,9 @@ fn walreceiver_main(
                     }
                 }
 
-                // Update the last_valid LSN value in the page cache one more time. We updated
+                // Update the last_valid LSN value in the timeline one more time. We updated
                 // it in the loop above, between each WAL record, but we might have received
-                // a partial record after the last completed record. Our page cache's value
+                // a partial record after the last completed record. Our timeline's value
                 // better reflect that, because GetPage@LSN requests might also point in the
                 // middle of a record, if the request LSN was taken from the server's current
                 // flush ptr.

@@ -1,6 +1,6 @@
 //!
 //! WAL decoder. For each WAL record, it decodes the record to figure out which data blocks
-//! the record affects, to add the records to the page cache.
+//! the record affects, so that they can be stored in repository.
 //!
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::*;

@@ -34,8 +34,8 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::basebackup;
 use crate::branches;
-use crate::page_cache;
 use crate::relish::*;
+use crate::tenant_mgr;
 use crate::walreceiver;
 use crate::PageServerConf;
 
@@ -229,7 +229,7 @@ impl PageServerHandler {
         tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
         // Check that the timeline exists
-        let repository = page_cache::get_repository_for_tenant(&tenantid)?;
+        let repository = tenant_mgr::get_repository_for_tenant(&tenantid)?;
         let timeline = repository
             .get_timeline(timelineid)
             .context(format!("error fetching timeline {}", timelineid))?;
@@ -338,7 +338,7 @@ impl PageServerHandler {
         tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let repository = page_cache::get_repository_for_tenant(&tenantid)?;
+        let repository = tenant_mgr::get_repository_for_tenant(&tenantid)?;
         let timeline = repository
             .get_timeline(timelineid)
             .context(format!("error fetching timeline {}", timelineid))?;
@@ -486,7 +486,7 @@ impl postgres_backend::Handler for PageServerHandler {
             self.check_permission(Some(tenantid))?;
 
             // Check that the timeline exists
-            let repository = page_cache::get_repository_for_tenant(&tenantid)?;
+            let repository = tenant_mgr::get_repository_for_tenant(&tenantid)?;
             repository
                 .get_timeline(timelineid)
                 .context(format!("error fetching timeline {}", timelineid))?;
@@ -550,7 +550,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
 
-            page_cache::create_repository_for_tenant(&self.conf, tenantid)?;
+            tenant_mgr::create_repository_for_tenant(&self.conf, tenantid)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -584,7 +584,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .map(|h| h.as_str().parse())
                 .unwrap_or(Ok(self.conf.gc_horizon))?;
 
-            let repo = page_cache::get_repository_for_tenant(&tenantid)?;
+            let repo = tenant_mgr::get_repository_for_tenant(&tenantid)?;
 
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
 

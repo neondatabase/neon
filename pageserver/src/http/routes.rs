@@ -18,10 +18,9 @@ use zenith_utils::http::{
 
 use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
-use crate::page_cache;
 use crate::{
     branches::{self},
-    PageServerConf, ZTenantId,
+    tenant_mgr, PageServerConf, ZTenantId,
 };
 
 #[derive(Debug)]
@@ -125,7 +124,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
     let response_data = tokio::task::spawn_blocking(move || {
-        page_cache::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
+        tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
     })
     .await
     .map_err(ApiError::from_err)??;

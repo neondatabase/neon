@@ -19,7 +19,7 @@ use anyhow::{ensure, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{branches, http, logger, page_cache, page_service, PageServerConf};
+use pageserver::{branches, http, logger, page_service, tenant_mgr, PageServerConf};
 use zenith_utils::http::endpoint;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
@@ -326,8 +326,8 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     info!("Starting pageserver on {}", conf.listen_addr);
     let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
 
-    // Initialize page cache, this will spawn walredo_thread
-    page_cache::init(conf);
+    // Initialize tenant manager.
+    tenant_mgr::init(conf);
 
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.

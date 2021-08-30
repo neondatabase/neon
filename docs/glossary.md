@@ -62,11 +62,7 @@ This is the unit of data exchange between compute node and pageserver.
 
 ### Pageserver
 
-Zenith storage engine: page cache repositories + wal receiver + page service + wal redo.
-
-### Page cache
-
-This module acts as a switchboard to access different repositories managed by this pageserver.
+Zenith storage engine: repositories + wal receiver + page service + wal redo.
 
 ### Page service
 
@@ -133,8 +129,10 @@ See `docs/multitenancy.md` for more.
 
 ### Timeline
 
-Timeline is a page cache workhorse that accepts page changes
-and serves get_page_at_lsn() and get_rel_size() requests.
+Timeline accepts page changes and serves get_page_at_lsn() and
+get_rel_size() requests. The term "timeline" is used internally
+in the system, but to users they are exposed as "branches", with
+human-friendly names.
 
 NOTE: this has nothing to do with PostgreSQL WAL timelines.
 
@@ -157,7 +155,7 @@ as the acceptor. Those are the standard terms in the Paxos algorithm.
 The WAL receiver connects to the external WAL safekeeping service (or
 directly to the primary) using PostgreSQL physical streaming
 replication, and continuously receives WAL. It decodes the WAL records,
-and stores them to the page cache repository.
+and stores them to the repository.
 
 We keep one WAL receiver active per timeline.
 

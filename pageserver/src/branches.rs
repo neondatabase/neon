@@ -20,8 +20,8 @@ use log::*;
 use zenith_utils::lsn::Lsn;
 
 use crate::logger;
-use crate::page_cache;
 use crate::restore_local_repo;
+use crate::tenant_mgr;
 use crate::walredo::WalRedoManager;
 use crate::{repository::Repository, PageServerConf};
 
@@ -87,7 +87,7 @@ pub fn create_repo(
 
     let tli = create_timeline(conf, None, &tenantid)?;
 
-    // We don't use page_cache here, because we don't want to spawn the WAL redo thread during
+    // We don't use tenant manager, because we don't want to spawn the WAL redo thread during
     // repository initialization.
     //
     // FIXME: That caused trouble, because the WAL redo thread launched initdb in the background,
@@ -203,7 +203,7 @@ pub(crate) fn get_tenants(conf: &PageServerConf) -> Result<Vec<String>> {
 }
 
 pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
-    let repo = page_cache::get_repository_for_tenant(tenantid)?;
+    let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
 
     // Each branch has a corresponding record (text file) in the refs/branches
     // with timeline_id.
@@ -259,7 +259,7 @@ pub(crate) fn create_branch(
     startpoint_str: &str,
     tenantid: &ZTenantId,
 ) -> Result<BranchInfo> {
-    let repo = page_cache::get_repository_for_tenant(tenantid)?;
+    let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
 
     if conf.branch_path(branchname, tenantid).exists() {
         anyhow::bail!("branch {} already exists", branchname);

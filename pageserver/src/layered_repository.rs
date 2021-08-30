@@ -466,8 +466,8 @@ pub struct LayeredTimeline {
     //
     // last_record_lsn points to the end of last processed WAL record.
     // It can lag behind last_valid_lsn, if the WAL receiver has
-    // received some WAL after the end of last record, but not the
-    // whole next record yet. In the page cache, we care about
+    // received some WAL after the end of last record, but not the whole
+    // next record yet. For get_page_at_lsn requests, we care about
     // last_valid_lsn, but if the WAL receiver needs to restart the
     // streaming, it needs to restart at the end of last record, so we
     // track them separately. last_record_lsn should perhaps be in
@@ -790,7 +790,7 @@ impl Timeline for LayeredTimeline {
             .observe_closure_duration(|| self.checkpoint_internal(true))
     }
 
-    /// Remember that WAL has been received and added to the page cache up to the given LSN
+    /// Remember that WAL has been received and added to the timeline up to the given LSN
     fn advance_last_valid_lsn(&self, lsn: Lsn) {
         let old = self.last_valid_lsn.advance(lsn);
 
@@ -824,7 +824,7 @@ impl Timeline for LayeredTimeline {
     }
 
     ///
-    /// Remember the (end of) last valid WAL record remembered in the page cache.
+    /// Remember the (end of) last valid WAL record remembered in the timeline.
     ///
     /// NOTE: this updates last_valid_lsn as well.
     ///
