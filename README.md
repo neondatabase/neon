@@ -67,7 +67,7 @@ main	127.0.0.1:55432	0/1609610	running
 
 4. Now it is possible to connect to postgres and run some queries:
 ```text
-> psql -p55432 -h 127.0.0.1 postgres
+> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
 CREATE TABLE
 postgres=# insert into t values(1,1);
@@ -97,7 +97,7 @@ waiting for server to start.... done
 
 # this new postgres instance will have all the data from 'main' postgres,
 # but all modifications would not affect data in original postgres
-> psql -p55433 -h 127.0.0.1 postgres
+> psql -p55433 -h 127.0.0.1 -U zenith_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
