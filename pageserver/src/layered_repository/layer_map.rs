@@ -13,13 +13,24 @@ use crate::layered_repository::storage_layer::{Layer, SegmentTag};
 use crate::layered_repository::InMemoryLayer;
 use crate::relish::*;
 use anyhow::Result;
+use lazy_static::lazy_static;
 use log::*;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::ops::Bound::Included;
 use std::sync::Arc;
+use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
+
+lazy_static! {
+    static ref NUM_INMEMORY_LAYERS: IntGauge =
+        register_int_gauge!("pageserver_inmemory_layers", "Number of layers in memory")
+            .expect("failed to define a metric");
+    static ref NUM_ONDISK_LAYERS: IntGauge =
+        register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")
+            .expect("failed to define a metric");
+}
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -142,6 +153,8 @@ impl LayerMap {
             layer: layer,
         };
         self.open_segs.push(opensegentry);
+
+        NUM_INMEMORY_LAYERS.inc();
     }
 
     /// Remove the oldest in-memory layer
@@ -151,6 +164,7 @@ impl LayerMap {
 
         let mut segentry = self.segs.get_mut(&segtag).unwrap();
         segentry.open = None;
+        NUM_INMEMORY_LAYERS.dec();
     }
 
     ///
@@ -172,6 +186,7 @@ impl LayerMap {
             };
             self.segs.insert(tag, segentry);
         }
+        NUM_ONDISK_LAYERS.inc();
     }
 
     ///
@@ -186,6 +201,7 @@ impl LayerMap {
         if let Some(segentry) = self.segs.get_mut(&tag) {
             segentry.historic.remove(&start_lsn);
         }
+        NUM_ONDISK_LAYERS.dec();
     }
 
     pub fn list_rels(&self, spcnode: u32, dbnode: u32) -> Result<HashSet<RelTag>> {
