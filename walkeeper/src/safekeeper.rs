@@ -411,16 +411,12 @@ where
         let mut sync_control_file = false;
 
         // Truncate WAL behind VCL
-        if self.s.acceptor_state.epoch < msg.h.term
-            && msg.h.end_lsn >= msg.h.epoch_start_lsn
-            && msg.h.epoch_start_lsn < self.flush_lsn
-        {
-            let endpos = Lsn::max(msg.h.end_lsn, msg.h.epoch_start_lsn);
-            if endpos < self.flush_lsn {
-                self.storage.truncate_wal(&self.s, endpos)?;
+        if self.s.acceptor_state.epoch < msg.h.term && msg.h.end_lsn >= msg.h.epoch_start_lsn {
+            if msg.h.end_lsn < self.flush_lsn {
+                self.storage.truncate_wal(&self.s, msg.h.end_lsn)?;
+                self.flush_lsn = msg.h.end_lsn;
             }
             info!("switched to new epoch {}", msg.h.term);
-            self.flush_lsn = msg.h.end_lsn;
             self.s.acceptor_state.epoch = msg.h.term; /* bump epoch */
             sync_control_file = true;
         }
