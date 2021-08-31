@@ -217,7 +217,7 @@ impl Timeline {
             rmsg = shared_state.sk.process_msg(msg)?;
             // locally available commit lsn. flush_lsn can be smaller than
             // commit_lsn if we are catching up safekeeper.
-            commit_lsn = min(shared_state.sk.flush_lsn, shared_state.sk.s.commit_lsn);
+            commit_lsn = shared_state.sk.commit_lsn;
 
             // if this is AppendResponse, fill in proper hot standby feedback
             if let AcceptorProposerMessage::AppendResponse(ref mut resp) = rmsg {
