@@ -372,7 +372,7 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        Ok(auth::check_permission(claims, tenantid)?)
+        auth::check_permission(claims, tenantid)
     }
 }
 
@@ -389,7 +389,7 @@ impl postgres_backend::Handler for PageServerHandler {
             .as_ref()
             .as_ref()
             .unwrap()
-            .decode(&str::from_utf8(jwt_response)?)?;
+            .decode(str::from_utf8(jwt_response)?)?;
 
         if matches!(data.claims.scope, Scope::Tenant) {
             ensure!(
@@ -425,7 +425,7 @@ impl postgres_backend::Handler for PageServerHandler {
             self.handle_controlfile(pgb)?;
         } else if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
-            let params = params_raw.split(" ").collect::<Vec<_>>();
+            let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(
                 params.len() == 2,
                 "invalid param number for pagestream command"
@@ -484,7 +484,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .get_timeline(timelineid)
                 .context(format!("error fetching timeline {}", timelineid))?;
 
-            walreceiver::launch_wal_receiver(&self.conf, timelineid, &connstr, tenantid.to_owned());
+            walreceiver::launch_wal_receiver(self.conf, timelineid, &connstr, tenantid.to_owned());
 
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("branch_create ") {
@@ -495,7 +495,7 @@ impl postgres_backend::Handler for PageServerHandler {
             // TODO: escaping, to allow branch names with spaces
             let re = Regex::new(r"^branch_create ([[:xdigit:]]+) (\S+) ([^\r\n\s;]+)[\r\n\s;]*;?$")
                 .unwrap();
-            let caps = re.captures(&query_string).ok_or_else(err)?;
+            let caps = re.captures(query_string).ok_or_else(err)?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let branchname = caps.get(2).ok_or_else(err)?.as_str().to_owned();
@@ -504,7 +504,7 @@ impl postgres_backend::Handler for PageServerHandler {
             self.check_permission(Some(tenantid))?;
 
             let branch =
-                branches::create_branch(&self.conf, &branchname, &startpoint_str, &tenantid)?;
+                branches::create_branch(self.conf, &branchname, &startpoint_str, &tenantid)?;
             let branch = serde_json::to_vec(&branch)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
@@ -519,14 +519,14 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
 
-            let branches = crate::branches::get_branches(&self.conf, &tenantid)?;
+            let branches = crate::branches::get_branches(self.conf, &tenantid)?;
             let branches_buf = serde_json::to_vec(&branches)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(&branches_buf)]))?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("tenant_list") {
-            let tenants = crate::branches::get_tenants(&self.conf)?;
+            let tenants = crate::branches::get_tenants(self.conf)?;
             let tenants_buf = serde_json::to_vec(&tenants)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
@@ -537,13 +537,13 @@ impl postgres_backend::Handler for PageServerHandler {
 
             // tenant_create <tenantid>
             let re = Regex::new(r"^tenant_create ([[:xdigit:]]+)$").unwrap();
-            let caps = re.captures(&query_string).ok_or_else(err)?;
+            let caps = re.captures(query_string).ok_or_else(err)?;
 
             self.check_permission(None)?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
 
-            tenant_mgr::create_repository_for_tenant(&self.conf, tenantid)?;
+            tenant_mgr::create_repository_for_tenant(self.conf, tenantid)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -597,39 +597,39 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"elapsed"),
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
-                Some(&result.ondisk_relfiles_total.to_string().as_bytes()),
+                Some(result.ondisk_relfiles_total.to_string().as_bytes()),
                 Some(
-                    &result
+                    result
                         .ondisk_relfiles_needed_by_cutoff
                         .to_string()
                         .as_bytes(),
                 ),
                 Some(
-                    &result
+                    result
                         .ondisk_relfiles_needed_by_branches
                         .to_string()
                         .as_bytes(),
                 ),
-                Some(&result.ondisk_relfiles_not_updated.to_string().as_bytes()),
-                Some(&result.ondisk_relfiles_removed.to_string().as_bytes()),
-                Some(&result.ondisk_relfiles_dropped.to_string().as_bytes()),
-                Some(&result.ondisk_nonrelfiles_total.to_string().as_bytes()),
+                Some(result.ondisk_relfiles_not_updated.to_string().as_bytes()),
+                Some(result.ondisk_relfiles_removed.to_string().as_bytes()),
+                Some(result.ondisk_relfiles_dropped.to_string().as_bytes()),
+                Some(result.ondisk_nonrelfiles_total.to_string().as_bytes()),
                 Some(
-                    &result
+                    result
                         .ondisk_nonrelfiles_needed_by_cutoff
                         .to_string()
                         .as_bytes(),
                 ),
                 Some(
-                    &result
+                    result
                         .ondisk_nonrelfiles_needed_by_branches
                         .to_string()
                         .as_bytes(),
                 ),
-                Some(&result.ondisk_nonrelfiles_not_updated.to_string().as_bytes()),
-                Some(&result.ondisk_nonrelfiles_removed.to_string().as_bytes()),
-                Some(&result.ondisk_nonrelfiles_dropped.to_string().as_bytes()),
-                Some(&result.elapsed.as_millis().to_string().as_bytes()),
+                Some(result.ondisk_nonrelfiles_not_updated.to_string().as_bytes()),
+                Some(result.ondisk_nonrelfiles_removed.to_string().as_bytes()),
+                Some(result.ondisk_nonrelfiles_dropped.to_string().as_bytes()),
+                Some(result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {

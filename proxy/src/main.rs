@@ -143,10 +143,10 @@ fn main() -> anyhow::Result<()> {
         // for each connection.
         thread::Builder::new()
             .name("Proxy thread".into())
-            .spawn(move || proxy::thread_main(&state, pageserver_listener))?,
+            .spawn(move || proxy::thread_main(state, pageserver_listener))?,
         thread::Builder::new()
             .name("Mgmt thread".into())
-            .spawn(move || mgmt::thread_main(&state, mgmt_listener))?,
+            .spawn(move || mgmt::thread_main(state, mgmt_listener))?,
     ];
 
     for t in threads.into_iter() {

@@ -29,7 +29,7 @@ use zenith_utils::lsn::Lsn;
 const MAX_MBR_BLKNO: u32 =
     pg_constants::MAX_MULTIXACT_ID / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
 
-const ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 ///
 /// Import all relation data pages from local disk into the repository.
@@ -130,7 +130,7 @@ pub fn import_timeline_from_postgres_datadir(
     }
     for entry in fs::read_dir(path.join("pg_twophase"))? {
         let entry = entry?;
-        let xid = u32::from_str_radix(&entry.path().to_str().unwrap(), 16)?;
+        let xid = u32::from_str_radix(entry.path().to_str().unwrap(), 16)?;
         import_nonrel_file(timeline, lsn, RelishTag::TwoPhase { xid }, &entry.path())?;
     }
     // TODO: Scan pg_tblspc
@@ -429,7 +429,7 @@ pub fn save_decoded_record(
                 },
                 rpageno,
                 lsn,
-                ZERO_PAGE,
+                ZERO_PAGE.clone(),
             )?;
         } else {
             assert!(info == pg_constants::CLOG_TRUNCATE);
@@ -486,7 +486,7 @@ pub fn save_decoded_record(
                 },
                 rpageno,
                 lsn,
-                ZERO_PAGE,
+                ZERO_PAGE.clone(),
             )?;
         } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
             let pageno = buf.get_u32_le();
@@ -499,7 +499,7 @@ pub fn save_decoded_record(
                 },
                 rpageno,
                 lsn,
-                ZERO_PAGE,
+                ZERO_PAGE.clone(),
             )?;
         } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
             let xlrec = XlMultiXactCreate::decode(&mut buf);
@@ -597,19 +597,16 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
     // TODO This implementation is very inefficient -
     // it scans all non-rels only to find FileNodeMaps
     for tag in timeline.list_nonrels(req_lsn)? {
-        match tag {
-            RelishTag::FileNodeMap { spcnode, dbnode } => {
-                if spcnode == src_tablespace_id && dbnode == src_db_id {
-                    let img = timeline.get_page_at_lsn_nowait(tag, 0, req_lsn)?;
-                    let new_tag = RelishTag::FileNodeMap {
-                        spcnode: tablespace_id,
-                        dbnode: db_id,
-                    };
-                    timeline.put_page_image(new_tag, 0, lsn, img)?;
-                    break;
-                }
+        if let RelishTag::FileNodeMap { spcnode, dbnode } = tag {
+            if spcnode == src_tablespace_id && dbnode == src_db_id {
+                let img = timeline.get_page_at_lsn_nowait(tag, 0, req_lsn)?;
+                let new_tag = RelishTag::FileNodeMap {
+                    spcnode: tablespace_id,
+                    dbnode: db_id,
+                };
+                timeline.put_page_image(new_tag, 0, lsn, img)?;
+                break;
             }
-            _ => {} // do nothing
         }
     }
     info!(
@@ -785,17 +782,14 @@ fn save_clog_truncate_record(
     // instead.
     let req_lsn = min(timeline.get_last_record_lsn(), lsn);
     for obj in timeline.list_nonrels(req_lsn)? {
-        match obj {
-            RelishTag::Slru { slru, segno } => {
-                if slru == SlruKind::Clog {
-                    let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
-                    if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
-                        timeline.put_unlink(RelishTag::Slru { slru, segno }, lsn)?;
-                        trace!("unlink CLOG segment {:>04X} at lsn {}", segno, lsn);
-                    }
+        if let RelishTag::Slru { slru, segno } = obj {
+            if slru == SlruKind::Clog {
+                let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
+                if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
+                    timeline.put_unlink(RelishTag::Slru { slru, segno }, lsn)?;
+                    trace!("unlink CLOG segment {:>04X} at lsn {}", segno, lsn);
                 }
             }
-            _ => {}
         }
     }
 

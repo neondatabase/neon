@@ -209,7 +209,7 @@ impl WalRedoManager for PostgresRedoManager {
             let process = (*process_guard).as_ref().unwrap();
 
             self.runtime
-                .block_on(self.handle_apply_request(&process, &request))
+                .block_on(self.handle_apply_request(process, &request))
         };
         end_time = Instant::now();
 
@@ -453,7 +453,7 @@ impl PostgresRedoProcess {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
-        let datadir = conf.tenant_path(&tenantid).join("wal-redo-datadir");
+        let datadir = conf.tenant_path(tenantid).join("wal-redo-datadir");
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {

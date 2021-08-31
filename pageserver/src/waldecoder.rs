@@ -197,6 +197,7 @@ impl WalStreamDecoder {
 }
 
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct DecodedBkpBlock {
     /* Is this block ref in use? */
     //in_use: bool,
@@ -229,25 +230,7 @@ pub struct DecodedBkpBlock {
 
 impl DecodedBkpBlock {
     pub fn new() -> DecodedBkpBlock {
-        DecodedBkpBlock {
-            rnode_spcnode: 0,
-            rnode_dbnode: 0,
-            rnode_relnode: 0,
-            forknum: 0,
-            blkno: 0,
-
-            flags: 0,
-            has_image: false,
-            apply_image: false,
-            will_init: false,
-            hole_offset: 0,
-            hole_length: 0,
-            bimg_len: 0,
-            bimg_info: 0,
-
-            has_data: false,
-            data_len: 0,
-        }
+        Default::default()
     }
 }
 

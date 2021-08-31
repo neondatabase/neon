@@ -14,6 +14,7 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use bytes::Bytes;
 use log::*;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
 use std::path::PathBuf;
@@ -93,8 +94,8 @@ impl Layer for InMemoryLayer {
         let delta_filename = DeltaFileName {
             seg: self.seg,
             start_lsn: self.start_lsn,
-            end_lsn: end_lsn,
-            dropped: dropped,
+            end_lsn,
+            dropped,
         }
         .to_string();
 
@@ -102,15 +103,15 @@ impl Layer for InMemoryLayer {
     }
 
     fn get_timeline_id(&self) -> ZTimelineId {
-        return self.timelineid;
+        self.timelineid
     }
 
     fn get_seg_tag(&self) -> SegmentTag {
-        return self.seg;
+        self.seg
     }
 
     fn get_start_lsn(&self) -> Lsn {
-        return self.start_lsn;
+        self.start_lsn
     }
 
     fn get_end_lsn(&self) -> Lsn {
@@ -253,6 +254,10 @@ impl Layer for InMemoryLayer {
         Ok(())
     }
 }
+
+// Type alias to simplify InMemoryLayer::freeze signature
+//
+type SuccessorLayers = (Vec<Arc<dyn Layer>>, Option<Arc<InMemoryLayer>>);
 
 impl InMemoryLayer {
     /// Return the oldest page version that's stored in this layer
@@ -429,7 +434,7 @@ impl InMemoryLayer {
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
-                segsizes: segsizes,
+                segsizes,
             }),
             predecessor: Some(src),
         })
@@ -454,7 +459,7 @@ impl InMemoryLayer {
         cutoff_lsn: Lsn,
         // This is needed just to call materialize_page()
         timeline: &LayeredTimeline,
-    ) -> Result<(Vec<Arc<dyn Layer>>, Option<Arc<InMemoryLayer>>)> {
+    ) -> Result<SuccessorLayers> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.seg, self.timelineid, cutoff_lsn
@@ -494,13 +499,17 @@ impl InMemoryLayer {
             before_page_versions = BTreeMap::new();
             after_page_versions = BTreeMap::new();
             for ((blknum, lsn), pv) in inner.page_versions.iter() {
-                if *lsn == end_lsn {
-                    // Page versions at the cutoff LSN will be stored in the
-                    // materialized image layer.
-                } else if *lsn > end_lsn {
-                    after_page_versions.insert((*blknum, *lsn), pv.clone());
-                } else {
-                    before_page_versions.insert((*blknum, *lsn), pv.clone());
+                match lsn.cmp(&end_lsn) {
+                    Ordering::Less => {
+                        before_page_versions.insert((*blknum, *lsn), pv.clone());
+                    }
+                    Ordering::Equal => {
+                        // Page versions at the cutoff LSN will be stored in the
+                        // materialized image layer.
+                    }
+                    Ordering::Greater => {
+                        after_page_versions.insert((*blknum, *lsn), pv.clone());
+                    }
                 }
             }
         } else {

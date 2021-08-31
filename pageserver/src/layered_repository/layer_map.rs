@@ -109,7 +109,7 @@ impl LayerMap {
 
         if let Some(open) = &segentry.open {
             if open.get_start_lsn() <= lsn {
-                let x: Arc<dyn Layer> = Arc::clone(&open) as _;
+                let x: Arc<dyn Layer> = Arc::clone(open) as _;
                 return Some(x);
             }
         }
@@ -119,7 +119,7 @@ impl LayerMap {
             .range((Included(Lsn(0)), Included(lsn)))
             .next_back()
         {
-            let x: Arc<dyn Layer> = Arc::clone(&v) as _;
+            let x: Arc<dyn Layer> = Arc::clone(v) as _;
             Some(x)
         } else {
             None
@@ -132,12 +132,7 @@ impl LayerMap {
     ///
     pub fn get_open(&self, tag: &SegmentTag) -> Option<Arc<InMemoryLayer>> {
         let segentry = self.segs.get(tag)?;
-
-        if let Some(open) = &segentry.open {
-            Some(Arc::clone(open))
-        } else {
-            None
-        }
+        segentry.open.as_ref().map(Arc::clone)
     }
 
     ///
@@ -161,7 +156,7 @@ impl LayerMap {
 
         let opensegentry = OpenSegEntry {
             oldest_pending_lsn: layer.get_oldest_pending_lsn(),
-            layer: layer,
+            layer,
             generation: self.current_generation,
         };
         self.open_segs.push(opensegentry);
