@@ -462,9 +462,11 @@ impl Storage for FileStorage {
                 wal_file = file;
                 partial = false;
             } else {
-				wal_file = OpenOptions::new().write(true).open(&wal_file_partial_path)?;
-				partial = true;
-			}
+                wal_file = OpenOptions::new()
+                    .write(true)
+                    .open(&wal_file_partial_path)?;
+                partial = true;
+            }
             wal_file.seek(SeekFrom::Start(xlogoff as u64))?;
             while xlogoff < wal_seg_size {
                 let bytes_to_write = min(XLOG_BLCKSZ, wal_seg_size - xlogoff);
@@ -494,7 +496,7 @@ impl Storage for FileStorage {
                 .data_dir
                 .join(ztli.to_string())
                 .join(wal_file_name.clone() + ".partial");
-			// TODO: better use fs::try_exists which is currenty avaialble only in nightly build
+            // TODO: better use fs::try_exists which is currenty avaialble only in nightly build
             if wal_file_path.exists() {
                 fs::remove_file(&wal_file_path)?;
             } else if wal_file_partial_path.exists() {
