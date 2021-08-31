@@ -229,7 +229,7 @@ impl ReplicationConn {
 
             start_pos += send_size as u64;
 
-            debug!("Sent WAL to page server up to {}", end_pos);
+            debug!("sent WAL up to {}", end_pos);
 
             // Decide whether to reuse this file. If we don't set wal_file here
             // a new file will be opened next time.
