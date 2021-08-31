@@ -97,6 +97,9 @@ impl WalStreamDecoder {
                 // TODO: verify the remaining fields in the header
 
                 self.lsn += XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
+                if !self.crc_check && self.contlen != hdr.std.xlp_rem_len {
+                    self.contlen = hdr.std.xlp_rem_len; // skip continuation record
+                }
             } else if self.lsn.block_offset() == 0 {
                 if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_SHORT_PHD {
                     return Ok(None);
@@ -116,6 +119,9 @@ impl WalStreamDecoder {
                 // TODO: verify the remaining fields in the header
 
                 self.lsn += XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
+                if !self.crc_check && self.contlen != hdr.xlp_rem_len {
+                    self.contlen = hdr.xlp_rem_len; // skip continuation record
+                }
             } else if self.padlen > 0 {
                 if self.inputbuf.remaining() < self.padlen as usize {
                     return Ok(None);
