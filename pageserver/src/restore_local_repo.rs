@@ -3,6 +3,8 @@
 //! zenith Timeline.
 //!
 use log::*;
+use postgres_ffi::nonrelfile_utils::clogpage_precedes;
+use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
 use std::cmp::min;
 use std::fs;
 use std::fs::File;
@@ -19,8 +21,8 @@ use crate::repository::*;
 use crate::waldecoder::*;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::Oid;
 use postgres_ffi::{pg_constants, CheckPoint, ControlFileData};
-use postgres_ffi::{Oid, TransactionId};
 use zenith_utils::lsn::Lsn;
 
 const MAX_MBR_BLKNO: u32 =
@@ -734,44 +736,6 @@ fn save_xact_record(
         }
     }
     Ok(())
-}
-
-// See TransactionIdPrecedes in transam.c
-fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> bool {
-    /*
-     * If either ID is a permanent XID then we can just do unsigned
-     * comparison.  If both are normal, do a modulo-2^32 comparison.
-     */
-
-    if !(id1 >= pg_constants::FIRST_NORMAL_TRANSACTION_ID)
-        || !(id2 >= pg_constants::FIRST_NORMAL_TRANSACTION_ID)
-    {
-        return id1 < id2;
-    }
-
-    let diff = id1.wrapping_sub(id2) as i32;
-    return diff < 0;
-}
-
-// See CLOGPagePrecedes in clog.c
-fn clogpage_precedes(page1: u32, page2: u32) -> bool {
-    let mut xid1 = page1 * pg_constants::CLOG_XACTS_PER_PAGE;
-    xid1 += pg_constants::FIRST_NORMAL_TRANSACTION_ID + 1;
-    let mut xid2 = page2 * pg_constants::CLOG_XACTS_PER_PAGE;
-    xid2 += pg_constants::FIRST_NORMAL_TRANSACTION_ID + 1;
-
-    return transaction_id_precedes(xid1, xid2)
-        && transaction_id_precedes(xid1, xid2 + pg_constants::CLOG_XACTS_PER_PAGE - 1);
-}
-
-// See SlruMayDeleteSegment() in slru.c
-fn slru_may_delete_clogsegment(segpage: u32, cutoff_page: u32) -> bool {
-    let seg_last_page = segpage + pg_constants::SLRU_PAGES_PER_SEGMENT - 1;
-
-    assert_eq!(segpage % pg_constants::SLRU_PAGES_PER_SEGMENT, 0);
-
-    return clogpage_precedes(segpage, cutoff_page)
-        && clogpage_precedes(seg_last_page, cutoff_page);
 }
 
 fn save_clog_truncate_record(

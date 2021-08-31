@@ -14,3 +14,23 @@ pub mod nonrelfile_utils;
 pub mod pg_constants;
 pub mod relfile_utils;
 pub mod xlog_utils;
+
+//  See TransactionIdIsNormal in transam.h
+pub const fn transaction_id_is_normal(id: TransactionId) -> bool {
+    id > pg_constants::FIRST_NORMAL_TRANSACTION_ID
+}
+
+// See TransactionIdPrecedes in transam.c
+pub const fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> bool {
+    /*
+     * If either ID is a permanent XID then we can just do unsigned
+     * comparison.  If both are normal, do a modulo-2^32 comparison.
+     */
+
+    if !(transaction_id_is_normal(id1)) || !transaction_id_is_normal(id2) {
+        return id1 < id2;
+    }
+
+    let diff = id1.wrapping_sub(id2) as i32;
+    return diff < 0;
+}
