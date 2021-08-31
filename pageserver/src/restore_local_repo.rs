@@ -485,7 +485,7 @@ pub fn save_decoded_record(
                 lsn,
                 ZERO_PAGE,
             )?;
-        } else if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
+        } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
             let pageno = buf.get_u32_le();
             let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
             let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
