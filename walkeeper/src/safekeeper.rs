@@ -521,7 +521,7 @@ mod tests {
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
-            epoch_start_lsn: Lsn(2),
+            epoch_start_lsn: Lsn(3),
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
             commit_lsn: Lsn(0),
