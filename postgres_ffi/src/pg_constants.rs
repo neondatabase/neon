@@ -189,11 +189,11 @@ pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
-pub const PG_MAJORVERSION: &'static str = "14";
+pub const PG_MAJORVERSION: &str = "14";
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
-pub const PGDATA_SUBDIRS: [&'static str; 22] = [
+pub const PGDATA_SUBDIRS: [&str; 22] = [
     "global",
     "pg_wal/archive_status",
     "pg_commit_ts",
@@ -218,11 +218,11 @@ pub const PGDATA_SUBDIRS: [&'static str; 22] = [
     "pg_logical/mappings",
 ];
 
-pub const PGDATA_SPECIAL_FILES: [&'static str; 4] = [
+pub const PGDATA_SPECIAL_FILES: [&str; 4] = [
     "pg_hba.conf",
     "pg_ident.conf",
     "postgresql.conf",
     "postgresql.auto.conf",
 ];
 
-pub static PG_HBA: &'static str = include_str!("../samples/pg_hba.conf");
+pub static PG_HBA: &str = include_str!("../samples/pg_hba.conf");

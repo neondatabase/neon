@@ -246,8 +246,8 @@ impl LayeredRepository {
         tenantid: ZTenantId,
     ) -> LayeredRepository {
         LayeredRepository {
-            tenantid: tenantid,
-            conf: conf,
+            tenantid,
+            conf,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
         }
@@ -902,7 +902,7 @@ impl LayeredTimeline {
 
         while lsn < timeline.ancestor_lsn {
             trace!("going into ancestor {} ", timeline.ancestor_lsn);
-            timeline = &timeline.ancestor_timeline.as_ref().unwrap();
+            timeline = timeline.ancestor_timeline.as_ref().unwrap();
         }
 
         // Now we have the right starting timeline for our search.
@@ -937,7 +937,7 @@ impl LayeredTimeline {
             // If not, check if there's a layer on the ancestor timeline
             if let Some(ancestor) = &timeline.ancestor_timeline {
                 lsn = timeline.ancestor_lsn;
-                timeline = &ancestor.as_ref();
+                timeline = ancestor.as_ref();
                 trace!("recursing into ancestor at {}/{}", timeline.timelineid, lsn);
                 continue;
             }
@@ -1134,7 +1134,7 @@ impl LayeredTimeline {
             }
 
             // freeze it
-            let (new_historics, new_open) = oldest_layer.freeze(last_record_lsn, &self)?;
+            let (new_historics, new_open) = oldest_layer.freeze(last_record_lsn, self)?;
 
             // replace this layer with the new layers that 'freeze' returned
             layers.pop_oldest_open();
@@ -1176,7 +1176,7 @@ impl LayeredTimeline {
         let ancestor_timelineid = self.ancestor_timeline.as_ref().map(|x| x.timelineid);
 
         let metadata = TimelineMetadata {
-            disk_consistent_lsn: disk_consistent_lsn,
+            disk_consistent_lsn,
             prev_record_lsn: ondisk_prev_record_lsn,
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
@@ -1304,18 +1304,14 @@ impl LayeredTimeline {
             doomed_layer.delete()?;
             layers.remove_historic(&*doomed_layer);
 
-            if doomed_layer.is_dropped() {
-                if doomed_layer.get_seg_tag().rel.is_relation() {
-                    result.ondisk_relfiles_dropped += 1;
-                } else {
-                    result.ondisk_nonrelfiles_dropped += 1;
-                }
-            } else {
-                if doomed_layer.get_seg_tag().rel.is_relation() {
-                    result.ondisk_relfiles_removed += 1;
-                } else {
-                    result.ondisk_nonrelfiles_removed += 1;
-                }
+            match (
+                doomed_layer.is_dropped(),
+                doomed_layer.get_seg_tag().rel.is_relation(),
+            ) {
+                (true, true) => result.ondisk_relfiles_dropped += 1,
+                (true, false) => result.ondisk_nonrelfiles_dropped += 1,
+                (false, true) => result.ondisk_relfiles_removed += 1,
+                (false, false) => result.ondisk_nonrelfiles_removed += 1,
             }
         }
 

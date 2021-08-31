@@ -111,8 +111,10 @@ impl DeltaFileName {
             dropped,
         })
     }
+}
 
-    fn to_string(&self) -> String {
+impl fmt::Display for DeltaFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let basename = match self.seg.rel {
             RelishTag::Relation(reltag) => format!(
                 "rel_{}_{}_{}_{}",
@@ -134,11 +136,12 @@ impl DeltaFileName {
                 format!("pg_filenodemap_{}_{}", spcnode, dbnode)
             }
             RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
-            RelishTag::Checkpoint => format!("pg_control_checkpoint"),
-            RelishTag::ControlFile => format!("pg_control"),
+            RelishTag::Checkpoint => "pg_control_checkpoint".to_string(),
+            RelishTag::ControlFile => "pg_control".to_string(),
         };
 
-        format!(
+        write!(
+            f,
             "{}_{}_{:016X}_{:016X}{}",
             basename,
             self.seg.segno,
@@ -146,12 +149,6 @@ impl DeltaFileName {
             u64::from(self.end_lsn),
             if self.dropped { "_DROPPED" } else { "" }
         )
-    }
-}
-
-impl fmt::Display for DeltaFileName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
     }
 }
 
@@ -233,8 +230,10 @@ impl ImageFileName {
 
         Some(ImageFileName { seg, lsn })
     }
+}
 
-    fn to_string(&self) -> String {
+impl fmt::Display for ImageFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let basename = match self.seg.rel {
             RelishTag::Relation(reltag) => format!(
                 "rel_{}_{}_{}_{}",
@@ -256,22 +255,17 @@ impl ImageFileName {
                 format!("pg_filenodemap_{}_{}", spcnode, dbnode)
             }
             RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
-            RelishTag::Checkpoint => format!("pg_control_checkpoint"),
-            RelishTag::ControlFile => format!("pg_control"),
+            RelishTag::Checkpoint => "pg_control_checkpoint".to_string(),
+            RelishTag::ControlFile => "pg_control".to_string(),
         };
 
-        format!(
+        write!(
+            f,
             "{}_{}_{:016X}",
             basename,
             self.seg.segno,
             u64::from(self.lsn),
         )
-    }
-}
-
-impl fmt::Display for ImageFileName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
     }
 }
 
@@ -302,7 +296,7 @@ pub fn list_files(
             warn!("unrecognized filename in timeline dir: {}", fname);
         }
     }
-    return Ok((imgfiles, deltafiles));
+    Ok((imgfiles, deltafiles))
 }
 
 /// Helper enum to hold a PageServerConf, or a path

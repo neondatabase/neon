@@ -148,7 +148,7 @@ impl ReplicationConn {
             }
         });
 
-        let (mut start_pos, mut stop_pos) = Self::parse_start_stop(&cmd)?;
+        let (mut start_pos, mut stop_pos) = Self::parse_start_stop(cmd)?;
 
         let mut wal_seg_size: usize;
         loop {

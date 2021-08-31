@@ -95,13 +95,13 @@ pub fn attach_openapi_ui(
 
 fn parse_token(header_value: &str) -> Result<&str, ApiError> {
     // header must be in form Bearer <token>
-    let (prefix, token) = header_value.split_once(' ').ok_or(ApiError::Unauthorized(
-        "malformed authorization header".to_string(),
-    ))?;
+    let (prefix, token) = header_value
+        .split_once(' ')
+        .ok_or_else(|| ApiError::Unauthorized("malformed authorization header".to_string()))?;
     if prefix != "Bearer" {
-        Err(ApiError::Unauthorized(
+        return Err(ApiError::Unauthorized(
             "malformed authorization header".to_string(),
-        ))?
+        ));
     }
     Ok(token)
 }
@@ -123,9 +123,11 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                         .map_err(|_| ApiError::Unauthorized("malformed jwt token".to_string()))?;
                     req.set_context(data.claims);
                 }
-                None => Err(ApiError::Unauthorized(
-                    "missing authorization header".to_string(),
-                ))?,
+                None => {
+                    return Err(ApiError::Unauthorized(
+                        "missing authorization header".to_string(),
+                    ))
+                }
             }
         }
         Ok(req)

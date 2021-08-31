@@ -127,7 +127,7 @@ impl SharedState {
                     if let CreateControlFile::False = create {
                         bail!("control file is empty");
                     }
-                    return Ok((file, SafeKeeperState::new()));
+                    Ok((file, SafeKeeperState::new()))
                 } else {
                     match SafeKeeperState::des_from(&mut file) {
                         Err(e) => {
@@ -144,7 +144,7 @@ impl SharedState {
                                     SK_FORMAT_VERSION
                                 );
                             }
-                            return Ok((file, s));
+                            Ok((file, s))
                         }
                     }
                 }
@@ -220,11 +220,8 @@ impl Timeline {
             commit_lsn = min(shared_state.sk.flush_lsn, shared_state.sk.s.commit_lsn);
 
             // if this is AppendResponse, fill in proper hot standby feedback
-            match rmsg {
-                AcceptorProposerMessage::AppendResponse(ref mut resp) => {
-                    resp.hs_feedback = shared_state.hs_feedback.clone();
-                }
-                _ => (),
+            if let AcceptorProposerMessage::AppendResponse(ref mut resp) = rmsg {
+                resp.hs_feedback = shared_state.hs_feedback.clone();
             }
         }
         // Ping wal sender that new data might be available.
@@ -401,7 +398,7 @@ impl Storage for FileStorage {
                     {
                         Ok(mut file) => {
                             for _ in 0..(wal_seg_size / XLOG_BLCKSZ) {
-                                file.write_all(&ZERO_BLOCK)?;
+                                file.write_all(ZERO_BLOCK)?;
                             }
                             wal_file = file;
                         }
