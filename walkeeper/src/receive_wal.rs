@@ -324,10 +324,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 
         info!(
             "Start accepting WAL for timeline {} tenant {} address {:?} flush_lsn={}",
-            server_info.timeline_id,
-            server_info.tenant_id,
-            self.peer_addr,
-            my_info.flush_lsn,
+            server_info.timeline_id, server_info.tenant_id, self.peer_addr, my_info.flush_lsn,
         );
         let mut last_rec_lsn = Lsn(0);
         let mut decoder = WalStreamDecoder::new(last_rec_lsn, false);
@@ -408,7 +405,7 @@ impl<'pg> ReceiveWalConn<'pg> {
              * maximum (vcl) determined by WAL proposer during handshake.
              * Switching epoch means that node completes recovery and start writing in the WAL new data.
              */
-            if my_info.epoch < prop.epoch && end_pos > max(my_info.flush_lsn, prop.vcl) {
+            if my_info.epoch < prop.epoch && end_pos >= max(my_info.flush_lsn, prop.vcl) {
                 info!("Switch to new epoch {}", prop.epoch);
                 my_info.epoch = prop.epoch; /* bump epoch */
                 sync_control_file = true;
