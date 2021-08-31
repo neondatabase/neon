@@ -480,6 +480,10 @@ mod tests {
         fn write_wal(&mut self, _s: &SafeKeeperState, _startpos: Lsn, _buf: &[u8]) -> Result<()> {
             Ok(())
         }
+
+        fn truncate_wal(&mut self, _s: &SafeKeeperState, _endpos: Lsn) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
