@@ -164,7 +164,7 @@ fn walreceiver_main(
     // There might be some padding after the last full record, skip it.
     startpoint += startpoint.calc_padding(8u32);
 
-    debug!(
+    info!(
         "last_record_lsn {} starting replication from {} for timeline {}, server is at {}...",
         last_rec_lsn, startpoint, timelineid, end_of_wal
     );
