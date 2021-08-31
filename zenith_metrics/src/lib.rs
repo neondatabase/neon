@@ -42,6 +42,7 @@ lazy_static! {
 // performed by the process.
 // We know the the size of the block, so we can determine the I/O bytes out of it.
 // The value might be not 100% exact, but should be fine for Prometheus metrics in this case.
+#[allow(clippy::unnecessary_cast)]
 fn update_io_metrics() {
     let mut usage = rusage {
         ru_utime: timeval {

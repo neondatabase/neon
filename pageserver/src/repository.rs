@@ -113,7 +113,7 @@ pub trait Timeline: Send + Sync {
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>>;
 
     /// Get a list of non-relational objects
-    fn list_nonrels<'a>(&'a self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
+    fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
@@ -201,6 +201,7 @@ impl WALRecord {
 ///
 /// Tests that should work the same with any Repository/Timeline implementation.
 ///
+#[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
     use super::*;

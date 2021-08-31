@@ -84,10 +84,10 @@ impl<'a> Basebackup<'a> {
         for filepath in pg_constants::PGDATA_SPECIAL_FILES.iter() {
             if *filepath == "pg_hba.conf" {
                 let data = pg_constants::PG_HBA.as_bytes();
-                let header = new_tar_header(&filepath, data.len() as u64)?;
-                self.ar.append(&header, &data[..])?;
+                let header = new_tar_header(filepath, data.len() as u64)?;
+                self.ar.append(&header, data)?;
             } else {
-                let header = new_tar_header(&filepath, 0)?;
+                let header = new_tar_header(filepath, 0)?;
                 self.ar.append(&header, &mut io::empty())?;
             }
         }
@@ -166,14 +166,12 @@ impl<'a> Basebackup<'a> {
             self.lsn,
         )?;
         let path = if spcnode == pg_constants::GLOBALTABLESPACE_OID {
-            let dst_path = "PG_VERSION";
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
-            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, &version_bytes[..])?;
+            let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
+            self.ar.append(&header, version_bytes)?;
 
-            let dst_path = format!("global/PG_VERSION");
-            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, &version_bytes[..])?;
+            let header = new_tar_header("global/PG_VERSION", version_bytes.len() as u64)?;
+            self.ar.append(&header, version_bytes)?;
 
             String::from("global/pg_filenode.map") // filenode map for global tablespace
         } else {
@@ -188,7 +186,7 @@ impl<'a> Basebackup<'a> {
             let dst_path = format!("base/{}/PG_VERSION", dbnode);
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, &version_bytes[..])?;
+            self.ar.append(&header, version_bytes)?;
 
             format!("base/{}/pg_filenode.map", dbnode)
         };

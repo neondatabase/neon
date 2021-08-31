@@ -113,7 +113,7 @@ impl CfgFileParams {
             .auth_type
             .as_ref()
             .map_or(Ok(AuthType::Trust), |auth_type| {
-                AuthType::from_str(&auth_type)
+                AuthType::from_str(auth_type)
             })?;
 
         if !pg_distrib_dir.join("bin/postgres").exists() {
@@ -273,7 +273,7 @@ fn main() -> Result<()> {
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Initialize logger
-    let (_scope_guard, log_file) = logger::init_logging(&conf, "pageserver.log")?;
+    let (_scope_guard, log_file) = logger::init_logging(conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;
 
     // Note: this `info!(...)` macro comes from `log` crate

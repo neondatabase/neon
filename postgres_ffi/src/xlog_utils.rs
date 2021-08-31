@@ -37,6 +37,7 @@ pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = std::mem::size_of::<XLogPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
+#[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 
 pub type XLogRecPtr = u64;
@@ -173,12 +174,11 @@ fn find_end_of_wal_segment(
                 let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
                 wal_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
                 crc = crc32c_append(0, &buf[crc_offs + 4..page_offs + n]);
-                crc = !crc;
             } else {
                 crc ^= 0xFFFFFFFFu32;
                 crc = crc32c_append(crc, &buf[page_offs..page_offs + n]);
-                crc = !crc;
             }
+            crc = !crc;
             rec_offs += n;
             offs += n;
             contlen -= n;
@@ -465,7 +465,7 @@ mod tests {
         let waldump_output = std::str::from_utf8(&waldump_output.stderr).unwrap();
         println!("waldump_output = '{}'", &waldump_output);
         let re = Regex::new(r"invalid record length at (.+):").unwrap();
-        let caps = re.captures(&waldump_output).unwrap();
+        let caps = re.captures(waldump_output).unwrap();
         let waldump_wal_end = Lsn::from_str(caps.get(1).unwrap().as_str()).unwrap();
 
         // 5. Rename file to partial to actually find last valid lsn

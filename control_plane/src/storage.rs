@@ -74,7 +74,10 @@ impl PageServerNode {
             args.extend(&["--auth-type", "ZenithJWT"]);
         }
 
-        create_tenant.map(|tenantid| args.extend(&["--create-tenant", tenantid]));
+        if let Some(tenantid) = create_tenant {
+            args.extend(&["--create-tenant", tenantid])
+        }
+
         let status = cmd
             .args(args)
             .env_clear()

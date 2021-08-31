@@ -95,6 +95,12 @@ impl SafeKeeperState {
     }
 }
 
+impl Default for SafeKeeperState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // protocol messages
 
 /// Initial Proposer -> Acceptor message
@@ -205,7 +211,7 @@ impl ProposerAcceptorMessage {
                 let rec_size = hdr
                     .end_lsn
                     .checked_sub(hdr.begin_lsn)
-                    .ok_or(anyhow!("begin_lsn > end_lsn in AppendRequest"))?
+                    .ok_or_else(|| anyhow!("begin_lsn > end_lsn in AppendRequest"))?
                     .0 as usize;
                 if rec_size > MAX_SEND_SIZE {
                     bail!(
@@ -217,10 +223,7 @@ impl ProposerAcceptorMessage {
                 let mut wal_data_vec: Vec<u8> = vec![0; rec_size];
                 stream.read_exact(&mut wal_data_vec)?;
                 let wal_data = Bytes::from(wal_data_vec);
-                let msg = AppendRequest {
-                    h: hdr,
-                    wal_data: wal_data,
-                };
+                let msg = AppendRequest { h: hdr, wal_data };
 
                 Ok(ProposerAcceptorMessage::AppendRequest(msg))
             }
@@ -378,6 +381,7 @@ where
     }
 
     /// Handle request to append WAL.
+    #[allow(clippy::comparison_chain)]
     fn handle_append_request(&mut self, msg: &AppendRequest) -> Result<AcceptorProposerMessage> {
         // log first AppendRequest from this proposer
         if self.elected_proposer_term < msg.h.term {
@@ -492,7 +496,7 @@ mod tests {
         let mut vote_resp = sk.process_msg(&vote_request);
         match vote_resp.unwrap() {
             AcceptorProposerMessage::VoteResponse(resp) => assert!(resp.vote_given != 0),
-            _ => assert!(false),
+            r => panic!("unexpected response: {:?}", r),
         }
 
         // reboot...
@@ -506,7 +510,7 @@ mod tests {
         vote_resp = sk.process_msg(&vote_request);
         match vote_resp.unwrap() {
             AcceptorProposerMessage::VoteResponse(resp) => assert!(resp.vote_given == 0),
-            _ => assert!(false),
+            r => panic!("unexpected response: {:?}", r),
         }
     }
 
@@ -540,7 +544,7 @@ mod tests {
         ar_hdr.begin_lsn = Lsn(2);
         ar_hdr.end_lsn = Lsn(3);
         append_request = AppendRequest {
-            h: ar_hdr.clone(),
+            h: ar_hdr,
             wal_data: Bytes::from_static(b"b"),
         };
         let resp = sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request));

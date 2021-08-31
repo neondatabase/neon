@@ -56,7 +56,7 @@ impl CPlaneApi {
             md5::compute([stored_hash.as_bytes(), salt].concat())
         );
 
-        let received_hash = std::str::from_utf8(&md5_response)?;
+        let received_hash = std::str::from_utf8(md5_response)?;
 
         println!(
             "auth: {} rh={} sh={} ssh={} {:?}",

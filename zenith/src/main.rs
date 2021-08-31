@@ -359,7 +359,7 @@ fn get_branch_infos(
 }
 
 fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    let pageserver = PageServerNode::from_env(&env);
+    let pageserver = PageServerNode::from_env(env);
     match tenant_match.subcommand() {
         ("list", Some(_)) => {
             for tenant in pageserver.tenant_list()? {
@@ -381,12 +381,12 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
 }
 
 fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    let pageserver = PageServerNode::from_env(&env);
+    let pageserver = PageServerNode::from_env(env);
 
     if let Some(branchname) = branch_match.value_of("branchname") {
         let startpoint_str = branch_match
             .value_of("start-point")
-            .ok_or(anyhow!("Missing start-point"))?;
+            .ok_or_else(|| anyhow!("Missing start-point"))?;
         let tenantid: ZTenantId = branch_match
             .value_of("tenantid")
             .map_or(Ok(env.tenantid), |value| value.parse())?;

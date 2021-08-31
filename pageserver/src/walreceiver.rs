@@ -457,7 +457,7 @@ fn write_wal_file(
                 {
                     Ok(mut file) => {
                         for _ in 0..(wal_seg_size / XLOG_BLCKSZ) {
-                            file.write_all(&ZERO_BLOCK)?;
+                            file.write_all(ZERO_BLOCK)?;
                         }
                         wal_file = file;
                     }

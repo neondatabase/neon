@@ -97,23 +97,23 @@ impl Layer for ImageLayer {
     }
 
     fn get_timeline_id(&self) -> ZTimelineId {
-        return self.timelineid;
+        self.timelineid
     }
 
     fn get_seg_tag(&self) -> SegmentTag {
-        return self.seg;
+        self.seg
     }
 
     fn is_dropped(&self) -> bool {
-        return false;
+        false
     }
 
     fn get_start_lsn(&self) -> Lsn {
-        return self.lsn;
+        self.lsn
     }
 
     fn get_end_lsn(&self) -> Lsn {
-        return self.lsn;
+        self.lsn
     }
 
     /// Look up given page in the file
@@ -255,10 +255,10 @@ impl ImageLayer {
 
         let layer = ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
-            timelineid: timelineid,
-            tenantid: tenantid,
-            seg: seg,
-            lsn: lsn,
+            timelineid,
+            tenantid,
+            seg,
+            lsn,
             inner: Mutex::new(ImageLayerInner {
                 loaded: true,
                 image_type: image_type.clone(),

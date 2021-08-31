@@ -43,7 +43,7 @@ pub struct PointInTime {
 
 pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str>) -> Result<()> {
     // Initialize logger
-    let (_scope_guard, _log_file) = logger::init_logging(&conf, "pageserver.log")?;
+    let (_scope_guard, _log_file) = logger::init_logging(conf, "pageserver.log")?;
     let _log_guard = slog_stdlog::init()?;
 
     // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
@@ -284,7 +284,7 @@ pub(crate) fn create_branch(
     // FIXME: there's a race condition, if you create a branch with the same
     // name concurrently.
     let data = newtli.to_string();
-    fs::write(conf.branch_path(&branchname, tenantid), data)?;
+    fs::write(conf.branch_path(branchname, tenantid), data)?;
 
     Ok(BranchInfo {
         name: branchname.to_string(),
@@ -333,21 +333,21 @@ fn parse_point_in_time(
 
     // Check if it's a tag
     if lsn.is_none() {
-        let tagpath = conf.tag_path(name, &tenantid);
+        let tagpath = conf.tag_path(name, tenantid);
         if tagpath.exists() {
             let pointstr = fs::read_to_string(tagpath)?;
 
-            return parse_point_in_time(conf, &pointstr, &tenantid);
+            return parse_point_in_time(conf, &pointstr, tenantid);
         }
     }
 
     // Check if it's a branch
     // Check if it's branch @ LSN
-    let branchpath = conf.branch_path(name, &tenantid);
+    let branchpath = conf.branch_path(name, tenantid);
     if branchpath.exists() {
         let pointstr = fs::read_to_string(branchpath)?;
 
-        let mut result = parse_point_in_time(conf, &pointstr, &tenantid)?;
+        let mut result = parse_point_in_time(conf, &pointstr, tenantid)?;
 
         result.lsn = lsn.unwrap_or(Lsn(0));
         return Ok(result);
@@ -356,7 +356,7 @@ fn parse_point_in_time(
     // Check if it's a timelineid
     // Check if it's timelineid @ LSN
     if let Ok(timelineid) = ZTimelineId::from_str(name) {
-        let tlipath = conf.timeline_path(&timelineid, &tenantid);
+        let tlipath = conf.timeline_path(&timelineid, tenantid);
         if tlipath.exists() {
             return Ok(PointInTime {
                 timelineid,

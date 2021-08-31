@@ -130,23 +130,23 @@ pub struct DeltaLayerInner {
 
 impl Layer for DeltaLayer {
     fn get_timeline_id(&self) -> ZTimelineId {
-        return self.timelineid;
+        self.timelineid
     }
 
     fn get_seg_tag(&self) -> SegmentTag {
-        return self.seg;
+        self.seg
     }
 
     fn is_dropped(&self) -> bool {
-        return self.dropped;
+        self.dropped
     }
 
     fn get_start_lsn(&self) -> Lsn {
-        return self.start_lsn;
+        self.start_lsn
     }
 
     fn get_end_lsn(&self) -> Lsn {
-        return self.end_lsn;
+        self.end_lsn
     }
 
     fn filename(&self) -> PathBuf {
@@ -358,6 +358,7 @@ impl DeltaLayer {
     /// This is used to write the in-memory layer to disk. The in-memory layer uses the same
     /// data structure with two btreemaps as we do, so passing the btreemaps is currently
     /// expedient.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
@@ -372,16 +373,16 @@ impl DeltaLayer {
     ) -> Result<DeltaLayer> {
         let delta_layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
-            timelineid: timelineid,
-            tenantid: tenantid,
-            seg: seg,
-            start_lsn: start_lsn,
+            timelineid,
+            tenantid,
+            seg,
+            start_lsn,
             end_lsn,
             dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: true,
                 page_version_metas: BTreeMap::new(),
-                relsizes: relsizes,
+                relsizes,
             }),
             predecessor,
         };
