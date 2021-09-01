@@ -47,28 +47,45 @@ impl<'a> Basebackup<'a> {
         timeline: &'a Arc<dyn Timeline>,
         req_lsn: Option<Lsn>,
     ) -> Basebackup<'a> {
+        // current_prev may be zero if we are at the start of timeline branched from old lsn
         let RecordLsn {
-            last: lsn,
-            prev: prev_record_lsn,
-        } = if let Some(lsn) = req_lsn {
-            // FIXME: that wouldn't work since we don't know prev for old LSN's.
-            // Probably it is better to avoid using prev in compute node start
-            // at all and accept the fact that first WAL record in the timeline would
-            // have zero as prev. https://github.com/zenithdb/zenith/issues/506
-            RecordLsn {
-                last: lsn,
-                prev: lsn,
+            last: current_last,
+            prev: current_prev,
+        } = timeline.get_last_record_rlsn();
+
+        // Compute postgres doesn't have any previous WAL files, but the first record that this
+        // postgres is going to write need to have LSN of previous record (xl_prev). So we are
+        // writing prev_lsn to "zenith.signal" file so that postgres can read it during the start.
+        // In some cases we don't know prev_lsn (branch or basebackup @old_lsn) so pass Lsn(0)
+        // instead and embrace the wrong xl_prev in this situations.
+        let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
+            if req_lsn > current_last {
+                // FIXME: now wait_lsn() is inside of list_nonrels() so we don't have a way
+                // to get it from there. It is better to wait just here.
+                (Lsn(0), req_lsn)
+            } else if req_lsn < current_last {
+                // we don't know prev already. We don't currently use basebackup@old_lsn
+                // but may use it for read only replicas in future
+                (Lsn(0), req_lsn)
+            } else {
+                // we are exactly at req_lsn and know prev
+                (current_prev, req_lsn)
             }
         } else {
-            // Atomically get last and prev LSN's
-            timeline.get_last_record_rlsn()
+            // None in req_lsn means that we are branching from the latest LSN
+            (current_prev, current_last)
         };
+
+        info!(
+            "taking basebackup lsn={}, prev_lsn={}",
+            backup_prev, backup_lsn
+        );
 
         Basebackup {
             ar: Builder::new(write),
             timeline,
-            lsn,
-            prev_record_lsn,
+            lsn: backup_lsn,
+            prev_record_lsn: backup_prev,
         }
     }
 
@@ -236,7 +253,7 @@ impl<'a> Basebackup<'a> {
             XLOG_SIZE_OF_XLOG_LONG_PHD as u32,
             pg_constants::WAL_SEGMENT_SIZE,
         );
-        checkpoint.redo = self.lsn.0 + self.lsn.calc_padding(8u32);
+        checkpoint.redo = normalize_lsn(self.lsn, pg_constants::WAL_SEGMENT_SIZE).0;
 
         //reset some fields we don't want to preserve
         //TODO Check this.
@@ -249,9 +266,14 @@ impl<'a> Basebackup<'a> {
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
         // add zenith.signal file
+        let xl_prev = if self.prev_record_lsn == Lsn(0) {
+            0xBAD0 // magic value to indicate that we don't know prev_lsn
+        } else {
+            self.prev_record_lsn.0
+        };
         self.ar.append(
             &new_tar_header("zenith.signal", 8)?,
-            &self.prev_record_lsn.0.to_le_bytes()[..],
+            &xl_prev.to_le_bytes()[..],
         )?;
 
         //send pg_control

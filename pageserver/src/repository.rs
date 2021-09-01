@@ -146,6 +146,7 @@ pub trait Timeline: Send + Sync {
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
     fn get_last_record_lsn(&self) -> Lsn;
     fn get_prev_record_lsn(&self) -> Lsn;
+    fn get_start_lsn(&self) -> Lsn;
 
     ///
     /// Flush to disk all data that was written with the put_* functions
