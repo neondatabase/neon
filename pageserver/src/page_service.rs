@@ -348,7 +348,7 @@ impl PageServerHandler {
 
         /* Send a tarball of the latest snapshot on the timeline */
 
-        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_valid_lsn());
+        let req_lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
 
         {
             let mut writer = CopyDataSink { pgb };

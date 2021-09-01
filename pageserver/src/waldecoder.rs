@@ -179,7 +179,10 @@ impl WalStreamDecoder {
                         self.padlen = self.lsn.calc_padding(8u32) as u32;
                     }
 
-                    let result = (self.lsn, recordbuf);
+                    // Always align resulting LSN on 0x8 boundary -- that is important for getPage()
+                    // and WalReceiver integration. Since this code is used both for WalReceiver and
+                    // initial WAL import let's force alignment right here.
+                    let result = (self.lsn.align(), recordbuf);
                     return Ok(Some(result));
                 }
                 continue;

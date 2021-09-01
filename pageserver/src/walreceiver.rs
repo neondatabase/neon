@@ -153,8 +153,7 @@ fn walreceiver_main(
     // Start streaming the WAL, from where we left off previously.
     //
     // If we had previously received WAL up to some point in the middle of a WAL record, we
-    // better start from the end of last full WAL record, not in the middle of one. Hence,
-    // use 'last_record_lsn' rather than 'last_valid_lsn' here.
+    // better start from the end of last full WAL record, not in the middle of one.
     let mut last_rec_lsn = timeline.get_last_record_lsn();
     let mut startpoint = last_rec_lsn;
 
@@ -163,10 +162,6 @@ fn walreceiver_main(
     }
 
     // There might be some padding after the last full record, skip it.
-    //
-    // FIXME: It probably would be better to always start streaming from the beginning
-    // of the page, or the segment, so that we could check the page/segment headers
-    // too. Just for the sake of paranoia.
     startpoint += startpoint.calc_padding(8u32);
 
     debug!(
@@ -212,6 +207,12 @@ fn walreceiver_main(
                     // Save old checkpoint value to compare with it after decoding WAL record
                     let old_checkpoint_bytes = checkpoint.encode();
                     let decoded = decode_wal_record(recdata.clone());
+
+                    // It is important to deal with the aligned records as lsn in getPage@LSN is
+                    // aligned and can be several bytes bigger. Without this alignment we are
+                    // at risk of hittind a deadlock.
+                    assert!(lsn.is_aligned());
+
                     restore_local_repo::save_decoded_record(
                         &mut checkpoint,
                         &*timeline,
@@ -232,14 +233,6 @@ fn walreceiver_main(
                         )?;
                     }
                 }
-
-                // Update the last_valid LSN value in the timeline one more time. We updated
-                // it in the loop above, between each WAL record, but we might have received
-                // a partial record after the last completed record. Our timeline's value
-                // better reflect that, because GetPage@LSN requests might also point in the
-                // middle of a record, if the request LSN was taken from the server's current
-                // flush ptr.
-                timeline.advance_last_valid_lsn(endlsn);
 
                 // Somewhat arbitrarily, if we have at least 10 complete wal segments (16 MB each),
                 // "checkpoint" the repository to flush all the changes from WAL we've processed
@@ -290,7 +283,7 @@ fn walreceiver_main(
                 );
 
                 if reply_requested {
-                    Some(timeline.get_last_valid_lsn())
+                    Some(timeline.get_last_record_lsn())
                 } else {
                     None
                 }

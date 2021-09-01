@@ -162,7 +162,7 @@ fn bootstrap_timeline(
     run_initdb(conf, &initdb_path)?;
     let pgdata_path = initdb_path;
 
-    let lsn = get_lsn_from_controlfile(&pgdata_path)?;
+    let lsn = get_lsn_from_controlfile(&pgdata_path)?.align();
 
     info!("bootstrap_timeline {:?} at lsn {}", pgdata_path, lsn);
 
@@ -215,7 +215,7 @@ pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Resul
 
             let latest_valid_lsn = repo
                 .get_timeline(timeline_id)
-                .map(|timeline| timeline.get_last_valid_lsn())
+                .map(|timeline| timeline.get_last_record_lsn())
                 .ok();
 
             let ancestor_path = conf.ancestor_path(&timeline_id, tenantid);
