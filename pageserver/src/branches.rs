@@ -264,14 +264,21 @@ pub(crate) fn create_branch(
     }
 
     let mut startpoint = parse_point_in_time(conf, startpoint_str, tenantid)?;
-
+    let timeline = repo.get_timeline(startpoint.timelineid)?;
     if startpoint.lsn == Lsn(0) {
         // Find end of WAL on the old timeline
-        let end_of_wal = repo
-            .get_timeline(startpoint.timelineid)?
-            .get_last_record_lsn();
+        let end_of_wal = timeline.get_last_record_lsn();
         info!("branching at end of WAL: {}", end_of_wal);
         startpoint.lsn = end_of_wal;
+    }
+    startpoint.lsn = startpoint.lsn.align();
+    if timeline.get_start_lsn() > startpoint.lsn {
+        anyhow::bail!(
+            "invalid startpoint {} for the branch {}: less than timeline start {}",
+            startpoint.lsn,
+            branchname,
+            timeline.get_start_lsn()
+        );
     }
 
     // create a new timeline directory for it

@@ -150,12 +150,24 @@ impl Repository for LayeredRepository {
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
         let src_timeline = self.get_timeline(src)?;
 
+        let RecordLsn {
+            last: src_last,
+            prev: src_prev,
+        } = src_timeline.get_last_record_rlsn();
+
+        // Use src_prev from the source timeline only if we branched at the last record.
+        let dst_prev = if src_last == start_lsn {
+            Some(src_prev)
+        } else {
+            None
+        };
+
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
         // into the ancestor.
         let metadata = TimelineMetadata {
             disk_consistent_lsn: start_lsn,
-            prev_record_lsn: Some(src_timeline.get_prev_record_lsn()), // FIXME not atomic with start_lsn
+            prev_record_lsn: dst_prev,
             ancestor_timeline: Some(src),
             ancestor_lsn: start_lsn,
         };
@@ -781,6 +793,14 @@ impl Timeline for LayeredTimeline {
 
     fn get_last_record_rlsn(&self) -> RecordLsn {
         self.last_record_lsn.load()
+    }
+
+    fn get_start_lsn(&self) -> Lsn {
+        if let Some(ancestor) = self.ancestor_timeline.as_ref() {
+            ancestor.get_start_lsn()
+        } else {
+            self.ancestor_lsn
+        }
     }
 }
 

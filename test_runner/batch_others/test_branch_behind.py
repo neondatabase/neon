@@ -1,3 +1,4 @@
+import subprocess
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
 
@@ -74,3 +75,18 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     # All the rows are visible on the main branch
     main_cur.execute('SELECT count(*) FROM foo')
     assert main_cur.fetchone() == (200100, )
+
+    # Check bad lsn's for branching
+
+    # branch at segment boundary
+    zenith_cli.run(["branch", "test_branch_segment_boundary", "test_branch_behind@0/3000000"])
+    pg = postgres.create_start("test_branch_segment_boundary")
+    cur = pg.connect().cursor()
+    cur.execute('SELECT 1')
+    assert cur.fetchone() == (1, )
+
+    # branch at pre-initdb lsn
+    try:
+        zenith_cli.run(["branch", "test_branch_preinitdb", "test_branch_behind@0/42"])
+    except subprocess.CalledProcessError:
+        print("Branch creation with pre-initdb LSN failed (as expected)")
