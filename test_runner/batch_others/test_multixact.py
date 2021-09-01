@@ -1,4 +1,4 @@
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver, check_restored_datadir_content
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -63,3 +63,6 @@ def test_multixact(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_b
 
     # Check that we restored pg_controlfile correctly
     assert next_multixact_id_new == next_multixact_id
+
+    # Check that we restore the content of the datadir correctly
+    check_restored_datadir_content(zenith_cli, pg, lsn, postgres)
