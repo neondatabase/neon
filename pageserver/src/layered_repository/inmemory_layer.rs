@@ -241,8 +241,8 @@ impl Layer for InMemoryLayer {
             .unwrap_or_default();
 
         println!(
-            "----- in-memory layer for {} {}-{} ----",
-            self.seg, self.start_lsn, end_str
+            "----- in-memory layer for tli {} seg {} {}-{} ----",
+            self.timelineid, self.seg, self.start_lsn, end_str
         );
 
         for (k, v) in inner.segsizes.iter() {
@@ -273,7 +273,7 @@ impl InMemoryLayer {
         start_lsn: Lsn,
         oldest_pending_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
-        trace!(
+        println!(
             "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
             seg,
             timelineid,
@@ -327,7 +327,7 @@ impl InMemoryLayer {
     pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<()> {
         assert!(self.seg.blknum_in_seg(blknum));
 
-        trace!(
+        println!(
             "put_page_version blk {} of {} at {}/{}",
             blknum,
             self.seg.rel,
@@ -354,7 +354,7 @@ impl InMemoryLayer {
             // which we've just acquired above
             let oldsize = inner.get_seg_size(lsn);
             if newsize > oldsize {
-                trace!(
+                println!(
                     "enlarging segment {} from {} to {} blocks at {}",
                     self.seg,
                     oldsize,
@@ -388,7 +388,35 @@ impl InMemoryLayer {
         assert!(inner.drop_lsn.is_none());
         inner.drop_lsn = Some(lsn);
 
-        info!("dropped segment {} at {}", self.seg, lsn);
+        println!("dropped segment {} at {}", self.seg, lsn);
+
+        let end_str = inner
+        .drop_lsn
+        .as_ref()
+        .map(|drop_lsn| drop_lsn.to_string())
+        .unwrap_or_default();
+
+        {
+            let mut result = format!(
+                "----- inmemory layer tli {} for {} {}-{} ----\n",
+                self.timelineid, self.seg, self.start_lsn, end_str
+            );
+
+            for (k, v) in inner.segsizes.iter() {
+                result += &format!("{}: {}\n", k, v);
+            }
+            for (k, v) in inner.page_versions.iter() {
+                result += &format!(
+                    "blk {} at {}: {}/{}\n",
+                    k.0,
+                    k.1,
+                    v.page_image.is_some(),
+                    v.record.is_some()
+                );
+            }
+
+            println!("{}", result);
+        }
 
         Ok(())
     }
@@ -407,7 +435,7 @@ impl InMemoryLayer {
     ) -> Result<InMemoryLayer> {
         let seg = src.get_seg_tag();
 
-        trace!(
+        println!(
             "initializing new InMemoryLayer for writing {} on timeline {} at {}",
             seg,
             timelineid,
@@ -457,7 +485,7 @@ impl InMemoryLayer {
         // This is needed just to call materialize_page()
         timeline: &LayeredTimeline,
     ) -> Result<(Vec<Arc<dyn Layer>>, Option<Arc<InMemoryLayer>>)> {
-        info!(
+        println!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.seg, self.timelineid, cutoff_lsn
         );
@@ -533,7 +561,7 @@ impl InMemoryLayer {
             )?;
             let delta_layer_rc: Arc<dyn Layer> = Arc::new(delta_layer);
             frozen_layers.push(delta_layer_rc);
-            trace!(
+            println!(
                 "freeze: created delta layer {} {}-{}",
                 self.seg,
                 self.start_lsn,
@@ -549,7 +577,7 @@ impl InMemoryLayer {
             let imgfile = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
             let imgfile_rc: Arc<dyn Layer> = Arc::new(imgfile);
             frozen_layers.push(Arc::clone(&imgfile_rc));
-            trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
+            println!("freeze: created image layer {} at {}", self.seg, end_lsn);
 
             // If there were any page versions newer than the cutoff, initialize a new in-memory
             // layer to hold them
@@ -566,7 +594,7 @@ impl InMemoryLayer {
                 new_inner.page_versions.append(&mut after_page_versions);
                 new_inner.segsizes.append(&mut after_segsizes);
                 drop(new_inner);
-                trace!("freeze: created new in-mem layer {} {}-", self.seg, end_lsn);
+                println!("freeze: created new in-mem layer {} {}-", self.seg, end_lsn);
 
                 new_open_rc = Some(Arc::new(new_open))
             }
@@ -578,12 +606,21 @@ impl InMemoryLayer {
     /// debugging function to print out the contents of the layer
     #[allow(unused)]
     pub fn dump(&self) -> String {
-        let mut result = format!(
-            "----- inmemory layer for {} {}-> ----\n",
-            self.seg, self.start_lsn
-        );
+
 
         let inner = self.inner.lock().unwrap();
+
+        let end_str = inner
+        .drop_lsn
+        .as_ref()
+        .map(|drop_lsn| drop_lsn.to_string())
+        .unwrap_or_default();
+
+        let mut result =  format!(
+            "----- dump inmemory layer for tli {} seg {} {}-{} ----",
+            self.timelineid, self.seg, self.start_lsn, end_str
+        );
+
 
         for (k, v) in inner.segsizes.iter() {
             result += &format!("{}: {}\n", k, v);
@@ -598,6 +635,8 @@ impl InMemoryLayer {
             );
         }
 
+        println!("inner println {}", result);
         result
+
     }
 }

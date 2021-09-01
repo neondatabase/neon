@@ -149,6 +149,7 @@ impl LayerMap {
         if let Some(segentry) = self.segs.get_mut(&tag) {
             if let Some(_old) = &segentry.open {
                 // FIXME: shouldn't exist, but check
+                println!("insert_open() // FIXME: shouldn't exist, but check");
             }
             segentry.open = Some(Arc::clone(&layer));
         } else {
@@ -220,6 +221,8 @@ impl LayerMap {
     pub fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
         let mut rels: HashSet<RelTag> = HashSet::new();
 
+        println!("layer list_rels()");
+
         for (seg, segentry) in self.segs.iter() {
             if let RelishTag::Relation(reltag) = seg.rel {
                 if (spcnode == 0 || reltag.spcnode == spcnode)
@@ -227,16 +230,32 @@ impl LayerMap {
                 {
                     // Add only if it exists at the requested LSN.
                     if let Some(open) = &segentry.open {
+                        println!("explore segentry.open {:?}", open.filename());
+
                         if open.get_end_lsn() > lsn && open.get_start_lsn() <= lsn {
                             rels.insert(reltag);
+                            println!("found rel {} at lsn {} in open layer start_lsn {} end lsn {}",
+                             reltag, lsn, open.get_start_lsn(), open.get_end_lsn());
+                            println!("{}", open.dump());
+
+                        }
+                        else
+                        {
+                            println!("found DROPPED rel {} at lsn {} in open layer start_lsn {} end lsn {}",
+                            reltag, lsn, open.get_start_lsn(), open.get_end_lsn());
+                            println!("{}", open.dump());  
                         }
                     } else if let Some((l_start_lsn, layer)) = segentry
                         .historic
                         .range((Included(Lsn(0)), Included(lsn)))
                         .next_back()
                     {
+                        println!("explore historic segment {:?}", layer.filename());
+
                         if !layer.is_dropped() && l_start_lsn <= &lsn {
                             rels.insert(reltag);
+                            println!("found rel {} in historic layer", reltag);
+                            layer.dump()?;
                         }
                     }
                 }

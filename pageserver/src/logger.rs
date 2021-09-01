@@ -24,7 +24,7 @@ pub fn init_logging(
         if record.level().is_at_least(slog::Level::Info) {
             return true;
         }
-        false
+        true
     });
     let drain = std::sync::Mutex::new(drain).fuse();
     let logger = slog::Logger::root(

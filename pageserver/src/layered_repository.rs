@@ -583,7 +583,7 @@ impl Timeline for LayeredTimeline {
     }
 
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
-        trace!("list_rels called at {}", lsn);
+        println!("list_rels called at {}", lsn);
 
         // List all rels in this timeline, and all its ancestors.
         let mut all_rels = HashSet::new();
@@ -987,7 +987,7 @@ impl LayeredTimeline {
             if prev_layer.get_timeline_id() != self.timelineid {
                 // First modification on this timeline
                 start_lsn = self.ancestor_lsn;
-                trace!(
+                println!(
                     "creating file for write for {} at branch point {}/{}",
                     seg,
                     self.timelineid,
@@ -995,14 +995,14 @@ impl LayeredTimeline {
                 );
             } else {
                 start_lsn = prev_layer.get_end_lsn();
-                trace!(
+                println!(
                     "creating file for write for {} after previous layer {}/{}",
                     seg,
                     self.timelineid,
                     start_lsn
                 );
             }
-            trace!(
+            println!(
                 "prev layer is at {}/{} - {}",
                 prev_layer.get_timeline_id(),
                 prev_layer.get_start_lsn(),
@@ -1018,7 +1018,7 @@ impl LayeredTimeline {
             )?;
         } else {
             // New relation.
-            trace!(
+            println!(
                 "creating layer for write for new rel {} at {}/{}",
                 seg,
                 self.timelineid,
@@ -1030,6 +1030,7 @@ impl LayeredTimeline {
         }
 
         let mut layers = self.layers.lock().unwrap();
+        println!("before layers.insert_open {:?}", layer.filename());
         let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
         layers.insert_open(Arc::clone(&layer_rc));
 
@@ -1090,7 +1091,7 @@ impl LayeredTimeline {
             prev: prev_record_lsn,
         } = self.last_record_lsn.load();
 
-        trace!(
+        println!(
             "checkpointing timeline {} at {}",
             self.timelineid,
             last_record_lsn
