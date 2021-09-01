@@ -680,7 +680,6 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
 
 /// Subroutine of save_decoded_record(), to handle an XLOG_XACT_* records.
 ///
-/// We are currently only interested in the dropped relations.
 fn save_xact_record(
     timeline: &dyn Timeline,
     lsn: Lsn,
