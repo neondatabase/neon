@@ -490,12 +490,6 @@ impl InMemoryLayer {
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
 
-        // write a new base image layer at the cutoff point
-        let imgfile = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
-        let imgfile_rc: Arc<dyn Layer> = Arc::new(imgfile);
-        frozen_layers.push(Arc::clone(&imgfile_rc));
-        trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
-
         if self.start_lsn != end_lsn {
             // Write the page versions before the cutoff to disk.
             let delta_layer = DeltaLayer::create(
@@ -522,29 +516,36 @@ impl InMemoryLayer {
             assert!(before_page_versions.is_empty());
         }
 
-        // If there were any "new" page versions, initialize a new in-memory layer to hold
-        // them
-        let new_open = if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
-            let new_open = Self::create_successor_layer(
-                self.conf,
-                imgfile_rc,
-                self.timelineid,
-                self.tenantid,
-                end_lsn,
-                end_lsn,
-            )?;
-            let mut new_inner = new_open.inner.lock().unwrap();
-            new_inner.page_versions.append(&mut after_page_versions);
-            new_inner.segsizes.append(&mut after_segsizes);
-            drop(new_inner);
-            trace!("freeze: created new in-mem layer {} {}-", self.seg, end_lsn);
+        let mut new_open_rc = None;
+        if !dropped {
+            // Write a new base image layer at the cutoff point
+            let imgfile = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
+            let imgfile_rc: Arc<dyn Layer> = Arc::new(imgfile);
+            frozen_layers.push(Arc::clone(&imgfile_rc));
+            trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
 
-            Some(Arc::new(new_open))
-        } else {
-            None
-        };
+            // If there were any page versions newer than the cutoff, initialize a new in-memory
+            // layer to hold them
+            if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
+                let new_open = Self::create_successor_layer(
+                    self.conf,
+                    imgfile_rc,
+                    self.timelineid,
+                    self.tenantid,
+                    end_lsn,
+                    end_lsn,
+                )?;
+                let mut new_inner = new_open.inner.lock().unwrap();
+                new_inner.page_versions.append(&mut after_page_versions);
+                new_inner.segsizes.append(&mut after_segsizes);
+                drop(new_inner);
+                trace!("freeze: created new in-mem layer {} {}-", self.seg, end_lsn);
 
-        Ok((frozen_layers, new_open))
+                new_open_rc = Some(Arc::new(new_open))
+            }
+        }
+
+        Ok((frozen_layers, new_open_rc))
     }
 
     /// debugging function to print out the contents of the layer
