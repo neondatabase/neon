@@ -46,8 +46,8 @@ fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId, tenantid: ZT
     let me_conf: Config = me_connstr.parse().unwrap();
     let (host, port) = connection_host_port(&me_conf);
     let callme = format!(
-        "callmemaybe {} {} host={} port={} options='-c ztimelineid={}'",
-        tenantid, timelineid, host, port, timelineid,
+        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={}'",
+        tenantid, timelineid, host, port, timelineid, tenantid,
     );
 
     loop {

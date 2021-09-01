@@ -6,14 +6,14 @@ use crate::receive_wal::ReceiveWalConn;
 use crate::replication::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use std::str::FromStr;
 use std::sync::Arc;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor};
-use zenith_utils::zid::ZTimelineId;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::timeline::CreateControlFile;
 
@@ -23,19 +23,25 @@ pub struct SendWalHandler {
     pub conf: WalAcceptorConf,
     /// assigned application name
     pub appname: Option<String>,
+    pub tenantid: Option<ZTenantId>,
     pub timelineid: Option<ZTimelineId>,
     pub timeline: Option<Arc<Timeline>>,
 }
 
 impl postgres_backend::Handler for SendWalHandler {
     fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupMessage) -> Result<()> {
-        match sm.params.get("ztimelineid") {
-            Some(ref ztimelineid) => {
-                let ztlid = ZTimelineId::from_str(ztimelineid)?;
-                self.timelineid = Some(ztlid);
-            }
-            _ => bail!("timelineid is required"),
-        }
+        let ztimelineid = sm
+            .params
+            .get("ztimelineid")
+            .ok_or(anyhow!("timelineid is required"))?;
+        self.timelineid = Some(ZTimelineId::from_str(ztimelineid)?);
+
+        let ztenantid = sm
+            .params
+            .get("ztenantid")
+            .ok_or(anyhow!("tenantid is required"))?;
+        self.tenantid = Some(ZTenantId::from_str(ztenantid)?);
+
         if let Some(app_name) = sm.params.get("application_name") {
             self.appname = Some(app_name.clone());
         }
@@ -48,12 +54,14 @@ impl postgres_backend::Handler for SendWalHandler {
             if query_string.starts_with(b"START_WAL_PUSH") {
                 self.timeline.set(
                     &self.conf,
+                    self.tenantid.unwrap(),
                     self.timelineid.unwrap(),
                     CreateControlFile::True,
                 )?;
             } else {
                 self.timeline.set(
                     &self.conf,
+                    self.tenantid.unwrap(),
                     self.timelineid.unwrap(),
                     CreateControlFile::False,
                 )?;
@@ -79,6 +87,7 @@ impl SendWalHandler {
         SendWalHandler {
             conf,
             appname: None,
+            tenantid: None,
             timelineid: None,
             timeline: None,
         }
