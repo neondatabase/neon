@@ -31,6 +31,7 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
+
     let metrics = zenith_metrics::gather();
     encoder.encode(&metrics, &mut buffer).unwrap();
 
