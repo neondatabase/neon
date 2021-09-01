@@ -8,7 +8,7 @@ Prerequisites:
   packages are stale, as it commonly happens, so manual installation is not
   recommended.
   Run `pipenv shell` to activate the venv or use `pipenv run` to run a single
-  command in the venv, e.g. `pipenv run pytests`.
+  command in the venv, e.g. `pipenv run pytest`.
 - Zenith and Postgres binaries
     - See the root README.md for build directions
     - Tests can be run from the git tree; or see the environment variables
