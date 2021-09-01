@@ -26,6 +26,7 @@ use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use zenith_utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
 pub const XLOG_BLCKSZ: usize = 8192;
@@ -87,6 +88,21 @@ pub fn IsXLogFileName(fname: &str) -> bool {
 #[allow(non_snake_case)]
 pub fn IsPartialXLogFileName(fname: &str) -> bool {
     fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
+}
+
+/// If LSN points to the beginning of the page, then shift it to first record,
+/// otherwise align on 8-bytes boundary (required for WAL records)
+pub fn normalize_lsn(lsn: Lsn, seg_sz: usize) -> Lsn {
+    if lsn.0 % XLOG_BLCKSZ as u64 == 0 {
+        let hdr_size = if lsn.0 % seg_sz as u64 == 0 {
+            XLOG_SIZE_OF_XLOG_LONG_PHD
+        } else {
+            XLOG_SIZE_OF_XLOG_SHORT_PHD
+        };
+        lsn + hdr_size as u64
+    } else {
+        lsn.align()
+    }
 }
 
 pub fn get_current_timestamp() -> TimestampTz {
@@ -416,7 +432,6 @@ mod tests {
     use super::*;
     use regex::Regex;
     use std::{env, process::Command, str::FromStr};
-    use zenith_utils::lsn::Lsn;
 
     // Run find_end_of_wal against file in test_wal dir
     // Ensure that it finds last record correctly
