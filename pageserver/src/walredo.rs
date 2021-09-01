@@ -44,9 +44,12 @@ use zenith_utils::zid::ZTenantId;
 
 use crate::relish::*;
 use crate::repository::WALRecord;
+use crate::waldecoder::XlMultiXactCreate;
 use crate::waldecoder::XlXactParsedRecord;
-use crate::waldecoder::{MultiXactId, XlMultiXactCreate};
 use crate::PageServerConf;
+use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
+use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
+use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::XLogRecord;
@@ -215,24 +218,6 @@ impl WalRedoManager for PostgresRedoManager {
 
         result
     }
-}
-
-fn mx_offset_to_flags_offset(xid: MultiXactId) -> usize {
-    ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32) as u16
-        % pg_constants::MULTIXACT_MEMBERGROUPS_PER_PAGE
-        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE) as usize
-}
-
-fn mx_offset_to_flags_bitshift(xid: MultiXactId) -> u16 {
-    (xid as u16) % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP
-        * pg_constants::MXACT_MEMBER_BITS_PER_XACT
-}
-
-/* Location (byte offset within page) of TransactionId of given member */
-fn mx_offset_to_member_offset(xid: MultiXactId) -> usize {
-    mx_offset_to_flags_offset(xid)
-        + (pg_constants::MULTIXACT_FLAGBYTES_PER_GROUP
-            + (xid as u16 % pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP) * 4) as usize
 }
 
 impl PostgresRedoManager {
