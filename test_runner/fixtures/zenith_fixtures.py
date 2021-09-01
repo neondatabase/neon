@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import time
+import filecmp
 
 from contextlib import closing
 from pathlib import Path
@@ -597,6 +598,23 @@ class Postgres(PgProtocol):
         self.stop()
 
 
+    def list_files_to_compare(self):
+        pgdata_files = []
+        for root, _file, filenames in os.walk(self.pgdata_dir):
+            for filename in filenames:
+                rel_dir = os.path.relpath(root, self.pgdata_dir)
+                # Skip some dirs and files we don't want to compare
+                skip_dirs = ['pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical']
+                skip_files = ['pg_internal.init', 'pg.log', 'zenith.signal', 'postgresql.conf',
+                            'postmaster.opts', 'postmaster.pid', 'pg_control']
+                if rel_dir not in skip_dirs and filename not in skip_files:
+                    rel_file = os.path.join(rel_dir, filename)
+                    pgdata_files.append(rel_file)
+
+        pgdata_files.sort()
+        print(pgdata_files)
+        return pgdata_files
+
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
     def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, initial_tenant: str, base_port: int = 55431):
@@ -924,3 +942,41 @@ class TenantFactory:
 @zenfixture
 def tenant_factory(zenith_cli: ZenithCli):
     return TenantFactory(zenith_cli)
+
+
+# pg is the existing comute node we want to compare our basebackup to
+# lsn is the latest lsn of this node
+def check_restored_datadir_content(zenith_cli, pg, lsn, postgres: PostgresFactory):
+    # stop postgres to ensure that files won't change
+    pg.stop()
+
+    # list files we're going to compare
+    pgdata_files = pg.list_files_to_compare()
+
+    # create new branch, but don't start postgres
+    # We only need 'basebackup' result here.
+    zenith_cli.run(
+        ["branch", "new", pg.branch + "@" + lsn])
+
+    pg2 = postgres.create('new')
+    print('postgres is created on new branch')
+
+    print('files in a basebackup')
+    # list files we're going to compare
+    pgdata_files2 = pg2.list_files_to_compare()
+
+    # check that file sets are equal
+    assert pgdata_files == pgdata_files2
+
+    # compare content of the files
+    # filecmp returns (match, mismatch, error) lists
+    # We've already filtered all mismatching files in list_files_to_compare(),
+    # so here expect that the content is identical
+    (match, mismatch, error) = filecmp.cmpfiles(pg.pgdata_dir,
+                                                pg2.pgdata_dir,
+                                                pgdata_files,
+                                                shallow=False)
+    print('filecmp result mismatch and error lists:')
+    print(mismatch)
+    print(error)
+    assert (mismatch, error) == ([], [])
