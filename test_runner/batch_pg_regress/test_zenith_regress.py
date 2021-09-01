@@ -1,7 +1,7 @@
 import os
 
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import PostgresFactory
+from fixtures.zenith_fixtures import PostgresFactory, check_restored_datadir_content
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -50,3 +50,10 @@ def test_zenith_regress(postgres: PostgresFactory, pg_bin, zenith_cli, test_outp
     # logs the exact same data to `regression.out` anyway.
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env, cwd=runpath)
+
+        # checkpoint one more time to ensure that the lsn we get is the latest one
+        pg.safe_psql('CHECKPOINT')
+        lsn = pg.safe_psql('select pg_current_wal_insert_lsn()')[0][0]
+
+        # Check that we restore the content of the datadir correctly
+        check_restored_datadir_content(zenith_cli, pg, lsn, postgres)

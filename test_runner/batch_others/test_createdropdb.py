@@ -2,7 +2,7 @@ import os
 import pathlib
 
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory, ZenithCli
+from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory, ZenithCli, check_restored_datadir_content
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -69,6 +69,8 @@ def test_dropdb(
         with conn.cursor() as cur:
             cur.execute('DROP DATABASE foodb')
 
+            cur.execute('CHECKPOINT')
+
             cur.execute('SELECT pg_current_wal_insert_lsn()')
             lsn_after_drop = cur.fetchone()[0]
 
@@ -94,3 +96,6 @@ def test_dropdb(
     print(dbpath)
 
     assert os.path.isdir(dbpath) == False
+
+    # Check that we restore the content of the datadir correctly
+    check_restored_datadir_content(zenith_cli, pg, lsn_after_drop, postgres)
