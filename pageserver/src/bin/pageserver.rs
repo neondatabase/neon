@@ -281,6 +281,22 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
     // TODO: Check that it looks like a valid repository before going further
 
+    // bind sockets before daemonizing so we report errors early and do not return until we are listening
+    info!(
+        "Starting pageserver http handler on {}",
+        conf.http_endpoint_addr
+    );
+    let http_listener = TcpListener::bind(conf.http_endpoint_addr.clone())?;
+
+    info!(
+        "Starting pageserver pg protocol handler on {}",
+        conf.listen_addr
+    );
+    let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
+
+    // Initialize tenant manager.
+    tenant_mgr::init(conf);
+
     if conf.daemonize {
         info!("daemonizing...");
 
@@ -301,6 +317,9 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         }
     }
 
+    // keep join handles for spawned threads
+    let mut join_handles = vec![];
+
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
         AuthType::Trust | AuthType::MD5 => None,
@@ -313,21 +332,16 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     info!("Using auth: {:#?}", conf.auth_type);
 
     // Spawn a new thread for the http endpoint
+    // bind before launching separate thread so the error reported before startup exits
     let cloned = auth.clone();
-    thread::Builder::new()
+    let http_endpoint_thread = thread::Builder::new()
         .name("http_endpoint_thread".into())
         .spawn(move || {
             let router = http::make_router(conf, cloned);
-            endpoint::serve_thread_main(router, conf.http_endpoint_addr.clone())
+            endpoint::serve_thread_main(router, http_listener)
         })?;
 
-    // Check that we can bind to address before starting threads to simplify shutdown
-    // sequence if port is occupied.
-    info!("Starting pageserver on {}", conf.listen_addr);
-    let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
-
-    // Initialize tenant manager.
-    tenant_mgr::init(conf);
+    join_handles.push(http_endpoint_thread);
 
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.
@@ -337,9 +351,13 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
             page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
         })?;
 
-    page_service_thread
-        .join()
-        .expect("Page service thread has panicked")?;
+    join_handles.push(page_service_thread);
 
+    for handle in join_handles.into_iter() {
+        handle
+            .join()
+            .expect("thread panicked")
+            .expect("thread exited with an error")
+    }
     Ok(())
 }

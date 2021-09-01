@@ -1,3 +1,5 @@
+use std::net::TcpListener;
+
 use crate::auth::{self, Claims, JwtAuth};
 use crate::http::error;
 use crate::zid::ZTenantId;
@@ -144,10 +146,9 @@ pub fn check_permission(req: &Request<Body>, tenantid: Option<ZTenantId>) -> Res
 
 pub fn serve_thread_main(
     router_builder: RouterBuilder<hyper::Body, ApiError>,
-    addr: String,
+    listener: TcpListener,
 ) -> anyhow::Result<()> {
-    let addr = addr.parse()?;
-    log::info!("Starting an http endpoint at {}", addr);
+    log::info!("Starting a http endoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
@@ -159,7 +160,7 @@ pub fn serve_thread_main(
 
     let _guard = runtime.enter();
 
-    let server = Server::bind(&addr).serve(service);
+    let server = Server::from_tcp(listener)?.serve(service);
 
     runtime.block_on(server)?;
 
