@@ -61,6 +61,11 @@ fn main() {
         //
         // These are the types and constants that we want to generate bindings for
         //
+        .allowlist_type("BlockNumber")
+        .allowlist_type("OffsetNumber")
+        .allowlist_type("MultiXactId")
+        .allowlist_type("MultiXactOffset")
+        .allowlist_type("MultiXactStatus")
         .allowlist_type("ControlFileData")
         .allowlist_type("CheckPoint")
         .allowlist_type("FullTransactionId")

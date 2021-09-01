@@ -10,16 +10,11 @@ use postgres_ffi::xlog_utils::*;
 use postgres_ffi::XLogLongPageHeaderData;
 use postgres_ffi::XLogPageHeaderData;
 use postgres_ffi::XLogRecord;
-use postgres_ffi::{Oid, TransactionId};
+use postgres_ffi::{BlockNumber, OffsetNumber};
+use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use std::cmp::min;
 use thiserror::Error;
 use zenith_utils::lsn::Lsn;
-
-pub type BlockNumber = u32;
-pub type OffsetNumber = u16;
-pub type MultiXactId = TransactionId;
-pub type MultiXactOffset = u32;
-pub type MultiXactStatus = u32;
 
 #[allow(dead_code)]
 pub struct WalStreamDecoder {

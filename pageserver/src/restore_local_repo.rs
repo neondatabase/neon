@@ -17,6 +17,7 @@ use bytes::{Buf, Bytes};
 use crate::relish::*;
 use crate::repository::*;
 use crate::waldecoder::*;
+use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::{pg_constants, CheckPoint, ControlFileData};
@@ -912,18 +913,6 @@ fn save_multixact_create_record(
     Ok(())
 }
 
-#[allow(non_upper_case_globals)]
-const MaxMultiXactOffset: u32 = 0xFFFFFFFF;
-
-#[allow(non_snake_case)]
-const fn MXOffsetToMemberPage(xid: u32) -> u32 {
-    xid / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32
-}
-#[allow(non_snake_case)]
-const fn MXOffsetToMemberSegment(xid: u32) -> i32 {
-    (MXOffsetToMemberPage(xid) / pg_constants::SLRU_PAGES_PER_SEGMENT) as i32
-}
-
 fn save_multixact_truncate_record(
     checkpoint: &mut CheckPoint,
     timeline: &dyn Timeline,
@@ -934,9 +923,9 @@ fn save_multixact_truncate_record(
     checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
 
     // PerformMembersTruncation
-    let maxsegment: i32 = MXOffsetToMemberSegment(MaxMultiXactOffset);
-    let startsegment: i32 = MXOffsetToMemberSegment(xlrec.start_trunc_memb);
-    let endsegment: i32 = MXOffsetToMemberSegment(xlrec.end_trunc_memb);
+    let maxsegment: i32 = mx_offset_to_member_segment(pg_constants::MAX_MULTIXACT_OFFSET);
+    let startsegment: i32 = mx_offset_to_member_segment(xlrec.start_trunc_memb);
+    let endsegment: i32 = mx_offset_to_member_segment(xlrec.end_trunc_memb);
     let mut segment: i32 = startsegment;
 
     // Delete all the segments except the last one. The last segment can still
