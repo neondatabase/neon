@@ -1,16 +1,17 @@
+use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
 use std::time::Duration;
+use std::{io, thread};
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use pageserver::http::models::{BranchCreateRequest, TenantCreateRequest};
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder};
-use reqwest::{IntoUrl, Method, StatusCode};
+use reqwest::{IntoUrl, Method};
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::ZTenantId;
 
@@ -100,11 +101,12 @@ impl PageServerNode {
     }
 
     pub fn start(&self) -> Result<()> {
-        println!(
-            "Starting pageserver at '{}' in {}",
+        print!(
+            "Starting pageserver at '{}' in '{}'",
             connection_address(&self.pg_connection_config),
             self.repo_path().display()
         );
+        io::stdout().flush().unwrap();
 
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         cmd.args(&["-D", self.repo_path().to_str().unwrap()])
@@ -121,22 +123,31 @@ impl PageServerNode {
 
         // It takes a while for the page server to start up. Wait until it is
         // open for business.
-        for retries in 1..15 {
+        const RETRIES: i8 = 15;
+        for retries in 1..RETRIES {
             match self.check_status() {
                 Ok(_) => {
-                    println!("Pageserver started");
+                    println!("\nPageserver started");
                     return Ok(());
                 }
                 Err(err) => {
-                    println!(
-                        "Pageserver not responding yet, err {} retrying ({})...",
-                        err, retries
-                    );
+                    if err.is_connect() && retries < 5 {
+                        print!(".");
+                        io::stdout().flush().unwrap();
+                    } else {
+                        if retries == 5 {
+                            print!("\n") // put a line break after dots for second message
+                        }
+                        println!(
+                            "Pageserver not responding yet, err {} retrying ({})...",
+                            err, retries
+                        );
+                    }
                     thread::sleep(Duration::from_secs(1));
                 }
             }
         }
-        bail!("pageserver failed to start");
+        bail!("pageserver failed to start in {} seconds", RETRIES);
     }
 
     pub fn stop(&self) -> Result<()> {
@@ -180,19 +191,14 @@ impl PageServerNode {
         builder
     }
 
-    pub fn check_status(&self) -> Result<()> {
-        let status = self
-            .http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
+    pub fn check_status(&self) -> reqwest::Result<()> {
+        self.http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
             .send()?
-            .status();
-        ensure!(
-            status == StatusCode::OK,
-            format!("got unexpected response status {}", status)
-        );
+            .error_for_status()?;
         Ok(())
     }
 
-    pub fn tenant_list(&self) -> Result<Vec<String>> {
+    pub fn tenant_list(&self) -> reqwest::Result<Vec<String>> {
         Ok(self
             .http_request(Method::GET, format!("{}/{}", self.http_base_url, "tenant"))
             .send()?
@@ -200,7 +206,7 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn tenant_create(&self, tenantid: ZTenantId) -> Result<()> {
+    pub fn tenant_create(&self, tenantid: ZTenantId) -> reqwest::Result<()> {
         Ok(self
             .http_request(Method::POST, format!("{}/{}", self.http_base_url, "tenant"))
             .json(&TenantCreateRequest {
@@ -211,7 +217,7 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn branch_list(&self, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
+    pub fn branch_list(&self, tenantid: &ZTenantId) -> reqwest::Result<Vec<BranchInfo>> {
         Ok(self
             .http_request(
                 Method::GET,
@@ -227,7 +233,7 @@ impl PageServerNode {
         branch_name: &str,
         startpoint: &str,
         tenantid: &ZTenantId,
-    ) -> Result<BranchInfo> {
+    ) -> reqwest::Result<BranchInfo> {
         Ok(self
             .http_request(Method::POST, format!("{}/branch", self.http_base_url))
             .json(&BranchCreateRequest {
