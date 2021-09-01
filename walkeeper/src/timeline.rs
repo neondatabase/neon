@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 
-use zenith_utils::zid::ZTimelineId;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};
 use crate::safekeeper::{
@@ -258,9 +258,11 @@ pub trait TimelineTools {
     fn set(
         &mut self,
         conf: &WalAcceptorConf,
+        tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<()>;
+
     fn get(&self) -> &Arc<Timeline>;
 }
 
@@ -268,13 +270,14 @@ impl TimelineTools for Option<Arc<Timeline>> {
     fn set(
         &mut self,
         conf: &WalAcceptorConf,
+        tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<()> {
         // We will only set the timeline once. If it were to ever change,
         // anyone who cloned the Arc would be out of date.
         assert!(self.is_none());
-        *self = Some(GlobalTimelines::get(conf, timeline_id, create)?);
+        *self = Some(GlobalTimelines::get(conf, tenant_id, timeline_id, create)?);
         Ok(())
     }
 
@@ -284,7 +287,7 @@ impl TimelineTools for Option<Arc<Timeline>> {
 }
 
 lazy_static! {
-    pub static ref TIMELINES: Mutex<HashMap<ZTimelineId, Arc<Timeline>>> =
+    pub static ref TIMELINES: Mutex<HashMap<(ZTenantId, ZTimelineId), Arc<Timeline>>> =
         Mutex::new(HashMap::new());
 }
 
@@ -296,12 +299,13 @@ impl GlobalTimelines {
     /// If control file doesn't exist and create=false, bails out.
     pub fn get(
         conf: &WalAcceptorConf,
+        tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<Arc<Timeline>> {
         let mut timelines = TIMELINES.lock().unwrap();
 
-        match timelines.get(&timeline_id) {
+        match timelines.get(&(tenant_id, timeline_id)) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
                 info!(
@@ -313,7 +317,7 @@ impl GlobalTimelines {
                 let shared_state = SharedState::create_restore(conf, timeline_id, create)?;
 
                 let new_tli = Arc::new(Timeline::new(timeline_id, shared_state));
-                timelines.insert(timeline_id, Arc::clone(&new_tli));
+                timelines.insert((tenant_id, timeline_id), Arc::clone(&new_tli));
                 Ok(new_tli)
             }
         }
