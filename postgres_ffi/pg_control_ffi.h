@@ -8,3 +8,6 @@
 #include "catalog/pg_control.h"
 #include "access/xlog_internal.h"
 
+#include "storage/block.h"
+#include "storage/off.h"
+#include "access/multixact.h"
