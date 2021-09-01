@@ -4,14 +4,16 @@
 //! is rather narrow, but we can extend it once required.
 
 use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode};
-use anyhow::{bail, ensure, Result};
+use crate::sock_split::{BidiStream, ReadStream, WriteStream};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
 use log::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::io::{self, BufReader, Write};
+use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
+use std::sync::Arc;
 
 pub trait Handler {
     /// Handle single query.
@@ -45,6 +47,7 @@ pub trait Handler {
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub enum ProtoState {
     Initialization,
+    Encrypted,
     Authentication,
     Established,
 }
@@ -76,12 +79,40 @@ pub enum ProcessMsgResult {
     Break,
 }
 
+/// Always-writeable sock_split stream.
+/// May not be readable. See [`PostgresBackend::take_stream_in`]
+pub enum Stream {
+    Bidirectional(BidiStream),
+    WriteOnly(WriteStream),
+}
+
+impl Stream {
+    fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
+        match self {
+            Self::Bidirectional(bidi_stream) => bidi_stream.shutdown(how),
+            Self::WriteOnly(write_stream) => write_stream.shutdown(how),
+        }
+    }
+}
+
+impl io::Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Bidirectional(bidi_stream) => bidi_stream.write(buf),
+            Self::WriteOnly(write_stream) => write_stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Bidirectional(bidi_stream) => bidi_stream.flush(),
+            Self::WriteOnly(write_stream) => write_stream.flush(),
+        }
+    }
+}
+
 pub struct PostgresBackend {
-    // replication.rs wants to handle reading on its own in separate thread, so
-    // wrap in Option to be able to take and transfer the BufReader. Ugly, but I
-    // have no better ideas.
-    stream_in: Option<BufReader<TcpStream>>,
-    stream_out: TcpStream,
+    stream: Option<Stream>,
     // Output buffer. c.f. BeMessage::write why we are using BytesMut here.
     buf_out: BytesMut,
 
@@ -89,6 +120,9 @@ pub struct PostgresBackend {
 
     md5_salt: [u8; 4],
     auth_type: AuthType,
+
+    peer_addr: SocketAddr,
+    pub tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
@@ -102,47 +136,52 @@ pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
 }
 
 impl PostgresBackend {
-    pub fn new(socket: TcpStream, auth_type: AuthType) -> io::Result<Self> {
-        let mut pb = PostgresBackend {
-            stream_in: None,
-            stream_out: socket,
+    pub fn new(
+        socket: TcpStream,
+        auth_type: AuthType,
+        tls_config: Option<Arc<rustls::ServerConfig>>,
+    ) -> io::Result<Self> {
+        let peer_addr = socket.peer_addr()?;
+        Ok(Self {
+            stream: Some(Stream::Bidirectional(BidiStream::from_tcp(socket))),
             buf_out: BytesMut::with_capacity(10 * 1024),
             state: ProtoState::Initialization,
             md5_salt: [0u8; 4],
             auth_type,
-        };
-
-        // if socket cloning fails, report the error and bail out
-        pb.stream_in = match pb.stream_out.try_clone() {
-            Ok(read_sock) => Some(BufReader::new(read_sock)),
-            Err(error) => {
-                let errmsg = format!("{}", error);
-                let _res = pb.write_message_noflush(&BeMessage::ErrorResponse(errmsg));
-                return Err(error);
-            }
-        };
-
-        Ok(pb)
+            tls_config,
+            peer_addr,
+        })
     }
 
-    pub fn into_stream(self) -> TcpStream {
-        self.stream_out
+    pub fn into_stream(self) -> Stream {
+        self.stream.unwrap()
     }
 
     /// Get direct reference (into the Option) to the read stream.
-    fn get_stream_in(&mut self) -> Result<&mut BufReader<TcpStream>> {
-        match self.stream_in {
-            Some(ref mut stream_in) => Ok(stream_in),
-            None => bail!("stream_in was taken"),
+    fn get_stream_in(&mut self) -> Result<&mut BidiStream> {
+        match &mut self.stream {
+            Some(Stream::Bidirectional(stream)) => Ok(stream),
+            _ => Err(anyhow!("reader taken")),
         }
     }
 
-    pub fn get_peer_addr(&self) -> Result<SocketAddr> {
-        Ok(self.stream_out.peer_addr()?)
+    pub fn get_peer_addr(&self) -> &SocketAddr {
+        &self.peer_addr
     }
 
-    pub fn take_stream_in(&mut self) -> Option<BufReader<TcpStream>> {
-        self.stream_in.take()
+    pub fn take_stream_in(&mut self) -> Option<ReadStream> {
+        let stream = self.stream.take();
+        match stream {
+            Some(Stream::Bidirectional(bidi_stream)) => {
+                let (read, write) = bidi_stream.split();
+                self.stream = Some(Stream::WriteOnly(write));
+                Some(read)
+            }
+            stream => {
+                self.stream = stream;
+                None
+            }
+        }
     }
 
     /// Read full message or return None if connection is closed.
@@ -151,7 +190,7 @@ impl PostgresBackend {
 
         use ProtoState::*;
         match state {
-            Initialization => FeStartupMessage::read(stream),
+            Initialization | Encrypted => FeStartupMessage::read(stream),
             Authentication | Established => FeMessage::read(stream),
         }
     }
@@ -164,7 +203,8 @@ impl PostgresBackend {
 
     /// Flush output buffer into the socket.
     pub fn flush(&mut self) -> io::Result<&mut Self> {
-        self.stream_out.write_all(&self.buf_out)?;
+        let stream = self.stream.as_mut().unwrap();
+        stream.write_all(&self.buf_out)?;
         self.buf_out.clear();
         Ok(self)
     }
@@ -178,13 +218,14 @@ impl PostgresBackend {
     // Wrapper for run_message_loop() that shuts down socket when we are done
     pub fn run(mut self, handler: &mut impl Handler) -> Result<()> {
         let ret = self.run_message_loop(handler);
-        let _res = self.stream_out.shutdown(Shutdown::Both);
+        if let Some(stream) = self.stream.as_mut() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
         ret
     }
 
     fn run_message_loop(&mut self, handler: &mut impl Handler) -> Result<()> {
-        let peer_addr = self.stream_out.peer_addr()?;
-        trace!("postgres backend to {:?} started", peer_addr);
+        trace!("postgres backend to {:?} started", self.peer_addr);
 
         let mut unnamed_query_string = Bytes::new();
 
@@ -197,8 +238,22 @@ impl PostgresBackend {
             }
         }
 
-        trace!("postgres backend to {:?} exited", peer_addr);
+        trace!("postgres backend to {:?} exited", self.peer_addr);
         Ok(())
+    }
+
+    pub fn start_tls(&mut self) -> anyhow::Result<()> {
+        match self.stream.take() {
+            Some(Stream::Bidirectional(bidi_stream)) => {
+                let session = rustls::ServerSession::new(&self.tls_config.clone().unwrap());
+                self.stream = Some(Stream::Bidirectional(bidi_stream.start_tls(session)?));
+                Ok(())
+            }
+            stream => {
+                self.stream = stream;
+                bail!("can't start TLs without bidi stream");
+            }
+        }
     }
 
     fn process_message(
@@ -224,11 +279,30 @@ impl PostgresBackend {
                 trace!("got startup message {:?}", m);
 
                 match m.kind {
-                    StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
+                    StartupRequestCode::NegotiateSsl => {
                         info!("SSL requested");
-                        self.write_message(&BeMessage::Negotiate)?;
+
+                        if self.tls_config.is_some() {
+                            self.write_message(&BeMessage::EncryptionResponse(true))?;
+                            self.start_tls()?;
+                            self.state = ProtoState::Encrypted;
+                        } else {
+                            self.write_message(&BeMessage::EncryptionResponse(false))?;
+                        }
+                    }
+                    StartupRequestCode::NegotiateGss => {
+                        info!("GSS requested");
+                        self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
                     StartupRequestCode::Normal => {
+                        if self.tls_config.is_some() && !matches!(self.state, ProtoState::Encrypted)
+                        {
+                            self.write_message(&BeMessage::ErrorResponse(
+                                "must connect with TLS".to_string(),
+                            ))?;
+                            bail!("client did not connect with TLS");
+                        }
+
                         // NB: startup() may change self.auth_type -- we are using that in proxy code
                         // to bypass auth for new users.
                         handler.startup(self, &m)?;

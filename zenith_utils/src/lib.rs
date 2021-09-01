@@ -23,3 +23,6 @@ pub mod auth;
 pub mod zid;
 // http endpoint utils
 pub mod http;
+
+// socket splitting utils
+pub mod sock_split;

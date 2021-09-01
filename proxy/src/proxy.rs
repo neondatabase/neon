@@ -6,11 +6,12 @@ use anyhow::bail;
 use tokio_postgres::NoTls;
 
 use rand::Rng;
-use std::sync::mpsc::channel;
-use std::thread;
-use tokio::io::AsyncWriteExt;
+use std::io::Write;
+use std::{io, sync::mpsc::channel, thread};
+use zenith_utils::postgres_backend::Stream;
 use zenith_utils::postgres_backend::{PostgresBackend, ProtoState};
 use zenith_utils::pq_proto::*;
+use zenith_utils::sock_split::{ReadStream, WriteStream};
 use zenith_utils::{postgres_backend, pq_proto::BeMessage};
 
 ///
@@ -59,7 +60,11 @@ pub fn proxy_conn_main(
         cplane: CPlaneApi::new(&state.conf.cplane_address),
         user: "".into(),
         database: "".into(),
-        pgb: PostgresBackend::new(socket, postgres_backend::AuthType::MD5)?,
+        pgb: PostgresBackend::new(
+            socket,
+            postgres_backend::AuthType::MD5,
+            state.conf.ssl_config.clone(),
+        )?,
         md5_salt: [0u8; 4],
         psql_session_id: "".into(),
     };
@@ -75,17 +80,7 @@ pub fn proxy_conn_main(
         conn.handle_new_user()?
     };
 
-    // ok, proxy pass user connection to database_uri
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let _ = runtime.block_on(proxy_pass(conn.pgb, db_info))?;
-
-    println!("proxy_conn_main done;");
-
-    Ok(())
+    proxy_pass(conn.pgb, db_info)
 }
 
 impl ProxyConnection {
@@ -94,6 +89,7 @@ impl ProxyConnection {
     }
 
     fn handle_startup(&mut self) -> anyhow::Result<()> {
+        let mut encrypted = false;
         loop {
             let msg = self.pgb.read_message()?;
             println!("got message {:?}", msg);
@@ -102,11 +98,29 @@ impl ProxyConnection {
                     println!("got startup message {:?}", m);
 
                     match m.kind {
-                        StartupRequestCode::NegotiateGss | StartupRequestCode::NegotiateSsl => {
+                        StartupRequestCode::NegotiateGss => {
+                            self.pgb
+                                .write_message(&BeMessage::EncryptionResponse(false))?;
+                        }
+                        StartupRequestCode::NegotiateSsl => {
                             println!("SSL requested");
-                            self.pgb.write_message(&BeMessage::Negotiate)?;
+                            if self.pgb.tls_config.is_some() {
+                                self.pgb
+                                    .write_message(&BeMessage::EncryptionResponse(true))?;
+                                self.pgb.start_tls()?;
+                                encrypted = true;
+                            } else {
+                                self.pgb
+                                    .write_message(&BeMessage::EncryptionResponse(false))?;
+                            }
                         }
                         StartupRequestCode::Normal => {
+                            if self.state.conf.ssl_config.is_some() && !encrypted {
+                                self.pgb.write_message(&BeMessage::ErrorResponse(
+                                    "must connect with TLS".to_string(),
+                                ))?;
+                                bail!("client did not connect with TLS");
+                            }
                             self.user = m
                                 .params
                                 .get("user")
@@ -226,31 +240,52 @@ databases without opening the browser.
     }
 }
 
-async fn proxy_pass(pgb: PostgresBackend, db_info: DatabaseInfo) -> anyhow::Result<()> {
+/// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
+async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<tokio::net::TcpStream> {
     let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()).await?;
     let config = db_info.conn_string().parse::<tokio_postgres::Config>()?;
     let _ = config.connect_raw(&mut socket, NoTls).await?;
+    Ok(socket)
+}
 
-    println!("Connected to pg, proxying");
+/// Concurrently proxy both directions of the client and server connections
+fn proxy(
+    client_read: ReadStream,
+    client_write: WriteStream,
+    server_read: ReadStream,
+    server_write: WriteStream,
+) -> anyhow::Result<()> {
+    fn do_proxy(mut reader: ReadStream, mut writer: WriteStream) -> io::Result<()> {
+        std::io::copy(&mut reader, &mut writer)?;
+        writer.flush()?;
+        writer.shutdown(std::net::Shutdown::Both)
+    }
 
-    let incoming_std = pgb.into_stream();
-    incoming_std.set_nonblocking(true)?;
-    let mut incoming_conn = tokio::net::TcpStream::from_std(incoming_std)?;
+    let client_to_server_jh = thread::spawn(move || do_proxy(client_read, server_write));
 
-    let (mut ri, mut wi) = incoming_conn.split();
-    let (mut ro, mut wo) = socket.split();
-
-    let client_to_server = async {
-        tokio::io::copy(&mut ri, &mut wo).await?;
-        wo.shutdown().await
-    };
-
-    let server_to_client = async {
-        tokio::io::copy(&mut ro, &mut wi).await?;
-        wi.shutdown().await
-    };
-
-    tokio::try_join!(client_to_server, server_to_client)?;
+    let res1 = do_proxy(server_read, client_write);
+    let res2 = client_to_server_jh.join().unwrap();
+    res1?;
+    res2?;
 
     Ok(())
+}
+
+/// Proxy a client connection to a postgres database
+fn proxy_pass(pgb: PostgresBackend, db_info: DatabaseInfo) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let db_stream = runtime.block_on(connect_to_db(db_info))?;
+    let db_stream = db_stream.into_std()?;
+    db_stream.set_nonblocking(false)?;
+
+    let db_stream = zenith_utils::sock_split::BidiStream::from_tcp(db_stream);
+    let (db_read, db_write) = db_stream.split();
+
+    let stream = match pgb.into_stream() {
+        Stream::Bidirectional(bidi_stream) => bidi_stream,
+        _ => bail!("invalid stream"),
+    };
+
+    let (client_read, client_write) = stream.split();
+    proxy(client_read, client_write, db_read, db_write)
 }

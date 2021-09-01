@@ -11,8 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::net::TcpStream;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::sleep;
@@ -22,6 +21,7 @@ use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage, XLogDataBody};
+use zenith_utils::sock_split::ReadStream;
 
 pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
 
@@ -49,7 +49,7 @@ impl HotStandbyFeedback {
 pub struct ReplicationConn {
     /// This is an `Option` because we will spawn a background thread that will
     /// `take` it from us.
-    stream_in: Option<BufReader<TcpStream>>,
+    stream_in: Option<ReadStream>,
 }
 
 // TODO: move this to crate::timeline when there's more users
