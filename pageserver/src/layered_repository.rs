@@ -147,7 +147,7 @@ impl Repository for LayeredRepository {
         // into the ancestor.
         let metadata = TimelineMetadata {
             disk_consistent_lsn: start_lsn,
-            prev_record_lsn: Some(src_timeline.get_prev_record_lsn()), // FIXME not atomic with start_lsn
+            prev_record_lsn: Some(start_lsn - 8), // we just need to enforce that prev<curr
             ancestor_timeline: Some(src),
             ancestor_lsn: start_lsn,
         };
