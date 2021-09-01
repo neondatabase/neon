@@ -85,6 +85,16 @@ impl Lsn {
         // (Regular subtraction will panic on overflow in debug builds.)
         (sz.wrapping_sub(self.0)) % sz
     }
+
+    /// Align LSN on 8-byte boundary (alignment of WAL records).
+    pub fn align(&self) -> Lsn {
+        Lsn((self.0 + 7) & !7)
+    }
+
+    /// Align LSN on 8-byte boundary (alignment of WAL records).
+    pub fn is_aligned(&self) -> bool {
+        *self == self.align()
+    }
 }
 
 impl From<u64> for Lsn {

@@ -25,7 +25,7 @@ use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::relish::*;
@@ -39,7 +39,7 @@ use zenith_metrics::{register_histogram, Histogram};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn};
-use zenith_utils::seqwait::SeqWait;
+use zenith_utils::seqwait::{MonotonicCounter, SeqWait};
 
 mod blob;
 mod delta_layer;
@@ -116,6 +116,8 @@ impl Repository for LayeredRepository {
     ) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
+        assert!(start_lsn.is_aligned());
+
         // Create the timeline directory, and write initial metadata to file.
         std::fs::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
@@ -145,6 +147,8 @@ impl Repository for LayeredRepository {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
         let src_timeline = self.get_timeline(src)?;
+        // This LSN comes from the user request. Make sure it is aligned.
+        let start_lsn = start_lsn.aligned();
 
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
@@ -315,7 +319,10 @@ impl LayeredRepository {
         let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
         let data = std::fs::read(&path)?;
 
-        Ok(TimelineMetadata::des(&data)?)
+        let data = TimelineMetadata::des(&data)?;
+        assert!(data.disk_consistent_lsn.is_aligned());
+
+        Ok(data)
     }
 
     //
@@ -407,7 +414,7 @@ impl LayeredRepository {
                 .collect();
 
             let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
-            let last_lsn = timeline.get_last_valid_lsn();
+            let last_lsn = timeline.get_last_record_lsn();
 
             if let Some(cutoff) = last_lsn.checked_sub(horizon) {
                 // If GC was explicitly requested by the admin, force flush all in-memory
@@ -451,18 +458,21 @@ pub struct TimelineMetadata {
     ancestor_lsn: Lsn,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct RecordLsn {
     last: Lsn,
     prev: Lsn,
 }
 
-impl RecordLsn {
-    fn advance(&mut self, lsn: Lsn) {
+impl MonotonicCounter<Lsn> for RecordLsn {
+    fn cnt_advance(&mut self, lsn: Lsn) {
         assert!(self.last <= lsn);
         let new_prev = self.last;
         self.last = lsn;
         self.prev = new_prev;
+    }
+    fn cnt_value(&self) -> Lsn {
+        self.last
     }
 }
 
@@ -478,33 +488,19 @@ pub struct LayeredTimeline {
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
 
     // What page versions do we hold in the repository? If we get a
-    // request > last_valid_lsn, we need to wait until we receive all
+    // request > last_record_lsn, we need to wait until we receive all
     // the WAL up to the request. The SeqWait provides functions for
     // that. TODO: If we get a request for an old LSN, such that the
     // versions have already been garbage collected away, we should
     // throw an error, but we don't track that currently.
     //
-    // record_lsn.last points to the end of last processed WAL record.
-    // It can lag behind last_valid_lsn, if the WAL receiver has
-    // received some WAL after the end of last record, but not the whole
-    // next record yet. For get_page_at_lsn requests, we care about
-    // last_valid_lsn, but if the WAL receiver needs to restart the
-    // streaming, it needs to restart at the end of last record, so we
-    // track them separately. last_record_lsn should perhaps be in
-    // walreceiver.rs instead of here, but it seems convenient to keep
-    // all three values together.
+    // last_record_lsn.load().last points to the end of last processed WAL record.
     //
     // We also remember the starting point of the previous record in
-    // 'record_lsn.prev'. It's used to set the xl_prev pointer of the
+    // 'last_record_lsn.load().prev'. It's used to set the xl_prev pointer of the
     // first WAL record when the node is started up. But here, we just
     // keep track of it.
-    //
-    // When advancing last_valid_lsn and record_lsn simultaneously, we MUST
-    // advance last_valid_lsn before record_lsn.
-    // This is so if a reader wishes, it can read record_lsn and then
-    // last_valid_lsn, and find that last_valid_lsn >= record_lsn.
-    last_valid_lsn: SeqWait<Lsn>,
-    record_lsn: RwLock<RecordLsn>,
+    last_record_lsn: SeqWait<RecordLsn, Lsn>,
 
     // All WAL records have been processed and stored durably on files on
     // local disk, up to this LSN. On crash and restart, we need to re-process
@@ -675,7 +671,7 @@ impl Timeline for LayeredTimeline {
         debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
 
         let oldsize = self
-            .get_relish_size(rel, self.last_valid_lsn.load())?
+            .get_relish_size(rel, self.get_last_record_lsn())?
             .ok_or_else(|| {
                 anyhow!(
                     "attempted to truncate non-existent relish {} at {}",
@@ -722,7 +718,7 @@ impl Timeline for LayeredTimeline {
         trace!("put_unlink: {} at {}", rel, lsn);
 
         if rel.is_blocky() {
-            let oldsize_opt = self.get_relish_size(rel, self.last_valid_lsn.load())?;
+            let oldsize_opt = self.get_relish_size(rel, self.get_last_record_lsn())?;
             if let Some(oldsize) = oldsize_opt {
                 let old_last_seg = if oldsize == 0 {
                     0
@@ -778,76 +774,25 @@ impl Timeline for LayeredTimeline {
             .observe_closure_duration(|| self.checkpoint_internal(true))
     }
 
-    /// Remember that WAL has been received and added to the timeline up to the given LSN
-    fn advance_last_valid_lsn(&self, lsn: Lsn) {
-        let old = self.last_valid_lsn.advance(lsn);
-
-        // The last valid LSN cannot move backwards, but when WAL
-        // receiver is restarted after having only partially processed
-        // a record, it can call this with an lsn older than previous
-        // last valid LSN, when it restarts processing that record.
-        if lsn < old {
-            // Should never be called with an LSN older than the last
-            // record LSN, though.
-            let last_record_lsn = self.get_last_record_lsn();
-            if lsn < last_record_lsn {
-                warn!(
-                    "attempted to move last valid LSN backwards beyond last record LSN (last record {}, new {})",
-                    last_record_lsn, lsn
-                );
-            }
-        }
-    }
-
-    fn init_valid_lsn(&self, lsn: Lsn) {
-        // These writes must be specified in the order mentioned on the field comments.
-        let old = self.last_valid_lsn.advance(lsn);
-        assert!(old == Lsn(0));
-
-        {
-            let mut record_lsn = self.record_lsn.write().unwrap();
-
-            assert_eq!(record_lsn.last, Lsn(0));
-            assert_eq!(record_lsn.prev, Lsn(0));
-
-            record_lsn.advance(lsn);
-        }
-    }
-
-    fn get_last_valid_lsn(&self) -> Lsn {
-        self.last_valid_lsn.load()
-    }
-
     ///
     /// Remember the (end of) last valid WAL record remembered in the timeline.
     ///
-    /// NOTE: this updates last_valid_lsn as well.
-    ///
-    fn advance_last_record_lsn(&self, lsn: Lsn) {
-        // These writes must be specified in the order mentioned on the field comments.
-        let old_valid_lsn = self.last_valid_lsn.advance(lsn);
+    fn advance_last_record_lsn(&self, new_lsn: Lsn) {
+        assert!(new_lsn.is_aligned());
 
-        // Can't move backwards.
-        if lsn < old_valid_lsn {
-            warn!(
-                "attempted to move last record LSN backwards (was {}, new {})",
-                old_valid_lsn, lsn
-            );
-        }
+        let old_lsn = self.last_record_lsn.advance(new_lsn);
 
-        {
-            let mut record_lsn = self.record_lsn.write().unwrap();
-            assert!(record_lsn.last <= lsn);
-            record_lsn.advance(lsn);
-        }
+        // since we are align incoming LSN's we can't have delta less
+        // then 0x8
+        assert!(old_lsn == new_lsn || (new_lsn.0 - old_lsn.0 >= 0x8));
     }
 
     fn get_last_record_lsn(&self) -> Lsn {
-        self.record_lsn.read().unwrap().last
+        self.last_record_lsn.load().last
     }
 
     fn get_prev_record_lsn(&self) -> Lsn {
-        self.record_lsn.read().unwrap().prev
+        self.last_record_lsn.load().prev
     }
 }
 
@@ -871,10 +816,8 @@ impl LayeredTimeline {
 
             walredo_mgr,
 
-            // initialize in-memory 'last_valid_lsn' and 'last_record_lsn' from
-            // 'disk_consistent_lsn'.
-            last_valid_lsn: SeqWait::new(metadata.disk_consistent_lsn),
-            record_lsn: RwLock::new(RecordLsn {
+            // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
+            last_record_lsn: SeqWait::new(RecordLsn {
                 last: metadata.disk_consistent_lsn,
                 prev: metadata.prev_record_lsn.unwrap_or(Lsn(0)),
             }),
@@ -1020,8 +963,15 @@ impl LayeredTimeline {
     fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
         let layers = self.layers.lock().unwrap();
 
-        if lsn < self.last_valid_lsn.load() {
-            bail!("cannot modify relation after advancing last_valid_lsn");
+        assert!(lsn.is_aligned());
+
+        let last_record_lsn = self.get_last_record_lsn();
+        if lsn < last_record_lsn {
+            panic!(
+                "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
+                lsn,
+                last_record_lsn
+            );
         }
 
         // Do we have a layer open for writing already?
@@ -1133,20 +1083,15 @@ impl LayeredTimeline {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint_internal(&self, force: bool) -> Result<()> {
-        // To hold the invariant last_valid_lsn >= last_record_lsn,
-        // we must follow the read order specified in the field comments.
-
         let RecordLsn {
             last: last_record_lsn,
             prev: prev_record_lsn,
-        } = self.record_lsn.read().unwrap().clone();
-
-        let last_valid_lsn = self.last_valid_lsn.load();
+        } = self.last_record_lsn.load();
 
         trace!(
             "checkpointing timeline {} at {}",
             self.timelineid,
-            last_valid_lsn
+            last_record_lsn
         );
 
         // Grab lock on the layer map.
@@ -1169,10 +1114,10 @@ impl LayeredTimeline {
         while let Some(oldest_layer) = layers.peek_oldest_open() {
             // Does this layer need freezing?
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
-            let distance = last_valid_lsn.0 - oldest_pending_lsn.0;
+            let distance = last_record_lsn.0 - oldest_pending_lsn.0;
             if !force && distance < OLDEST_INMEM_DISTANCE {
                 info!(
-                    "the oldest layer is now {} which is {} bytes behind last_valid_lsn",
+                    "the oldest layer is now {} which is {} bytes behind last_record_lsn",
                     oldest_layer.get_seg_tag(),
                     distance
                 );
@@ -1181,7 +1126,7 @@ impl LayeredTimeline {
             }
 
             // freeze it
-            let (new_historics, new_open) = oldest_layer.freeze(last_valid_lsn, &self)?;
+            let (new_historics, new_open) = oldest_layer.freeze(last_record_lsn, &self)?;
 
             // replace this layer with the new layers that 'freeze' returned
             layers.pop_oldest_open();

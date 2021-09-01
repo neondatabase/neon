@@ -135,7 +135,7 @@ pub fn import_timeline_from_postgres_datadir(
     }
     // TODO: Scan pg_tblspc
 
-    timeline.advance_last_valid_lsn(lsn);
+    timeline.advance_last_record_lsn(lsn.align());
     timeline.checkpoint()?;
 
     Ok(())
@@ -338,7 +338,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     let checkpoint_bytes = checkpoint.encode();
     timeline.put_page_image(RelishTag::Checkpoint, 0, last_lsn, checkpoint_bytes)?;
 
-    timeline.advance_last_valid_lsn(last_lsn);
+    timeline.advance_last_record_lsn(last_lsn.align());
     timeline.checkpoint()?;
     Ok(())
 }
@@ -536,7 +536,7 @@ pub fn save_decoded_record(
     }
     // Now that this record has been handled, let the repository know that
     // it is up-to-date to this LSN
-    timeline.advance_last_record_lsn(lsn);
+    timeline.advance_last_record_lsn(lsn.align());
     Ok(())
 }
 

@@ -18,13 +18,28 @@ pub enum SeqWaitError {
     Shutdown,
 }
 
+/// Monotonically increasing value
+///
+/// It is handy to store some other fields under the same mutex in SeqWait<S>
+/// (e.g. store prev_record_lsn). So we allow SeqWait to be parametrized with
+/// any type that can expose counter. <V> is the type of exposed counter.
+pub trait MonotonicCounter<V> {
+    /// Bump counter value and check that it goes forward
+    /// N.B.: new_val is an actual new value, not a difference.
+    fn cnt_advance(&mut self, new_val: V);
+
+    /// Get counter value
+    fn cnt_value(&self) -> V;
+}
+
 /// Internal components of a `SeqWait`
-struct SeqWaitInt<T>
+struct SeqWaitInt<S, V>
 where
-    T: Ord,
+    S: MonotonicCounter<V>,
+    V: Ord,
 {
-    waiters: BinaryHeap<Waiter<T>>,
-    current: T,
+    waiters: BinaryHeap<Waiter<V>>,
+    current: S,
     shutdown: bool,
 }
 
@@ -72,19 +87,23 @@ impl<T: Ord> Eq for Waiter<T> {}
 /// [`wait_for`]: SeqWait::wait_for
 /// [`advance`]: SeqWait::advance
 ///
-pub struct SeqWait<T>
+/// <S> means Storage, <V> is type of counter that this storage exposes.
+///
+pub struct SeqWait<S, V>
 where
-    T: Ord,
+    S: MonotonicCounter<V>,
+    V: Ord,
 {
-    internal: Mutex<SeqWaitInt<T>>,
+    internal: Mutex<SeqWaitInt<S, V>>,
 }
 
-impl<T> SeqWait<T>
+impl<S, V> SeqWait<S, V>
 where
-    T: Ord + Debug + Copy,
+    S: MonotonicCounter<V> + Copy,
+    V: Ord + Copy,
 {
     /// Create a new `SeqWait`, initialized to a particular number
-    pub fn new(starting_num: T) -> Self {
+    pub fn new(starting_num: S) -> Self {
         let internal = SeqWaitInt {
             waiters: BinaryHeap::new(),
             current: starting_num,
@@ -122,7 +141,7 @@ where
     ///
     /// This call won't complete until someone has called `advance`
     /// with a number greater than or equal to the one we're waiting for.
-    pub fn wait_for(&self, num: T) -> Result<(), SeqWaitError> {
+    pub fn wait_for(&self, num: V) -> Result<(), SeqWaitError> {
         match self.queue_for_wait(num) {
             Ok(None) => Ok(()),
             Ok(Some(rx)) => rx.recv().map_err(|_| SeqWaitError::Shutdown),
@@ -137,7 +156,7 @@ where
     ///
     /// If that hasn't happened after the specified timeout duration,
     /// [`SeqWaitError::Timeout`] will be returned.
-    pub fn wait_for_timeout(&self, num: T, timeout_duration: Duration) -> Result<(), SeqWaitError> {
+    pub fn wait_for_timeout(&self, num: V, timeout_duration: Duration) -> Result<(), SeqWaitError> {
         match self.queue_for_wait(num) {
             Ok(None) => Ok(()),
             Ok(Some(rx)) => rx.recv_timeout(timeout_duration).map_err(|e| match e {
@@ -150,9 +169,9 @@ where
 
     /// Register and return a channel that will be notified when a number arrives,
     /// or None, if it has already arrived.
-    fn queue_for_wait(&self, num: T) -> Result<Option<Receiver<()>>, SeqWaitError> {
+    fn queue_for_wait(&self, num: V) -> Result<Option<Receiver<()>>, SeqWaitError> {
         let mut internal = self.internal.lock().unwrap();
-        if internal.current >= num {
+        if internal.current.cnt_value() >= num {
             return Ok(None);
         }
         if internal.shutdown {
@@ -174,16 +193,16 @@ where
     /// All waiters at this value or below will be woken.
     ///
     /// Returns the old number.
-    pub fn advance(&self, num: T) -> T {
+    pub fn advance(&self, num: V) -> V {
         let old_value;
         let wake_these = {
             let mut internal = self.internal.lock().unwrap();
 
-            old_value = internal.current;
+            old_value = internal.current.cnt_value();
             if old_value >= num {
                 return old_value;
             }
-            internal.current = num;
+            internal.current.cnt_advance(num);
 
             // Pop all waiters <= num from the heap. Collect them in a vector, and
             // wake them up after releasing the lock.
@@ -206,7 +225,7 @@ where
     }
 
     /// Read the current value, without waiting.
-    pub fn load(&self) -> T {
+    pub fn load(&self) -> S {
         self.internal.lock().unwrap().current
     }
 }
@@ -218,6 +237,16 @@ mod tests {
     use std::thread::sleep;
     use std::thread::spawn;
     use std::time::Duration;
+
+    impl MonotonicCounter<i32> for i32 {
+        fn cnt_advance(&mut self, val: i32) {
+            assert!(*self <= val);
+            *self = val;
+        }
+        fn cnt_value(&self) -> i32 {
+            *self
+        }
+    }
 
     #[test]
     fn seqwait() {
