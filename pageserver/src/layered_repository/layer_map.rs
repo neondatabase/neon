@@ -227,15 +227,17 @@ impl LayerMap {
                 {
                     // Add only if it exists at the requested LSN.
                     if let Some(open) = &segentry.open {
-                        if open.get_end_lsn() > lsn {
+                        if open.get_end_lsn() > lsn && open.get_start_lsn() <= lsn {
                             rels.insert(reltag);
                         }
-                    } else if let Some((_k, _v)) = segentry
+                    } else if let Some((l_start_lsn, layer)) = segentry
                         .historic
                         .range((Included(Lsn(0)), Included(lsn)))
                         .next_back()
                     {
-                        rels.insert(reltag);
+                        if !layer.is_dropped() && l_start_lsn <= &lsn {
+                            rels.insert(reltag);
+                        }
                     }
                 }
             }
@@ -253,15 +255,17 @@ impl LayerMap {
             } else {
                 // Add only if it exists at the requested LSN.
                 if let Some(open) = &segentry.open {
-                    if open.get_end_lsn() > lsn {
+                    if open.get_end_lsn() > lsn && open.get_start_lsn() <= lsn {
                         rels.insert(seg.rel);
                     }
-                } else if let Some((_k, _v)) = segentry
+                } else if let Some((l_start_lsn, layer)) = segentry
                     .historic
                     .range((Included(Lsn(0)), Included(lsn)))
                     .next_back()
                 {
-                    rels.insert(seg.rel);
+                    if !layer.is_dropped() && l_start_lsn <= &lsn {
+                        rels.insert(seg.rel);
+                    }
                 }
             }
         }

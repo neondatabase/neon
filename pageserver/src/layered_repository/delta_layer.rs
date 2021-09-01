@@ -251,6 +251,8 @@ impl Layer for DeltaLayer {
 
     /// Does this segment exist at given LSN?
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
+        assert!(lsn >= self.start_lsn);
+
         // Is the requested LSN after the rel was dropped?
         if self.dropped && lsn >= self.end_lsn {
             return Ok(false);

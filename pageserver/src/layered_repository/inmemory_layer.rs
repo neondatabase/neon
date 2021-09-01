@@ -198,6 +198,8 @@ impl Layer for InMemoryLayer {
 
     /// Does this segment exist at given LSN?
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
+        assert!(lsn >= self.start_lsn);
+
         let inner = self.inner.lock().unwrap();
 
         // Is the requested LSN after the segment was dropped?

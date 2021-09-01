@@ -157,7 +157,9 @@ impl Layer for ImageLayer {
     }
 
     /// Get size of the segment
-    fn get_seg_size(&self, _lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+        assert!(lsn >= self.lsn);
+
         let inner = self.load()?;
         match inner.image_type {
             ImageType::Blocky { num_blocks } => Ok(num_blocks),
@@ -166,7 +168,8 @@ impl Layer for ImageLayer {
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, _lsn: Lsn) -> Result<bool> {
+    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
+        assert!(lsn >= self.lsn);
         Ok(true)
     }
 
