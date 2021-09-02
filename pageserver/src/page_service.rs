@@ -492,7 +492,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
             // branch_create <tenantid> <branchname> <startpoint>
             // TODO lazy static
-            // TOOD: escaping, to allow branch names with spaces
+            // TODO: escaping, to allow branch names with spaces
             let re = Regex::new(r"^branch_create ([[:xdigit:]]+) (\S+) ([^\r\n\s;]+)[\r\n\s;]*;?$")
                 .unwrap();
             let caps = re.captures(&query_string).ok_or_else(err)?;

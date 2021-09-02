@@ -1052,7 +1052,7 @@ impl LayeredTimeline {
         // FIXME: we can deadlock if we call wait_lsn() from WAL receiver. And we actually
         // it a lot from there. Only deadlock that I caught was while trying to add wait_lsn()
         // in list_rels(). But it makes sense to make all functions in timeline non-waiting;
-        // assert that arg_lsn <= current_record_lsn; call wait_lsn explicetly where it is
+        // assert that arg_lsn <= current_record_lsn; call wait_lsn explicitly where it is
         // needed (page_service and basebackup); uncomment this check:
         // assert_ne!(thread::current().name(), Some("WAL receiver thread"));
 

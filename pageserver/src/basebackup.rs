@@ -53,7 +53,7 @@ impl<'a> Basebackup<'a> {
         } = if let Some(lsn) = req_lsn {
             // FIXME: that wouldn't work since we don't know prev for old LSN's.
             // Probably it is better to avoid using prev in compute node start
-            // at all and acept the fact that first WAL record in the timeline would
+            // at all and accept the fact that first WAL record in the timeline would
             // have zero as prev. https://github.com/zenithdb/zenith/issues/506
             RecordLsn {
                 last: lsn,

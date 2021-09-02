@@ -284,7 +284,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     if conf.daemonize {
         info!("daemonizing...");
 
-        // There should'n be any logging to stdin/stdout. Redirect it to the main log so
+        // There shouldn't be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fprintf's or backtraces.
         let stdout = log_file.try_clone().unwrap();
         let stderr = log_file;

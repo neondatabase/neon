@@ -1,6 +1,6 @@
 // For details about authentication see docs/authentication.md
 // TODO there are two issues for our use case in jsonwebtoken library which will be resolved in next release
-// The fisrt one is that there is no way to disable expiration claim, but it can be excluded from validation, so use this as a workaround for now.
+// The first one is that there is no way to disable expiration claim, but it can be excluded from validation, so use this as a workaround for now.
 // Relevant issue: https://github.com/Keats/jsonwebtoken/issues/190
 // The second one is that we wanted to use ed25519 keys, but they are also not supported until next version. So we go with RSA keys for now.
 // Relevant issue: https://github.com/Keats/jsonwebtoken/issues/162

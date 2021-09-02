@@ -78,7 +78,7 @@ class ZenithBenchmarkResults:
 
         self.results.append((test_name, metric_name, metric_value, unit))
 
-# Sesssion scope fixture that initializes the results object
+# Session scope fixture that initializes the results object
 @pytest.fixture(autouse=True, scope='session')
 def zenbenchmark_global(request) -> Iterator[ZenithBenchmarkResults]:
     """

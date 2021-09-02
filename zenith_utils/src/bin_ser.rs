@@ -6,7 +6,7 @@
 //!
 //! The [`LeSer`] trait does the same thing, in little-endian form.
 //!
-//! Note: you will get a compile error if you try to `use` both trais
+//! Note: you will get a compile error if you try to `use` both traits
 //! in the same module or scope. This is intended to be a safety
 //! mechanism: mixing big-endian and little-endian encoding in the same file
 //! is error-prone.
