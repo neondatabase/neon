@@ -43,6 +43,10 @@ pub struct LayerMap {
     /// This allows easy access to the in-memory layer that contains the
     /// oldest WAL record.
     open_segs: BinaryHeap<OpenSegEntry>,
+
+    /// Generation number, used to distinguish newly inserted entries in the
+    /// binary heap from older entries during checkpoint.
+    current_generation: u64,
 }
 
 ///
@@ -59,9 +63,13 @@ struct SegEntry {
 
 /// Entry held LayerMap.open_segs, with boilerplate comparison
 /// routines to implement a min-heap ordered by 'oldest_pending_lsn'
+///
+/// Each entry also carries a generation number. It can be used to distinguish
+/// entries with the same 'oldest_pending_lsn'.
 struct OpenSegEntry {
     pub oldest_pending_lsn: Lsn,
     pub layer: Arc<InMemoryLayer>,
+    pub generation: u64,
 }
 impl Ord for OpenSegEntry {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -73,10 +81,13 @@ impl Ord for OpenSegEntry {
 impl PartialOrd for OpenSegEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
-        // to get that.
-        other
-            .oldest_pending_lsn
-            .partial_cmp(&self.oldest_pending_lsn)
+        // to get that. Entries with identical oldest_pending_lsn are ordered by generation
+        Some(
+            other
+                .oldest_pending_lsn
+                .cmp(&self.oldest_pending_lsn)
+                .then_with(|| other.generation.cmp(&self.generation)),
+        )
     }
 }
 impl PartialEq for OpenSegEntry {
@@ -151,6 +162,7 @@ impl LayerMap {
         let opensegentry = OpenSegEntry {
             oldest_pending_lsn: layer.get_oldest_pending_lsn(),
             layer: layer,
+            generation: self.current_generation,
         };
         self.open_segs.push(opensegentry);
 
@@ -290,13 +302,21 @@ impl LayerMap {
         false
     }
 
-    /// Return the oldest in-memory layer.
-    pub fn peek_oldest_open(&self) -> Option<Arc<InMemoryLayer>> {
+    /// Return the oldest in-memory layer, along with its generation number.
+    pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
         if let Some(opensegentry) = self.open_segs.peek() {
-            Some(Arc::clone(&opensegentry.layer))
+            Some((Arc::clone(&opensegentry.layer), opensegentry.generation))
         } else {
             None
         }
+    }
+
+    /// Increment the generation number used to stamp open in-memory layers. Layers
+    /// added with `insert_open` after this call will be associated with the new
+    /// generation. Returns the new generation number.
+    pub fn increment_generation(&mut self) -> u64 {
+        self.current_generation += 1;
+        self.current_generation
     }
 
     pub fn iter_historic_layers(&self) -> HistoricLayerIter {
@@ -312,6 +332,7 @@ impl Default for LayerMap {
         LayerMap {
             segs: HashMap::new(),
             open_segs: BinaryHeap::new(),
+            current_generation: 0,
         }
     }
 }
