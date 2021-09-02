@@ -71,7 +71,7 @@ static TIMEOUT: Duration = Duration::from_secs(60);
 // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
 // would be more appropriate. But a low value forces the code to be exercised more,
 // which is good for now to trigger bugs.
-static OLDEST_INMEM_DISTANCE: u64 = 16 * 1024 * 1024;
+static OLDEST_INMEM_DISTANCE: i128 = 16 * 1024 * 1024;
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
@@ -1074,6 +1074,18 @@ impl LayeredTimeline {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint_internal(&self, force: bool) -> Result<()> {
+        // Grab lock on the layer map.
+        //
+        // TODO: We hold it locked throughout the checkpoint operation. That's bad,
+        // the checkpointing could take many seconds, and any incoming get_page_at_lsn()
+        // requests will block.
+        let mut layers = self.layers.lock().unwrap();
+
+        // Bump the generation number in the layer map, so that we can distinguish
+        // entries inserted after the checkpoint started
+        let current_generation = layers.increment_generation();
+
+        // Read 'last_record_lsn'. That becomes the cutoff LSN for frozen layers.
         let RecordLsn {
             last: last_record_lsn,
             prev: prev_record_lsn,
@@ -1085,13 +1097,6 @@ impl LayeredTimeline {
             last_record_lsn
         );
 
-        // Grab lock on the layer map.
-        //
-        // TODO: We hold it locked throughout the checkpoint operation. That's bad,
-        // the checkpointing could take many seconds, and any incoming get_page_at_lsn()
-        // requests will block.
-        let mut layers = self.layers.lock().unwrap();
-
         // Take the in-memory layer with the oldest WAL record. If it's older
         // than the threshold, write it out to disk as a new image and delta file.
         // Repeat until all remaining in-memory layers are within the threshold.
@@ -1102,14 +1107,26 @@ impl LayeredTimeline {
         // check, though. We should also aim at flushing layers that consume
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
-        while let Some(oldest_layer) = layers.peek_oldest_open() {
-            // Does this layer need freezing?
+
+        while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
-            let distance = last_record_lsn.0 - oldest_pending_lsn.0;
-            if !force && distance < OLDEST_INMEM_DISTANCE {
+
+            // Does this layer need freezing?
+            //
+            // Write out all in-memory layers that contain WAL older than OLDEST_INMEM_DISTANCE.
+            // Or if 'force' is true, write out all of them. If we reach a layer with the same
+            // generation number, we know that we have cycled through all layers that were open
+            // when we started. We don't want to process layers inserted after we started, to
+            // avoid getting into an infinite loop trying to process again entries that we
+            // inserted ourselves.
+            let distance = last_record_lsn.widening_sub(oldest_pending_lsn);
+            if distance < 0
+                || (!force && distance < OLDEST_INMEM_DISTANCE)
+                || oldest_generation == current_generation
+            {
                 info!(
                     "the oldest layer is now {} which is {} bytes behind last_record_lsn",
-                    oldest_layer.get_seg_tag(),
+                    oldest_layer.filename().display(),
                     distance
                 );
                 disk_consistent_lsn = oldest_pending_lsn;
