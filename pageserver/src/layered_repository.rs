@@ -675,14 +675,14 @@ impl Timeline for LayeredTimeline {
             (relsize - 1) / RELISH_SEG_SIZE
         };
 
-        // Unlink segments beyond the last remaining segment.
+        // Drop segments beyond the last remaining segment.
         for remove_segno in (last_remain_seg + 1)..=old_last_seg {
             let seg = SegmentTag {
                 rel,
                 segno: remove_segno,
             };
             let layer = self.get_layer_for_write(seg, lsn)?;
-            layer.put_unlink(lsn)?;
+            layer.drop_segment(lsn)?;
         }
 
         // Truncate the last remaining segment to the specified size
@@ -698,8 +698,8 @@ impl Timeline for LayeredTimeline {
         Ok(())
     }
 
-    fn put_unlink(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
-        trace!("put_unlink: {} at {}", rel, lsn);
+    fn drop_relish(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
+        trace!("drop_segment: {} at {}", rel, lsn);
 
         if rel.is_blocky() {
             let oldsize_opt = self.get_relish_size(rel, self.get_last_record_lsn())?;
@@ -710,25 +710,25 @@ impl Timeline for LayeredTimeline {
                     (oldsize - 1) / RELISH_SEG_SIZE
                 };
 
-                // Unlink all segments
+                // Drop all segments of the relish
                 for remove_segno in 0..=old_last_seg {
                     let seg = SegmentTag {
                         rel,
                         segno: remove_segno,
                     };
                     let layer = self.get_layer_for_write(seg, lsn)?;
-                    layer.put_unlink(lsn)?;
+                    layer.drop_segment(lsn)?;
                 }
             } else {
                 warn!(
-                    "put_unlink called on non-existent relish {} at {}",
+                    "drop_segment called on non-existent relish {} at {}",
                     rel, lsn
                 );
             }
         } else {
             let seg = SegmentTag::from_blknum(rel, 0);
             let layer = self.get_layer_for_write(seg, lsn)?;
-            layer.put_unlink(lsn)?;
+            layer.drop_segment(lsn)?;
         }
 
         Ok(())
@@ -927,7 +927,6 @@ impl LayeredTimeline {
                 assert!(layer.get_start_lsn() <= lsn);
 
                 if layer.is_dropped() && layer.get_end_lsn() <= lsn {
-                    // The segment was unlinked
                     return Ok(None);
                 }
 
@@ -1227,7 +1226,7 @@ impl LayeredTimeline {
         //
         // Determine for each file if it needs to be retained
         // FIXME: also scan open in-memory layers. Normally we cannot remove the
-        // latest layer of any seg, but if it was unlinked it's possible
+        // latest layer of any seg, but if it was dropped it's possible
         let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
             let seg = l.get_seg_tag();

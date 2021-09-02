@@ -380,7 +380,7 @@ impl InMemoryLayer {
     }
 
     /// Remember that the segment was dropped at given LSN
-    pub fn put_unlink(&self, lsn: Lsn) -> anyhow::Result<()> {
+    pub fn drop_segment(&self, lsn: Lsn) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
         assert!(inner.drop_lsn.is_none());
