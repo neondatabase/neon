@@ -193,7 +193,10 @@ impl Layer for ImageLayer {
 
     /// debugging function to print out the contents of the layer
     fn dump(&self) -> Result<()> {
-        println!("----- image layer for {} at {} ----", self.seg, self.lsn);
+        println!(
+            "----- image layer for tli {} seg {} at {} ----",
+            self.timelineid, self.seg, self.lsn
+        );
 
         let inner = self.load()?;
 
