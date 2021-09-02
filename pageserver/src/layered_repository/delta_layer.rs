@@ -40,7 +40,7 @@
 use crate::layered_repository::blob::BlobWriter;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageVersion, SegmentTag,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag,
 };
 use crate::repository::WALRecord;
 use crate::waldecoder;
@@ -167,15 +167,19 @@ impl Layer for DeltaLayer {
         blknum: u32,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
-    ) -> Result<Option<Lsn>> {
-        // Scan the BTreeMap backwards, starting from the given entry.
-        let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
+    ) -> Result<PageReconstructResult> {
+        let mut cont_lsn: Option<Lsn> = Some(lsn);
 
-        // TODO: avoid opening the snapshot file for each read
-        let (_path, book) = self.open_book()?;
-        let page_version_reader = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
+        assert!(self.seg.blknum_in_seg(blknum));
+
         {
+            // Open the file and lock the metadata in memory
+            // TODO: avoid opening the snapshot file for each read
+            let (_path, book) = self.open_book()?;
+            let page_version_reader = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
             let inner = self.load()?;
+
+            // Scan the metadata BTreeMap backwards, starting from the given entry.
             let minkey = (blknum, Lsn(0));
             let maxkey = (blknum, lsn);
             let mut iter = inner
@@ -183,9 +187,10 @@ impl Layer for DeltaLayer {
                 .range((Included(&minkey), Included(&maxkey)));
             while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
                 if let Some(img_range) = &entry.page_image_range {
+                    // Found a page image, return it
                     let img = Bytes::from(read_blob(&page_version_reader, img_range)?);
                     reconstruct_data.page_img = Some(img);
-                    need_base_image_lsn = None;
+                    cont_lsn = None;
                     break;
                 } else if let Some(rec_range) = &entry.record_range {
                     let rec = WALRecord::des(&read_blob(&page_version_reader, rec_range)?)?;
@@ -193,10 +198,11 @@ impl Layer for DeltaLayer {
                     reconstruct_data.records.push(rec);
                     if will_init {
                         // This WAL record initializes the page, so no need to go further back
-                        need_base_image_lsn = None;
+                        cont_lsn = None;
                         break;
                     } else {
-                        need_base_image_lsn = Some(*entry_lsn);
+                        // This WAL record needs to be applied against an older page image
+                        cont_lsn = Some(*entry_lsn);
                     }
                 } else {
                     // No base image, and no WAL record. Huh?
@@ -204,28 +210,23 @@ impl Layer for DeltaLayer {
                 }
             }
 
-            // Use the base image, if needed
-            if let Some(need_lsn) = need_base_image_lsn {
-                if let Some(predecessor) = &self.predecessor {
-                    need_base_image_lsn = predecessor.get_page_reconstruct_data(
-                        blknum,
-                        need_lsn,
-                        reconstruct_data,
-                    )?;
-                } else {
-                    bail!(
-                        "no base img found for {} at blk {} at LSN {}",
-                        self.seg,
-                        blknum,
-                        lsn
-                    );
-                }
-            }
-
-            // release lock on 'inner'
+            // release metadata lock and close the file
         }
 
-        Ok(need_base_image_lsn)
+        // If an older page image is needed to reconstruct the page, let the
+        // caller know about the predecessor layer.
+        if let Some(cont_lsn) = cont_lsn {
+            if let Some(cont_layer) = &self.predecessor {
+                Ok(PageReconstructResult::Continue(
+                    cont_lsn,
+                    Arc::clone(cont_layer),
+                ))
+            } else {
+                Ok(PageReconstructResult::Missing(cont_lsn))
+            }
+        } else {
+            Ok(PageReconstructResult::Complete)
+        }
     }
 
     /// Get size of the relation at given LSN

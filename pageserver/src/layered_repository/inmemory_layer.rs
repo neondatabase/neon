@@ -4,7 +4,7 @@
 //!
 use crate::layered_repository::filename::DeltaFileName;
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageVersion, SegmentTag, RELISH_SEG_SIZE,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
@@ -134,14 +134,15 @@ impl Layer for InMemoryLayer {
         blknum: u32,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
-    ) -> Result<Option<Lsn>> {
-        // Scan the BTreeMap backwards, starting from reconstruct_data.lsn.
-        let mut need_base_image_lsn: Option<Lsn> = Some(lsn);
+    ) -> Result<PageReconstructResult> {
+        let mut cont_lsn: Option<Lsn> = Some(lsn);
 
         assert!(self.seg.blknum_in_seg(blknum));
 
         {
             let inner = self.inner.lock().unwrap();
+
+            // Scan the BTreeMap backwards, starting from reconstruct_data.lsn.
             let minkey = (blknum, Lsn(0));
             let maxkey = (blknum, lsn);
             let mut iter = inner
@@ -150,16 +151,17 @@ impl Layer for InMemoryLayer {
             while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
                 if let Some(img) = &entry.page_image {
                     reconstruct_data.page_img = Some(img.clone());
-                    need_base_image_lsn = None;
+                    cont_lsn = None;
                     break;
                 } else if let Some(rec) = &entry.record {
                     reconstruct_data.records.push(rec.clone());
                     if rec.will_init {
                         // This WAL record initializes the page, so no need to go further back
-                        need_base_image_lsn = None;
+                        cont_lsn = None;
                         break;
                     } else {
-                        need_base_image_lsn = Some(*entry_lsn);
+                        // This WAL record needs to be applied against an older page image
+                        cont_lsn = Some(*entry_lsn);
                     }
                 } else {
                     // No base image, and no WAL record. Huh?
@@ -167,25 +169,23 @@ impl Layer for InMemoryLayer {
                 }
             }
 
-            // Use the base image, if needed
-            if let Some(need_lsn) = need_base_image_lsn {
-                if let Some(predecessor) = &self.predecessor {
-                    need_base_image_lsn =
-                        predecessor.get_page_reconstruct_data(blknum, need_lsn, reconstruct_data)?;
-                } else {
-                    bail!(
-                        "no base img found for {} at blk {} at LSN {}",
-                        self.seg,
-                        blknum,
-                        lsn
-                    );
-                }
-            }
-
             // release lock on 'inner'
         }
 
-        Ok(need_base_image_lsn)
+        // If an older page image is needed to reconstruct the page, let the
+        // caller know about the predecessor layer.
+        if let Some(cont_lsn) = cont_lsn {
+            if let Some(cont_layer) = &self.predecessor {
+                Ok(PageReconstructResult::Continue(
+                    cont_lsn,
+                    Arc::clone(cont_layer),
+                ))
+            } else {
+                Ok(PageReconstructResult::Missing(cont_lsn))
+            }
+        } else {
+            Ok(PageReconstructResult::Complete)
+        }
     }
 
     /// Get size of the relation at given LSN

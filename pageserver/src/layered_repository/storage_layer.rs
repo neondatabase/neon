@@ -10,6 +10,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
 
@@ -82,6 +83,19 @@ pub struct PageReconstructData {
     pub page_img: Option<Bytes>,
 }
 
+/// Return value from Layer::get_page_reconstruct_data
+pub enum PageReconstructResult {
+    /// Got all the data needed to reconstruct the requested page
+    Complete,
+    /// This layer didn't contain all the required data, the caller should collect
+    /// more data from the returned predecessor layer at the returned LSN.
+    Continue(Lsn, Arc<dyn Layer>),
+    /// This layer didn't contain data needed to reconstruct the page version at
+    /// the returned LSN. This is usually considered an error, but might be OK
+    /// in some circumstances.
+    Missing(Lsn),
+}
+
 ///
 /// A Layer holds all page versions for one segment of a relish, in a range of LSNs.
 /// There are two kinds of layers, in-memory and snapshot layers. In-memory
@@ -114,18 +128,21 @@ pub trait Layer: Send + Sync {
     /// It is up to the caller to collect more data from previous layer and
     /// perform WAL redo, if necessary.
     ///
-    /// If returns Some, the returned data is not complete. The caller needs
-    /// to continue with the returned 'lsn'.
-    ///
     /// Note that the 'blknum' is the offset of the page from the beginning
     /// of the *relish*, not the beginning of the segment. The requested
     /// 'blknum' must be covered by this segment.
+    ///
+    /// See PageReconstructResult for possible return values. The collected data
+    /// is appended to reconstruct_data; the caller should pass an empty struct
+    /// on first call. If this returns PageReconstructResult::Continue, call
+    /// again on the returned predecessor layer with the same 'reconstruct_data'
+    /// to collect more data.
     fn get_page_reconstruct_data(
         &self,
         blknum: u32,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
-    ) -> Result<Option<Lsn>>;
+    ) -> Result<PageReconstructResult>;
 
     /// Return size of the segment at given LSN. (Only for blocky relations.)
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;

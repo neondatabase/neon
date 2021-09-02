@@ -55,7 +55,9 @@ use image_layer::ImageLayer;
 use filename::{DeltaFileName, ImageFileName};
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
-use storage_layer::{Layer, PageReconstructData, SegmentTag, RELISH_SEG_SIZE};
+use storage_layer::{
+    Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
+};
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -1319,25 +1321,45 @@ impl LayeredTimeline {
             page_img: None,
         };
 
-        if let Some(_cont_lsn) = layer.get_page_reconstruct_data(blknum, lsn, &mut data)? {
-            // The layers are currently fully self-contained, so we should have found all
-            // the data we need to reconstruct the page in the layer.
-            if data.records.is_empty() {
-                // no records, and no base image. This can happen if PostgreSQL extends a relation
-                // but never writes the page.
-                //
-                // Would be nice to detect that situation better.
-                warn!("Page {} blk {} at {} not found", seg.rel, blknum, lsn);
-                return Ok(ZERO_PAGE.clone());
+        // Holds an Arc reference to 'layer_ref' when iterating in the loop below.
+        let mut layer_arc: Arc<dyn Layer>;
+
+        // Call the layer's get_page_reconstruct_data function to get the base image
+        // and WAL records needed to materialize the page. If it returns 'Continue',
+        // call it again on the predecessor layer until we have all the required data.
+        let mut layer_ref = layer;
+        let mut curr_lsn = lsn;
+        loop {
+            match layer_ref.get_page_reconstruct_data(blknum, curr_lsn, &mut data)? {
+                PageReconstructResult::Complete => break,
+                PageReconstructResult::Continue(cont_lsn, cont_layer) => {
+                    // Fetch base image / more WAL from the returned predecessor layer
+                    layer_arc = cont_layer;
+                    layer_ref = &*layer_arc;
+                    curr_lsn = cont_lsn;
+                    continue;
+                }
+                PageReconstructResult::Missing(lsn) => {
+                    // Oops, we could not reconstruct the page.
+                    if data.records.is_empty() {
+                        // no records, and no base image. This can happen if PostgreSQL extends a relation
+                        // but never writes the page.
+                        //
+                        // Would be nice to detect that situation better.
+                        warn!("Page {} blk {} at {} not found", seg.rel, blknum, lsn);
+                        return Ok(ZERO_PAGE.clone());
+                    }
+                    bail!(
+                        "No base image found for page {} blk {} at {}/{}",
+                        seg.rel,
+                        blknum,
+                        self.timelineid,
+                        lsn,
+                    );
+                }
             }
-            bail!(
-                "No base image found for page {} blk {} at {}/{}",
-                seg.rel,
-                blknum,
-                self.timelineid,
-                lsn,
-            );
         }
+
         self.reconstruct_page(seg.rel, blknum, lsn, data)
     }
 

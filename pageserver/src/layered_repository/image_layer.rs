@@ -21,12 +21,14 @@
 //! For non-blocky segments, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
 //!
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
-use crate::layered_repository::storage_layer::{Layer, PageReconstructData, SegmentTag};
+use crate::layered_repository::storage_layer::{
+    Layer, PageReconstructData, PageReconstructResult, SegmentTag,
+};
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, ensure, Result};
 use bytes::Bytes;
 use log::*;
 use std::convert::TryInto;
@@ -120,7 +122,7 @@ impl Layer for ImageLayer {
         blknum: u32,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
-    ) -> Result<Option<Lsn>> {
+    ) -> Result<PageReconstructResult> {
         assert!(lsn >= self.lsn);
 
         let inner = self.load()?;
@@ -132,12 +134,7 @@ impl Layer for ImageLayer {
         let buf = match &inner.image_type {
             ImageType::Blocky { num_blocks } => {
                 if base_blknum >= *num_blocks {
-                    bail!(
-                        "no base img found for {} at blk {} at LSN {}",
-                        self.seg,
-                        base_blknum,
-                        lsn
-                    );
+                    return Ok(PageReconstructResult::Missing(lsn));
                 }
 
                 let mut buf = vec![0u8; BLOCK_SIZE];
@@ -155,7 +152,7 @@ impl Layer for ImageLayer {
         };
 
         reconstruct_data.page_img = Some(Bytes::from(buf));
-        Ok(None)
+        Ok(PageReconstructResult::Complete)
     }
 
     /// Get size of the segment
