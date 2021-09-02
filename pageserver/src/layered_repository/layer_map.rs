@@ -266,15 +266,16 @@ impl LayerMap {
     /// Is there a newer image layer for given segment?
     ///
     /// This is used for garbage collection, to determine if an old layer can
-    /// be deleted. We ignore in-memory layers because they are not durable
-    /// on disk, and delta layers because they depend on an older layer.
+    /// be deleted.
     pub fn newer_image_layer_exists(&self, seg: SegmentTag, lsn: Lsn) -> bool {
         if let Some(segentry) = self.segs.get(&seg) {
+            // We only check on-disk layers, because
+            // in-memory layers are not durable
             for (newer_lsn, layer) in segentry
                 .historic
                 .range((Included(lsn), Included(Lsn(u64::MAX))))
             {
-                // Ignore delta layers.
+                // Ignore layers that depend on an older layer.
                 if layer.is_incremental() {
                     continue;
                 }
