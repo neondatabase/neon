@@ -285,8 +285,8 @@ impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self) -> Result<()> {
         println!(
-            "----- delta layer for {} {}-{} ----",
-            self.seg, self.start_lsn, self.end_lsn
+            "----- delta layer for tli {} seg {} {}-{} ----",
+            self.timelineid, self.seg, self.start_lsn, self.end_lsn
         );
 
         println!("--- relsizes ---");
