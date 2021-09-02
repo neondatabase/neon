@@ -42,7 +42,7 @@ pub struct InMemoryLayer {
     inner: Mutex<InMemoryLayerInner>,
 
     /// Predecessor layer
-    img_layer: Option<Arc<dyn Layer>>,
+    predecessor: Option<Arc<dyn Layer>>,
 }
 
 pub struct InMemoryLayerInner {
@@ -169,9 +169,9 @@ impl Layer for InMemoryLayer {
 
             // Use the base image, if needed
             if let Some(need_lsn) = need_base_image_lsn {
-                if let Some(img_layer) = &self.img_layer {
+                if let Some(predecessor) = &self.predecessor {
                     need_base_image_lsn =
-                        img_layer.get_page_reconstruct_data(blknum, need_lsn, reconstruct_data)?;
+                        predecessor.get_page_reconstruct_data(blknum, need_lsn, reconstruct_data)?;
                 } else {
                     bail!(
                         "no base img found for {} at blk {} at LSN {}",
@@ -225,7 +225,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn is_incremental(&self) -> bool {
-        self.img_layer.is_some()
+        self.predecessor.is_some()
     }
 
     /// debugging function to print out the contents of the layer
@@ -290,7 +290,7 @@ impl InMemoryLayer {
                 page_versions: BTreeMap::new(),
                 segsizes: BTreeMap::new(),
             }),
-            img_layer: None,
+            predecessor: None,
         })
     }
 
@@ -431,7 +431,7 @@ impl InMemoryLayer {
                 page_versions: BTreeMap::new(),
                 segsizes: segsizes,
             }),
-            img_layer: Some(src),
+            predecessor: Some(src),
         })
     }
 
@@ -525,7 +525,7 @@ impl InMemoryLayer {
                 self.start_lsn,
                 end_lsn,
                 dropped,
-                self.img_layer.clone(),
+                self.predecessor.clone(),
                 before_page_versions,
                 before_segsizes,
             )?;

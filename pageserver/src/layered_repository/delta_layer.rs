@@ -109,7 +109,7 @@ pub struct DeltaLayer {
 
     dropped: bool,
 
-    /// Base layer preceding this layer.
+    /// Predecessor layer
     predecessor: Option<Arc<dyn Layer>>,
 
     inner: Mutex<DeltaLayerInner>,
