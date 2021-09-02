@@ -45,7 +45,6 @@ pub fn import_timeline_from_postgres_datadir(
         match direntry.file_name().to_str() {
             None => continue,
 
-            // These special files appear in the snapshot, but are not needed by the page server
             Some("pg_control") => {
                 import_nonrel_file(timeline, lsn, RelishTag::ControlFile, &direntry.path())?;
                 // Extract checkpoint record from pg_control and store is as separate object
@@ -93,7 +92,6 @@ pub fn import_timeline_from_postgres_datadir(
             match direntry.file_name().to_str() {
                 None => continue,
 
-                // These special files appear in the snapshot, but are not needed by the page server
                 Some("PG_VERSION") => continue,
                 Some("pg_filenode.map") => import_nonrel_file(
                     timeline,
@@ -153,7 +151,7 @@ fn import_relfile(
 
     let p = parse_relfilename(path.file_name().unwrap().to_str().unwrap());
     if let Err(e) = p {
-        warn!("unrecognized file in snapshot: {:?} ({})", path, e);
+        warn!("unrecognized file in postgres datadir: {:?} ({})", path, e);
         return Err(e.into());
     }
     let (relnode, forknum, segno) = p.unwrap();

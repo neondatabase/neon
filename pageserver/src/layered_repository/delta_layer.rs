@@ -174,7 +174,7 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            // TODO: avoid opening the snapshot file for each read
+            // TODO: avoid opening the file for each read
             let (_path, book) = self.open_book()?;
             let page_version_reader = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
             let inner = self.load()?;

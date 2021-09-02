@@ -26,7 +26,7 @@ A checkpoint record in the WAL marks a point in the WAL sequence at which it is 
 NOTE: This is an overloaded term.
 
 Whenever enough WAL has been accumulated in memory, the page server []
-writes out the changes in memory into new layer files[]. This process
+writes out the changes from in-memory layers into new layer files[]. This process
 is called "checkpointing". The page server only creates layer files for
 relations that have been modified since the last checkpoint. 
 
@@ -41,17 +41,28 @@ Stateless Postgres node that stores data in pageserver.
 Each of the separate segmented file sets in which a relation is stored. The main fork is where the actual data resides. There also exist two secondary forks for metadata: the free space map and the visibility map.
 Each PostgreSQL fork is considered a separate relish.
 
-### Layer file
+### Layer
+
+Each layer corresponds to one RELISH_SEG_SIZE slice of a relish in a range of LSNs.
+There are two kinds of layers, in-memory and on-disk layers. In-memory
+layers are used to ingest incoming WAL, and provide fast access
+to the recent page versions. On-disk layers are stored as files on disk, and
+are immutable.
+### Layer file (on-disk layer)
 
 Layered repository on-disk format is based on immutable files.  The
-files are called "layer files". Each file corresponds to one 10 MB
+files are called "layer files". Each file corresponds to one RELISH_SEG_SIZE
 segment of a PostgreSQL relation fork. There are two kinds of layer
 files: image files and delta files. An image file contains a
 "snapshot" of the segment at a particular LSN, and a delta file
 contains WAL records applicable to the segment, in a range of LSNs.
 
+### Layer map
+
+The layer map tracks what layers exist for all the relishes in a timeline.
 ### Layered repository
 
+Zenith repository implementation that keeps data in layers.
 ### LSN
 
 
@@ -121,7 +132,7 @@ Each SLRU segment is considered a separate relish[].
 
 ### Tenant (Multitenancy)
 Tenant represents a single customer, interacting with Zenith.
-Wal redo[] activity, timelines[], snapshots[] are managed for each tenant independently.
+Wal redo[] activity, timelines[], layers[] are managed for each tenant independently.
 One pageserver[] can serve multiple tenants at once.
 One safekeeper 
 

@@ -2,8 +2,9 @@
 //! It is stored in a file on disk.
 //!
 //! On disk, the image files are stored in timelines/<timelineid> directory.
-//! Currently, there are no subdirectories, and each snapshot file is named like this:
+//! Currently, there are no subdirectories, and each image layer file is named like this:
 //!
+//! Note that segno is
 //!    <spcnode>_<dbnode>_<relnode>_<forknum>_<segno>_<LSN>
 //!
 //! For example:
@@ -15,10 +16,10 @@
 //! Only metadata is loaded into memory by the load function.
 //! When images are needed, they are read directly from disk.
 //!
-//! For blocky segments, the images are stored in BLOCKY_IMAGES_CHAPTER.
+//! For blocky relishes, the images are stored in BLOCKY_IMAGES_CHAPTER.
 //! All the images are required to be BLOCK_SIZE, which allows for random access.
 //!
-//! For non-blocky segments, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
+//! For non-blocky relishes, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
 //!
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
