@@ -240,16 +240,23 @@ impl Layer for InMemoryLayer {
             .unwrap_or_default();
 
         println!(
-            "----- in-memory layer for {} {}-{} ----",
-            self.seg, self.start_lsn, end_str
+            "----- in-memory layer for tli {} seg {} {}-{} ----",
+            self.timelineid, self.seg, self.start_lsn, end_str
         );
 
         for (k, v) in inner.segsizes.iter() {
-            println!("{}: {}", k, v);
+            println!("segsizes {}: {}", k, v);
         }
-        //for (k, v) in inner.page_versions.iter() {
-        //    println!("blk {} at {}: {}/{}", k.0, k.1, v.page_image.is_some(), v.record.is_some());
-        //}
+
+        for (k, v) in inner.page_versions.iter() {
+            println!(
+                "blk {} at {}: {}/{}\n",
+                k.0,
+                k.1,
+                v.page_image.is_some(),
+                v.record.is_some()
+            );
+        }
 
         Ok(())
     }
@@ -580,31 +587,5 @@ impl InMemoryLayer {
         }
 
         Ok((frozen_layers, new_open_rc))
-    }
-
-    /// debugging function to print out the contents of the layer
-    #[allow(unused)]
-    pub fn dump(&self) -> String {
-        let mut result = format!(
-            "----- inmemory layer for {} {}-> ----\n",
-            self.seg, self.start_lsn
-        );
-
-        let inner = self.inner.lock().unwrap();
-
-        for (k, v) in inner.segsizes.iter() {
-            result += &format!("{}: {}\n", k, v);
-        }
-        for (k, v) in inner.page_versions.iter() {
-            result += &format!(
-                "blk {} at {}: {}/{}\n",
-                k.0,
-                k.1,
-                v.page_image.is_some(),
-                v.record.is_some()
-            );
-        }
-
-        result
     }
 }

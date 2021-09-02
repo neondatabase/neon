@@ -320,6 +320,26 @@ impl LayerMap {
             iter: None,
         }
     }
+
+    /// debugging function to print out the contents of the layer map
+    #[allow(unused)]
+    pub fn dump(&self) -> Result<()> {
+        println!("Begin dump LayerMap");
+        for (seg, segentry) in self.segs.iter() {
+            if let Some(open) = &segentry.open {
+                open.dump()?;
+            }
+
+            for (_, layer) in segentry
+                .historic
+                .range((Included(Lsn(0)), Included(Lsn(u64::MAX))))
+            {
+                layer.dump()?;
+            }
+        }
+        println!("End dump LayerMap");
+        Ok(())
+    }
 }
 
 impl Default for LayerMap {
