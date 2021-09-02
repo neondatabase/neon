@@ -95,7 +95,7 @@ fn main() -> Result<()> {
                             .required(false)
                     ))
                 .subcommand(SubCommand::with_name("start")
-                    .about("Start a postrges compute node.\n This command actually creates new node from scrath, but preserves existing config files")
+                    .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
                     .arg(timeline_arg.clone()).arg(tenantid_arg.clone()))
                 .subcommand(
                     SubCommand::with_name("stop")
