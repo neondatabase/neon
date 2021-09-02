@@ -11,7 +11,7 @@
 //! data directory is compatible with a postgres binary. That includes
 //! a version number, configuration options that can be set at
 //! compilation time like the block size, and the platform's alignment
-//! and endianess information. (The PostgreSQL on-disk file format is
+//! and endianness information. (The PostgreSQL on-disk file format is
 //! not portable across platforms.)
 //!
 //! The control file is stored in the PostgreSQL data directory, as

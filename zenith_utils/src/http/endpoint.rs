@@ -145,7 +145,7 @@ pub fn serve_thread_main(
     addr: String,
 ) -> anyhow::Result<()> {
     let addr = addr.parse()?;
-    log::info!("Starting a http endoint at {}", addr);
+    log::info!("Starting an http endpoint at {}", addr);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
