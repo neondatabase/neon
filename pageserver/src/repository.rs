@@ -358,6 +358,37 @@ mod tests {
             TEST_IMG("foo blk 2 at 5")
         );
 
+        // Truncate to zero length
+        tline.put_truncation(TESTREL_A, Lsn(0x60), 0)?;
+        tline.advance_last_record_lsn(Lsn(0x60));
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 0);
+
+        // Extend from 0 to 2 blocks, leaving a gap
+        tline.put_page_image(TESTREL_A, 1, Lsn(0x70), TEST_IMG("foo blk 1"))?;
+        tline.advance_last_record_lsn(Lsn(0x70));
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x70))?.unwrap(), 2);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?, ZERO_PAGE);
+        assert_eq!(
+            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x70))?,
+            TEST_IMG("foo blk 1")
+        );
+
+        // Extend a lot more, leaving a big gap that spans across segments
+        // FIXME: This is currently broken, see https://github.com/zenithdb/zenith/issues/500
+        /*
+        tline.put_page_image(TESTREL_A, 1500, Lsn(0x80), TEST_IMG("foo blk 1500"))?;
+        tline.advance_last_record_lsn(Lsn(0x80));
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x80))?.unwrap(), 1501);
+        for blk in 2..1500 {
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blk, Lsn(0x80))?,
+                ZERO_PAGE);
+        }
+        assert_eq!(
+            tline.get_page_at_lsn(TESTREL_A, 1500, Lsn(0x80))?,
+            TEST_IMG("foo blk 1500"));
+         */
+
         Ok(())
     }
 
