@@ -13,7 +13,6 @@ pub use prometheus::{register_int_gauge_vec, IntGaugeVec};
 pub use prometheus::{Encoder, TextEncoder};
 
 mod wrappers;
-use libc::{c_long, getrusage, rusage, suseconds_t, time_t, timeval, RUSAGE_SELF};
 pub use wrappers::{CountedReader, CountedWriter};
 
 /// Gathers all Prometheus metrics and records the I/O stats just before that.
@@ -43,39 +42,24 @@ lazy_static! {
 // We know the the size of the block, so we can determine the I/O bytes out of it.
 // The value might be not 100% exact, but should be fine for Prometheus metrics in this case.
 fn update_io_metrics() {
-    let mut usage = rusage {
-        ru_utime: timeval {
-            tv_sec: 0 as time_t,
-            tv_usec: 0 as suseconds_t,
-        },
-        ru_stime: timeval {
-            tv_sec: 0 as time_t,
-            tv_usec: 0 as suseconds_t,
-        },
-        ru_maxrss: 0 as c_long,
-        ru_ixrss: 0 as c_long,
-        ru_idrss: 0 as c_long,
-        ru_isrss: 0 as c_long,
-        ru_minflt: 0 as c_long,
-        ru_majflt: 0 as c_long,
-        ru_nswap: 0 as c_long,
-        ru_inblock: 0 as c_long,
-        ru_oublock: 0 as c_long,
-        ru_msgsnd: 0 as c_long,
-        ru_msgrcv: 0 as c_long,
-        ru_nsignals: 0 as c_long,
-        ru_nvcsw: 0 as c_long,
-        ru_nivcsw: 0 as c_long,
-    };
-    unsafe {
-        getrusage(RUSAGE_SELF, (&mut usage) as *mut rusage);
-    }
+    let rusage_stats = get_rusage_stats();
 
     const BYTES_IN_BLOCK: i64 = 512;
     DISK_IO_BYTES
         .with_label_values(&["read"])
-        .set(usage.ru_inblock * BYTES_IN_BLOCK);
+        .set(rusage_stats.ru_inblock * BYTES_IN_BLOCK);
     DISK_IO_BYTES
         .with_label_values(&["write"])
-        .set(usage.ru_oublock * BYTES_IN_BLOCK);
+        .set(rusage_stats.ru_oublock * BYTES_IN_BLOCK);
+}
+
+fn get_rusage_stats() -> libc::rusage {
+    let mut rusage = std::mem::MaybeUninit::uninit();
+
+    // SAFETY: kernel will initialize the struct for us
+    unsafe {
+        let ret = libc::getrusage(libc::RUSAGE_SELF, rusage.as_mut_ptr());
+        assert!(ret == 0, "getrusage failed: bad args");
+        rusage.assume_init()
+    }
 }
