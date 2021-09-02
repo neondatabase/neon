@@ -97,16 +97,12 @@ pub enum PageReconstructResult {
 }
 
 ///
-/// A Layer holds all page versions for one segment of a relish, in a range of LSNs.
-/// There are two kinds of layers, in-memory and snapshot layers. In-memory
+/// A Layer corresponds to one RELISH_SEG_SIZE slice of a relish in a range of LSNs.
+/// There are two kinds of layers, in-memory and on-disk layers. In-memory
 /// layers are used to ingest incoming WAL, and provide fast access
-/// to the recent page versions. Snaphot layers are stored on disk, and
+/// to the recent page versions. On-disk layers are stored as files on disk, and
 /// are immutable. This trait presents the common functionality of
-/// in-memory and snapshot layers.
-///
-/// Each layer contains a full snapshot of the segment at the start
-/// LSN. In addition to that, it contains WAL (or more page images)
-/// needed to recontruct any page version up to the end LSN.
+/// in-memory and on-disk layers.
 ///
 pub trait Layer: Send + Sync {
     // These functions identify the relish segment and the LSN range
