@@ -6,13 +6,14 @@ which pages they apply to, and accumulates the incoming changes in
 memory. Every now and then, the accumulated changes are written out to
 new files.
 
-The files are called "snapshot files". Each snapshot file corresponds
-to one 10 MB slice of a PostgreSQL relation fork. The snapshot files
+The files are called "layer files". Each layer file corresponds
+to one RELISH_SEG_SIZE slice of a PostgreSQL relation fork or
+non-rel file in a range of LSNs. The layer files
 for each timeline are stored in the timeline's subdirectory under
 .zenith/tenants/<tenantid>/timelines.
 
-There are two kind of snapshot file: base images, and deltas. A base
-image file contains a snapshot of a segment as it was at one LSN,
+There are two kind of layer file: base images, and deltas. A base
+image file contains a layer of a segment as it was at one LSN,
 whereas a delta file contains modifications to a segment - mostly in
 the form of WAL records - in a range of LSN
 
@@ -44,7 +45,7 @@ managed, except that the first part of file names is different.
 Internally, the relations and non-relation files that are managed in
 the versioned store are together called "relishes".
 
-If a file has been dropped, the last snapshot file for it is created
+If a file has been dropped, the last layer file for it is created
 with the _DROPPED suffix, e.g.
 
     rel_1663_13990_2609_0_10_000000000169C348_0000000001702000_DROPPED
@@ -67,7 +68,7 @@ for 'orders' table on 'main' branch is represented like this:
     main/orders_100_200
 
 
-# Creating snapshot files
+# Creating layer files
 
 Let's start with a simple example with a system that contains one
 branch called 'main' and two tables, 'orders' and 'customers'. The end
@@ -86,10 +87,10 @@ end of WAL at 250 are kept in memory. If the page server crashes, the
 latest records between 200-250 need to be re-read from the WAL.
 
 Whenever enough WAL has been accumulated in memory, the page server
-writes out the changes in memory into new snapshot files. This process
+writes out the changes in memory into new layer files. This process
 is called "checkpointing" (not to be confused with the PostgreSQL
 checkpoints, that's a different thing). The page server only creates
-snapshot files for relations that have been modified since the last
+layer files for relations that have been modified since the last
 checkpoint. For example, if the current end of WAL is at LSN 450, and
 the last checkpoint happened at LSN 400 but there hasn't been any
 recent changes to 'customers' table, you would have these files on
@@ -108,7 +109,7 @@ disk:
 
 If the customers table is modified later, a new file is created for it
 at the next checkpoint. The new file will cover the "gap" from the
-last snapshot file, so the LSN ranges are always contiguous:
+last layer file, so the LSN ranges are always contiguous:
 
 	main/orders_100
 	main/orders_100_200
@@ -130,13 +131,13 @@ page server needs to reconstruct the requested page, as it was at the
 requested LSN. To do that, the page server first checks the recent
 in-memory layer; if the requested page version is found there, it can
 be returned immediatedly without looking at the files on
-disk. Otherwise the page server needs to locate the snapshot file that
+disk. Otherwise the page server needs to locate the layer file that
 contains the requested page version.
 
 For example, if a request comes in for table 'orders' at LSN 250, the
 page server would load the 'main/orders_200_300' file into memory, and
 reconstruct and return the requested page from it, as it was at
-LSN 250. Because the snapshot file consists of a full image of the
+LSN 250. Because the layer file consists of a full image of the
 relation at the start LSN and the WAL, reconstructing the page
 involves replaying any WAL records applicable to the page between LSNs
 200-250, starting from the base image at LSN 200.
@@ -171,7 +172,7 @@ Then, the 'orders' table is updated differently on the 'main' and
 
 Because the 'customers' table hasn't been modified on the child
 branch, there is no file for it there. If you request a page for it on
-the 'child' branch, the page server will not find any snapshot file
+the 'child' branch, the page server will not find any layer file
 for it in the 'child' directory, so it will recurse to look into the
 parent 'main' branch instead.
 
@@ -217,7 +218,7 @@ branch at a historic LSN, is how we support PITR in Zenith.
 
 # Garbage collection
 
-In this scheme, we keep creating new snapshot files over time. We also
+In this scheme, we keep creating new layer files over time. We also
 need a mechanism to remove old files that are no longer needed,
 because disk space isn't infinite.
 
@@ -245,7 +246,7 @@ of the branch is LSN 525, so that the GC horizon is currently at
 	main/customers_200
 
 We can remove the following files because the end LSNs of those files are
-older than GC horizon 375, and there are more recent snapshot files for the
+older than GC horizon 375, and there are more recent layer files for the
 table:
 
 	main/orders_100       DELETE
@@ -262,7 +263,7 @@ table:
 	main/customers_200      KEEP, NO NEWER VERSION
 
 'main/customers_100_200' is old enough, but it cannot be
-removed because there is no newer snapshot file for the table.
+removed because there is no newer layer file for the table.
 
 Things get slightly more complicated with multiple branches. All of
 the above still holds, but in addition to recent files we must also
@@ -308,7 +309,7 @@ new base image and delta file for it on the child:
 
 After this, the 'main/orders_100' and 'main/orders_100_200' file could
 be removed. It is no longer needed by the child branch, because there
-is a newer snapshot file there. TODO: This optimization hasn't been
+is a newer layer file there. TODO: This optimization hasn't been
 implemented! The GC algorithm will currently keep the file on the
 'main' branch anyway, for as long as the child branch exists.
 
@@ -346,7 +347,7 @@ It would also be OK to have overlapping LSN ranges for the same relation:
 	main/orders_300_400
 	main/orders_400
 
-The code that reads the snapshot files should cope with this, but this
+The code that reads the layer files should cope with this, but this
 situation doesn't arise either, because the checkpointing code never
 does that.  It could be useful, however, as a transient state when
 garbage collecting around branch points, or explicit recovery
@@ -360,6 +361,6 @@ points. For example, if we start with this:
 
 And there is a branch or explicit recovery point at LSN 150, we could
 replace 'main/orders_100_200' with 'main/orders_150' to keep a
-snapshot only at that exact point that's still needed, removing the
+layer only at that exact point that's still needed, removing the
 other page versions around it. But such compaction has not been
 implemented yet.

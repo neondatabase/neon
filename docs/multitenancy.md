@@ -37,7 +37,7 @@ On the page server tenants introduce one level of indirection, so data directory
    ├── de182bc61fb11a5a6b390a8aed3a804a
    └── ee6016ec31116c1b7c33dfdfca38891f
 ```
-Wal redo activity, timelines, snapshots are managed for each tenant independently.
+Wal redo activity and timelines are managed for each tenant independently.
 
 For local environment used for example in tests there also new level of indirection for tenants. It touches `pgdatadirs` directory. Now it contains `tenants` subdirectory so the structure looks the following way:
 
