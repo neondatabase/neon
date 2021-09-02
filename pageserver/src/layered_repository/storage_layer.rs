@@ -105,12 +105,24 @@ pub enum PageReconstructResult {
 /// in-memory and on-disk layers.
 ///
 pub trait Layer: Send + Sync {
-    // These functions identify the relish segment and the LSN range
-    // that this Layer holds.
+    /// Identify the timeline this relish belongs to
     fn get_timeline_id(&self) -> ZTimelineId;
+
+    /// Identify the relish segment
     fn get_seg_tag(&self) -> SegmentTag;
+
+    /// Inclusive start bound of the LSN range that this layer hold
     fn get_start_lsn(&self) -> Lsn;
+
+    /// 'end_lsn' meaning depends on the layer kind:
+    /// - in-memory layer is either unbounded (end_lsn = MAX_LSN) or dropped (end_lsn = drop_lsn)
+    /// - image layer represents snapshot at one LSN, so end_lsn = lsn
+    /// - delta layer has end_lsn
+    ///
+    /// TODO Is end_lsn always exclusive for all layer kinds?
     fn get_end_lsn(&self) -> Lsn;
+
+    /// Is the segment represented by this layer dropped by PostgreSQL?
     fn is_dropped(&self) -> bool;
 
     /// Filename used to store this layer on disk. (Even in-memory layers
