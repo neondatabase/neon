@@ -1147,10 +1147,8 @@ impl LayeredTimeline {
         }
 
         // Call unload() on all frozen layers, to release memory.
-        // TODO: On-disk layers shouldn't consume much memory to begin with,
-        // so this shouldn't be necessary. But currently the DeltaLayer and
-        // ImageLayer code slurps the whole file into memory, so they do in
-        // fact consume a lot of memory.
+        // This shouldn't be much memory, as only metadata is slurped
+        // into memory.
         for layer in layers.iter_historic_layers() {
             layer.unload()?;
         }
