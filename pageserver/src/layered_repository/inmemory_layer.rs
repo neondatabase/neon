@@ -7,6 +7,7 @@ use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
+use crate::layered_repository::ZERO_PAGE;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
 use crate::PageServerConf;
@@ -364,6 +365,36 @@ impl InMemoryLayer {
                     newsize,
                     lsn
                 );
+
+                // If we are extending the relation by more than one page, initialize the "gap"
+                // with zeros
+                //
+                // XXX: What if the caller initializes the gap with subsequent call with same LSN?
+                // I don't think that can happen currently, but that is highly dependent on how
+                // PostgreSQL writes its WAL records and there's no guarantee of it. If it does
+                // happen, we would hit the "page version already exists" warning above on the
+                // subsequent call to initialize the gap page.
+                let gapstart = self.seg.segno * RELISH_SEG_SIZE + oldsize;
+                for gapblknum in gapstart..blknum {
+                    let zeropv = PageVersion {
+                        page_image: Some(ZERO_PAGE.clone()),
+                        record: None,
+                    };
+                    println!(
+                        "filling gap blk {} with zeros for write of {}",
+                        gapblknum, blknum
+                    );
+                    let old = inner.page_versions.insert((gapblknum, lsn), zeropv);
+                    // We already had an entry for this LSN. That's odd..
+
+                    if old.is_some() {
+                        warn!(
+                            "Page version of rel {} blk {} at {} already exists",
+                            self.seg.rel, blknum, lsn
+                        );
+                    }
+                }
+
                 inner.segsizes.insert(lsn, newsize);
             }
         }
