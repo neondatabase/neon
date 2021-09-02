@@ -472,7 +472,7 @@ impl InMemoryLayer {
     }
 
     ///
-    /// Write the this in-memory layer to disk, as a snapshot layer.
+    /// Write the this in-memory layer to disk.
     ///
     /// The cutoff point for the layer that's written to disk is 'end_lsn'.
     ///

@@ -346,7 +346,7 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyOutResponse)?;
         info!("sent CopyOut");
 
-        /* Send a tarball of the latest snapshot on the timeline */
+        /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
             let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn);
@@ -582,18 +582,18 @@ impl postgres_backend::Handler for PageServerHandler {
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor::int8_col(b"snapshot_relfiles_total"),
-                RowDescriptor::int8_col(b"snapshot_relfiles_needed_by_cutoff"),
-                RowDescriptor::int8_col(b"snapshot_relfiles_needed_by_branches"),
-                RowDescriptor::int8_col(b"snapshot_relfiles_not_updated"),
-                RowDescriptor::int8_col(b"snapshot_relfiles_removed"),
-                RowDescriptor::int8_col(b"snapshot_relfiles_dropped"),
-                RowDescriptor::int8_col(b"snapshot_nonrelfiles_total"),
-                RowDescriptor::int8_col(b"snapshot_nonrelfiles_needed_by_cutoff"),
-                RowDescriptor::int8_col(b"snapshot_nonrelfiles_needed_by_branches"),
-                RowDescriptor::int8_col(b"snapshot_nonrelfiles_not_updated"),
-                RowDescriptor::int8_col(b"snapshot_nonrelfiles_removed"),
-                RowDescriptor::int8_col(b"snapshot_nonrelfiles_dropped"),
+                RowDescriptor::int8_col(b"layer_relfiles_total"),
+                RowDescriptor::int8_col(b"layer_relfiles_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layer_relfiles_needed_by_branches"),
+                RowDescriptor::int8_col(b"layer_relfiles_not_updated"),
+                RowDescriptor::int8_col(b"layer_relfiles_removed"),
+                RowDescriptor::int8_col(b"layer_relfiles_dropped"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_total"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_branches"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_not_updated"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_removed"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_dropped"),
                 RowDescriptor::int8_col(b"elapsed"),
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
