@@ -133,9 +133,8 @@ pub trait Timeline: Send + Sync {
     /// Truncate relation
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
 
-    /// Unlink relish.
-    /// This method is used for marking dropped relations and truncated SLRU segments
-    fn put_unlink(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
+    /// This method is used for marking dropped relations and truncated SLRU files
+    fn drop_relish(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
 
     /// Track end of the latest digested WAL record.
     ///

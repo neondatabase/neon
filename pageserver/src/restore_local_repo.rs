@@ -395,15 +395,15 @@ pub fn save_decoded_record(
             for tablespace_id in dropdb.tablespace_ids {
                 let rels = timeline.list_rels(tablespace_id, dropdb.db_id, lsn)?;
                 for rel in rels {
-                    timeline.put_unlink(RelishTag::Relation(rel), lsn)?;
+                    timeline.drop_relish(RelishTag::Relation(rel), lsn)?;
                 }
                 trace!(
-                    "Unlink FileNodeMap {}, {} at lsn {}",
+                    "Drop FileNodeMap {}, {} at lsn {}",
                     tablespace_id,
                     dropdb.db_id,
                     lsn
                 );
-                timeline.put_unlink(
+                timeline.drop_relish(
                     RelishTag::FileNodeMap {
                         spcnode: tablespace_id,
                         dbnode: dropdb.db_id,
@@ -446,12 +446,12 @@ pub fn save_decoded_record(
             save_xact_record(timeline, lsn, &parsed_xact, decoded)?;
             // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
             trace!(
-                "unlink twophaseFile for xid {} parsed_xact.xid {} here at {}",
+                "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
                 decoded.xl_xid,
                 parsed_xact.xid,
                 lsn
             );
-            timeline.put_unlink(
+            timeline.drop_relish(
                 RelishTag::TwoPhase {
                     xid: parsed_xact.xid,
                 },
@@ -728,7 +728,7 @@ fn save_xact_record(
                 dbnode: xnode.dbnode,
                 relnode: xnode.relnode,
             };
-            timeline.put_unlink(RelishTag::Relation(rel), lsn)?;
+            timeline.drop_relish(RelishTag::Relation(rel), lsn)?;
         }
     }
     Ok(())
@@ -770,7 +770,7 @@ fn save_clog_truncate_record(
         return Ok(());
     }
 
-    // Iterate via SLRU CLOG segments and unlink segments that we're ready to truncate
+    // Iterate via SLRU CLOG segments and drop segments that we're ready to truncate
     // TODO This implementation is very inefficient -
     // it scans all non-rels only to find Clog
     //
@@ -784,8 +784,8 @@ fn save_clog_truncate_record(
             if slru == SlruKind::Clog {
                 let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
                 if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
-                    timeline.put_unlink(RelishTag::Slru { slru, segno }, lsn)?;
-                    trace!("unlink CLOG segment {:>04X} at lsn {}", segno, lsn);
+                    timeline.drop_relish(RelishTag::Slru { slru, segno }, lsn)?;
+                    trace!("Drop CLOG segment {:>04X} at lsn {}", segno, lsn);
                 }
             }
         }
@@ -886,7 +886,7 @@ fn save_multixact_truncate_record(
     // Delete all the segments except the last one. The last segment can still
     // contain, possibly partially, valid data.
     while segment != endsegment {
-        timeline.put_unlink(
+        timeline.drop_relish(
             RelishTag::Slru {
                 slru: SlruKind::MultiXactMembers,
                 segno: segment as u32,
