@@ -324,7 +324,7 @@ impl PostgresRedoManager {
                             if rec_segno == segno && blknum == rpageno {
                                 transaction_id_set_status(
                                     *subxact,
-                                    pg_constants::TRANSACTION_STATUS_SUB_COMMITTED,
+                                    pg_constants::TRANSACTION_STATUS_COMMITTED,
                                     &mut page,
                                 );
                             }
