@@ -11,3 +11,4 @@
 - [postgres_ffi/README](/postgres_ffi/README) — Postgres FFI overview.
 - [test_runner/README.md](/test_runner/README.md) — tests infrastructure overview.
 - [walkeeper/README](/walkeeper/README.md) — WAL service overview.
+- [core_changes.md](core_changes.md) - Description of Zenith changes in Postgres core
