@@ -11,6 +11,7 @@ import signal
 import subprocess
 import time
 import filecmp
+import difflib
 
 from contextlib import closing
 from pathlib import Path
@@ -956,10 +957,10 @@ def check_restored_datadir_content(zenith_cli, pg, lsn, postgres: PostgresFactor
     # create new branch, but don't start postgres
     # We only need 'basebackup' result here.
     zenith_cli.run(
-        ["branch", "new", pg.branch + "@" + lsn])
+        ["branch", "check_restored_datadir", pg.branch + "@" + lsn])
 
-    pg2 = postgres.create('new')
-    print('postgres is created on new branch')
+    pg2 = postgres.create('check_restored_datadir')
+    print('postgres is created on check_restored_datadir branch')
 
     print('files in a basebackup')
     # list files we're going to compare
@@ -979,4 +980,18 @@ def check_restored_datadir_content(zenith_cli, pg, lsn, postgres: PostgresFactor
     print('filecmp result mismatch and error lists:')
     print(mismatch)
     print(error)
+
+    for f in mismatch:
+
+        f1 = os.path.join(pg.pgdata_dir, f)
+        f2 = os.path.join(pg2.pgdata_dir, f)
+        stdout_filename = "{}.diff".format(f2)
+
+        with open(stdout_filename, 'w') as stdout_f:
+            subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)
+            subprocess.run("xxd -b {} > {}.hex ".format(f2, f2), shell=True)
+
+            cmd = ['diff {}.hex {}.hex'.format(f1, f2)]
+            subprocess.run(cmd, stdout=stdout_f, shell=True)
+
     assert (mismatch, error) == ([], [])
