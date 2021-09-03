@@ -46,13 +46,14 @@ def test_pgbench(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin
 
     connstr = pg.connstr()
 
-    # Initialize pgbench database
-    with zenbenchmark.record_duration('init'):
-        pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+    # Initialize pgbench database, recording the time and I/O it takes
+    with zenbenchmark.record_pageserver_writes(pageserver, 'pageserver_writes'):
+        with zenbenchmark.record_duration('init'):
+            pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
 
-        # Flush the layers from memory to disk. The time to do that is included in the
-        # reported init time.
-        pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+            # Flush the layers from memory to disk. This is included in the reported
+            # time and I/O
+            pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
 
     # Run pgbench for 5000 transactions
     with zenbenchmark.record_duration('5000_xacts'):

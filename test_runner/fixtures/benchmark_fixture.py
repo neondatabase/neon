@@ -1,6 +1,7 @@
 from pprint import pprint
 
 import os
+import re
 import timeit
 import pathlib
 import uuid
@@ -119,6 +120,35 @@ class ZenithBenchmarker:
         end = timeit.default_timer()
 
         self.results.record(self.request.node.name, metric_name, end - start, 's')
+
+    def get_io_writes(self, pageserver) -> int:
+        """
+        Fetch the "cumulative # of bytes written" metric from the pageserver
+        """
+        # Fetch all the exposed prometheus metrics from page server
+        all_metrics = pageserver.http_client().get_metrics()
+        # Use a regular expression to extract the one we're interested in
+        #
+        # TODO: If we start to collect more of the prometheus metrics in the
+        # performance test suite like this, we should refactor this to load and
+        # parse all the metrics into a more convenient structure in one go.
+        #
+        # The metric should be an integer, as it's a number of bytes. But in general
+        # all prometheus metrics are floats. So to be pedantic, read it as a float
+        # and round to integer.
+        matches = re.search(r'pageserver_disk_io_bytes{io_operation="write"} (\S+)', all_metrics)
+        return int(round(float(matches.group(1))))
+
+    @contextmanager
+    def record_pageserver_writes(self, pageserver, metric_name):
+        """
+        Record bytes written by the pageserver during a test.
+        """
+        before = self.get_io_writes(pageserver)
+        yield
+        after = self.get_io_writes(pageserver)
+
+        self.results.record(self.request.node.name, metric_name, round((after - before) / (1024 * 1024)), 'MB')
 
 @pytest.fixture(scope='function')
 def zenbenchmark(zenbenchmark_global, request) -> Iterator[ZenithBenchmarker]:
