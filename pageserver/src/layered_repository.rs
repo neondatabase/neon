@@ -68,7 +68,7 @@ static TIMEOUT: Duration = Duration::from_secs(60);
 // This puts a backstop on how much WAL needs to be re-digested if the
 // page server crashes.
 //
-// FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
+// FIXME: This current value is very low. I would imagine something like 1 GiB or 10 GiB
 // would be more appropriate. But a low value forces the code to be exercised more,
 // which is good for now to trigger bugs.
 static OLDEST_INMEM_DISTANCE: i128 = 16 * 1024 * 1024;

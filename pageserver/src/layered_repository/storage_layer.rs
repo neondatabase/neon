@@ -14,12 +14,12 @@ use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
 
-// Size of one segment in pages (10 MB)
+// Size of one segment in pages (10 MiB)
 pub const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
 
 ///
 /// Each relish stored in the repository is divided into fixed-sized "segments",
-/// with 10 MB of key-space, or 1280 8k pages each.
+/// with 10 MiB of key-space, or 1280 8k pages each.
 ///
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy)]
 pub struct SegmentTag {

@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(parse_relfilename("0"), Ok((0, 0, 0)));
 
         // PostgreSQL has a limit of 2^32-2 blocks in a table. With 8k block size and
-        // 1 GB segments, the max segment number is 32767. But we accept larger values
+        // 1 GiB segments, the max segment number is 32767. But we accept larger values
         // currently.
         assert_eq!(parse_relfilename("1.123456"), Ok((1, 0, 123456)));
     }

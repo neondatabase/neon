@@ -225,7 +225,7 @@ because disk space isn't infinite.
 What files are still needed? Currently, the page server supports PITR
 and branching from any branch at any LSN that is "recent enough" from
 the tip of the branch.  "Recent enough" is defined as an LSN horizon,
-which by default is 64 MB.  (See DEFAULT_GC_HORIZON). For this
+which by default is 64 MiB.  (See DEFAULT_GC_HORIZON). For this
 example, let's assume that the LSN horizon is 150 units.
 
 Let's look at the single branch scenario again. Imagine that the end
@@ -255,9 +255,9 @@ table:
 	main/orders_200_300   DELETE
 	main/orders_300       STILL NEEDED BY orders_300_400
 	main/orders_300_400   KEEP, NEWER THAN GC HORIZON
-	main/orders_400       .. 
-	main/orders_400_500   .. 
-	main/orders_500       .. 
+	main/orders_400       ..
+	main/orders_400_500   ..
+	main/orders_500       ..
 	main/customers_100      DELETE
 	main/customers_100_200  DELETE
 	main/customers_200      KEEP, NO NEWER VERSION

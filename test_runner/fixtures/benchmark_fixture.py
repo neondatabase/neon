@@ -42,7 +42,7 @@ def test_mybench(postgres: PostgresFactory, pageserver: ZenithPageserver, zenben
 
     # Initialize the test
     ...
-    
+
     # Run the test, timing how long it takes
     with zenbenchmark.record_duration('test_query'):
         cur.execute('SELECT test_query(...)')
@@ -110,10 +110,10 @@ class ZenithBenchmarker:
     def record_duration(self, metric_name):
         """
         Record a duration. Usage:
-        
+
         with zenbenchmark.record_duration('foobar_runtime'):
             foobar()   # measure this
-        
+
         """
         start = timeit.default_timer()
         yield
@@ -148,7 +148,7 @@ class ZenithBenchmarker:
         yield
         after = self.get_io_writes(pageserver)
 
-        self.results.record(self.request.node.name, metric_name, round((after - before) / (1024 * 1024)), 'MB')
+        self.results.record(self.request.node.name, metric_name, round((after - before) / (1024 * 1024)), 'MiB')
 
 @pytest.fixture(scope='function')
 def zenbenchmark(zenbenchmark_global, request) -> Iterator[ZenithBenchmarker]:
@@ -182,7 +182,7 @@ def pytest_terminal_summary(
 
         terminalreporter.write("{}.{}: ".format(func, metric_name))
 
-        if unit == 'MB':
+        if unit == 'MiB':
             terminalreporter.write("{0:,.0f}".format(metric_value), green=True)
         elif unit == 's':
             terminalreporter.write("{0:,.3f}".format(metric_value), green=True)

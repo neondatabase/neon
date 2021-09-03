@@ -65,4 +65,4 @@ def test_pgbench(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin
 
     # Report disk space used by the repository
     timeline_size = get_timeline_size(repo_dir, pageserver.initial_tenant, timeline)
-    zenbenchmark.record('size', timeline_size / (1024*1024), 'MB')
+    zenbenchmark.record('size', timeline_size / (1024*1024), 'MiB')

@@ -234,7 +234,7 @@ fn walreceiver_main(
                     }
                 }
 
-                // Somewhat arbitrarily, if we have at least 10 complete wal segments (16 MB each),
+                // Somewhat arbitrarily, if we have at least 10 complete wal segments (16 MiB each),
                 // "checkpoint" the repository to flush all the changes from WAL we've processed
                 // so far to disk. After this, we don't need the original WAL anymore, and it
                 // can be removed. This is probably too aggressive for production, but it's useful
