@@ -199,6 +199,11 @@ impl Layer for InMemoryLayer {
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
         let inner = self.inner.lock().unwrap();
 
+        // If the segment created after requested LSN,
+        // it doesn't exist in the layer. But we shouldn't
+        // have requested it in the first place.
+        assert!(lsn >= self.start_lsn);
+
         // Is the requested LSN after the segment was dropped?
         if let Some(drop_lsn) = inner.drop_lsn {
             if lsn >= drop_lsn {
