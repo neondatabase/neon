@@ -464,6 +464,54 @@ mod tests {
     }
 
     ///
+    /// Test list_rels() function, with branches and dropped relations
+    ///
+    #[test]
+    fn test_list_rels_drop() -> Result<()> {
+        let repo = get_test_repo("test_list_rels_drop")?;
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+        const TESTDB: u32 = 111;
+
+        // Import initial dummy checkpoint record, otherwise the get_timeline() call
+        // after branching fails below
+        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_PAGE.clone())?;
+
+        // Create a relation on the timeline
+        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+
+        // Check that list_rels() lists it after LSN 2, but no before it.
+        let reltag = match TESTREL_A {
+            RelishTag::Relation(reltag) => reltag,
+            _ => panic!("unexpected relish"),
+        };
+        assert!(!tline.list_rels(0, TESTDB, Lsn(0x10))?.contains(&reltag));
+        assert!(tline.list_rels(0, TESTDB, Lsn(0x20))?.contains(&reltag));
+        assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&reltag));
+
+        // Create a branch, check that the relation is visible there
+        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
+        repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
+        let newtline = repo.get_timeline(newtimelineid)?;
+
+        assert!(newtline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&reltag));
+
+        // Drop it on the branch
+        newtline.drop_relish(TESTREL_A, Lsn(0x40))?;
+
+        // Check that it's no longer listed on the branch after the point where it was dropped
+        assert!(newtline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&reltag));
+        assert!(!newtline.list_rels(0, TESTDB, Lsn(0x40))?.contains(&reltag));
+
+        // Run checkpoint and garbage collection and check that it's still not visible
+        newtline.checkpoint()?;
+        repo.gc_iteration(Some(newtimelineid), 0, true)?;
+        assert!(!newtline.list_rels(0, TESTDB, Lsn(0x40))?.contains(&reltag));
+
+        Ok(())
+    }
+
+    ///
     /// Test branch creation
     ///
     #[test]
