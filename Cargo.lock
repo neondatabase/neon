@@ -1186,8 +1186,8 @@ dependencies = [
  "lazy_static",
  "log",
  "postgres",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
- "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-protocol",
+ "postgres-types",
  "postgres_ffi",
  "rand",
  "regex",
@@ -1301,27 +1301,9 @@ dependencies = [
  "fallible-iterator",
  "futures",
  "log",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-protocol",
  "tokio",
- "tokio-postgres 0.7.1",
-]
-
-[[package]]
-name = "postgres-protocol"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff3e0f70d32e20923cabf2df02913be7c1842d4c772db8065c00fcfdd1d1bff3"
-dependencies = [
- "base64 0.13.0",
- "byteorder",
- "bytes",
- "fallible-iterator",
- "hmac",
- "md-5",
- "memchr",
- "rand",
- "sha2",
- "stringprep",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -1345,22 +1327,11 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "430f4131e1b7657b0cd9a2b0c3408d77c9a43a042d300b8c77f981dffcc43a2f"
-dependencies = [
- "bytes",
- "fallible-iterator",
- "postgres-protocol 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "postgres-types"
-version = "0.2.1"
 source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
 dependencies = [
  "bytes",
  "fallible-iterator",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-protocol",
 ]
 
 [[package]]
@@ -1447,7 +1418,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-postgres 0.7.2",
+ "tokio-postgres",
  "zenith_utils",
 ]
 
@@ -2189,31 +2160,8 @@ dependencies = [
  "percent-encoding",
  "phf",
  "pin-project-lite",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
- "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
- "socket2",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "tokio-postgres"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d2b1383c7e4fb9a09e292c7c6afb7da54418d53b045f1c1fac7a911411a2b8b"
-dependencies = [
- "async-trait",
- "byteorder",
- "bytes",
- "fallible-iterator",
- "futures",
- "log",
- "parking_lot",
- "percent-encoding",
- "phf",
- "pin-project-lite",
- "postgres-protocol 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "postgres-types 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "postgres-protocol",
+ "postgres-types",
  "socket2",
  "tokio",
  "tokio-util",
@@ -2386,7 +2334,7 @@ dependencies = [
  "log",
  "pageserver",
  "postgres",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-protocol",
  "postgres_ffi",
  "regex",
  "rust-s3",
