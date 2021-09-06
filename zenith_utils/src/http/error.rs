@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 use hyper::{header, Body, Response, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use thiserror::Error;
 
@@ -45,7 +45,7 @@ impl ApiError {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct HttpErrorBody {
     pub msg: String,
 }
