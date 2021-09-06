@@ -161,6 +161,20 @@ impl Layer for DeltaLayer {
         )
     }
 
+    fn path(&self) -> Option<PathBuf> {
+        Some(Self::path_for(
+            &self.path_or_conf,
+            self.timelineid,
+            self.tenantid,
+            &DeltaFileName {
+                seg: self.seg,
+                start_lsn: self.start_lsn,
+                end_lsn: self.end_lsn,
+                dropped: self.dropped,
+            },
+        ))
+    }
+
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
@@ -271,7 +285,9 @@ impl Layer for DeltaLayer {
 
     fn delete(&self) -> Result<()> {
         // delete underlying file
-        fs::remove_file(self.path())?;
+        if let Some(path) = self.path() {
+            fs::remove_file(path)?;
+        }
         Ok(())
     }
 
@@ -321,20 +337,6 @@ impl Layer for DeltaLayer {
 }
 
 impl DeltaLayer {
-    fn path(&self) -> PathBuf {
-        Self::path_for(
-            &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
-            &DeltaFileName {
-                seg: self.seg,
-                start_lsn: self.start_lsn,
-                end_lsn: self.end_lsn,
-                dropped: self.dropped,
-            },
-        )
-    }
-
     fn path_for(
         path_or_conf: &PathOrConf,
         timelineid: ZTimelineId,
@@ -386,7 +388,9 @@ impl DeltaLayer {
         let mut inner = delta_layer.inner.lock().unwrap();
 
         // Write the in-memory btreemaps into a file
-        let path = delta_layer.path();
+        let path = delta_layer
+            .path()
+            .expect("DeltaLayer is supposed to have a layer path on disk");
 
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?

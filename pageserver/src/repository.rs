@@ -260,7 +260,6 @@ mod tests {
         fs::create_dir_all(&repo_dir.join("timelines"))?;
 
         let conf = PageServerConf::dummy_conf(repo_dir);
-
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));

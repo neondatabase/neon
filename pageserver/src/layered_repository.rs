@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -33,6 +33,7 @@ use std::{fs, thread};
 
 use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
+use crate::relish_storage::storage_uploader::QueueBasedRelishUploader;
 use crate::repository::{GcResult, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
 use crate::walredo::WalRedoManager;
@@ -109,6 +110,7 @@ pub struct LayeredRepository {
     timelines: Mutex<HashMap<ZTimelineId, Arc<LayeredTimeline>>>,
 
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+    relish_uploader: Option<Arc<QueueBasedRelishUploader>>,
 }
 
 /// Public interface
@@ -139,7 +141,8 @@ impl Repository for LayeredRepository {
             None,
             timelineid,
             self.tenantid,
-            self.walredo_mgr.clone(),
+            Arc::clone(&self.walredo_mgr),
+            self.relish_uploader.as_ref().map(Arc::clone),
             0,
         )?;
 
@@ -230,7 +233,8 @@ impl LayeredRepository {
                     ancestor,
                     timelineid,
                     self.tenantid,
-                    self.walredo_mgr.clone(),
+                    Arc::clone(&self.walredo_mgr),
+                    self.relish_uploader.as_ref().map(Arc::clone),
                     0, // init with 0 and update after layers are loaded
                 )?;
 
@@ -275,6 +279,9 @@ impl LayeredRepository {
             conf,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
+            relish_uploader: conf.relish_storage_config.as_ref().map(|config| {
+                Arc::new(QueueBasedRelishUploader::new(config, &conf.workdir).unwrap())
+            }),
         }
     }
 
@@ -349,7 +356,7 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         data: &TimelineMetadata,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
         let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
         let mut file = File::create(&path)?;
 
@@ -357,7 +364,7 @@ impl LayeredRepository {
 
         file.write_all(&TimelineMetadata::ser(data)?)?;
 
-        Ok(())
+        Ok(path)
     }
 
     fn load_metadata(
@@ -535,6 +542,8 @@ pub struct LayeredTimeline {
 
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
+
+    relish_uploader: Option<Arc<QueueBasedRelishUploader>>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -943,6 +952,7 @@ impl LayeredTimeline {
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         conf: &'static PageServerConf,
         metadata: TimelineMetadata,
@@ -950,6 +960,7 @@ impl LayeredTimeline {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+        relish_uploader: Option<Arc<QueueBasedRelishUploader>>,
         current_logical_size: usize,
     ) -> Result<LayeredTimeline> {
         let timeline = LayeredTimeline {
@@ -959,6 +970,7 @@ impl LayeredTimeline {
             layers: Mutex::new(LayerMap::default()),
 
             walredo_mgr,
+            relish_uploader,
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
@@ -1317,6 +1329,11 @@ impl LayeredTimeline {
             drop(layers);
             let new_historics = frozen.write_to_disk(self)?;
             layers = self.layers.lock().unwrap();
+            if let Some(relish_uploader) = &self.relish_uploader {
+                for label_path in new_historics.iter().filter_map(|layer| layer.path()) {
+                    relish_uploader.schedule_upload(self.timelineid, label_path);
+                }
+            }
 
             // Finally, replace the frozen in-memory layer with the new on-disk layers
             layers.remove_historic(frozen.as_ref());
@@ -1353,12 +1370,10 @@ impl LayeredTimeline {
         // don't remember what the correct value that corresponds to some old
         // LSN is. But if we flush everything, then the value corresponding
         // current 'last_record_lsn' is correct and we can store it on disk.
-        let ondisk_prev_record_lsn = {
-            if disk_consistent_lsn == last_record_lsn {
-                Some(prev_record_lsn)
-            } else {
-                None
-            }
+        let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+            Some(prev_record_lsn)
+        } else {
+            None
         };
 
         let ancestor_timelineid = self.ancestor_timeline.as_ref().map(|x| x.timelineid);
@@ -1369,7 +1384,11 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
-        LayeredRepository::save_metadata(self.conf, self.timelineid, self.tenantid, &metadata)?;
+        let metadata_path =
+            LayeredRepository::save_metadata(self.conf, self.timelineid, self.tenantid, &metadata)?;
+        if let Some(relish_uploader) = &self.relish_uploader {
+            relish_uploader.schedule_upload(self.timelineid, metadata_path);
+        }
 
         // Also update the in-memory copy
         self.disk_consistent_lsn.store(disk_consistent_lsn);
