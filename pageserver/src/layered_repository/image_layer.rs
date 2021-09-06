@@ -97,6 +97,18 @@ impl Layer for ImageLayer {
         )
     }
 
+    fn path(&self) -> Option<PathBuf> {
+        Some(Self::path_for(
+            &self.path_or_conf,
+            self.timelineid,
+            self.tenantid,
+            &ImageFileName {
+                seg: self.seg,
+                lsn: self.lsn,
+            },
+        ))
+    }
+
     fn get_timeline_id(&self) -> ZTimelineId {
         self.timelineid
     }
@@ -183,7 +195,9 @@ impl Layer for ImageLayer {
 
     fn delete(&self) -> Result<()> {
         // delete underlying file
-        fs::remove_file(self.path())?;
+        if let Some(path) = self.path() {
+            fs::remove_file(path)?;
+        }
         Ok(())
     }
 
@@ -214,18 +228,6 @@ impl Layer for ImageLayer {
 }
 
 impl ImageLayer {
-    fn path(&self) -> PathBuf {
-        Self::path_for(
-            &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
-            &ImageFileName {
-                seg: self.seg,
-                lsn: self.lsn,
-            },
-        )
-    }
-
     fn path_for(
         path_or_conf: &PathOrConf,
         timelineid: ZTimelineId,
@@ -271,8 +273,9 @@ impl ImageLayer {
         let inner = layer.inner.lock().unwrap();
 
         // Write the images into a file
-        let path = layer.path();
-
+        let path = layer
+            .path()
+            .expect("ImageLayer is supposed to have a layer path on disk");
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
         let file = File::create(&path)?;

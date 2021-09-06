@@ -15,11 +15,14 @@ use std::{
 };
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
 
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{branches, http, page_service, tenant_mgr, PageServerConf, LOG_FILE_NAME};
+use pageserver::{
+    branches, http, page_service, tenant_mgr, PageServerConf, RelishStorageConfig, S3Config,
+    LOG_FILE_NAME,
+};
 use zenith_utils::http::endpoint;
 
 /// String arguments that can be declared via CLI or config file
@@ -34,6 +37,23 @@ struct CfgFileParams {
     pg_distrib_dir: Option<String>,
     auth_validation_public_key_path: Option<String>,
     auth_type: Option<String>,
+    // see https://github.com/alexcrichton/toml-rs/blob/6c162e6562c3e432bf04c82a3d1d789d80761a86/examples/enum_external.rs for enum deserialisation examples
+    relish_storage: Option<RelishStorage>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+enum RelishStorage {
+    Local {
+        local_path: String,
+    },
+    AwsS3 {
+        bucket_name: String,
+        bucket_region: String,
+        #[serde(skip_serializing)]
+        access_key_id: Option<String>,
+        #[serde(skip_serializing)]
+        secret_access_key: Option<String>,
+    },
 }
 
 impl CfgFileParams {
@@ -41,6 +61,21 @@ impl CfgFileParams {
     fn from_args(arg_matches: &ArgMatches) -> Self {
         let get_arg = |arg_name: &str| -> Option<String> {
             arg_matches.value_of(arg_name).map(str::to_owned)
+        };
+
+        let relish_storage = if let Some(local_path) = get_arg("relish-storage-local-path") {
+            Some(RelishStorage::Local { local_path })
+        } else if let Some((bucket_name, bucket_region)) =
+            get_arg("relish-storage-s3-bucket").zip(get_arg("relish-storage-region"))
+        {
+            Some(RelishStorage::AwsS3 {
+                bucket_name,
+                bucket_region,
+                access_key_id: get_arg("relish-storage-access-key"),
+                secret_access_key: get_arg("relish-storage-secret-access-key"),
+            })
+        } else {
+            None
         };
 
         Self {
@@ -53,6 +88,7 @@ impl CfgFileParams {
             pg_distrib_dir: get_arg("postgres-distrib"),
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
             auth_type: get_arg("auth-type"),
+            relish_storage,
         }
     }
 
@@ -71,6 +107,7 @@ impl CfgFileParams {
                 .auth_validation_public_key_path
                 .or(other.auth_validation_public_key_path),
             auth_type: self.auth_type.or(other.auth_type),
+            relish_storage: self.relish_storage.or(other.relish_storage),
         }
     }
 
@@ -124,7 +161,7 @@ impl CfgFileParams {
             })?;
 
         if !pg_distrib_dir.join("bin/postgres").exists() {
-            anyhow::bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
+            bail!("Can't find postgres binary at {:?}", pg_distrib_dir);
         }
 
         if auth_type == AuthType::ZenithJWT {
@@ -138,6 +175,26 @@ impl CfgFileParams {
                 format!("Can't find auth_validation_public_key at {:?}", path_ref)
             );
         }
+
+        let relish_storage_config =
+            self.relish_storage
+                .as_ref()
+                .map(|storage_params| match storage_params.clone() {
+                    RelishStorage::Local { local_path } => {
+                        RelishStorageConfig::LocalFs(PathBuf::from(local_path))
+                    }
+                    RelishStorage::AwsS3 {
+                        bucket_name,
+                        bucket_region,
+                        access_key_id,
+                        secret_access_key,
+                    } => RelishStorageConfig::AwsS3(S3Config {
+                        bucket_name,
+                        bucket_region,
+                        access_key_id,
+                        secret_access_key,
+                    }),
+                });
 
         Ok(PageServerConf {
             daemonize: false,
@@ -157,6 +214,7 @@ impl CfgFileParams {
 
             auth_validation_public_key_path,
             auth_type,
+            relish_storage_config,
         })
     }
 }
@@ -247,6 +305,43 @@ fn main() -> Result<()> {
                 .long("auth-type")
                 .takes_value(true)
                 .help("Authentication scheme type. One of: Trust, MD5, ZenithJWT"),
+        )
+        .arg(
+            Arg::with_name("relish-storage-local-path")
+                .long("relish-storage-local-path")
+                .takes_value(true)
+                .help("Path to the local directory, to be used as an external relish storage")
+                .conflicts_with_all(&[
+                    "relish-storage-s3-bucket",
+                    "relish-storage-region",
+                    "relish-storage-access-key",
+                    "relish-storage-secret-access-key",
+                ]),
+        )
+        .arg(
+            Arg::with_name("relish-storage-s3-bucket")
+                .long("relish-storage-s3-bucket")
+                .takes_value(true)
+                .help("Name of the AWS S3 bucket to use an external relish storage")
+                .requires("relish-storage-region"),
+        )
+        .arg(
+            Arg::with_name("relish-storage-region")
+                .long("relish-storage-region")
+                .takes_value(true)
+                .help("Region of the AWS S3 bucket"),
+        )
+        .arg(
+            Arg::with_name("relish-storage-access-key")
+                .long("relish-storage-access-key")
+                .takes_value(true)
+                .help("Credentials to access the AWS S3 bucket"),
+        )
+        .arg(
+            Arg::with_name("relish-storage-secret-access-key")
+                .long("relish-storage-secret-access-key")
+                .takes_value(true)
+                .help("Credentials to access the AWS S3 bucket"),
         )
         .get_matches();
 

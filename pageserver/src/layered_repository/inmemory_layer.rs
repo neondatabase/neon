@@ -116,6 +116,10 @@ impl Layer for InMemoryLayer {
         PathBuf::from(format!("inmem-{}", delta_filename))
     }
 
+    fn path(&self) -> Option<PathBuf> {
+        None
+    }
+
     fn get_timeline_id(&self) -> ZTimelineId {
         self.timelineid
     }

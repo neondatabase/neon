@@ -4,8 +4,6 @@ version = "0.1.0"
 authors = ["Stas Kelvich <stas@zenith.tech>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 bookfile = "^0.3"
 chrono = "0.4.19"
@@ -19,7 +17,7 @@ lazy_static = "1.4.0"
 log = "0.4.14"
 clap = "2.33.0"
 daemonize = "0.4.1"
-tokio = { version = "1.11", features = ["process", "macros"] }
+tokio = { version = "1.11", features = ["process", "macros", "fs"] }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
@@ -34,6 +32,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 toml = "0.5"
 scopeguard = "1.1.0"
+rust-s3 = { version = "0.27.0-rc4", features = ["no-verify-ssl"] }
+async-trait = "0.1"
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }

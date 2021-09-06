@@ -13,6 +13,7 @@ pub mod http;
 pub mod layered_repository;
 pub mod page_service;
 pub mod relish;
+mod relish_storage;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod tenant_mgr;
@@ -79,6 +80,7 @@ pub struct PageServerConf {
     pub auth_type: AuthType,
 
     pub auth_validation_public_key_path: Option<PathBuf>,
+    pub relish_storage_config: Option<RelishStorageConfig>,
 }
 
 impl PageServerConf {
@@ -158,6 +160,33 @@ impl PageServerConf {
             pg_distrib_dir: "".into(),
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
+            relish_storage_config: None,
         }
+    }
+}
+
+/// External relish storage configuration, enough for creating a client for that storage.
+#[derive(Debug, Clone)]
+pub enum RelishStorageConfig {
+    /// Root folder to place all stored relish data into.
+    LocalFs(PathBuf),
+    AwsS3(S3Config),
+}
+
+/// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
+#[derive(Clone)]
+pub struct S3Config {
+    pub bucket_name: String,
+    pub bucket_region: String,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+}
+
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("bucket_name", &self.bucket_name)
+            .field("bucket_region", &self.bucket_region)
+            .finish()
     }
 }
