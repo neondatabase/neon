@@ -218,7 +218,7 @@ impl Layer for DeltaLayer {
         if let Some(cont_lsn) = cont_lsn {
             if let Some(cont_layer) = &self.predecessor {
                 Ok(PageReconstructResult::Continue(
-                    cont_lsn,
+                    self.start_lsn, //cont_lsn,
                     Arc::clone(cont_layer),
                 ))
             } else {

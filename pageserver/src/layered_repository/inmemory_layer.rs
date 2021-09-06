@@ -177,7 +177,7 @@ impl Layer for InMemoryLayer {
         if let Some(cont_lsn) = cont_lsn {
             if let Some(cont_layer) = &self.predecessor {
                 Ok(PageReconstructResult::Continue(
-                    cont_lsn,
+                    self.start_lsn, //cont_lsn,
                     Arc::clone(cont_layer),
                 ))
             } else {
@@ -455,9 +455,11 @@ impl InMemoryLayer {
         // This is needed just to call materialize_page()
         timeline: &LayeredTimeline,
     ) -> Result<(Vec<Arc<dyn Layer>>, Option<Arc<InMemoryLayer>>)> {
-        info!(
+        trace!(
             "freezing in memory layer for {} on timeline {} at {}",
-            self.seg, self.timelineid, cutoff_lsn
+            self.seg,
+            self.timelineid,
+            cutoff_lsn
         );
 
         let inner = self.inner.lock().unwrap();
