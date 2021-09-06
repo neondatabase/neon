@@ -325,6 +325,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
+ "thiserror",
  "toml",
  "url",
  "walkeeper",
