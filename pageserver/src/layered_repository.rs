@@ -48,6 +48,7 @@ mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
+mod interval_tree;
 mod layer_map;
 mod storage_layer;
 
@@ -1410,7 +1411,7 @@ impl LayeredTimeline {
         // while iterating it. BTreeMap::retain() would be another option)
         for doomed_layer in layers_to_remove {
             doomed_layer.delete()?;
-            layers.remove_historic(&*doomed_layer);
+            layers.remove_historic(&doomed_layer);
 
             match (
                 doomed_layer.is_dropped(),

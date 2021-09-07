@@ -9,6 +9,7 @@
 //! new image and delta layers and corresponding files are written to disk.
 //!
 
+use crate::layered_repository::interval_tree::{IntervalItem, IntervalIter, IntervalTree};
 use crate::layered_repository::storage_layer::{Layer, SegmentTag};
 use crate::layered_repository::InMemoryLayer;
 use crate::relish::*;
@@ -16,7 +17,7 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
@@ -131,12 +132,11 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: &dyn Layer) {
+    pub fn remove_historic(&mut self, layer: &Arc<dyn Layer>) {
         let tag = layer.get_seg_tag();
-        let start_lsn = layer.get_start_lsn();
 
         if let Some(segentry) = self.segs.get_mut(&tag) {
-            segentry.historic.remove(&start_lsn);
+            segentry.historic.remove(layer);
         }
         NUM_ONDISK_LAYERS.dec();
     }
@@ -212,7 +212,7 @@ impl LayerMap {
 
     pub fn iter_historic_layers(&self) -> HistoricLayerIter {
         HistoricLayerIter {
-            segiter: self.segs.iter(),
+            seg_iter: self.segs.iter(),
             iter: None,
         }
     }
@@ -226,12 +226,23 @@ impl LayerMap {
                 open.dump()?;
             }
 
-            for (_, layer) in segentry.historic.iter() {
+            for layer in segentry.historic.iter() {
                 layer.dump()?;
             }
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+}
+
+impl IntervalItem for dyn Layer {
+    type Key = Lsn;
+
+    fn start_key(&self) -> Lsn {
+        self.get_start_lsn()
+    }
+    fn end_key(&self) -> Lsn {
+        self.get_end_lsn()
     }
 }
 
@@ -244,15 +255,15 @@ impl LayerMap {
 /// each segment. The older layers, stored on disk, are kept in a
 /// BTreeMap keyed by the layer's start LSN.
 struct SegEntry {
-    pub open: Option<Arc<InMemoryLayer>>,
-    pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
+    open: Option<Arc<InMemoryLayer>>,
+    historic: IntervalTree<dyn Layer>,
 }
 
 impl Default for SegEntry {
     fn default() -> Self {
         SegEntry {
             open: None,
-            historic: BTreeMap::new(),
+            historic: IntervalTree::new(),
         }
     }
 }
@@ -266,27 +277,19 @@ impl SegEntry {
             }
         }
 
-        if let Some((_start_lsn, layer)) = self.historic.range(..=lsn).next_back() {
-            Some(Arc::clone(layer))
-        } else {
-            None
-        }
+        self.historic.search(lsn)
     }
 
     pub fn newer_image_layer_exists(&self, lsn: Lsn) -> bool {
         // We only check on-disk layers, because
         // in-memory layers are not durable
 
-        for (_newer_lsn, layer) in self.historic.range(lsn..) {
+        for layer in self.historic.iter_newer(lsn) {
             // Ignore incremental layers.
             if layer.is_incremental() {
                 continue;
             }
-            if layer.get_end_lsn() > lsn {
-                return true;
-            } else {
-                continue;
-            }
+            return true;
         }
         false
     }
@@ -297,9 +300,7 @@ impl SegEntry {
     }
 
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        let start_lsn = layer.get_start_lsn();
-
-        self.historic.insert(start_lsn, layer);
+        self.historic.insert(layer);
     }
 }
 
@@ -338,8 +339,8 @@ impl Eq for OpenLayerEntry {}
 
 /// Iterator returned by LayerMap::iter_historic_layers()
 pub struct HistoricLayerIter<'a> {
-    segiter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
-    iter: Option<std::collections::btree_map::Iter<'a, Lsn, Arc<dyn Layer>>>,
+    seg_iter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
+    iter: Option<IntervalIter<'a, dyn Layer>>,
 }
 
 impl<'a> Iterator for HistoricLayerIter<'a> {
@@ -349,11 +350,11 @@ impl<'a> Iterator for HistoricLayerIter<'a> {
         loop {
             if let Some(x) = &mut self.iter {
                 if let Some(x) = x.next() {
-                    return Some(Arc::clone(&*x.1));
+                    return Some(Arc::clone(&x));
                 }
             }
-            if let Some(seg) = self.segiter.next() {
-                self.iter = Some(seg.1.historic.iter());
+            if let Some((_tag, segentry)) = self.seg_iter.next() {
+                self.iter = Some(segentry.historic.iter());
                 continue;
             } else {
                 return None;
