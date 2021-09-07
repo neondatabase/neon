@@ -598,24 +598,6 @@ class Postgres(PgProtocol):
     def __exit__(self, exc_type, exc, tb):
         self.stop()
 
-
-    def list_files_to_compare(self):
-        pgdata_files = []
-        for root, _file, filenames in os.walk(self.pgdata_dir):
-            for filename in filenames:
-                rel_dir = os.path.relpath(root, self.pgdata_dir)
-                # Skip some dirs and files we don't want to compare
-                skip_dirs = ['pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical']
-                skip_files = ['pg_internal.init', 'pg.log', 'zenith.signal', 'postgresql.conf',
-                            'postmaster.opts', 'postmaster.pid', 'pg_control']
-                if rel_dir not in skip_dirs and filename not in skip_files:
-                    rel_file = os.path.join(rel_dir, filename)
-                    pgdata_files.append(rel_file)
-
-        pgdata_files.sort()
-        print(pgdata_files)
-        return pgdata_files
-
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
     def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, initial_tenant: str, base_port: int = 55431):
@@ -944,37 +926,62 @@ class TenantFactory:
 def tenant_factory(zenith_cli: ZenithCli):
     return TenantFactory(zenith_cli)
 
+#
+# Test helpers
+#
+def list_files_to_compare(pgdata_dir: str):
+    pgdata_files = []
+    for root, _file, filenames in os.walk(pgdata_dir):
+        for filename in filenames:
+            rel_dir = os.path.relpath(root, pgdata_dir)
+            # Skip some dirs and files we don't want to compare
+            skip_dirs = ['pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical']
+            skip_files = ['pg_internal.init', 'pg.log', 'zenith.signal', 'postgresql.conf',
+                        'postmaster.opts', 'postmaster.pid', 'pg_control']
+            if rel_dir not in skip_dirs and filename not in skip_files:
+                rel_file = os.path.join(rel_dir, filename)
+                pgdata_files.append(rel_file)
 
-# pg is the existing comute node we want to compare our basebackup to
-# lsn is the latest lsn of this node
-def check_restored_datadir_content(zenith_cli, pg, lsn, postgres: PostgresFactory):
+    pgdata_files.sort()
+    print(pgdata_files)
+    return pgdata_files
+
+# pg is the existing and running compute node, that we want to compare with a basebackup
+def check_restored_datadir_content(zenith_cli, test_output_dir, pg):
+
+    # Get the timeline ID of our branch. We need it for the 'basebackup' command
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SHOW zenith.zenith_timeline")
+            timeline = cur.fetchone()[0]
+
     # stop postgres to ensure that files won't change
     pg.stop()
 
+    # Take a basebackup from pageserver
+    restored_dir_path = os.path.join(test_output_dir, "{}_restored_datadir".format(pg.branch))
+    mkdir_if_needed(restored_dir_path)
+
+    cmd = "psql -h 127.0.0.1 -p {} -c 'basebackup {} {}' | tar -x -C {}".format(
+     DEFAULT_PAGESERVER_PG_PORT, pg.tenant_id, timeline, restored_dir_path)
+
+    cmd = os.path.join(pg.pg_bin.pg_bin_path, cmd)
+
+    subprocess.run(cmd, shell=True)
+
     # list files we're going to compare
-    pgdata_files = pg.list_files_to_compare()
-
-    # create new branch, but don't start postgres
-    # We only need 'basebackup' result here.
-    zenith_cli.run(
-        ["branch", "check_restored_datadir", pg.branch + "@" + lsn])
-
-    pg2 = postgres.create('check_restored_datadir')
-    print('postgres is created on check_restored_datadir branch')
-
-    print('files in a basebackup')
-    # list files we're going to compare
-    pgdata_files2 = pg2.list_files_to_compare()
+    pgdata_files = list_files_to_compare(pg.pgdata_dir)
+    restored_files = list_files_to_compare(restored_dir_path)
 
     # check that file sets are equal
-    assert pgdata_files == pgdata_files2
+    assert pgdata_files == restored_files
 
     # compare content of the files
     # filecmp returns (match, mismatch, error) lists
     # We've already filtered all mismatching files in list_files_to_compare(),
     # so here expect that the content is identical
     (match, mismatch, error) = filecmp.cmpfiles(pg.pgdata_dir,
-                                                pg2.pgdata_dir,
+                                                restored_dir_path,
                                                 pgdata_files,
                                                 shallow=False)
     print('filecmp result mismatch and error lists:')
@@ -984,7 +991,7 @@ def check_restored_datadir_content(zenith_cli, pg, lsn, postgres: PostgresFactor
     for f in mismatch:
 
         f1 = os.path.join(pg.pgdata_dir, f)
-        f2 = os.path.join(pg2.pgdata_dir, f)
+        f2 = os.path.join(restored_dir_path, f)
         stdout_filename = "{}.diff".format(f2)
 
         with open(stdout_filename, 'w') as stdout_f:

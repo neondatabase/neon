@@ -55,4 +55,4 @@ def test_pg_regress(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_
         lsn = pg.safe_psql('select pg_current_wal_insert_lsn()')[0][0]
 
         # Check that we restore the content of the datadir correctly
-        check_restored_datadir_content(zenith_cli, pg, lsn, postgres)
+        check_restored_datadir_content(zenith_cli, test_output_dir, pg)

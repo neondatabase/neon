@@ -9,7 +9,8 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # it only checks next_multixact_id field in restored pg_control,
 # since we don't have functions to check multixact internals.
 #
-def test_multixact(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli, base_dir):
+def test_multixact(pageserver: ZenithPageserver, postgres: PostgresFactory,
+                    pg_bin, zenith_cli, base_dir, test_output_dir):
     # Create a branch for us
     zenith_cli.run(["branch", "test_multixact", "empty"])
     pg = postgres.create_start('test_multixact')
@@ -65,4 +66,4 @@ def test_multixact(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_b
     assert next_multixact_id_new == next_multixact_id
 
     # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(zenith_cli, pg, lsn, postgres)
+    check_restored_datadir_content(zenith_cli, test_output_dir, pg_new)
