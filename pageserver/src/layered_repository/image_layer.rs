@@ -114,7 +114,7 @@ impl Layer for ImageLayer {
     }
 
     fn get_end_lsn(&self) -> Lsn {
-        self.lsn
+        self.lsn + 1
     }
 
     /// Look up given page in the file

@@ -453,6 +453,8 @@ impl InMemoryLayer {
     ) -> Result<InMemoryLayer> {
         let seg = src.get_seg_tag();
 
+        assert!(oldest_pending_lsn >= start_lsn);
+
         trace!(
             "initializing new InMemoryLayer for writing {} on timeline {} at {}",
             seg,
@@ -504,8 +506,8 @@ impl InMemoryLayer {
         timeline: &LayeredTimeline,
     ) -> Result<SuccessorLayers> {
         info!(
-            "freezing in memory layer for {} on timeline {} at {}",
-            self.seg, self.timelineid, cutoff_lsn
+            "freezing in memory layer {} on timeline {} at {} (oldest {})",
+            self.filename().display(), self.timelineid, cutoff_lsn, self.oldest_pending_lsn
         );
 
         let inner = self.inner.lock().unwrap();
@@ -532,10 +534,17 @@ impl InMemoryLayer {
             before_segsizes = BTreeMap::new();
             after_segsizes = BTreeMap::new();
             for (lsn, size) in inner.segsizes.iter() {
-                if *lsn > end_lsn {
-                    after_segsizes.insert(*lsn, *size);
-                } else {
-                    before_segsizes.insert(*lsn, *size);
+                match lsn.cmp(&end_lsn) {
+                    Ordering::Less => {
+                        before_segsizes.insert(*lsn, *size);
+                    },
+                    Ordering::Equal => {
+                        // Page versions at the cutoff LSN will be stored in the
+                        // materialized image layer.
+                    }
+                    Ordering::Greater => {
+                        after_segsizes.insert(*lsn, *size);
+                    }
                 }
             }
 
@@ -609,8 +618,8 @@ impl InMemoryLayer {
                     imgfile_rc,
                     self.timelineid,
                     self.tenantid,
-                    end_lsn,
-                    end_lsn,
+                    end_lsn + 1,
+                    end_lsn + 1,
                 )?;
                 let mut new_inner = new_open.inner.lock().unwrap();
                 new_inner.page_versions.append(&mut after_page_versions);
