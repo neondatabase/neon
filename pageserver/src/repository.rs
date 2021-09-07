@@ -17,11 +17,7 @@ pub trait Repository: Send + Sync {
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
     /// Create a new, empty timeline. The caller is responsible for loading data into it
-    fn create_empty_timeline(
-        &self,
-        timelineid: ZTimelineId,
-        start_lsn: Lsn,
-    ) -> Result<Arc<dyn Timeline>>;
+    fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
@@ -291,7 +287,7 @@ mod tests {
 
         // Create timeline to work on
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+        let tline = repo.create_empty_timeline(timelineid)?;
 
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
@@ -407,7 +403,7 @@ mod tests {
     fn test_large_rel() -> Result<()> {
         let repo = get_test_repo("test_large_rel")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+        let tline = repo.create_empty_timeline(timelineid)?;
 
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
@@ -470,7 +466,7 @@ mod tests {
     fn test_branch() -> Result<()> {
         let repo = get_test_repo("test_branch")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+        let tline = repo.create_empty_timeline(timelineid)?;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
