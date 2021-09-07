@@ -210,7 +210,6 @@ mod tests {
     use crate::PageServerConf;
     use postgres_ffi::pg_constants;
     use std::fs;
-    use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
     use zenith_utils::postgres_backend::AuthType;
@@ -243,7 +242,7 @@ mod tests {
     static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
     fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
-        let repo_dir = PathBuf::from(format!("../tmp_check/test_{}", test_name));
+        let repo_dir = PageServerConf::test_repo_dir(test_name);
         let _ = fs::remove_dir_all(&repo_dir);
         fs::create_dir_all(&repo_dir)?;
         fs::create_dir_all(&repo_dir.join("timelines"))?;

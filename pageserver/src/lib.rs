@@ -110,4 +110,25 @@ impl PageServerConf {
     pub fn pg_lib_dir(&self) -> PathBuf {
         self.pg_distrib_dir.join("lib")
     }
+
+    #[cfg(test)]
+    fn test_repo_dir(test_name: &str) -> PathBuf {
+        PathBuf::from(format!("../tmp_check/test_{}", test_name))
+    }
+
+    #[cfg(test)]
+    fn dummy_conf(repo_dir: PathBuf) -> Self {
+        PageServerConf {
+            daemonize: false,
+            gc_horizon: 64 * 1024 * 1024,
+            gc_period: Duration::from_secs(10),
+            listen_addr: "127.0.0.1:5430".to_string(),
+            http_endpoint_addr: "127.0.0.1:9898".to_string(),
+            superuser: "zenith_admin".to_string(),
+            workdir: repo_dir,
+            pg_distrib_dir: "".into(),
+            auth_type: AuthType::Trust,
+            auth_validation_public_key_path: None,
+        }
+    }
 }

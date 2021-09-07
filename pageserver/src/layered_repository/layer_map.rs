@@ -370,3 +370,78 @@ impl<'a> Iterator for HistoricLayerIter<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PageServerConf;
+    use std::str::FromStr;
+    use zenith_utils::zid::{ZTenantId, ZTimelineId};
+
+    /// Arbitrary relation tag, for testing.
+    const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
+        spcnode: 0,
+        dbnode: 111,
+        relnode: 1000,
+        forknum: 0,
+    });
+
+    /// Construct a dummy InMemoryLayer for testing
+    fn dummy_inmem_layer(
+        conf: &'static PageServerConf,
+        segno: u32,
+        start_lsn: Lsn,
+        oldest_pending_lsn: Lsn,
+    ) -> Arc<InMemoryLayer> {
+        Arc::new(
+            InMemoryLayer::create(
+                conf,
+                ZTimelineId::from_str("00000000000000000000000000000000").unwrap(),
+                ZTenantId::from_str("00000000000000000000000000000000").unwrap(),
+                SegmentTag {
+                    rel: TESTREL_A,
+                    segno,
+                },
+                start_lsn,
+                oldest_pending_lsn,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_open_layers() -> Result<()> {
+        let conf = PageServerConf::dummy_conf(PageServerConf::test_repo_dir("dummy_inmem_layer"));
+        let conf = Box::leak(Box::new(conf));
+
+        let mut layers = LayerMap::default();
+
+        let gen1 = layers.increment_generation();
+        layers.insert_open(dummy_inmem_layer(conf, 0, Lsn(100), Lsn(100)));
+        layers.insert_open(dummy_inmem_layer(conf, 1, Lsn(100), Lsn(200)));
+        layers.insert_open(dummy_inmem_layer(conf, 2, Lsn(100), Lsn(120)));
+        layers.insert_open(dummy_inmem_layer(conf, 3, Lsn(100), Lsn(110)));
+
+        let gen2 = layers.increment_generation();
+        layers.insert_open(dummy_inmem_layer(conf, 4, Lsn(100), Lsn(110)));
+        layers.insert_open(dummy_inmem_layer(conf, 5, Lsn(100), Lsn(100)));
+
+        // A helper function (closure) to pop the next oldest open entry from the layer map,
+        // and assert that it is what we'd expect
+        let mut assert_pop_layer = |expected_segno: u32, expected_generation: u64| {
+            let (l, generation) = layers.peek_oldest_open().unwrap();
+            assert!(l.get_seg_tag().segno == expected_segno);
+            assert!(generation == expected_generation);
+            layers.pop_oldest_open();
+        };
+
+        assert_pop_layer(0, gen1); // 100
+        assert_pop_layer(5, gen2); // 100
+        assert_pop_layer(3, gen1); // 110
+        assert_pop_layer(4, gen2); // 110
+        assert_pop_layer(2, gen1); // 120
+        assert_pop_layer(1, gen1); // 200
+
+        Ok(())
+    }
+}
