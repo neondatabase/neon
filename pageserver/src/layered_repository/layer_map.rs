@@ -42,7 +42,7 @@ pub struct LayerMap {
     /// All in-memory layers, ordered by 'oldest_pending_lsn' and generation
     /// of each layer. This allows easy access to the in-memory layer that
     /// contains the oldest WAL record.
-    open_segs: BinaryHeap<OpenSegEntry>,
+    open_layers: BinaryHeap<OpenLayerEntry>,
 
     /// Generation number, used to distinguish newly inserted entries in the
     /// binary heap from older entries during checkpoint.
@@ -61,17 +61,17 @@ struct SegEntry {
     pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
 }
 
-/// Entry held LayerMap.open_segs, with boilerplate comparison routines
+/// Entry held LayerMap.open_layers, with boilerplate comparison routines
 /// to implement a min-heap ordered by 'oldest_pending_lsn' and 'generation'
 ///
 /// Each entry also carries a generation number. It can be used to distinguish
 /// entries with the same 'oldest_pending_lsn'.
-struct OpenSegEntry {
+struct OpenLayerEntry {
     pub oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
     pub generation: u64,
     pub layer: Arc<InMemoryLayer>,
 }
-impl Ord for OpenSegEntry {
+impl Ord for OpenLayerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
         // to get that. Entries with identical oldest_pending_lsn are ordered by generation
@@ -81,17 +81,17 @@ impl Ord for OpenSegEntry {
             .then_with(|| other.generation.cmp(&self.generation))
     }
 }
-impl PartialOrd for OpenSegEntry {
+impl PartialOrd for OpenLayerEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl PartialEq for OpenSegEntry {
+impl PartialEq for OpenLayerEntry {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(&other) == Ordering::Equal
     }
 }
-impl Eq for OpenSegEntry {}
+impl Eq for OpenLayerEntry {}
 
 impl LayerMap {
     ///
@@ -150,20 +150,20 @@ impl LayerMap {
             self.segs.insert(tag, segentry);
         }
 
-        let opensegentry = OpenSegEntry {
+        let open_layer_entry = OpenLayerEntry {
             oldest_pending_lsn: layer.get_oldest_pending_lsn(),
             layer,
             generation: self.current_generation,
         };
-        self.open_segs.push(opensegentry);
+        self.open_layers.push(open_layer_entry);
 
         NUM_INMEMORY_LAYERS.inc();
     }
 
     /// Remove the oldest in-memory layer
     pub fn pop_oldest_open(&mut self) {
-        let opensegentry = self.open_segs.pop().unwrap();
-        let segtag = opensegentry.layer.get_seg_tag();
+        let oldest_entry = self.open_layers.pop().unwrap();
+        let segtag = oldest_entry.layer.get_seg_tag();
 
         let mut segentry = self.segs.get_mut(&segtag).unwrap();
         segentry.open = None;
@@ -296,8 +296,8 @@ impl LayerMap {
 
     /// Return the oldest in-memory layer, along with its generation number.
     pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
-        if let Some(opensegentry) = self.open_segs.peek() {
-            Some((Arc::clone(&opensegentry.layer), opensegentry.generation))
+        if let Some(oldest_entry) = self.open_layers.peek() {
+            Some((Arc::clone(&oldest_entry.layer), oldest_entry.generation))
         } else {
             None
         }
@@ -340,7 +340,7 @@ impl Default for LayerMap {
     fn default() -> Self {
         LayerMap {
             segs: HashMap::new(),
-            open_segs: BinaryHeap::new(),
+            open_layers: BinaryHeap::new(),
             current_generation: 0,
         }
     }
