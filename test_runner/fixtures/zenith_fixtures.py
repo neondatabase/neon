@@ -992,7 +992,7 @@ def check_restored_datadir_content(zenith_cli, test_output_dir, pg):
 
         f1 = os.path.join(pg.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
-        stdout_filename = "{}.diff".format(f2)
+        stdout_filename = "{}.filediff".format(f2)
 
         with open(stdout_filename, 'w') as stdout_f:
             subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)

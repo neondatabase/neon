@@ -239,7 +239,7 @@ jobs:
           when: always
           command: |
             du -sh /tmp/test_output/*
-            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "wal_acceptor.log" ! -name "regression.diffs" ! -name "junit.xml" -delete
+            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "wal_acceptor.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" -delete
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output
