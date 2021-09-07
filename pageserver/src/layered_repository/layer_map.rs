@@ -14,7 +14,6 @@ use crate::layered_repository::InMemoryLayer;
 use crate::relish::*;
 use anyhow::Result;
 use lazy_static::lazy_static;
-use log::*;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
@@ -49,49 +48,15 @@ pub struct LayerMap {
     current_generation: u64,
 }
 
-///
-/// Per-segment entry in the LayerMap.segs hash map
-///
-/// The last layer that is open for writes is always an InMemoryLayer,
-/// and is kept in a separate field, because there can be only one for
-/// each segment. The older layers, stored on disk, are kept in a
-/// BTreeMap keyed by the layer's start LSN.
-struct SegEntry {
-    pub open: Option<Arc<InMemoryLayer>>,
-    pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
-}
-
-/// Entry held LayerMap.open_layers, with boilerplate comparison routines
-/// to implement a min-heap ordered by 'oldest_pending_lsn' and 'generation'
-///
-/// Each entry also carries a generation number. It can be used to distinguish
-/// entries with the same 'oldest_pending_lsn'.
-struct OpenLayerEntry {
-    pub oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
-    pub generation: u64,
-    pub layer: Arc<InMemoryLayer>,
-}
-impl Ord for OpenLayerEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
-        // to get that. Entries with identical oldest_pending_lsn are ordered by generation
-        other
-            .oldest_pending_lsn
-            .cmp(&self.oldest_pending_lsn)
-            .then_with(|| other.generation.cmp(&self.generation))
+impl Default for LayerMap {
+    fn default() -> Self {
+        LayerMap {
+            segs: HashMap::new(),
+            open_layers: BinaryHeap::new(),
+            current_generation: 0,
+        }
     }
 }
-impl PartialOrd for OpenLayerEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl PartialEq for OpenLayerEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(&other) == Ordering::Equal
-    }
-}
-impl Eq for OpenLayerEntry {}
 
 impl LayerMap {
     ///
@@ -103,23 +68,7 @@ impl LayerMap {
     pub fn get(&self, tag: &SegmentTag, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         let segentry = self.segs.get(tag)?;
 
-        if let Some(open) = &segentry.open {
-            if open.get_start_lsn() <= lsn {
-                let x: Arc<dyn Layer> = Arc::clone(open) as _;
-                return Some(x);
-            }
-        }
-
-        if let Some((_k, v)) = segentry
-            .historic
-            .range((Included(Lsn(0)), Included(lsn)))
-            .next_back()
-        {
-            let x: Arc<dyn Layer> = Arc::clone(v) as _;
-            Some(x)
-        } else {
-            None
-        }
+        segentry.get(lsn)
     }
 
     ///
@@ -128,6 +77,7 @@ impl LayerMap {
     ///
     pub fn get_open(&self, tag: &SegmentTag) -> Option<Arc<InMemoryLayer>> {
         let segentry = self.segs.get(tag)?;
+
         segentry.open.as_ref().map(Arc::clone)
     }
 
@@ -135,21 +85,11 @@ impl LayerMap {
     /// Insert an open in-memory layer
     ///
     pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
-        let tag = layer.get_seg_tag();
+        let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
 
-        if let Some(segentry) = self.segs.get_mut(&tag) {
-            if let Some(_old) = &segentry.open {
-                // FIXME: shouldn't exist, but check
-            }
-            segentry.open = Some(Arc::clone(&layer));
-        } else {
-            let segentry = SegEntry {
-                open: Some(Arc::clone(&layer)),
-                historic: BTreeMap::new(),
-            };
-            self.segs.insert(tag, segentry);
-        }
+        segentry.insert_open(Arc::clone(&layer));
 
+        // Also add it to the binary heap
         let open_layer_entry = OpenLayerEntry {
             oldest_pending_lsn: layer.get_oldest_pending_lsn(),
             layer,
@@ -162,11 +102,18 @@ impl LayerMap {
 
     /// Remove the oldest in-memory layer
     pub fn pop_oldest_open(&mut self) {
+        // Pop it from the binary heap
         let oldest_entry = self.open_layers.pop().unwrap();
         let segtag = oldest_entry.layer.get_seg_tag();
 
+        // Also remove it from the SegEntry of this segment
         let mut segentry = self.segs.get_mut(&segtag).unwrap();
+        assert!(Arc::ptr_eq(
+            &segentry.open.as_ref().unwrap(),
+            &oldest_entry.layer
+        ));
         segentry.open = None;
+
         NUM_INMEMORY_LAYERS.dec();
     }
 
@@ -174,21 +121,9 @@ impl LayerMap {
     /// Insert an on-disk layer
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        let tag = layer.get_seg_tag();
-        let start_lsn = layer.get_start_lsn();
+        let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
+        segentry.insert_historic(layer);
 
-        if let Some(segentry) = self.segs.get_mut(&tag) {
-            segentry.historic.insert(start_lsn, layer);
-        } else {
-            let mut historic = BTreeMap::new();
-            historic.insert(start_lsn, layer);
-
-            let segentry = SegEntry {
-                open: None,
-                historic,
-            };
-            self.segs.insert(tag, segentry);
-        }
         NUM_ONDISK_LAYERS.inc();
     }
 
@@ -207,7 +142,7 @@ impl LayerMap {
         NUM_ONDISK_LAYERS.dec();
     }
 
-    // List relations that exist at the lsn
+    /// List relations that exist at the lsn
     pub fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
         let mut rels: HashSet<RelTag> = HashSet::new();
 
@@ -217,16 +152,10 @@ impl LayerMap {
                     && (dbnode == 0 || reltag.dbnode == dbnode)
                 {
                     // Add only if it exists at the requested LSN.
-                    if let Some(open) = &segentry.open {
-                        if open.get_end_lsn() > lsn {
+                    if let Some(layer) = segentry.get(lsn) {
+                        if !layer.is_dropped() || layer.get_end_lsn() > lsn {
                             rels.insert(reltag);
                         }
-                    } else if let Some((_k, _v)) = segentry
-                        .historic
-                        .range((Included(Lsn(0)), Included(lsn)))
-                        .next_back()
-                    {
-                        rels.insert(reltag);
                     }
                 }
             }
@@ -234,7 +163,7 @@ impl LayerMap {
         Ok(rels)
     }
 
-    // List non-relation relishes that exist at the lsn
+    /// List non-relation relishes that exist at the lsn
     pub fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
         let mut rels: HashSet<RelishTag> = HashSet::new();
 
@@ -243,16 +172,10 @@ impl LayerMap {
             if let RelishTag::Relation(_) = seg.rel {
             } else {
                 // Add only if it exists at the requested LSN.
-                if let Some(open) = &segentry.open {
-                    if open.get_end_lsn() > lsn {
+                if let Some(layer) = segentry.get(lsn) {
+                    if !layer.is_dropped() || layer.get_end_lsn() > lsn {
                         rels.insert(seg.rel);
                     }
-                } else if let Some((_k, _v)) = segentry
-                    .historic
-                    .range((Included(Lsn(0)), Included(lsn)))
-                    .next_back()
-                {
-                    rels.insert(seg.rel);
                 }
             }
         }
@@ -265,33 +188,10 @@ impl LayerMap {
     /// be deleted.
     pub fn newer_image_layer_exists(&self, seg: SegmentTag, lsn: Lsn) -> bool {
         if let Some(segentry) = self.segs.get(&seg) {
-            // We only check on-disk layers, because
-            // in-memory layers are not durable
-            for (newer_lsn, layer) in segentry
-                .historic
-                .range((Included(lsn), Included(Lsn(u64::MAX))))
-            {
-                // Ignore layers that depend on an older layer.
-                if layer.is_incremental() {
-                    continue;
-                }
-                if layer.get_end_lsn() > lsn {
-                    trace!(
-                        "found later layer for {}, {} {}-{}",
-                        seg,
-                        lsn,
-                        newer_lsn,
-                        layer.get_end_lsn()
-                    );
-                    return true;
-                } else {
-                    trace!("found singleton layer for {}, {} {}", seg, lsn, newer_lsn);
-                    continue;
-                }
-            }
+            segentry.newer_image_layer_exists(lsn)
+        } else {
+            false
         }
-        trace!("no later layer found for {}, {}", seg, lsn);
-        false
     }
 
     /// Return the oldest in-memory layer, along with its generation number.
@@ -336,16 +236,115 @@ impl LayerMap {
     }
 }
 
-impl Default for LayerMap {
+///
+/// Per-segment entry in the LayerMap::segs hash map. Holds all the layers
+/// associated with the segment.
+///
+/// The last layer that is open for writes is always an InMemoryLayer,
+/// and is kept in a separate field, because there can be only one for
+/// each segment. The older layers, stored on disk, are kept in a
+/// BTreeMap keyed by the layer's start LSN.
+struct SegEntry {
+    pub open: Option<Arc<InMemoryLayer>>,
+    pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
+}
+
+impl Default for SegEntry {
     fn default() -> Self {
-        LayerMap {
-            segs: HashMap::new(),
-            open_layers: BinaryHeap::new(),
-            current_generation: 0,
+        SegEntry {
+            open: None,
+            historic: BTreeMap::new(),
         }
     }
 }
 
+impl SegEntry {
+    pub fn get(&self, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+        if let Some(open) = &self.open {
+            if open.get_start_lsn() <= lsn {
+                let x: Arc<dyn Layer> = Arc::clone(open) as _;
+                return Some(x);
+            }
+        }
+
+        if let Some((_start_lsn, layer)) = self
+            .historic
+            .range((Included(Lsn(0)), Included(lsn)))
+            .next_back()
+        {
+            Some(Arc::clone(layer))
+        } else {
+            None
+        }
+    }
+
+    pub fn newer_image_layer_exists(&self, lsn: Lsn) -> bool {
+        // We only check on-disk layers, because
+        // in-memory layers are not durable
+
+        for (_newer_lsn, layer) in self
+            .historic
+            .range((Included(lsn), Included(Lsn(u64::MAX))))
+        {
+            // Ignore incremental layers.
+            if layer.is_incremental() {
+                continue;
+            }
+            if layer.get_end_lsn() > lsn {
+                return true;
+            } else {
+                continue;
+            }
+        }
+        false
+    }
+
+    pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
+        assert!(self.open.is_none());
+        self.open = Some(layer);
+    }
+
+    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
+        let start_lsn = layer.get_start_lsn();
+
+        self.historic.insert(start_lsn, layer);
+    }
+}
+
+/// Entry held in LayerMap::open_layers, with boilerplate comparison routines
+/// to implement a min-heap ordered by 'oldest_pending_lsn' and 'generation'
+///
+/// The generation number associated with each entry can be used to distinguish
+/// recently-added entries (i.e after last call to increment_generation()) from older
+/// entries with the same 'oldest_pending_lsn'.
+struct OpenLayerEntry {
+    pub oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
+    pub generation: u64,
+    pub layer: Arc<InMemoryLayer>,
+}
+impl Ord for OpenLayerEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
+        // to get that. Entries with identical oldest_pending_lsn are ordered by generation
+        other
+            .oldest_pending_lsn
+            .cmp(&self.oldest_pending_lsn)
+            .then_with(|| other.generation.cmp(&self.generation))
+    }
+}
+impl PartialOrd for OpenLayerEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for OpenLayerEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(&other) == Ordering::Equal
+    }
+}
+impl Eq for OpenLayerEntry {}
+
+/// Iterator returned by LayerMap::iter_historic_layers()
 pub struct HistoricLayerIter<'a> {
     segiter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
     iter: Option<std::collections::btree_map::Iter<'a, Lsn, Arc<dyn Layer>>>,
