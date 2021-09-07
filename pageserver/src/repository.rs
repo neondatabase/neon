@@ -364,9 +364,9 @@ mod tests {
         );
 
         // Truncate to zero length
-        tline.put_truncation(TESTREL_A, Lsn(0x60), 0)?;
-        tline.advance_last_record_lsn(Lsn(0x60));
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 0);
+        tline.put_truncation(TESTREL_A, Lsn(0x68), 0)?;
+        tline.advance_last_record_lsn(Lsn(0x68));
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x68))?.unwrap(), 0);
 
         // Extend from 0 to 2 blocks, leaving a gap
         tline.put_page_image(TESTREL_A, 1, Lsn(0x70), TEST_IMG("foo blk 1"))?;

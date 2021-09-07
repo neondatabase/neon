@@ -823,11 +823,7 @@ impl Timeline for LayeredTimeline {
     fn advance_last_record_lsn(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
-        let old_lsn = self.last_record_lsn.advance(new_lsn);
-
-        // since we are align incoming LSN's we can't have delta less
-        // then 0x8
-        assert!(old_lsn == new_lsn || (new_lsn.0 - old_lsn.0 >= 0x8));
+        self.last_record_lsn.advance(new_lsn);
     }
 
     fn get_last_record_lsn(&self) -> Lsn {
@@ -1068,7 +1064,7 @@ impl LayeredTimeline {
         assert!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
-        if lsn < last_record_lsn {
+        if lsn <= last_record_lsn {
             panic!(
                 "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
                 lsn,
