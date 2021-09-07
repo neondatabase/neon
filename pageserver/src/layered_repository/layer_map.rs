@@ -62,37 +62,33 @@ struct SegEntry {
 }
 
 /// Entry held LayerMap.open_segs, with boilerplate comparison
-/// routines to implement a min-heap ordered by 'oldest_pending_lsn'
+/// routines to implement a min-heap ordered by 'oldest_pending_lsn' and 'generation''
 ///
 /// Each entry also carries a generation number. It can be used to distinguish
 /// entries with the same 'oldest_pending_lsn'.
 struct OpenSegEntry {
     pub oldest_pending_lsn: Lsn,
-    pub layer: Arc<InMemoryLayer>,
     pub generation: u64,
+    pub layer: Arc<InMemoryLayer>,
 }
 impl Ord for OpenSegEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
-        // to get that.
-        other.oldest_pending_lsn.cmp(&self.oldest_pending_lsn)
+        // to get that. Entries with identical oldest_pending_lsn are ordered by generation
+        other
+            .oldest_pending_lsn
+            .cmp(&self.oldest_pending_lsn)
+            .then_with(|| other.generation.cmp(&self.generation))
     }
 }
 impl PartialOrd for OpenSegEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
-        // to get that. Entries with identical oldest_pending_lsn are ordered by generation
-        Some(
-            other
-                .oldest_pending_lsn
-                .cmp(&self.oldest_pending_lsn)
-                .then_with(|| other.generation.cmp(&self.generation)),
-        )
+        Some(self.cmp(other))
     }
 }
 impl PartialEq for OpenSegEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.oldest_pending_lsn.eq(&other.oldest_pending_lsn)
+        self.cmp(&other) == Ordering::Equal
     }
 }
 impl Eq for OpenSegEntry {}
