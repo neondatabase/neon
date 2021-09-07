@@ -39,9 +39,9 @@ pub struct LayerMap {
     /// All the layers keyed by segment tag
     segs: HashMap<SegmentTag, SegEntry>,
 
-    /// All in-memory layers, ordered by 'oldest_pending_lsn' of each layer.
-    /// This allows easy access to the in-memory layer that contains the
-    /// oldest WAL record.
+    /// All in-memory layers, ordered by 'oldest_pending_lsn' and generation
+    /// of each layer. This allows easy access to the in-memory layer that
+    /// contains the oldest WAL record.
     open_segs: BinaryHeap<OpenSegEntry>,
 
     /// Generation number, used to distinguish newly inserted entries in the
@@ -61,13 +61,13 @@ struct SegEntry {
     pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
 }
 
-/// Entry held LayerMap.open_segs, with boilerplate comparison
-/// routines to implement a min-heap ordered by 'oldest_pending_lsn' and 'generation''
+/// Entry held LayerMap.open_segs, with boilerplate comparison routines
+/// to implement a min-heap ordered by 'oldest_pending_lsn' and 'generation'
 ///
 /// Each entry also carries a generation number. It can be used to distinguish
 /// entries with the same 'oldest_pending_lsn'.
 struct OpenSegEntry {
-    pub oldest_pending_lsn: Lsn,
+    pub oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
     pub generation: u64,
     pub layer: Arc<InMemoryLayer>,
 }
