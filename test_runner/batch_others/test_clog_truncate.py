@@ -3,7 +3,7 @@ import os
 
 from contextlib import closing
 
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver, check_restored_datadir_content
+from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 

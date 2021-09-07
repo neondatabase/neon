@@ -48,6 +48,7 @@ def test_dropdb(
     pageserver: ZenithPageserver,
     postgres: PostgresFactory,
     pg_bin,
+    test_output_dir
 ):
     zenith_cli.run(["branch", "test_dropdb", "empty"])
 
@@ -98,4 +99,4 @@ def test_dropdb(
     assert os.path.isdir(dbpath) == False
 
     # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(zenith_cli, pg, lsn_after_drop, postgres)
+    check_restored_datadir_content(zenith_cli, test_output_dir, pg)
