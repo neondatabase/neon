@@ -14,10 +14,8 @@ use crate::layered_repository::InMemoryLayer;
 use crate::relish::*;
 use anyhow::Result;
 use lazy_static::lazy_static;
-use log::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
-use std::ops::Bound::Included;
 use std::sync::Arc;
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
@@ -144,56 +142,29 @@ impl LayerMap {
 
     // List relations along with a flag that marks if they exist at the given lsn.
     // spcnode 0 and dbnode 0 have special meanings and mean all tabespaces/databases.
-    pub fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashMap<RelTag, bool>> {
-        let mut rels: HashMap<RelTag, bool> = HashMap::new();
-
-        for (seg, segentry) in self.segs.iter() {
-            if let RelishTag::Relation(reltag) = seg.rel {
-                if (spcnode == 0 || reltag.spcnode == spcnode)
-                    && (dbnode == 0 || reltag.dbnode == dbnode)
-                {
-                    if let Some(layer) = &segentry.open {
-                        if layer.get_start_lsn() <= lsn && lsn <= layer.get_end_lsn() {
-                            let exists = layer.get_seg_exists(lsn)?;
-                            trace!("Open layer list object {}: exists {}", reltag, exists);
-                            rels.insert(reltag, exists);
-                        }
-                    } else if let Some((_, layer)) = segentry
-                        .historic
-                        .range((Included(Lsn(0)), Included(lsn)))
-                        .next_back()
-                    {
-                        let exists = layer.get_seg_exists(lsn)?;
-                        rels.insert(reltag, exists);
-                    }
-                }
-            }
-        }
-        Ok(rels)
-    }
-
-    // List non-relation relishes that exist at the lsn
-    pub fn list_nonrels(&self, lsn: Lsn) -> Result<HashMap<RelishTag, bool>> {
+    // Pass Tag if we're only interested in some relations.
+    pub fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashMap<RelishTag, bool>> {
         let mut rels: HashMap<RelishTag, bool> = HashMap::new();
 
-        // Scan the timeline directory to get all rels in this timeline.
         for (seg, segentry) in self.segs.iter() {
-            if let RelishTag::Relation(_) = seg.rel {
-            } else {
-                // Add only if it exists at the requested LSN.
-                if let Some(layer) = &segentry.open {
-                    if layer.get_start_lsn() <= lsn && lsn <= layer.get_end_lsn() {
-                        let exists = layer.get_seg_exists(lsn)?;
-                        trace!("Open layer list object {}: exists {}", seg.rel, exists);
-                        rels.insert(seg.rel, exists);
+            match seg.rel {
+                RelishTag::Relation(reltag) => {
+                    if let Some(request_rel) = tag {
+                        if (request_rel.spcnode == 0 || reltag.spcnode == request_rel.spcnode)
+                            && (request_rel.dbnode == 0 || reltag.dbnode == request_rel.dbnode)
+                        {
+                            if let Some(exists) = segentry.exists_at_lsn(lsn) {
+                                rels.insert(seg.rel, exists);
+                            }
+                        }
                     }
-                } else if let Some((_k, layer)) = segentry
-                    .historic
-                    .range((Included(Lsn(0)), Included(lsn)))
-                    .next_back()
-                {
-                    let exists = layer.get_seg_exists(lsn)?;
-                    rels.insert(seg.rel, exists);
+                }
+                _ => {
+                    if tag == None {
+                        if let Some(exists) = segentry.exists_at_lsn(lsn) {
+                            rels.insert(seg.rel, exists);
+                        }
+                    }
                 }
             }
         }
@@ -277,6 +248,21 @@ impl Default for SegEntry {
 }
 
 impl SegEntry {
+    /// Does the segment exist at given LSN?
+    /// Return None if object is not found in this SegEntry.
+    fn exists_at_lsn(&self, lsn: Lsn) -> Option<bool> {
+        if let Some(layer) = &self.open {
+            if layer.get_start_lsn() <= lsn && lsn <= layer.get_end_lsn() {
+                let exists = layer.get_seg_exists(lsn).ok()?;
+                return Some(exists);
+            }
+        } else if let Some((_, layer)) = self.historic.range(..=lsn).next_back() {
+            let exists = layer.get_seg_exists(lsn).ok()?;
+            return Some(exists);
+        }
+        None
+    }
+
     pub fn get(&self, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         if let Some(open) = &self.open {
             if open.get_start_lsn() <= lsn {

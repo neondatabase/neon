@@ -18,6 +18,7 @@ use log::*;
 use postgres_ffi::pg_constants::BLCKSZ;
 use serde::{Deserialize, Serialize};
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
@@ -645,89 +646,62 @@ impl Timeline for LayeredTimeline {
         Ok(result)
     }
 
-    fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
-        trace!("list_rels called at {}", lsn);
+    fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelishTag>> {
+        let request_tag = RelTag {
+            spcnode: spcnode,
+            dbnode: dbnode,
+            relnode: 0,
+            forknum: 0,
+        };
 
-        // List all rels in this timeline, and all its ancestors.
-        let mut all_rels_map: HashMap<RelTag, bool> = HashMap::new();
-        let mut result = HashSet::new();
-        let mut timeline = self;
-
-        loop {
-            timeline.layers.lock().unwrap().dump()?;
-
-            let rels = timeline
-                .layers
-                .lock()
-                .unwrap()
-                .list_rels(spcnode, dbnode, lsn)?;
-
-            for (&new_rel, &new_rel_exists) in rels.iter() {
-                if let Some(rel_exists) = all_rels_map.get(&new_rel) {
-                    trace!(
-                        "list_rels() Newer version of the object {} is already found: exists {}",
-                        new_rel,
-                        rel_exists
-                    );
-                } else {
-                    all_rels_map.insert(new_rel, new_rel_exists);
-                    trace!(
-                        "list_rels() Newer version of the object {} NOT found: exists {}",
-                        new_rel,
-                        new_rel_exists
-                    );
-                }
-            }
-
-            if let Some(ancestor) = timeline.ancestor_timeline.as_ref() {
-                timeline = ancestor;
-                continue;
-            } else {
-                break;
-            }
-        }
-
-        // Filter out dropped relations
-        for (&new_rel, &new_rel_exists) in all_rels_map.iter() {
-            if new_rel_exists {
-                result.insert(new_rel);
-                trace!("list_rels() List object {}", new_rel);
-            } else {
-                trace!("list_rels() Filter out droped object {}", new_rel);
-            }
-        }
-
-        Ok(result)
+        self.list_relishes(Some(request_tag), lsn)
     }
 
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
         info!("list_nonrels called at {}", lsn);
-
         let lsn = self.wait_lsn(lsn)?;
 
-        // List all nonrels in this timeline, and all its ancestors.
-        let mut all_rels_map: HashMap<RelishTag, bool> = HashMap::new();
+        self.list_relishes(None, lsn)
+    }
+
+    fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashSet<RelishTag>> {
+        trace!("list_relishes called at {}", lsn);
+
+        // List of all relishes along with a flag that marks if they exist at the given lsn.
+        let mut all_relishes_map: HashMap<RelishTag, bool> = HashMap::new();
         let mut result = HashSet::new();
         let mut timeline = self;
-        loop {
-            let rels = timeline.layers.lock().unwrap().list_nonrels(lsn)?;
 
-            for (&new_rel, &new_rel_exists) in rels.iter() {
-                if let Some(rel_exists) = all_rels_map.get(&new_rel) {
-                    trace!(
-                        "list_nonrels() Newer version of the object {} is already found: exists {}",
-                        new_rel,
-                        rel_exists
-                    );
-                } else {
-                    all_rels_map.insert(new_rel, new_rel_exists);
-                    trace!(
-                        "list_nonrels() Newer version of the object {} NOT found: exists {}",
-                        new_rel,
-                        new_rel_exists
-                    );
+        // Iterate through layers back in time and find the most
+        // recent state of the relish. Don't add relish to the list
+        // if newer version is already there.
+        //
+        // This most recent version can represent dropped or existing relish.
+        // We will filter dropped relishes below.
+        //
+        loop {
+            let rels = timeline.layers.lock().unwrap().list_relishes(tag, lsn)?;
+
+            for (&new_relish, &new_relish_exists) in rels.iter() {
+                match all_relishes_map.entry(new_relish) {
+                    Entry::Occupied(o) => {
+                        trace!(
+                            "Newer version of the object {} is already found: exists {}",
+                            new_relish,
+                            o.get(),
+                        );
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert(new_relish_exists);
+                        trace!(
+                            "Newer version of the object {} NOT found. Insert NEW: exists {}",
+                            new_relish,
+                            new_relish_exists
+                        );
+                    }
                 }
             }
+
             if let Some(ancestor) = timeline.ancestor_timeline.as_ref() {
                 timeline = ancestor;
                 continue;
@@ -736,13 +710,13 @@ impl Timeline for LayeredTimeline {
             }
         }
 
-        // Filter out dropped relations
-        for (&new_rel, &new_rel_exists) in all_rels_map.iter() {
-            if new_rel_exists {
-                result.insert(new_rel);
-                trace!("list_nonrels() List object {}", new_rel);
+        // Filter out dropped relishes
+        for (&new_relish, &new_relish_exists) in all_relishes_map.iter() {
+            if new_relish_exists {
+                result.insert(new_relish);
+                trace!("List object {}", new_relish);
             } else {
-                trace!("list_nonrels() Filter out droped object {}", new_rel);
+                trace!("Filter out droped object {}", new_relish);
             }
         }
 
@@ -921,7 +895,7 @@ impl Timeline for LayeredTimeline {
         let all_rels = self.list_rels(0, 0, lsn)?;
 
         for rel in all_rels {
-            if let Some(size) = self.get_relish_size(RelishTag::Relation(rel), lsn)? {
+            if let Some(size) = self.get_relish_size(rel, lsn)? {
                 total_blocks += size as usize;
             }
         }
