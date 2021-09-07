@@ -17,7 +17,6 @@ use lazy_static::lazy_static;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
-use std::ops::Bound::Included;
 use std::sync::Arc;
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
@@ -267,11 +266,7 @@ impl SegEntry {
             }
         }
 
-        if let Some((_start_lsn, layer)) = self
-            .historic
-            .range((Included(Lsn(0)), Included(lsn)))
-            .next_back()
-        {
+        if let Some((_start_lsn, layer)) = self.historic.range(..=lsn).next_back() {
             Some(Arc::clone(layer))
         } else {
             None
@@ -282,10 +277,7 @@ impl SegEntry {
         // We only check on-disk layers, because
         // in-memory layers are not durable
 
-        for (_newer_lsn, layer) in self
-            .historic
-            .range((Included(lsn), Included(Lsn(u64::MAX))))
-        {
+        for (_newer_lsn, layer) in self.historic.range(lsn..) {
             // Ignore incremental layers.
             if layer.is_incremental() {
                 continue;
