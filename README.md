@@ -125,9 +125,19 @@ Now we use README files to cover design ideas and overall architecture for each 
 
 To view your `rustdoc` documentation in a browser, try running `cargo doc --no-deps --open`
 
+### Postgres-specific terms
+
+Due to Zenith's very close relation with PostgreSQL internals, there are numerous specific terms used.
+Same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
+
+To get more familiar with this aspect, refer to:
+
+- [Zenith glossary](/docs/glossary.md)
+- [PostgreSQL glossary](https://www.postgresql.org/docs/13/glossary.html)
+- Other PostgreSQL documentation and sources (Zenith fork sources can be found [here](https://github.com/zenithdb/postgres))
+
 ## Join the development
 
 - Read `CONTRIBUTING.md` to learn about project code style and practices.
-- Use glossary in [/docs/glossary.md](/docs/glossary.md)
 - To get familiar with a source tree layout, use [/docs/sourcetree.md](/docs/sourcetree.md).
 - To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html
