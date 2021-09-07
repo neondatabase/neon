@@ -106,10 +106,14 @@ pub trait Timeline: Send + Sync {
     /// Does relation exist?
     fn get_rel_exists(&self, tag: RelishTag, lsn: Lsn) -> Result<bool>;
 
-    /// Get a list of all distinct relations in given tablespace and database.
-    fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>>;
+    /// Get a list of all existing relations
+    /// Pass RelTag to get relation objects or None to get nonrels.
+    fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
-    /// Get a list of non-relational objects
+    /// Get a list of all existing relations in given tablespace and database.
+    fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelishTag>>;
+
+    /// Get a list of all existing non-relational objects
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
     //------------------------------------------------------------------------------
@@ -480,33 +484,37 @@ mod tests {
         // Create a relation on the timeline
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
 
-        // Check that list_rels() lists it after LSN 2, but no before it.
-        let reltag = match TESTREL_A {
-            RelishTag::Relation(reltag) => reltag,
-            _ => panic!("unexpected relish"),
-        };
-        assert!(!tline.list_rels(0, TESTDB, Lsn(0x10))?.contains(&reltag));
-        assert!(tline.list_rels(0, TESTDB, Lsn(0x20))?.contains(&reltag));
-        assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&reltag));
+        // Check that list_rels() lists it after LSN 2, but no before it
+        assert!(!tline.list_rels(0, TESTDB, Lsn(0x10))?.contains(&TESTREL_A));
+        assert!(tline.list_rels(0, TESTDB, Lsn(0x20))?.contains(&TESTREL_A));
+        assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
 
         // Create a branch, check that the relation is visible there
         let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
         repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
         let newtline = repo.get_timeline(newtimelineid)?;
 
-        assert!(newtline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&reltag));
+        assert!(newtline
+            .list_rels(0, TESTDB, Lsn(0x30))?
+            .contains(&TESTREL_A));
 
         // Drop it on the branch
         newtline.drop_relish(TESTREL_A, Lsn(0x40))?;
 
         // Check that it's no longer listed on the branch after the point where it was dropped
-        assert!(newtline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&reltag));
-        assert!(!newtline.list_rels(0, TESTDB, Lsn(0x40))?.contains(&reltag));
+        assert!(newtline
+            .list_rels(0, TESTDB, Lsn(0x30))?
+            .contains(&TESTREL_A));
+        assert!(!newtline
+            .list_rels(0, TESTDB, Lsn(0x40))?
+            .contains(&TESTREL_A));
 
         // Run checkpoint and garbage collection and check that it's still not visible
         newtline.checkpoint()?;
         repo.gc_iteration(Some(newtimelineid), 0, true)?;
-        assert!(!newtline.list_rels(0, TESTDB, Lsn(0x40))?.contains(&reltag));
+        assert!(!newtline
+            .list_rels(0, TESTDB, Lsn(0x40))?
+            .contains(&TESTREL_A));
 
         Ok(())
     }

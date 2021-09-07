@@ -395,7 +395,7 @@ pub fn save_decoded_record(
             for tablespace_id in dropdb.tablespace_ids {
                 let rels = timeline.list_rels(tablespace_id, dropdb.db_id, lsn)?;
                 for rel in rels {
-                    timeline.drop_relish(RelishTag::Relation(rel), lsn)?;
+                    timeline.drop_relish(rel, lsn)?;
                 }
                 trace!(
                     "Drop FileNodeMap {}, {} at lsn {}",
@@ -558,37 +558,36 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
     let mut num_rels_copied = 0;
     let mut num_blocks_copied = 0;
-    for src_rel in rels {
-        assert_eq!(src_rel.spcnode, src_tablespace_id);
-        assert_eq!(src_rel.dbnode, src_db_id);
+    for rel in rels {
+        if let RelishTag::Relation(src_rel) = rel {
+            assert_eq!(src_rel.spcnode, src_tablespace_id);
+            assert_eq!(src_rel.dbnode, src_db_id);
 
-        let nblocks = timeline
-            .get_relish_size(RelishTag::Relation(src_rel), req_lsn)?
-            .unwrap_or(0);
-        let dst_rel = RelTag {
-            spcnode: tablespace_id,
-            dbnode: db_id,
-            relnode: src_rel.relnode,
-            forknum: src_rel.forknum,
-        };
+            let nblocks = timeline.get_relish_size(rel, req_lsn)?.unwrap_or(0);
+            let dst_rel = RelTag {
+                spcnode: tablespace_id,
+                dbnode: db_id,
+                relnode: src_rel.relnode,
+                forknum: src_rel.forknum,
+            };
 
-        // Copy content
-        for blknum in 0..nblocks {
-            let content =
-                timeline.get_page_at_lsn_nowait(RelishTag::Relation(src_rel), blknum, req_lsn)?;
+            // Copy content
+            for blknum in 0..nblocks {
+                let content = timeline.get_page_at_lsn_nowait(rel, blknum, req_lsn)?;
 
-            debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
+                debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
-            timeline.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content)?;
-            num_blocks_copied += 1;
+                timeline.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content)?;
+                num_blocks_copied += 1;
+            }
+
+            if nblocks == 0 {
+                // make sure we have some trace of the relation, even if it's empty
+                timeline.put_truncation(RelishTag::Relation(dst_rel), lsn, 0)?;
+            }
+
+            num_rels_copied += 1;
         }
-
-        if nblocks == 0 {
-            // make sure we have some trace of the relation, even if it's empty
-            timeline.put_truncation(RelishTag::Relation(dst_rel), lsn, 0)?;
-        }
-
-        num_rels_copied += 1;
     }
 
     // Copy relfilemap
