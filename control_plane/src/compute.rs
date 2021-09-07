@@ -482,13 +482,15 @@ impl PostgresNode {
     }
 
     pub fn stop(&self, destroy: bool) -> Result<()> {
-        self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
         if destroy {
+            self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
             println!(
                 "Destroying postgres data directory '{}'",
                 self.pgdata().to_str().unwrap()
             );
             fs::remove_dir_all(&self.pgdata())?;
+        } else {
+            self.pg_ctl(&["stop"], &None)?;
         }
         Ok(())
     }
