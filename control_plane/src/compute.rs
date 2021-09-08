@@ -482,6 +482,13 @@ impl PostgresNode {
     }
 
     pub fn stop(&self, destroy: bool) -> Result<()> {
+        // If we are going to destroy data directory,
+        // use immediate shutdown mode, otherwise,
+        // shutdown gracefully to leave the data directory sane.
+        //
+        // Compute node always starts from scratch, so stop
+        // without destroy only used for testing and debugging.
+        //
         if destroy {
             self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
             println!(
