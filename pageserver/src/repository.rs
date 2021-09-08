@@ -395,6 +395,144 @@ mod tests {
         Ok(())
     }
 
+    // Test what happens if we dropped a relation
+    // and then created it again within the same layer.
+    #[test]
+    fn test_drop_extend() -> Result<()> {
+        let repo = get_test_repo("test_drop_extend")?;
+
+        // Create timeline to work on
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+
+        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        tline.advance_last_record_lsn(Lsn(0x20));
+
+        // Check that rel exists and size is correct
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(), 1);
+
+        // Drop relish
+        tline.drop_relish(TESTREL_A, Lsn(0x30))?;
+        tline.advance_last_record_lsn(Lsn(0x30));
+
+        // Check that rel is not visible anymore
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
+        assert!(tline.get_relish_size(TESTREL_A, Lsn(0x30))?.is_none());
+
+        // Extend it again
+        tline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
+        tline.advance_last_record_lsn(Lsn(0x40));
+
+        // Check that rel exists and size is correct
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x40))?.unwrap(), 1);
+
+        Ok(())
+    }
+
+    // Test what happens if we truncated a relation
+    // so that one of its segments was dropped
+    // and then extended it again within the same layer.
+    #[test]
+    fn test_truncate_extend() -> Result<()> {
+        let repo = get_test_repo("test_truncate_extend")?;
+
+        // Create timeline to work on
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+
+        //from storage_layer.rs
+        const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
+        let relsize = RELISH_SEG_SIZE * 2;
+
+        // Create relation with relsize blocks
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+        }
+
+        tline.advance_last_record_lsn(Lsn(0x20));
+
+        // The relation was created at LSN 2, not visible at LSN 1 yet.
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
+        assert!(tline.get_relish_size(TESTREL_A, Lsn(0x10))?.is_none());
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
+        assert_eq!(
+            tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(),
+            relsize
+        );
+
+        // Check relation content
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, lsn)?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // Truncate relation so that second segment was dropped
+        // - only leave one page
+        tline.put_truncation(TESTREL_A, Lsn(0x60), 1)?;
+        tline.advance_last_record_lsn(Lsn(0x60));
+
+        // Check reported size and contents after truncation
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 1);
+
+        for blkno in 0..1 {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x60))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // should still see all blocks with older LSN
+        assert_eq!(
+            tline.get_relish_size(TESTREL_A, Lsn(0x50))?.unwrap(),
+            relsize
+        );
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x50))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // Extend relation again.
+        // Add enough blocks to create second segment
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x80);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+        }
+        tline.advance_last_record_lsn(Lsn(0x80));
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
+        assert_eq!(
+            tline.get_relish_size(TESTREL_A, Lsn(0x80))?.unwrap(),
+            relsize
+        );
+        // Check relation content
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x80);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x80))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        Ok(())
+    }
+
     /// Test get_relsize() and truncation with a file larger than 1 GB, so that it's
     /// split into multiple 1 GB segments in Postgres.
     #[test]
