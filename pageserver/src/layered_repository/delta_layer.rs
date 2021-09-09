@@ -168,7 +168,7 @@ impl Layer for DeltaLayer {
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
-        let mut cont_lsn: Option<Lsn> = Some(lsn);
+        let mut need_image = true;
 
         assert!(self.seg.blknum_in_seg(blknum));
 
@@ -185,12 +185,12 @@ impl Layer for DeltaLayer {
             let mut iter = inner
                 .page_version_metas
                 .range((Included(&minkey), Included(&maxkey)));
-            while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
+            while let Some(((_blknum, _entry_lsn), entry)) = iter.next_back() {
                 if let Some(img_range) = &entry.page_image_range {
                     // Found a page image, return it
                     let img = Bytes::from(read_blob(&page_version_reader, img_range)?);
                     reconstruct_data.page_img = Some(img);
-                    cont_lsn = None;
+                    need_image = false;
                     break;
                 } else if let Some(rec_range) = &entry.record_range {
                     let rec = WALRecord::des(&read_blob(&page_version_reader, rec_range)?)?;
@@ -198,11 +198,8 @@ impl Layer for DeltaLayer {
                     reconstruct_data.records.push(rec);
                     if will_init {
                         // This WAL record initializes the page, so no need to go further back
-                        cont_lsn = None;
+                        need_image = false;
                         break;
-                    } else {
-                        // This WAL record needs to be applied against an older page image
-                        cont_lsn = Some(*entry_lsn);
                     }
                 } else {
                     // No base image, and no WAL record. Huh?
@@ -215,14 +212,14 @@ impl Layer for DeltaLayer {
 
         // If an older page image is needed to reconstruct the page, let the
         // caller know about the predecessor layer.
-        if let Some(cont_lsn) = cont_lsn {
+        if need_image {
             if let Some(cont_layer) = &self.predecessor {
                 Ok(PageReconstructResult::Continue(
-                    cont_lsn,
+                    self.start_lsn,
                     Arc::clone(cont_layer),
                 ))
             } else {
-                Ok(PageReconstructResult::Missing(cont_lsn))
+                Ok(PageReconstructResult::Missing(self.start_lsn))
             }
         } else {
             Ok(PageReconstructResult::Complete)
