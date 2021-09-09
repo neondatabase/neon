@@ -137,7 +137,7 @@ impl Layer for InMemoryLayer {
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
-        let mut cont_lsn: Option<Lsn> = Some(lsn);
+        let mut need_image = true;
 
         assert!(self.seg.blknum_in_seg(blknum));
 
@@ -150,20 +150,17 @@ impl Layer for InMemoryLayer {
             let mut iter = inner
                 .page_versions
                 .range((Included(&minkey), Included(&maxkey)));
-            while let Some(((_blknum, entry_lsn), entry)) = iter.next_back() {
+            while let Some(((_blknum, _entry_lsn), entry)) = iter.next_back() {
                 if let Some(img) = &entry.page_image {
                     reconstruct_data.page_img = Some(img.clone());
-                    cont_lsn = None;
+                    need_image = false;
                     break;
                 } else if let Some(rec) = &entry.record {
                     reconstruct_data.records.push(rec.clone());
                     if rec.will_init {
                         // This WAL record initializes the page, so no need to go further back
-                        cont_lsn = None;
+                        need_image = false;
                         break;
-                    } else {
-                        // This WAL record needs to be applied against an older page image
-                        cont_lsn = Some(*entry_lsn);
                     }
                 } else {
                     // No base image, and no WAL record. Huh?
@@ -176,14 +173,14 @@ impl Layer for InMemoryLayer {
 
         // If an older page image is needed to reconstruct the page, let the
         // caller know about the predecessor layer.
-        if let Some(cont_lsn) = cont_lsn {
+        if need_image {
             if let Some(cont_layer) = &self.predecessor {
                 Ok(PageReconstructResult::Continue(
-                    cont_lsn,
+                    self.start_lsn,
                     Arc::clone(cont_layer),
                 ))
             } else {
-                Ok(PageReconstructResult::Missing(cont_lsn))
+                Ok(PageReconstructResult::Missing(self.start_lsn))
             }
         } else {
             Ok(PageReconstructResult::Complete)
