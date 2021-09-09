@@ -294,9 +294,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     );
     let pageserver_listener = TcpListener::bind(conf.listen_addr.clone())?;
 
-    // Initialize tenant manager.
-    tenant_mgr::init(conf);
-
     if conf.daemonize {
         info!("daemonizing...");
 
@@ -316,6 +313,9 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
             Err(e) => error!("Error, {}", e),
         }
     }
+
+    // Initialize tenant manager.
+    tenant_mgr::init(conf);
 
     // keep join handles for spawned threads
     let mut join_handles = vec![];
