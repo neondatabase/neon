@@ -5,15 +5,17 @@ receives a stream of incoming WAL, parses the WAL records to determine
 which pages they apply to, and accumulates the incoming changes in
 memory. Every now and then, the accumulated changes are written out to
 new immutable files. This process is called checkpointing. Old versions
-of on-disk files not needed by any timeline are removed by GC process.
+of on-disk files that are not needed by any timeline are removed by GC
+process.
+
 # Terms used in layered repository
 
-- Relish - one PostgreSQL relation or similarly threated file.
+- Relish - one PostgreSQL relation or similarly treated file.
 - Segment - one slice of a Relish that is stored in a LayeredTimeline.
 - Layer -  specific version of a relish Segment in a range of LSNs.
 
 Layers can be InMemory or OnDisk:
-- InMemory layer is not durably stored and should be rebuild from WAL on pageserver start.
+- InMemory layer is not durably stored and needs to rebuild from WAL on pageserver start.
 - OnDisk layer is durably stored.
 
 OnDisk layers can be Image or Delta:
@@ -51,7 +53,8 @@ For example, timeline.list_rels(lsn) will return all segments that are visible i
 including ones that were not modified in this timeline and thus don't have a layer in the timeline's LayerMap.
 
 TODO:
-Describe GC and chekpoint interval settings.
+Describe GC and checkpoint interval settings.
+
 # Layer files (On-disk layers)
 
 The files are called "layer files". Each layer file corresponds

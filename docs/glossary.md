@@ -127,12 +127,16 @@ How much history do we need to keep around for PITR and read-only nodes?
 
 NOTE: This is an overloaded term.
 
-A physical file which stores data for a given relation. File segments are limited in size by a configuration value (typically 1 gigabyte), so if a relation exceeds that size, it is split into multiple segments.
+A physical file that stores data for a given relation. File segments are
+limited in size by a compile-time setting (1 gigabyte by default), so if a
+relation exceeds that size, it is split into multiple segments.
+
 ### Segment (Layered Repository)
 
 NOTE: This is an overloaded term.
 
-Segment is a RELISH_SEG_SIZE slice of relish (defined by a SegmentTag).
+Segment is a RELISH_SEG_SIZE slice of relish (identified by a SegmentTag).
+
 ### SLRU
 
 SLRUs include pg_clog, pg_multixact/members, and
