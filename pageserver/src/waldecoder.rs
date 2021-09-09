@@ -54,6 +54,11 @@ impl WalStreamDecoder {
         }
     }
 
+    // The latest LSN position fed to the decoder.
+    pub fn available(&self) -> Lsn {
+        self.lsn + self.inputbuf.remaining() as u64
+    }
+
     pub fn feed_bytes(&mut self, buf: &[u8]) {
         self.inputbuf.extend_from_slice(buf);
     }
@@ -159,17 +164,10 @@ impl WalStreamDecoder {
                     let recordbuf = recordbuf.freeze();
                     let mut buf = recordbuf.clone();
 
+                    let xlogrec = XLogRecord::from_bytes(&mut buf);
+
                     // XLOG_SWITCH records are special. If we see one, we need to skip
                     // to the next WAL segment.
-                    let xlogrec = XLogRecord::from_bytes(&mut buf);
-                    let mut crc = crc32c_append(0, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
-                    crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
-                    if crc != xlogrec.xl_crc {
-                        return Err(WalDecodeError {
-                            msg: "WAL record crc mismatch".into(),
-                            lsn: self.lsn,
-                        });
-                    }
                     if xlogrec.is_xlog_switch_record() {
                         trace!("saw xlog switch record at {}", self.lsn);
                         self.padlen =
@@ -177,6 +175,15 @@ impl WalStreamDecoder {
                     } else {
                         // Pad to an 8-byte boundary
                         self.padlen = self.lsn.calc_padding(8u32) as u32;
+                    }
+
+                    let mut crc = crc32c_append(0, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
+                    crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
+                    if crc != xlogrec.xl_crc {
+                        return Err(WalDecodeError {
+                            msg: "WAL record crc mismatch".into(),
+                            lsn: self.lsn,
+                        });
                     }
 
                     // Always align resulting LSN on 0x8 boundary -- that is important for getPage()

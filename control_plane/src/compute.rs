@@ -3,7 +3,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,6 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
-use postgres_ffi::pg_constants;
 use regex::Regex;
 use zenith_utils::connstring::connection_host_port;
 use zenith_utils::lsn::Lsn;
@@ -229,18 +228,24 @@ impl PostgresNode {
 
     fn sync_walkeepers(&self) -> Result<Lsn> {
         let pg_path = self.env.pg_bin_dir().join("postgres");
-        let sync_output = Command::new(pg_path)
+        let sync_handle = Command::new(pg_path)
             .arg("--sync-safekeepers")
             .env_clear()
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .env("PGDATA", self.pgdata().to_str().unwrap())
-            .output()
-            .with_context(|| "sync-walkeepers failed")?;
+            .stdout(Stdio::piped())
+            // Comment this to avoid capturing stderr (useful if command hangs)
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("postgres --sync-safekeepers failed to start");
 
+        let sync_output = sync_handle
+            .wait_with_output()
+            .expect("postgres --sync-safekeepers failed");
         if !sync_output.status.success() {
             anyhow::bail!(
-                "sync-walkeepers failed: '{}'",
+                "sync-safekeepers failed: '{}'",
                 String::from_utf8_lossy(&sync_output.stderr)
             );
         }
@@ -373,12 +378,12 @@ impl PostgresNode {
 
     fn load_basebackup(&self) -> Result<()> {
         let lsn = if self.uses_wal_proposer {
-            // LSN WAL_SEGMENT_SIZE means that it is bootstrap and we need to download just
+            // LSN 0 means that it is bootstrap and we need to download just
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
             // when things would be more stable (TODO).
             let lsn = self.sync_walkeepers()?;
-            if lsn == Lsn(pg_constants::WAL_SEGMENT_SIZE as u64) {
+            if lsn == Lsn(0 as u64) {
                 None
             } else {
                 Some(lsn)

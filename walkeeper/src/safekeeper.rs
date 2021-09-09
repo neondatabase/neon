@@ -7,6 +7,7 @@ use byteorder::WriteBytesExt;
 use bytes::Buf;
 use bytes::Bytes;
 use log::*;
+use pageserver::waldecoder::WalStreamDecoder;
 use postgres_ffi::xlog_utils::TimeLineID;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -71,8 +72,8 @@ pub struct SafeKeeperState {
     pub proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
     pub commit_lsn: Lsn,
-    /// minimal LSN which may be needed for recovery of some safekeeper (end lsn
-    /// + 1 of last record streamed to everyone)
+    /// minimal LSN which may be needed for recovery of some safekeeper (end_lsn
+    /// of last record streamed to everyone)
     pub truncate_lsn: Lsn,
 }
 
@@ -142,7 +143,7 @@ pub struct VoteResponse {
     /// Safekeeper's log position, to let proposer choose the most advanced one
     epoch: Term,
     flush_lsn: Lsn,
-    restart_lsn: Lsn,
+    truncate_lsn: Lsn,
 }
 
 /// Request with WAL message sent from proposer to safekeeper. Along the way it
@@ -163,8 +164,8 @@ pub struct AppendRequestHeader {
     end_lsn: Lsn,
     /// LSN committed by quorum of safekeepers
     commit_lsn: Lsn,
-    /// restart LSN position (minimal LSN which may be needed by proposer to perform recovery)
-    restart_lsn: Lsn,
+    /// minimal LSN which may be needed by proposer to perform recovery of some safekeeper
+    truncate_lsn: Lsn,
     // only for logging/debugging
     proposer_uuid: PgUuid,
 }
@@ -276,10 +277,9 @@ pub trait Storage {
 
 /// SafeKeeper which consumes events (messages from compute) and provides
 /// replies.
-#[derive(Debug)]
 pub struct SafeKeeper<ST: Storage> {
-    /// Locally flushed part of WAL (end_lsn of last record). Established by
-    /// reading wal.
+    /// Locally flushed part of WAL with full records (end_lsn of last record).
+    /// Established by reading wal.
     pub flush_lsn: Lsn,
     pub tli: u32,
     /// not-yet-flushed pairs of same named fields in s.*
@@ -288,6 +288,7 @@ pub struct SafeKeeper<ST: Storage> {
     pub storage: ST,
     pub s: SafeKeeperState,          // persistent part
     pub elected_proposer_term: Term, // for monitoring/debugging
+    decoder: WalStreamDecoder,
 }
 
 impl<ST> SafeKeeper<ST>
@@ -304,6 +305,7 @@ where
             storage,
             s: state,
             elected_proposer_term: 0,
+            decoder: WalStreamDecoder::new(Lsn(0)),
         }
     }
 
@@ -347,7 +349,6 @@ where
         self.s.server.ztli = msg.ztli;
         self.s.server.tli = msg.tli;
         self.s.server.wal_seg_size = msg.wal_seg_size;
-        self.s.proposer_uuid = msg.proposer_id;
         self.storage.persist(&self.s, true)?;
 
         info!(
@@ -367,7 +368,7 @@ where
             vote_given: false as u64,
             epoch: 0,
             flush_lsn: Lsn(0),
-            restart_lsn: Lsn(0),
+            truncate_lsn: Lsn(0),
         };
         if self.s.acceptor_state.term < msg.term {
             self.s.acceptor_state.term = msg.term;
@@ -376,7 +377,7 @@ where
             resp.vote_given = true as u64;
             resp.epoch = self.s.acceptor_state.epoch;
             resp.flush_lsn = self.flush_lsn;
-            resp.restart_lsn = self.s.truncate_lsn;
+            resp.truncate_lsn = self.s.truncate_lsn;
         }
         info!("processed VoteRequest for term {}: {:?}", msg.term, &resp);
         Ok(AcceptorProposerMessage::VoteResponse(resp))
@@ -411,9 +412,35 @@ where
             return Ok(AcceptorProposerMessage::AppendResponse(resp));
         }
 
+        self.s.proposer_uuid = msg.h.proposer_uuid;
+
         // do the job
-        self.storage
-            .write_wal(&self.s, msg.h.begin_lsn, &msg.wal_data)?;
+        let mut last_rec_lsn = Lsn(0);
+        if msg.wal_data.len() > 0 {
+            self.storage
+                .write_wal(&self.s, msg.h.begin_lsn, &msg.wal_data)?;
+
+            // figure out last record's end lsn for reporting (if we got the
+            // whole record)
+            if self.decoder.available() != msg.h.begin_lsn {
+                info!(
+                    "restart decoder from {} to {}",
+                    self.decoder.available(),
+                    msg.h.begin_lsn,
+                );
+                self.decoder = WalStreamDecoder::new(msg.h.begin_lsn);
+            }
+            self.decoder.feed_bytes(&msg.wal_data);
+            loop {
+                match self.decoder.poll_decode()? {
+                    None => break, // no full record yet
+                    Some((lsn, _rec)) => {
+                        last_rec_lsn = lsn;
+                    }
+                }
+            }
+        }
+
         let mut sync_control_file = false;
         /*
          * Epoch switch happen when written WAL record cross the boundary.
@@ -429,21 +456,28 @@ where
         if self.s.acceptor_state.epoch < msg.h.term
             && msg.h.end_lsn >= max(self.flush_lsn, msg.h.epoch_start_lsn)
         {
-            info!("switched to new epoch {}", msg.h.term);
+            info!(
+                "switched to new epoch {} on receival of request end_lsn={:?}, len={:?}",
+                msg.h.term,
+                msg.h.end_lsn,
+                msg.wal_data.len(),
+            );
             self.s.acceptor_state.epoch = msg.h.term; /* bump epoch */
             sync_control_file = true;
         }
-        if msg.h.end_lsn > self.flush_lsn {
-            self.flush_lsn = msg.h.end_lsn;
+        if last_rec_lsn > self.flush_lsn {
+            self.flush_lsn = last_rec_lsn;
         }
 
-        self.s.proposer_uuid = msg.h.proposer_uuid;
-        // Advance commit_lsn taking into account what we have locally.
-        // xxx this is wrapped into epoch check because we overwrite wal
-        // instead of truncating it, so without it commit_lsn might include
-        // wrong part. Anyway, nobody is much interested in our commit_lsn while
-        // epoch switch hasn't happened, right?
-        if self.s.acceptor_state.epoch == msg.h.term {
+        // Advance commit_lsn taking into account what we have locally. xxx this
+        // is wrapped into epoch check because we overwrite wal instead of
+        // truncating it, so without it commit_lsn might include wrong part.
+        // Anyway, nobody is much interested in our commit_lsn while epoch
+        // switch hasn't happened, right?
+        //
+        // commit_lsn can be 0, being unknown to new walproposer while he hasn't
+        // collected majority of its epoch acks yet, ignore it in this case.
+        if self.s.acceptor_state.epoch == msg.h.term && msg.h.commit_lsn != Lsn(0) {
             let commit_lsn = min(msg.h.commit_lsn, self.flush_lsn);
             // If new commit_lsn reached epoch switch, force sync of control file:
             // walproposer in sync mode is very interested when this happens.
@@ -451,10 +485,10 @@ where
                 commit_lsn >= msg.h.epoch_start_lsn && self.s.commit_lsn < msg.h.epoch_start_lsn;
             self.commit_lsn = commit_lsn;
         }
-        self.truncate_lsn = msg.h.restart_lsn;
 
+        self.truncate_lsn = msg.h.truncate_lsn;
         /*
-         * Update restart LSN in control file.
+         * Update truncate and commit LSN in control file.
          * To avoid negative impact on performance of extra fsync, do it only
          * when restart_lsn delta exceeds WAL segment size.
          */
@@ -474,11 +508,12 @@ where
             // will be filled by caller code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
         };
-        debug!(
-            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, resp {:?}",
+        info!(
+            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, resp {:?}",
             msg.wal_data.len(),
             msg.h.end_lsn,
             msg.h.commit_lsn,
+            msg.h.truncate_lsn,
             &resp,
         );
         Ok(AcceptorProposerMessage::AppendResponse(resp))
@@ -548,7 +583,7 @@ mod tests {
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
             commit_lsn: Lsn(0),
-            restart_lsn: Lsn(0),
+            truncate_lsn: Lsn(0),
             proposer_uuid: [0; 16],
         };
         let mut append_request = AppendRequest {

@@ -27,12 +27,9 @@ use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 const CONTROL_FILE_NAME: &str = "safekeeper.control";
 
 /// Shared state associated with database instance (tenant)
-#[derive(Debug)]
 struct SharedState {
     /// Safekeeper object
     sk: SafeKeeper<FileStorage>,
-    /// opened file control file handle (needed to hold exlusive file lock)
-    control_file: File,
     /// For receiving-sending wal cooperation
     /// quorum commit LSN we've notified walsenders about
     commit_lsn: Lsn,
@@ -59,7 +56,7 @@ impl SharedState {
     ) -> Result<Self> {
         let (cf, state) = SharedState::load_control_file(conf, timelineid, create)?;
         let storage = FileStorage {
-            control_file: cf.try_clone()?,
+            control_file: cf,
             conf: conf.clone(),
         };
         let (flush_lsn, tli) = if state.server.wal_seg_size != 0 {
@@ -72,7 +69,6 @@ impl SharedState {
         Ok(Self {
             commit_lsn: Lsn(0),
             sk: SafeKeeper::new(Lsn(flush_lsn), tli, storage, state),
-            control_file: cf,
             hs_feedback: HotStandbyFeedback {
                 ts: 0,
                 xmin: u64::MAX,
@@ -161,7 +157,6 @@ impl SharedState {
 }
 
 /// Database instance (tenant)
-#[derive(Debug)]
 pub struct Timeline {
     pub timelineid: ZTimelineId,
     mutex: Mutex<SharedState>,
