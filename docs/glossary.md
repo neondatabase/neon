@@ -36,6 +36,7 @@ Stateless Postgres node that stores data in pageserver.
 
 ### Garbage collection
 
+The process of removing old on-disk layers that are not needed by any timeline anymore.
 ### Fork
 
 Each of the separate segmented file sets in which a relation is stored. The main fork is where the actual data resides. There also exist two secondary forks for metadata: the free space map and the visibility map.
@@ -43,7 +44,7 @@ Each PostgreSQL fork is considered a separate relish.
 
 ### Layer
 
-Each layer corresponds to one RELISH_SEG_SIZE slice of a relish in a range of LSNs.
+Each layer corresponds to the specific version of a relish Segment in a range of LSNs.
 There are two kinds of layers, in-memory and on-disk layers. In-memory
 layers are used to ingest incoming WAL, and provide fast access
 to the recent page versions. On-disk layers are stored as files on disk, and
@@ -122,6 +123,16 @@ One repository corresponds to one Tenant.
 
 How much history do we need to keep around for PITR and read-only nodes?
 
+### Segment (PostgreSQL)
+
+NOTE: This is an overloaded term.
+
+A physical file which stores data for a given relation. File segments are limited in size by a configuration value (typically 1 gigabyte), so if a relation exceeds that size, it is split into multiple segments.
+### Segment (Layered Repository)
+
+NOTE: This is an overloaded term.
+
+Segment is a RELISH_SEG_SIZE slice of relish (defined by a SegmentTag).
 ### SLRU
 
 SLRUs include pg_clog, pg_multixact/members, and

@@ -4,7 +4,55 @@ The on-disk format is based on immutable files. The page server
 receives a stream of incoming WAL, parses the WAL records to determine
 which pages they apply to, and accumulates the incoming changes in
 memory. Every now and then, the accumulated changes are written out to
-new files.
+new immutable files. This process is called checkpointing. Old versions
+of on-disk files not needed by any timeline are removed by GC process.
+# Terms used in layered repository
+
+- Relish - one PostgreSQL relation or similarly threated file.
+- Segment - one slice of a Relish that is stored in a LayeredTimeline.
+- Layer -  specific version of a relish Segment in a range of LSNs.
+
+Layers can be InMemory or OnDisk:
+- InMemory layer is not durably stored and should be rebuild from WAL on pageserver start.
+- OnDisk layer is durably stored.
+
+OnDisk layers can be Image or Delta:
+- ImageLayer represents an image or a snapshot of a segment at one particular LSN.
+- DeltaLayer represents a collection of WAL records or page images in a range of LSNs.
+
+Dropped segments are always represented on disk by DeltaLayer.
+
+LSN range defined by start_lsn and end_lsn:
+- start_lsn is always inclusive.
+- end_lsn depends on layer kind:
+	- InMemoryLayer is either unbounded (end_lsn = MAX_LSN) or dropped (end_lsn = drop_lsn)
+    - ImageLayer represents snapshot at one LSN, so end_lsn = lsn.
+    - DeltaLayer has explicit end_lsn, which represents end of incremental layer.
+
+Layers can be open or historical:
+- Open layer is a writeable one. Only InMemory layer can be open.
+FIXME: If open layer is dropped, it is not writeable, so it should be turned into historical, 
+but now it is not implemented - see bug #569.
+- Historical layer is the one that cannot be modified anymore. Now only OnDisk layers can be historical.
+
+- LayerMap - a map that tracks what layers exist for all the relishes in a timeline.
+
+LayerMap consists of two data structures:
+- segs - All the layers keyed by segment tag
+- open_layers - data structure that hold all open layers ordered by oldest_pending_lsn for quick access during checkpointing. oldest_pending_lsn is the LSN of the oldest page version stored in this layer.
+
+All operations that update InMemory Layers should update both structures to keep them up-to-date.
+
+- LayeredTimeline - implements Timeline interface.
+
+All methods of LayeredTimeline are aware of its ancestors and return data taking them into account.
+TODO: Are there any exceptions to this?
+For example, timeline.list_rels(lsn) will return all segments that are visible in this timeline at the LSN,
+including ones that were not modified in this timeline and thus don't have a layer in the timeline's LayerMap.
+
+TODO:
+Describe GC and chekpoint interval settings.
+# Layer files (On-disk layers)
 
 The files are called "layer files". Each layer file corresponds
 to one RELISH_SEG_SIZE slice of a PostgreSQL relation fork or
