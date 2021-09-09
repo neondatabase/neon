@@ -6,22 +6,21 @@ use crate::layered_repository::filename::DeltaFileName;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
-use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
-use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use bytes::Bytes;
 use log::*;
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use zenith_utils::lsn::Lsn;
+
+use super::frozen_layer::FrozenLayer;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -42,9 +41,6 @@ pub struct InMemoryLayer {
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
     inner: Mutex<InMemoryLayerInner>,
-
-    /// Predecessor layer
-    predecessor: Option<Arc<dyn Layer>>,
 }
 
 pub struct InMemoryLayerInner {
@@ -61,6 +57,9 @@ pub struct InMemoryLayerInner {
     /// `segsizes` tracks the size of the segment at different points in time.
     ///
     segsizes: BTreeMap<Lsn, u32>,
+
+    /// Predecessor layer
+    predecessor: Option<Arc<dyn Layer>>,
 }
 
 impl InMemoryLayerInner {
@@ -141,6 +140,8 @@ impl Layer for InMemoryLayer {
 
         assert!(self.seg.blknum_in_seg(blknum));
 
+        let predecessor: Option<Arc<dyn Layer>>;
+
         {
             let inner = self.inner.lock().unwrap();
 
@@ -168,17 +169,16 @@ impl Layer for InMemoryLayer {
                 }
             }
 
+            predecessor = inner.predecessor.clone();
+
             // release lock on 'inner'
         }
 
         // If an older page image is needed to reconstruct the page, let the
         // caller know about the predecessor layer.
         if need_image {
-            if let Some(cont_layer) = &self.predecessor {
-                Ok(PageReconstructResult::Continue(
-                    self.start_lsn,
-                    Arc::clone(cont_layer),
-                ))
+            if let Some(cont_layer) = predecessor {
+                Ok(PageReconstructResult::Continue(self.start_lsn, cont_layer))
             } else {
                 Ok(PageReconstructResult::Missing(self.start_lsn))
             }
@@ -229,7 +229,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn is_incremental(&self) -> bool {
-        self.predecessor.is_some()
+        self.inner.lock().unwrap().predecessor.is_some()
     }
 
     /// debugging function to print out the contents of the layer
@@ -264,10 +264,6 @@ impl Layer for InMemoryLayer {
         Ok(())
     }
 }
-
-// Type alias to simplify InMemoryLayer::freeze signature
-//
-type SuccessorLayers = (Vec<Arc<dyn Layer>>, Option<Arc<InMemoryLayer>>);
 
 impl InMemoryLayer {
     /// Return the oldest page version that's stored in this layer
@@ -304,8 +300,8 @@ impl InMemoryLayer {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
                 segsizes: BTreeMap::new(),
+                predecessor: None,
             }),
-            predecessor: None,
         })
     }
 
@@ -480,31 +476,15 @@ impl InMemoryLayer {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
                 segsizes,
+                predecessor: Some(src),
             }),
-            predecessor: Some(src),
         })
     }
 
-    ///
-    /// Write the this in-memory layer to disk.
-    ///
-    /// The cutoff point for the layer that's written to disk is 'end_lsn'.
-    ///
-    /// Returns new layers that replace this one. Always returns a new image
-    /// layer containing the page versions at the cutoff LSN, that were written
-    /// to disk, and usually also a DeltaLayer that includes all the WAL records
-    /// between start LSN and the cutoff. (The delta layer is not needed when
-    /// a new relish is created with a single LSN, so that the start and end LSN
-    /// are the same.) If there were page versions newer than 'end_lsn', also
-    /// returns a new in-memory layer containing those page versions. The caller
-    /// replaces this layer with the returned layers in the layer map.
-    ///
     pub fn freeze(
-        &self,
+        self: &Arc<Self>,
         cutoff_lsn: Lsn,
-        // This is needed just to call materialize_page()
-        timeline: &LayeredTimeline,
-    ) -> Result<SuccessorLayers> {
+    ) -> Result<(Option<Arc<FrozenLayer>>, Option<Arc<InMemoryLayer>>)> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.seg, self.timelineid, cutoff_lsn
@@ -529,32 +509,18 @@ impl InMemoryLayer {
         let mut before_page_versions;
         let mut before_segsizes;
         let mut after_page_versions;
-        let mut after_segsizes;
+        let after_segsizes;
         if !dropped {
-            before_segsizes = BTreeMap::new();
-            after_segsizes = BTreeMap::new();
-            for (lsn, size) in inner.segsizes.iter() {
-                if *lsn > end_lsn {
-                    after_segsizes.insert(*lsn, *size);
-                } else {
-                    before_segsizes.insert(*lsn, *size);
-                }
-            }
+            before_segsizes = inner.segsizes.clone();
+            after_segsizes = before_segsizes.split_off(&end_lsn);
 
             before_page_versions = BTreeMap::new();
             after_page_versions = BTreeMap::new();
             for ((blknum, lsn), pv) in inner.page_versions.iter() {
-                match lsn.cmp(&end_lsn) {
-                    Ordering::Less => {
-                        before_page_versions.insert((*blknum, *lsn), pv.clone());
-                    }
-                    Ordering::Equal => {
-                        // Page versions at the cutoff LSN will be stored in the
-                        // materialized image layer.
-                    }
-                    Ordering::Greater => {
-                        after_page_versions.insert((*blknum, *lsn), pv.clone());
-                    }
+                if *lsn > end_lsn {
+                    after_page_versions.insert((*blknum, *lsn), pv.clone());
+                } else {
+                    before_page_versions.insert((*blknum, *lsn), pv.clone());
                 }
             }
         } else {
@@ -564,66 +530,50 @@ impl InMemoryLayer {
             after_page_versions = BTreeMap::new();
         }
 
-        // we can release the lock now.
-        drop(inner);
-
-        let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
-
-        if self.start_lsn != end_lsn {
-            // Write the page versions before the cutoff to disk.
-            let delta_layer = DeltaLayer::create(
-                self.conf,
-                self.timelineid,
-                self.tenantid,
-                self.seg,
-                self.start_lsn,
+        let frozen_layer = if self.start_lsn != end_lsn {
+            Some(Arc::new(FrozenLayer {
+                conf: self.conf,
+                tenantid: self.tenantid,
+                timelineid: self.timelineid,
+                seg: self.seg,
+                start_lsn: self.start_lsn,
                 end_lsn,
-                dropped,
-                self.predecessor.clone(),
-                before_page_versions,
-                before_segsizes,
-            )?;
-            let delta_layer_rc: Arc<dyn Layer> = Arc::new(delta_layer);
-            frozen_layers.push(delta_layer_rc);
-            trace!(
-                "freeze: created delta layer {} {}-{}",
-                self.seg,
-                self.start_lsn,
-                end_lsn
-            );
+                drop_lsn: inner.drop_lsn, // TODO seems wrong
+                page_versions: before_page_versions,
+                segsizes: before_segsizes,
+                predecessor: inner.predecessor.clone(),
+            }))
         } else {
-            assert!(before_page_versions.is_empty());
-        }
+            None
+        };
 
-        let mut new_open_rc = None;
-        if !dropped {
-            // Write a new base image layer at the cutoff point
-            let imgfile = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
-            let imgfile_rc: Arc<dyn Layer> = Arc::new(imgfile);
-            frozen_layers.push(Arc::clone(&imgfile_rc));
-            trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
+        let new_open =
+            if !dropped && (!after_page_versions.is_empty() || !after_segsizes.is_empty()) {
+                Some(Arc::new(InMemoryLayer {
+                    conf: self.conf,
+                    tenantid: self.tenantid,
+                    timelineid: self.timelineid,
+                    seg: self.seg,
 
-            // If there were any page versions newer than the cutoff, initialize a new in-memory
-            // layer to hold them
-            if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
-                let new_open = Self::create_successor_layer(
-                    self.conf,
-                    imgfile_rc,
-                    self.timelineid,
-                    self.tenantid,
-                    end_lsn,
-                    end_lsn,
-                )?;
-                let mut new_inner = new_open.inner.lock().unwrap();
-                new_inner.page_versions.append(&mut after_page_versions);
-                new_inner.segsizes.append(&mut after_segsizes);
-                drop(new_inner);
-                trace!("freeze: created new in-mem layer {} {}-", self.seg, end_lsn);
+                    start_lsn: end_lsn,
+                    oldest_pending_lsn: end_lsn,
 
-                new_open_rc = Some(Arc::new(new_open))
-            }
-        }
+                    inner: Mutex::new(InMemoryLayerInner {
+                        drop_lsn: None,
+                        page_versions: after_page_versions,
+                        segsizes: after_segsizes,
+                        predecessor: Some(Arc::clone(self) as Arc<dyn Layer>),
+                    }),
+                }))
+            } else {
+                None
+            };
 
-        Ok((frozen_layers, new_open_rc))
+        Ok((frozen_layer, new_open))
+    }
+
+    pub fn replace_predecessor(&self, new: Arc<dyn Layer>) -> Option<Arc<dyn Layer>> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.predecessor.replace(new)
     }
 }

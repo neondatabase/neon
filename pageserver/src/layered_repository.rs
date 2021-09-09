@@ -47,6 +47,7 @@ use zenith_utils::seqwait::SeqWait;
 mod blob;
 mod delta_layer;
 mod filename;
+mod frozen_layer;
 mod image_layer;
 mod inmemory_layer;
 mod layer_map;
@@ -1252,16 +1253,38 @@ impl LayeredTimeline {
                 break;
             }
 
-            // freeze it
-            let (new_historics, new_open) = oldest_layer.freeze(last_record_lsn, self)?;
+            let (frozen, open) = oldest_layer.freeze(last_record_lsn)?;
 
-            // replace this layer with the new layers that 'freeze' returned
-            layers.pop_oldest_open();
-            if let Some(n) = new_open {
-                layers.insert_open(n);
+            if let Some(frozen) = frozen.clone() {
+                layers.insert_frozen(frozen);
             }
-            for n in new_historics {
-                layers.insert_historic(n);
+
+            layers.pop_oldest_open();
+
+            if let Some(open) = open.clone() {
+                layers.insert_open(open);
+            }
+
+            if let Some(frozen) = frozen {
+                drop(layers);
+                let historics = frozen.freeze_to_disk(self)?;
+                layers = self.layers.lock().unwrap();
+
+                if let Some(open) = open {
+                    if let Some(old_predecessor) =
+                        open.replace_predecessor(historics.last().unwrap().clone())
+                    {
+                        // TODO do this w/o clone
+                        let frozen_ref: Arc<dyn Layer> = Arc::clone(&frozen) as _;
+                        assert!(Arc::ptr_eq(&old_predecessor, &frozen_ref));
+                    }
+                }
+
+                layers.pop_oldest_frozen();
+
+                for historic in historics {
+                    layers.insert_historic(historic);
+                }
             }
         }
 

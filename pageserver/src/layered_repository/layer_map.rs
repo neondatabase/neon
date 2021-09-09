@@ -20,6 +20,8 @@ use std::sync::Arc;
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
 
+use super::frozen_layer::FrozenLayer;
+
 lazy_static! {
     static ref NUM_INMEMORY_LAYERS: IntGauge =
         register_int_gauge!("pageserver_inmemory_layers", "Number of layers in memory")
@@ -41,6 +43,8 @@ pub struct LayerMap {
     /// contains the oldest WAL record.
     open_layers: BinaryHeap<OpenLayerEntry>,
 
+    frozen_segtag: Option<SegmentTag>,
+
     /// Generation number, used to distinguish newly inserted entries in the
     /// binary heap from older entries during checkpoint.
     current_generation: u64,
@@ -51,6 +55,7 @@ impl Default for LayerMap {
         LayerMap {
             segs: HashMap::new(),
             open_layers: BinaryHeap::new(),
+            frozen_segtag: None,
             current_generation: 0,
         }
     }
@@ -112,7 +117,27 @@ impl LayerMap {
         ));
         segentry.open = None;
 
+        if let Some(frozen_segtag) = self.frozen_segtag {
+            assert_eq!(frozen_segtag, segtag);
+        }
+
         NUM_INMEMORY_LAYERS.dec();
+    }
+
+    pub fn insert_frozen(&mut self, layer: Arc<FrozenLayer>) {
+        let segtag = layer.get_seg_tag();
+        let segentry = self.segs.entry(segtag).or_default();
+        segentry.insert_frozen(layer);
+
+        assert!(self.frozen_segtag.is_none());
+        self.frozen_segtag = Some(segtag);
+    }
+
+    pub fn pop_oldest_frozen(&mut self) {
+        let segtag = self.frozen_segtag.take().unwrap();
+        let segentry = self.segs.get_mut(&segtag).unwrap();
+        assert!(segentry.frozen.is_some());
+        segentry.frozen = None;
     }
 
     ///
@@ -235,6 +260,7 @@ impl LayerMap {
 /// BTreeMap keyed by the layer's start LSN.
 struct SegEntry {
     pub open: Option<Arc<InMemoryLayer>>,
+    pub frozen: Option<Arc<FrozenLayer>>,
     pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
 }
 
@@ -242,6 +268,7 @@ impl Default for SegEntry {
     fn default() -> Self {
         SegEntry {
             open: None,
+            frozen: None,
             historic: BTreeMap::new(),
         }
     }
@@ -267,6 +294,13 @@ impl SegEntry {
         if let Some(open) = &self.open {
             if open.get_start_lsn() <= lsn {
                 let x: Arc<dyn Layer> = Arc::clone(open) as _;
+                return Some(x);
+            }
+        }
+
+        if let Some(frozen) = &self.frozen {
+            if frozen.get_start_lsn() <= lsn {
+                let x: Arc<dyn Layer> = Arc::clone(frozen) as _;
                 return Some(x);
             }
         }
@@ -299,6 +333,11 @@ impl SegEntry {
     pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
         assert!(self.open.is_none());
         self.open = Some(layer);
+    }
+
+    pub fn insert_frozen(&mut self, layer: Arc<FrozenLayer>) {
+        assert!(self.frozen.is_none());
+        self.frozen = Some(layer);
     }
 
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
