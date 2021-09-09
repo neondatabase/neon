@@ -48,8 +48,7 @@ pub fn import_timeline_from_postgres_datadir(
             Some("pg_control") => {
                 import_nonrel_file(timeline, lsn, RelishTag::ControlFile, &direntry.path())?;
                 // Extract checkpoint record from pg_control and store is as separate object
-                let pg_control_bytes =
-                    timeline.get_page_at_lsn_nowait(RelishTag::ControlFile, 0, lsn)?;
+                let pg_control_bytes = timeline.get_page_at_lsn(RelishTag::ControlFile, 0, lsn)?;
                 let pg_control = ControlFileData::decode(&pg_control_bytes)?;
                 let checkpoint_bytes = pg_control.checkPointCopy.encode();
                 timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, checkpoint_bytes)?;
@@ -270,7 +269,7 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(RelishTag::Checkpoint, 0, startpoint)?;
+    let checkpoint_bytes = timeline.get_page_at_lsn(RelishTag::Checkpoint, 0, startpoint)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
     loop {
@@ -392,8 +391,12 @@ pub fn save_decoded_record(
         {
             let dropdb = XlDropDatabase::decode(&mut buf);
 
+            // To drop the database, we need to drop all the relations in it. Like in
+            // save_xlog_dbase_create(), use the the previous record's LSN in the list_rels() call
+            let req_lsn = min(timeline.get_last_record_lsn(), lsn);
+
             for tablespace_id in dropdb.tablespace_ids {
-                let rels = timeline.list_rels(tablespace_id, dropdb.db_id, lsn)?;
+                let rels = timeline.list_rels(tablespace_id, dropdb.db_id, req_lsn)?;
                 for rel in rels {
                     timeline.drop_relish(rel, lsn)?;
                 }
@@ -573,7 +576,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
             // Copy content
             for blknum in 0..nblocks {
-                let content = timeline.get_page_at_lsn_nowait(rel, blknum, req_lsn)?;
+                let content = timeline.get_page_at_lsn(rel, blknum, req_lsn)?;
 
                 debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
@@ -596,7 +599,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
     for tag in timeline.list_nonrels(req_lsn)? {
         if let RelishTag::FileNodeMap { spcnode, dbnode } = tag {
             if spcnode == src_tablespace_id && dbnode == src_db_id {
-                let img = timeline.get_page_at_lsn_nowait(tag, 0, req_lsn)?;
+                let img = timeline.get_page_at_lsn(tag, 0, req_lsn)?;
                 let new_tag = RelishTag::FileNodeMap {
                     spcnode: tablespace_id,
                     dbnode: db_id,

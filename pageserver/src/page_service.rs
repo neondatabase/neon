@@ -270,6 +270,19 @@ impl PageServerHandler {
         Ok(())
     }
 
+    /// Helper function to wait for given lsn, or get the latest LSN if it's 0
+    ///
+    /// When invalid LSN is requested, it means "don't wait, return latest version of the page"
+    /// This is necessary for bootstrap.
+    fn wait_or_get_last_lsn(timeline: &dyn Timeline, lsn: Lsn) -> Result<Lsn> {
+        if lsn == Lsn(0) {
+            Ok(timeline.get_last_record_lsn())
+        } else {
+            timeline.wait_lsn(lsn)?;
+            Ok(lsn)
+        }
+    }
+
     fn handle_get_rel_exists_request(
         &self,
         timeline: &dyn Timeline,
@@ -283,7 +296,10 @@ impl PageServerHandler {
         };
         let tag = RelishTag::Relation(rel);
 
-        let result = timeline.get_rel_exists(tag, req.lsn);
+        let result = match Self::wait_or_get_last_lsn(timeline, req.lsn) {
+            Ok(lsn) => timeline.get_rel_exists(tag, lsn),
+            Err(e) => Err(e),
+        };
 
         PagestreamBeMessage::Status(match result {
             Ok(exist) => PagestreamStatusResponse {
@@ -311,7 +327,10 @@ impl PageServerHandler {
         };
         let tag = RelishTag::Relation(rel);
 
-        let result = timeline.get_relish_size(tag, req.lsn);
+        let result = match Self::wait_or_get_last_lsn(timeline, req.lsn) {
+            Ok(lsn) => timeline.get_relish_size(tag, lsn),
+            Err(e) => Err(e),
+        };
 
         PagestreamBeMessage::Nblocks(match result {
             Ok(Some(n_blocks)) => PagestreamStatusResponse { ok: true, n_blocks },
@@ -342,7 +361,10 @@ impl PageServerHandler {
         };
         let tag = RelishTag::Relation(rel);
 
-        let result = timeline.get_page_at_lsn(tag, req.blkno, req.lsn);
+        let result = match Self::wait_or_get_last_lsn(timeline, req.lsn) {
+            Ok(lsn) => timeline.get_page_at_lsn(tag, req.blkno, lsn),
+            Err(e) => Err(e),
+        };
 
         PagestreamBeMessage::Read(match result {
             Ok(page) => PagestreamReadResponse {
@@ -381,7 +403,7 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn);
+            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
             basebackup.send_tarball()?;
         }
         pgb.write_message(&BeMessage::CopyDone)?;

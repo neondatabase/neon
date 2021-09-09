@@ -294,6 +294,14 @@ pub(crate) fn create_branch(
         let end_of_wal = timeline.get_last_record_lsn();
         info!("branching at end of WAL: {}", end_of_wal);
         startpoint.lsn = end_of_wal;
+    } else {
+        // Wait for the WAL to arrive and be processed on the parent branch up
+        // to the requested branch point. The repository code itself doesn't
+        // require it, but if we start to receive WAL on the new timeline,
+        // decoding the new WAL might need to look up previous pages, relation
+        // sizes etc. and that would get confused if the previous page versions
+        // are not in the repository yet.
+        timeline.wait_lsn(startpoint.lsn)?;
     }
     startpoint.lsn = startpoint.lsn.align();
     if timeline.get_start_lsn() > startpoint.lsn {

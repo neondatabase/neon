@@ -66,6 +66,9 @@ pub fn launch_wal_receiver(
             receivers.insert(timelineid, receiver);
 
             // Also launch a new thread to handle this connection
+            //
+            // NOTE: This thread name is checked in the assertion in wait_lsn. If you change
+            // this, make sure you update the assertion too.
             let _walreceiver_thread = thread::Builder::new()
                 .name("WAL receiver thread".into())
                 .spawn(move || {
@@ -176,7 +179,7 @@ fn walreceiver_main(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
-    let checkpoint_bytes = timeline.get_page_at_lsn_nowait(RelishTag::Checkpoint, 0, startpoint)?;
+    let checkpoint_bytes = timeline.get_page_at_lsn(RelishTag::Checkpoint, 0, startpoint)?;
     let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
     trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 

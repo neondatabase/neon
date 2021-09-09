@@ -10,6 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
+use anyhow::Result;
 use bytes::{BufMut, BytesMut};
 use log::*;
 use std::io;
@@ -22,7 +23,7 @@ use crate::relish::*;
 use crate::repository::Timeline;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
-use zenith_utils::lsn::{Lsn, RecordLsn};
+use zenith_utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
@@ -46,34 +47,38 @@ impl<'a> Basebackup<'a> {
         write: &'a mut dyn Write,
         timeline: &'a Arc<dyn Timeline>,
         req_lsn: Option<Lsn>,
-    ) -> Basebackup<'a> {
-        // current_prev may be zero if we are at the start of timeline branched from old lsn
-        let RecordLsn {
-            last: current_last,
-            prev: current_prev,
-        } = timeline.get_last_record_rlsn();
-
-        // Compute postgres doesn't have any previous WAL files, but the first record that this
-        // postgres is going to write need to have LSN of previous record (xl_prev). So we are
-        // writing prev_lsn to "zenith.signal" file so that postgres can read it during the start.
-        // In some cases we don't know prev_lsn (branch or basebackup @old_lsn) so pass Lsn(0)
-        // instead and embrace the wrong xl_prev in this situations.
+    ) -> Result<Basebackup<'a>> {
+        // Compute postgres doesn't have any previous WAL files, but the first
+        // record that it's going to write needs to include the LSN of the
+        // previous record (xl_prev). We include prev_record_lsn in the
+        // "zenith.signal" file, so that postgres can read it during startup.
+        //
+        // We don't keep full history of record boundaries in the page server,
+        // however, only the predecessor of the latest record on each
+        // timeline. So we can only provide prev_record_lsn when you take a
+        // base backup at the end of the timeline, i.e. at last_record_lsn.
+        // Even at the end of the timeline, we sometimes don't have a valid
+        // prev_lsn value; that happens if the timeline was just branched from
+        // an old LSN and it doesn't have any WAL of its own yet. We will set
+        // prev_lsn to Lsn(0) if we cannot provide the correct value.
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
-            if req_lsn > current_last {
-                // FIXME: now wait_lsn() is inside of list_nonrels() so we don't have a way
-                // to get it from there. It is better to wait just here.
-                (Lsn(0), req_lsn)
-            } else if req_lsn < current_last {
-                // we don't know prev already. We don't currently use basebackup@old_lsn
-                // but may use it for read only replicas in future
-                (Lsn(0), req_lsn)
+            // Backup was requested at a particular LSN. Wait for it to arrive.
+            timeline.wait_lsn(req_lsn)?;
+
+            // If the requested point is the end of the timeline, we can
+            // provide prev_lsn. (get_last_record_rlsn() might return it as
+            // zero, though, if no WAL has been generated on this timeline
+            // yet.)
+            let end_of_timeline = timeline.get_last_record_rlsn();
+            if req_lsn == end_of_timeline.last {
+                (end_of_timeline.prev, req_lsn)
             } else {
-                // we are exactly at req_lsn and know prev
-                (current_prev, req_lsn)
+                (Lsn(0), req_lsn)
             }
         } else {
-            // None in req_lsn means that we are branching from the latest LSN
-            (current_prev, current_last)
+            // Backup was requested at end of the timeline.
+            let end_of_timeline = timeline.get_last_record_rlsn();
+            (end_of_timeline.prev, end_of_timeline.last)
         };
 
         info!(
@@ -81,12 +86,12 @@ impl<'a> Basebackup<'a> {
             backup_prev, backup_lsn
         );
 
-        Basebackup {
+        Ok(Basebackup {
             ar: Builder::new(write),
             timeline,
             lsn: backup_lsn,
             prev_record_lsn: backup_prev,
-        }
+        })
     }
 
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
@@ -154,11 +159,9 @@ impl<'a> Basebackup<'a> {
         let mut slru_buf: Vec<u8> =
             Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img = self.timeline.get_page_at_lsn_nowait(
-                RelishTag::Slru { slru, segno },
-                blknum,
-                self.lsn,
-            )?;
+            let img =
+                self.timeline
+                    .get_page_at_lsn(RelishTag::Slru { slru, segno }, blknum, self.lsn)?;
             assert!(img.len() == pg_constants::BLCKSZ as usize);
 
             slru_buf.extend_from_slice(&img);
@@ -177,7 +180,7 @@ impl<'a> Basebackup<'a> {
     // Along with them also send PG_VERSION for each database.
     //
     fn add_relmap_file(&mut self, spcnode: u32, dbnode: u32) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn_nowait(
+        let img = self.timeline.get_page_at_lsn(
             RelishTag::FileNodeMap { spcnode, dbnode },
             0,
             self.lsn,
@@ -219,7 +222,7 @@ impl<'a> Basebackup<'a> {
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
         let img = self
             .timeline
-            .get_page_at_lsn_nowait(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
+            .get_page_at_lsn(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -237,12 +240,12 @@ impl<'a> Basebackup<'a> {
     // Also send zenith.signal file with extra bootstrap data.
     //
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
-        let checkpoint_bytes =
-            self.timeline
-                .get_page_at_lsn_nowait(RelishTag::Checkpoint, 0, self.lsn)?;
+        let checkpoint_bytes = self
+            .timeline
+            .get_page_at_lsn(RelishTag::Checkpoint, 0, self.lsn)?;
         let pg_control_bytes =
             self.timeline
-                .get_page_at_lsn_nowait(RelishTag::ControlFile, 0, self.lsn)?;
+                .get_page_at_lsn(RelishTag::ControlFile, 0, self.lsn)?;
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 

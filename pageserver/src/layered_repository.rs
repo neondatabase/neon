@@ -565,14 +565,26 @@ pub struct LayeredTimeline {
 
 /// Public interface functions
 impl Timeline for LayeredTimeline {
-    /// Look up given page in the cache.
-    fn get_page_at_lsn(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
-        let lsn = self.wait_lsn(lsn)?;
+    /// Wait until WAL has been received up to the given LSN.
+    fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
+        // This should never be called from the WAL receiver thread, because that could lead
+        // to a deadlock. FIXME: Is there a less hacky way to check that?
+        assert_ne!(thread::current().name(), Some("WAL receiver thread"));
 
-        self.get_page_at_lsn_nowait(rel, blknum, lsn)
+        self.last_record_lsn
+            .wait_for_timeout(lsn, TIMEOUT)
+            .with_context(|| {
+                format!(
+                    "Timed out while waiting for WAL record at LSN {} to arrive",
+                    lsn
+                )
+            })?;
+
+        Ok(())
     }
 
-    fn get_page_at_lsn_nowait(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
+    /// Look up given page version.
+    fn get_page_at_lsn(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
         if !rel.is_blocky() && blknum != 0 {
             bail!(
                 "invalid request for block {} for non-blocky relish {}",
@@ -580,6 +592,7 @@ impl Timeline for LayeredTimeline {
                 rel
             );
         }
+        debug_assert!(lsn <= self.get_last_record_lsn());
 
         let seg = SegmentTag::from_blknum(rel, blknum);
 
@@ -598,8 +611,7 @@ impl Timeline for LayeredTimeline {
                 rel
             );
         }
-
-        let lsn = self.wait_lsn(lsn)?;
+        debug_assert!(lsn <= self.get_last_record_lsn());
 
         let mut segno = 0;
         loop {
@@ -631,7 +643,7 @@ impl Timeline for LayeredTimeline {
     }
 
     fn get_rel_exists(&self, rel: RelishTag, lsn: Lsn) -> Result<bool> {
-        let lsn = self.wait_lsn(lsn)?;
+        debug_assert!(lsn <= self.get_last_record_lsn());
 
         let seg = SegmentTag { rel, segno: 0 };
 
@@ -659,13 +671,13 @@ impl Timeline for LayeredTimeline {
 
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
         info!("list_nonrels called at {}", lsn);
-        let lsn = self.wait_lsn(lsn)?;
 
         self.list_relishes(None, lsn)
     }
 
     fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashSet<RelishTag>> {
         trace!("list_relishes called at {}", lsn);
+        debug_assert!(lsn <= self.get_last_record_lsn());
 
         // List of all relishes along with a flag that marks if they exist at the given lsn.
         let mut all_relishes_map: HashMap<RelishTag, bool> = HashMap::new();
@@ -1183,37 +1195,6 @@ impl LayeredTimeline {
         layers.insert_open(Arc::clone(&layer_rc));
 
         Ok(layer_rc)
-    }
-
-    ///
-    /// Wait until WAL has been received up to the given LSN.
-    ///
-    /// TODO: change lsn to be an Optional<Lsn> or even force callers to call get_last_record_lsn()
-    /// (since at least basebackup needs to call get_last_and_prev_record_lsns() instead)
-    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<Lsn> {
-        // When invalid LSN is requested, it means "don't wait, return latest version of the page"
-        // This is necessary for bootstrap.
-        if lsn == Lsn(0) {
-            return Ok(self.get_last_record_lsn());
-        }
-
-        // FIXME: we can deadlock if we call wait_lsn() from WAL receiver. And we actually
-        // it a lot from there. Only deadlock that I caught was while trying to add wait_lsn()
-        // in list_rels(). But it makes sense to make all functions in timeline non-waiting;
-        // assert that arg_lsn <= current_record_lsn; call wait_lsn explicitly where it is
-        // needed (page_service and basebackup); uncomment this check:
-        // assert_ne!(thread::current().name(), Some("WAL receiver thread"));
-
-        self.last_record_lsn
-            .wait_for_timeout(lsn, TIMEOUT)
-            .with_context(|| {
-                format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive",
-                    lsn
-                )
-            })?;
-
-        Ok(lsn)
     }
 
     ///
