@@ -229,6 +229,8 @@ fn bootstrap_timeline(
     let wal_dir = pgdata_path.join("pg_wal");
     restore_local_repo::import_timeline_wal(&wal_dir, &*timeline, lsn)?;
 
+    timeline.checkpoint()?;
+
     println!(
         "created initial timeline {} timeline.lsn {}",
         tli,

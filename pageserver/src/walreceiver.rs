@@ -223,7 +223,6 @@ fn walreceiver_main(
                         recdata,
                         lsn,
                     )?;
-                    last_rec_lsn = lsn;
 
                     let new_checkpoint_bytes = checkpoint.encode();
                     // Check if checkpoint data was updated by save_decoded_record
@@ -235,6 +234,11 @@ fn walreceiver_main(
                             new_checkpoint_bytes,
                         )?;
                     }
+
+                    // Now that this record has been fully handled, including updating the
+                    // checkpoint data, let the repository know that it is up-to-date to this LSN
+                    timeline.advance_last_record_lsn(lsn);
+                    last_rec_lsn = lsn;
                 }
 
                 // Somewhat arbitrarily, if we have at least 10 complete wal segments (16 MB each),

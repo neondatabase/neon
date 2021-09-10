@@ -46,12 +46,7 @@ pub fn import_timeline_from_postgres_datadir(
             None => continue,
 
             Some("pg_control") => {
-                import_nonrel_file(timeline, lsn, RelishTag::ControlFile, &direntry.path())?;
-                // Extract checkpoint record from pg_control and store is as separate object
-                let pg_control_bytes = timeline.get_page_at_lsn(RelishTag::ControlFile, 0, lsn)?;
-                let pg_control = ControlFileData::decode(&pg_control_bytes)?;
-                let checkpoint_bytes = pg_control.checkPointCopy.encode();
-                timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, checkpoint_bytes)?;
+                import_control_file(timeline, lsn, &direntry.path())?;
             }
             Some("pg_filenode.map") => import_nonrel_file(
                 timeline,
@@ -132,8 +127,7 @@ pub fn import_timeline_from_postgres_datadir(
     }
     // TODO: Scan pg_tblspc
 
-    timeline.advance_last_record_lsn(lsn.align());
-    timeline.checkpoint()?;
+    timeline.advance_last_record_lsn(lsn);
 
     Ok(())
 }
@@ -212,6 +206,35 @@ fn import_nonrel_file(
     info!("importing non-rel file {}", path.display());
 
     timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buffer[..]))?;
+    Ok(())
+}
+
+///
+/// Import pg_control file into the repository.
+///
+/// The control file is imported as is, but we also extract the checkpoint record
+/// from it and store it separated.
+fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result<()> {
+    let mut file = File::open(path)?;
+    let mut buffer = Vec::new();
+    // read the whole file
+    file.read_to_end(&mut buffer)?;
+
+    info!("importing control file {}", path.display());
+
+    // Import it as ControlFile
+    timeline.put_page_image(
+        RelishTag::ControlFile,
+        0,
+        lsn,
+        Bytes::copy_from_slice(&buffer[..]),
+    )?;
+
+    // Extract the checkpoint record and import it separately.
+    let pg_control = ControlFileData::decode(&buffer)?;
+    let checkpoint_bytes = pg_control.checkPointCopy.encode();
+    timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, checkpoint_bytes)?;
+
     Ok(())
 }
 
@@ -316,6 +339,13 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
                 break;
             }
             if let Some((lsn, recdata)) = rec.unwrap() {
+                // The previous record has been handled, let the repository know that
+                // it is up-to-date to this LSN. (We do this here on the "next" iteration,
+                // rather than right after the save_decoded_record, because at the end of
+                // the WAL, we will also need to perform the update of the checkpoint data
+                // with the same LSN as the last actual record.)
+                timeline.advance_last_record_lsn(last_lsn);
+
                 let decoded = decode_wal_record(recdata.clone());
                 save_decoded_record(&mut checkpoint, timeline, &decoded, recdata, lsn)?;
                 last_lsn = lsn;
@@ -331,12 +361,19 @@ pub fn import_timeline_wal(walpath: &Path, timeline: &dyn Timeline, startpoint: 
         offset = 0;
     }
 
-    info!("reached end of WAL at {}", last_lsn);
-    let checkpoint_bytes = checkpoint.encode();
-    timeline.put_page_image(RelishTag::Checkpoint, 0, last_lsn, checkpoint_bytes)?;
+    if last_lsn != startpoint {
+        info!(
+            "reached end of WAL at {}, updating checkpoint info",
+            last_lsn
+        );
+        let checkpoint_bytes = checkpoint.encode();
+        timeline.put_page_image(RelishTag::Checkpoint, 0, last_lsn, checkpoint_bytes)?;
 
-    timeline.advance_last_record_lsn(last_lsn.align());
-    timeline.checkpoint()?;
+        timeline.advance_last_record_lsn(last_lsn);
+    } else {
+        info!("no WAL to import at {}", last_lsn);
+    }
+
     Ok(())
 }
 
@@ -535,9 +572,6 @@ pub fn save_decoded_record(
             }
         }
     }
-    // Now that this record has been handled, let the repository know that
-    // it is up-to-date to this LSN
-    timeline.advance_last_record_lsn(lsn.align());
     Ok(())
 }
 
