@@ -457,9 +457,6 @@ mod tests {
     /// Test list_rels() function, with branches and dropped relations
     ///
     #[test]
-    // FIXME: The last assertion in this test is currently failing, see
-    // https://github.com/zenithdb/zenith/issues/502. Ignore the failure until that's fixed.
-    #[ignore]
     fn test_list_rels_drop() -> Result<()> {
         let repo = get_test_repo("test_list_rels_drop")?;
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
@@ -505,7 +502,6 @@ mod tests {
         newtline.checkpoint()?;
         repo.gc_iteration(Some(newtimelineid), 0, true)?;
 
-        // FIXME: this is currently failing
         assert!(!newtline
             .list_rels(0, TESTDB, Lsn(0x40))?
             .contains(&TESTREL_A));
