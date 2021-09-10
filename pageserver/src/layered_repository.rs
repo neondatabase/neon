@@ -124,23 +124,17 @@ impl Repository for LayeredRepository {
         Ok(self.get_timeline_locked(timelineid, &mut timelines)?)
     }
 
-    fn create_empty_timeline(
-        &self,
-        timelineid: ZTimelineId,
-        start_lsn: Lsn,
-    ) -> Result<Arc<dyn Timeline>> {
+    fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
-
-        assert!(start_lsn.is_aligned());
 
         // Create the timeline directory, and write initial metadata to file.
         std::fs::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
         let metadata = TimelineMetadata {
-            disk_consistent_lsn: start_lsn,
+            disk_consistent_lsn: Lsn(0),
             prev_record_lsn: None,
             ancestor_timeline: None,
-            ancestor_lsn: start_lsn,
+            ancestor_lsn: Lsn(0),
         };
         Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata)?;
 
