@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use log::trace;
 use std::{collections::BTreeMap, sync::Arc};
 
 use zenith_utils::{
@@ -63,7 +64,7 @@ impl Layer for FrozenLayer {
     }
 
     fn get_end_lsn(&self) -> zenith_utils::lsn::Lsn {
-        todo!()
+        self.end_lsn + 1
     }
 
     fn is_dropped(&self) -> bool {
@@ -161,6 +162,13 @@ impl Layer for FrozenLayer {
 
 impl FrozenLayer {
     pub fn freeze_to_disk(&self, timeline: &LayeredTimeline) -> Result<Vec<Arc<dyn Layer>>> {
+        trace!(
+            "freeze to disk {} {} {}-{}",
+            self.timelineid,
+            self.seg,
+            self.start_lsn,
+            self.end_lsn
+        );
         let mut frozens: Vec<Arc<dyn Layer>> = Vec::new();
 
         let before_segsizes: BTreeMap<Lsn, u32> = self
@@ -176,19 +184,21 @@ impl FrozenLayer {
             .filter(|((_, lsn), _)| lsn != &self.end_lsn)
             .collect();
 
-        let delta_layer = Arc::new(DeltaLayer::create(
-            self.conf,
-            self.timelineid,
-            self.tenantid,
-            self.seg,
-            self.start_lsn,
-            self.end_lsn,
-            self.drop_lsn.is_some(),
-            self.predecessor.clone(),
-            before_page_versions,
-            before_segsizes,
-        )?);
-        frozens.push(delta_layer.clone());
+        if self.start_lsn != self.end_lsn {
+            let delta_layer = Arc::new(DeltaLayer::create(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                self.seg,
+                self.start_lsn,
+                self.end_lsn,
+                self.drop_lsn.is_some(),
+                self.predecessor.clone(),
+                before_page_versions,
+                before_segsizes,
+            )?);
+            frozens.push(delta_layer.clone());
+        }
 
         if self.drop_lsn.is_none() {
             let img_layer = Arc::new(ImageLayer::create_from_src(

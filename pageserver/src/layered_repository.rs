@@ -1100,6 +1100,12 @@ impl LayeredTimeline {
     /// Get a handle to the latest layer for appending.
     ///
     fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+        trace!(
+            "get_layer_for_write called for {} at {}/{}",
+            seg,
+            self.timelineid,
+            lsn
+        );
         let layers = self.layers.lock().unwrap();
 
         assert!(lsn.is_aligned());
@@ -1255,10 +1261,6 @@ impl LayeredTimeline {
 
             let (frozen, open) = oldest_layer.freeze(last_record_lsn)?;
 
-            if let Some(frozen) = frozen.clone() {
-                layers.insert_frozen(frozen);
-            }
-
             layers.pop_oldest_open();
 
             if let Some(open) = open.clone() {
@@ -1266,17 +1268,20 @@ impl LayeredTimeline {
             }
 
             if let Some(frozen) = frozen {
+                layers.insert_frozen(frozen.clone());
+
                 drop(layers);
                 let historics = frozen.freeze_to_disk(self)?;
                 layers = self.layers.lock().unwrap();
 
                 if let Some(open) = open {
-                    if let Some(old_predecessor) =
-                        open.replace_predecessor(historics.last().unwrap().clone())
+                    if let Some(new_predecessor) = historics
+                        .last()
+                        .cloned()
+                        .or_else(|| oldest_layer.get_predecessor())
                     {
-                        // TODO do this w/o clone
-                        let frozen_ref: Arc<dyn Layer> = Arc::clone(&frozen) as _;
-                        assert!(Arc::ptr_eq(&old_predecessor, &frozen_ref));
+                        // TODO assert that `_old_predecessor` == frozen
+                        let _old_predecessor = open.replace_predecessor(new_predecessor);
                     }
                 }
 

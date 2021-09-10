@@ -490,6 +490,8 @@ impl InMemoryLayer {
             self.seg, self.timelineid, cutoff_lsn
         );
 
+        //self.dump()?;
+
         let inner = self.inner.lock().unwrap();
 
         // Normally, use the cutoff LSN as the end of the frozen layer.
@@ -512,7 +514,7 @@ impl InMemoryLayer {
         let after_segsizes;
         if !dropped {
             before_segsizes = inner.segsizes.clone();
-            after_segsizes = before_segsizes.split_off(&end_lsn);
+            after_segsizes = before_segsizes.split_off(&Lsn(end_lsn.0 + 1));
 
             before_page_versions = BTreeMap::new();
             after_page_versions = BTreeMap::new();
@@ -530,7 +532,7 @@ impl InMemoryLayer {
             after_page_versions = BTreeMap::new();
         }
 
-        let frozen_layer = if self.start_lsn != end_lsn {
+        let frozen_layer = if true {
             Some(Arc::new(FrozenLayer {
                 conf: self.conf,
                 tenantid: self.tenantid,
@@ -549,6 +551,11 @@ impl InMemoryLayer {
 
         let new_open =
             if !dropped && (!after_page_versions.is_empty() || !after_segsizes.is_empty()) {
+                let predecessor: Option<Arc<dyn Layer>> = frozen_layer
+                    .clone()
+                    .map(|x| x as Arc<dyn Layer>)
+                    .or_else(|| inner.predecessor.clone());
+
                 Some(Arc::new(InMemoryLayer {
                     conf: self.conf,
                     tenantid: self.tenantid,
@@ -562,14 +569,17 @@ impl InMemoryLayer {
                         drop_lsn: None,
                         page_versions: after_page_versions,
                         segsizes: after_segsizes,
-                        predecessor: Some(Arc::clone(self) as Arc<dyn Layer>),
+                        predecessor,
                     }),
                 }))
             } else {
                 None
             };
-
         Ok((frozen_layer, new_open))
+    }
+
+    pub fn get_predecessor(&self) -> Option<Arc<dyn Layer>> {
+        self.inner.lock().unwrap().predecessor.clone()
     }
 
     pub fn replace_predecessor(&self, new: Arc<dyn Layer>) -> Option<Arc<dyn Layer>> {
