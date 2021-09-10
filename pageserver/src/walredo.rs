@@ -43,7 +43,7 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantId;
 
 use crate::relish::*;
-use crate::repository::WALRecord;
+use crate::repository::{Timeline, WALRecord};
 use crate::waldecoder::XlMultiXactCreate;
 use crate::waldecoder::XlXactParsedRecord;
 use crate::PageServerConf;
@@ -79,6 +79,7 @@ pub trait WalRedoManager: Send + Sync {
     /// the reords.
     fn request_redo(
         &self,
+        timeline: &dyn Timeline,
         rel: RelishTag,
         blknum: u32,
         lsn: Lsn,
@@ -96,6 +97,7 @@ pub struct DummyRedoManager {}
 impl crate::walredo::WalRedoManager for DummyRedoManager {
     fn request_redo(
         &self,
+        _timeline: &dyn Timeline,
         _rel: RelishTag,
         _blknum: u32,
         _lsn: Lsn,
@@ -176,6 +178,7 @@ impl WalRedoManager for PostgresRedoManager {
     ///
     fn request_redo(
         &self,
+        timeline: &dyn Timeline,
         rel: RelishTag,
         blknum: u32,
         lsn: Lsn,
@@ -216,6 +219,13 @@ impl WalRedoManager for PostgresRedoManager {
         WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
         WAL_REDO_TIME.observe(end_time.duration_since(lock_time).as_secs_f64());
 
+        if let Ok(page) = result {
+            let mut buf = BytesMut::new();
+            buf.extend_from_slice(&page);
+            self.set_hint_bits(timeline, &mut buf, lsn, &request.records);
+            return Ok(buf.freeze());
+        }
+
         result
     }
 }
@@ -239,6 +249,117 @@ impl PostgresRedoManager {
             tenantid,
             conf,
             process: Mutex::new(None),
+        }
+    }
+
+    fn xid_status(&self, timeline: &dyn Timeline, xid: u32, lsn: Lsn) -> u8 {
+        let pageno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+        let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+        let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+        if let Ok(clog_page) = timeline.get_page_at_lsn_nowait(
+            RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno,
+            },
+            rpageno,
+            lsn,
+        ) {
+            postgres_ffi::nonrelfile_utils::transaction_id_get_status(xid, &clog_page[..])
+        } else {
+            pg_constants::TRANSACTION_STATUS_IN_PROGRESS
+        }
+    }
+
+    fn set_hint_bits(
+        &self,
+        timeline: &dyn Timeline,
+        page: &mut BytesMut,
+        lsn: Lsn,
+        records: &Vec<WALRecord>,
+    ) {
+        let mut flags = LittleEndian::read_u16(
+            &page[pg_constants::PD_FLAGS_OFFSET..pg_constants::PD_FLAGS_OFFSET + 2],
+        );
+        if (flags & (pg_constants::PD_HEAP_RELATION | pg_constants::PD_NONHEAP_RELATION)) == 0 {
+            // If type of relation was not determined yet,
+            // then do it now
+            for r in records {
+                let xl_rmid = r.rec[pg_constants::XL_RMID_OFFS];
+                if xl_rmid == pg_constants::RM_HEAP_ID || xl_rmid == pg_constants::RM_HEAP2_ID {
+                    flags |= pg_constants::PD_HEAP_RELATION;
+                    break;
+                }
+            }
+            if (flags & pg_constants::PD_HEAP_RELATION) == 0 {
+                flags |= pg_constants::PD_NONHEAP_RELATION;
+            }
+            LittleEndian::write_u16(
+                &mut page[pg_constants::PD_FLAGS_OFFSET..pg_constants::PD_FLAGS_OFFSET + 2],
+                flags,
+            );
+        }
+        if (flags & pg_constants::PD_HEAP_RELATION) != 0 {
+            // Set hint bits for heap relation page
+            let pd_lower = LittleEndian::read_u16(
+                &page[pg_constants::PD_LOWER_OFFSET..pg_constants::PD_LOWER_OFFSET + 2],
+            ) as usize;
+            let mut tid_offs = pg_constants::SIZE_OF_PAGE_HEADER_DATA;
+            while tid_offs < pd_lower {
+                let tid = LittleEndian::read_u32(&page[tid_offs..tid_offs + 4]);
+                let lp_off = (tid & 0x7FFF) as usize;
+                if ((tid >> 15) & 3) == pg_constants::LP_NORMAL {
+                    // normal item pointer
+                    let t_xmin = LittleEndian::read_u32(
+                        &page[lp_off + pg_constants::T_XMIN_OFFS
+                            ..lp_off + pg_constants::T_XMIN_OFFS + 4],
+                    );
+                    let t_xmax = LittleEndian::read_u32(
+                        &page[lp_off + pg_constants::T_XMAX_OFFS
+                            ..lp_off + pg_constants::T_XMAX_OFFS + 4],
+                    );
+                    let mut t_infomask = LittleEndian::read_u16(
+                        &page[lp_off + pg_constants::T_INFOMASK_OFFS
+                            ..lp_off + pg_constants::T_INFOMASK_OFFS + 2],
+                    );
+                    if (t_infomask
+                        & (pg_constants::HEAP_XMIN_COMMITTED | pg_constants::HEAP_XMIN_INVALID))
+                        == 0
+                        && t_xmin != 0
+                    {
+                        let status = self.xid_status(timeline, t_xmin, lsn);
+                        if status == pg_constants::TRANSACTION_STATUS_COMMITTED {
+                            t_infomask |= pg_constants::HEAP_XMIN_COMMITTED;
+                        } else if status == pg_constants::TRANSACTION_STATUS_ABORTED {
+                            t_infomask |= pg_constants::HEAP_XMIN_INVALID;
+                        }
+                        LittleEndian::write_u16(
+                            &mut page[lp_off + pg_constants::T_INFOMASK_OFFS
+                                ..lp_off + pg_constants::T_INFOMASK_OFFS + 2],
+                            t_infomask,
+                        );
+                    }
+                    if (t_infomask
+                        & (pg_constants::HEAP_XMAX_COMMITTED
+                            | pg_constants::HEAP_XMAX_INVALID
+                            | pg_constants::HEAP_XMAX_IS_MULTI))
+                        == 0
+                        && t_xmax != 0
+                    {
+                        let status = self.xid_status(timeline, t_xmax, lsn);
+                        if status == pg_constants::TRANSACTION_STATUS_COMMITTED {
+                            t_infomask |= pg_constants::HEAP_XMAX_COMMITTED;
+                        } else if status == pg_constants::TRANSACTION_STATUS_ABORTED {
+                            t_infomask |= pg_constants::HEAP_XMAX_INVALID;
+                        }
+                        LittleEndian::write_u16(
+                            &mut page[lp_off + pg_constants::T_INFOMASK_OFFS
+                                ..lp_off + pg_constants::T_INFOMASK_OFFS + 2],
+                            t_infomask,
+                        );
+                    }
+                }
+                tid_offs += 4;
+            }
         }
     }
 

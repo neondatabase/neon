@@ -1446,6 +1446,7 @@ impl LayeredTimeline {
                     trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", data.records.len(), blknum, rel, self.timelineid, request_lsn);
                 }
                 let img = self.walredo_mgr.request_redo(
+                    self,
                     rel,
                     blknum,
                     request_lsn,

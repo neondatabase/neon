@@ -46,6 +46,7 @@ pub const SIZE_OF_PAGE_HEADER: u16 = 24;
 pub const BITS_PER_HEAPBLOCK: u16 = 2;
 pub const HEAPBLOCKS_PER_PAGE: u16 = (BLCKSZ - SIZE_OF_PAGE_HEADER) * 8 / BITS_PER_HEAPBLOCK;
 
+pub const TRANSACTION_STATUS_IN_PROGRESS: u8 = 0x00;
 pub const TRANSACTION_STATUS_COMMITTED: u8 = 0x01;
 pub const TRANSACTION_STATUS_ABORTED: u8 = 0x02;
 pub const TRANSACTION_STATUS_SUB_COMMITTED: u8 = 0x03;
@@ -190,6 +191,31 @@ pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
 pub const PG_MAJORVERSION: &str = "14";
+
+// Zenith specific page flags used to distinguish heap and non-heap relations
+pub const PD_HEAP_RELATION: u16 = 0x10;
+pub const PD_NONHEAP_RELATION: u16 = 0x20;
+
+// bufpage.h
+pub const PD_FLAGS_OFFSET: usize = 10; // PageHeaderData.pd_flags
+pub const PD_LOWER_OFFSET: usize = 12; // PageHeaderData.pd_lower
+
+// itemid.h
+pub const LP_NORMAL: u32 = 1;
+
+// htup_details.h
+pub const T_XMIN_OFFS: usize = 0;
+pub const T_XMAX_OFFS: usize = 4;
+pub const T_INFOMASK_OFFS: usize = 4 * 3 + 2 * 3 + 2;
+pub const HEAP_XMIN_COMMITTED: u16 = 0x0100; /* t_xmin committed */
+pub const HEAP_XMIN_INVALID: u16 = 0x0200; /* t_xmin invalid/aborted */
+pub const HEAP_XMAX_COMMITTED: u16 = 0x0400; /* t_xmax committed */
+pub const HEAP_XMAX_INVALID: u16 = 0x0800; /* t_xmax invalid/aborted */
+pub const HEAP_XMAX_IS_MULTI: u16 = 0x1000; /* t_xmax is a MultiXactId */
+pub const SIZE_OF_PAGE_HEADER_DATA: usize = 24;
+
+// xlogrecord.h
+pub const XL_RMID_OFFS: usize = 17;
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c

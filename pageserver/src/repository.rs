@@ -507,6 +507,7 @@ mod tests {
     impl WalRedoManager for TestRedoManager {
         fn request_redo(
             &self,
+            timeline: &dyn Timeline,
             rel: RelishTag,
             blknum: u32,
             lsn: Lsn,
