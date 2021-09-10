@@ -472,7 +472,6 @@ impl LayeredRepository {
                 }
             }
 
-            // cutoff is
             if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
                 let branchpoints: Vec<Lsn> = all_branchpoints
                     .range((
@@ -1453,12 +1452,14 @@ impl LayeredTimeline {
 
         let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
-        // Scan all layer files in the directory. For each file, if a newer file
-        // exists, we can remove the old one.
+        // Scan all on-disk layers in the timeline.
         //
-        // Determine for each file if it needs to be retained
-        // FIXME: also scan open in-memory layers. Normally we cannot remove the
-        // latest layer of any seg, but if it was dropped it's possible
+        // Garbage collect the layer if all conditions are satisfied:
+        // 1. it is older than cutoff LSN;
+        // 2. it doesn't need to be retained for 'retain_lsns';
+        // 3. newer on-disk layer exists (only for non-dropped segments);
+        // 4. this layer doesn't serve as a tombstone for some older layer;
+        //
         let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
             let seg = l.get_seg_tag();
@@ -1469,7 +1470,7 @@ impl LayeredTimeline {
                 result.ondisk_nonrelfiles_total += 1;
             }
 
-            // Is it newer than cutoff point?
+            // 1. Is it newer than cutoff point?
             if l.get_end_lsn() > cutoff {
                 info!(
                     "keeping {} {}-{} because it's newer than cutoff {}",
@@ -1486,7 +1487,7 @@ impl LayeredTimeline {
                 continue 'outer;
             }
 
-            // 2. Is it needed by any child branch?
+            // 2. Is it needed by a child branch?
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive and end_lsn is exclusive
                 if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
@@ -1506,15 +1507,92 @@ impl LayeredTimeline {
                 }
             }
 
-            // Unless the relation was dropped, is there a later image file for this relation?
+            // 3. Is there a later on-disk layer for this relation?
             if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
             {
+                info!(
+                    "keeping {} {}-{} because it is the latest layer",
+                    seg,
+                    l.get_start_lsn(),
+                    l.get_end_lsn()
+                );
                 if seg.rel.is_relation() {
                     result.ondisk_relfiles_not_updated += 1;
                 } else {
                     result.ondisk_nonrelfiles_not_updated += 1;
                 }
                 continue 'outer;
+            }
+
+            // 4. Does this layer serve as a tombstome for some older layer?
+            if l.is_dropped() {
+                let prior_lsn = l.get_start_lsn().checked_sub(1u64).unwrap();
+
+                // Check if this layer serves as a tombstone for this timeline
+                // We have to do this separately from timeline check below,
+                // because LayerMap of this timeline is already locked.
+                let mut is_tombstone = layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn);
+                if is_tombstone {
+                    info!(
+                        "earlier layer exists at {} in {}",
+                        prior_lsn, self.timelineid
+                    );
+                }
+                // Now check ancestor timelines, if any
+                else if let Some(ancestor) = &self.ancestor_timeline {
+                    let prior_lsn = ancestor.get_last_record_lsn();
+                    if seg.rel.is_blocky() {
+                        info!(
+                            "check blocky relish size {} at {} in {} for layer {}-{}",
+                            seg,
+                            prior_lsn,
+                            ancestor.timelineid,
+                            l.get_start_lsn(),
+                            l.get_end_lsn()
+                        );
+                        match ancestor.get_relish_size(seg.rel, prior_lsn).unwrap() {
+                            Some(size) => {
+                                let last_live_seg = SegmentTag::from_blknum(seg.rel, size - 1);
+                                info!(
+                                    "blocky rel size is {} last_live_seg.segno {} seg.segno {}",
+                                    size, last_live_seg.segno, seg.segno
+                                );
+                                if last_live_seg.segno >= seg.segno {
+                                    is_tombstone = true;
+                                }
+                            }
+                            _ => {
+                                info!("blocky rel doesn't exist");
+                            }
+                        }
+                    } else {
+                        info!(
+                            "check non-blocky relish existence {} at {} in {} for layer {}-{}",
+                            seg,
+                            prior_lsn,
+                            ancestor.timelineid,
+                            l.get_start_lsn(),
+                            l.get_end_lsn()
+                        );
+                        is_tombstone = ancestor.get_rel_exists(seg.rel, prior_lsn).unwrap_or(false);
+                    }
+                }
+
+                if is_tombstone {
+                    info!(
+                        "keeping {} {}-{} because this layer servers as a tombstome for older layer",
+                        seg,
+                        l.get_start_lsn(),
+                        l.get_end_lsn()
+                    );
+
+                    if seg.rel.is_relation() {
+                        result.ondisk_relfiles_needed_as_tombstone += 1;
+                    } else {
+                        result.ondisk_nonrelfiles_needed_as_tombstone += 1;
+                    }
+                    continue 'outer;
+                }
             }
 
             // We didn't find any reason to keep this file, so remove it.

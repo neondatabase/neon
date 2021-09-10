@@ -174,6 +174,20 @@ impl LayerMap {
         }
     }
 
+    /// Is there any layer for given segment that is alive at the lsn?
+    ///
+    /// This is a public wrapper for SegEntry fucntion,
+    /// used for garbage collection, to determine if some alive layer
+    /// exists at the lsn. If so, we shouldn't delete a newer dropped layer
+    /// to avoid incorrectly making it visible.
+    pub fn layer_exists_at_lsn(&self, seg: SegmentTag, lsn: Lsn) -> bool {
+        if let Some(segentry) = self.segs.get(&seg) {
+            segentry.exists_at_lsn(lsn).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
     /// Return the oldest in-memory layer, along with its generation number.
     pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
         self.open_layers
