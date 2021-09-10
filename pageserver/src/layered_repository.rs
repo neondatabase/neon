@@ -193,12 +193,12 @@ impl Repository for LayeredRepository {
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
-        compact: bool,
+        checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         STORAGE_TIME
             .with_label_values(&["gc"])
             .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, compact)
+                self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
             })
     }
 }
@@ -403,14 +403,14 @@ impl LayeredRepository {
     //    don't cover any branch point LSNs.
     //
     // TODO:
-    // - if a relation has been modified on a child branch, then we
+    // - if a relation has a non-incremental persistent layer on a child branch, then we
     //   don't need to keep that in the parent anymore. But currently
     //   we do.
     fn gc_iteration_internal(
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
-        compact: bool,
+        checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -422,63 +422,72 @@ impl LayeredRepository {
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
         //
+        let mut timelineids: Vec<ZTimelineId> = Vec::new();
+
         // We scan the directory, not the in-memory hash table, because the hash
         // table only contains entries for timelines that have been accessed. We
         // need to take all timelines into account, not only the active ones.
-        let mut timelineids: Vec<ZTimelineId> = Vec::new();
-        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
         let timelines_path = self.conf.timelines_path(&self.tenantid);
+
         for direntry in fs::read_dir(timelines_path)? {
             let direntry = direntry?;
             if let Some(fname) = direntry.file_name().to_str() {
                 if let Ok(timelineid) = fname.parse::<ZTimelineId>() {
                     timelineids.push(timelineid);
-
-                    // Read the metadata of this timeline to get its parent timeline.
-                    //
-                    // We read the ancestor information directly from the file, instead
-                    // of calling get_timeline(). We don't want to load the timeline
-                    // into memory just for GC.
-                    //
-                    // FIXME: we open the timeline in the loop below with
-                    // get_timeline_locked() anyway, so maybe we should just do it
-                    // here, too.
-                    let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
-                    if let Some(ancestor_timeline) = metadata.ancestor_timeline {
-                        all_branchpoints.insert((ancestor_timeline, metadata.ancestor_lsn));
-                    }
                 }
             }
         }
 
-        // Ok, we now know all the branch points. Iterate through them.
+        //Now collect info about branchpoints
+        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
+        for timelineid in &timelineids {
+            let timeline = self.get_timeline_locked(*timelineid, &mut *timelines)?;
+
+            if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
+                // If target_timeline is specified, we only need to know branchpoints of its childs
+                if let Some(timelineid) = target_timelineid {
+                    if ancestor_timeline.timelineid == timelineid {
+                        all_branchpoints
+                            .insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
+                    }
+                }
+                // Collect branchpoints for all timelines
+                else {
+                    all_branchpoints.insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
+                }
+            }
+        }
+
+        // Ok, we now know all the branch points.
+        // Perform GC for each timeline.
         for timelineid in timelineids {
-            // If a target timeline was specified, leave the other timelines alone.
-            // This is a bit inefficient, because we still collect the information for
-            // all the timelines above.
-            if let Some(x) = target_timelineid {
-                if x != timelineid {
+            // We have already loaded all timelines above
+            // so this operation is just a quick map lookup.
+            let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
+
+            // If target_timeline is specified, only GC it
+            if let Some(target_timelineid) = target_timelineid {
+                if timelineid != target_timelineid {
                     continue;
                 }
             }
 
-            let branchpoints: Vec<Lsn> = all_branchpoints
-                .range((
-                    Included((timelineid, Lsn(0))),
-                    Included((timelineid, Lsn(u64::MAX))),
-                ))
-                .map(|&x| x.1)
-                .collect();
+            // cutoff is
+            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
+                let branchpoints: Vec<Lsn> = all_branchpoints
+                    .range((
+                        Included((timelineid, Lsn(0))),
+                        Included((timelineid, Lsn(u64::MAX))),
+                    ))
+                    .map(|&x| x.1)
+                    .collect();
 
-            let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
-            let last_lsn = timeline.get_last_record_lsn();
-
-            if let Some(cutoff) = last_lsn.checked_sub(horizon) {
-                // If GC was explicitly requested by the admin, force flush all in-memory
-                // layers to disk first, so that they too can be garbage collected. That's
+                // If requested, force flush all in-memory layers to disk first,
+                // so that they too can be garbage collected. That's
                 // used in tests, so we want as deterministic results as possible.
-                if compact {
+                if checkpoint_before_gc {
                     timeline.checkpoint()?;
+                    info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
 
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
@@ -1440,6 +1449,7 @@ impl LayeredTimeline {
             "running GC on timeline {}, cutoff {}",
             self.timelineid, cutoff
         );
+        info!("retain_lsns:  {:?}", retain_lsns);
 
         let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
@@ -1476,10 +1486,10 @@ impl LayeredTimeline {
                 continue 'outer;
             }
 
-            // Is it needed by a child branch?
+            // 2. Is it needed by any child branch?
             for retain_lsn in &retain_lsns {
-                // FIXME: are the bounds inclusive or exclusive?
-                if l.get_start_lsn() <= *retain_lsn && *retain_lsn <= l.get_end_lsn() {
+                // start_lsn is inclusive and end_lsn is exclusive
+                if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
                     info!(
                         "keeping {} {}-{} because it's needed by branch point {}",
                         seg,

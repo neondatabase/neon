@@ -28,18 +28,14 @@ pub trait Repository: Send + Sync {
     ///
     /// 'timelineid' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
-    /// `compact` parameter is used to force compaction of storage.
-    /// some storage implementation are based on lsm tree and require periodic merge (compaction).
-    /// usually storage implementation determines itself when compaction should be performed.
-    /// but for gc tests it way be useful to force compaction just after completion of gc iteration
-    /// to make sure that all detected garbage is removed.
-    /// so right now `compact` is set to true when gc explicitly requested through page srver api,
-    /// and is st to false in gc threads which infinitely repeats gc iterations in loop.
+    /// `checkpoint_before_gc` parameter is used to force compaction of storage before CG
+    /// to make tests more deterministic.
+    /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
     fn gc_iteration(
         &self,
         timelineid: Option<ZTimelineId>,
         horizon: u64,
-        compact: bool,
+        checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
 }
 
