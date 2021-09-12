@@ -6,7 +6,7 @@ Zenith substitutes PostgreSQL storage layer and redistributes data across a clus
 
 A Zenith installation consists of Compute nodes and Storage engine.
 
-Compute nodes are stateles PostgreSQL nodes, backed by zenith storage.
+Compute nodes are stateless PostgreSQL nodes, backed by zenith storage.
 
 Zenith storage engine consists of two major components:
 - Pageserver. Scalable storage backend for compute nodes.
