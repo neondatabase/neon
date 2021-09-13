@@ -374,7 +374,7 @@ impl CheckPoint {
 
     pub fn decode(buf: &[u8]) -> Result<CheckPoint, anyhow::Error> {
         use zenith_utils::bin_ser::LeSer;
-        Ok(CheckPoint::des_prefix(buf)?)
+        Ok(CheckPoint::des(buf)?)
     }
 
     // Update next XID based on provided new_xid and stored epoch.
