@@ -61,7 +61,12 @@ impl SharedState {
         };
         let (flush_lsn, tli) = if state.server.wal_seg_size != 0 {
             let wal_dir = conf.data_dir.join(format!("{}", timelineid));
-            find_end_of_wal(&wal_dir, state.server.wal_seg_size as usize, true)
+            find_end_of_wal(
+                &wal_dir,
+                state.server.wal_seg_size as usize,
+                true,
+                state.wal_start_lsn,
+            )?
         } else {
             (0, 0)
         };
