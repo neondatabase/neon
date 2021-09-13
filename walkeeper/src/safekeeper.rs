@@ -75,6 +75,9 @@ pub struct SafeKeeperState {
     /// minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone)
     pub truncate_lsn: Lsn,
+    // Safekeeper starts receiving WAL from this LSN, zeros before it ought to
+    // be skipped during decoding.
+    pub wal_start_lsn: Lsn,
 }
 
 impl SafeKeeperState {
@@ -94,6 +97,7 @@ impl SafeKeeperState {
             proposer_uuid: [0; 16],
             commit_lsn: Lsn(0),   /* part of WAL acknowledged by quorum */
             truncate_lsn: Lsn(0), /* minimal LSN which may be needed for recovery of some safekeeper */
+            wal_start_lsn: Lsn(0),
         }
     }
 }
@@ -413,6 +417,7 @@ where
         }
 
         self.s.proposer_uuid = msg.h.proposer_uuid;
+        let mut sync_control_file = false;
 
         // do the job
         let mut last_rec_lsn = Lsn(0);
@@ -439,9 +444,15 @@ where
                     }
                 }
             }
+
+            // If this was the first record we ever receieved, remember LSN to help
+            // find_end_of_wal skip the hole in the beginning.
+            if self.s.wal_start_lsn == Lsn(0) {
+                self.s.wal_start_lsn = msg.h.begin_lsn;
+                sync_control_file = true;
+            }
         }
 
-        let mut sync_control_file = false;
         /*
          * Epoch switch happen when written WAL record cross the boundary.
          * The boundary is maximum of last WAL position at this node (FlushLSN) and global
