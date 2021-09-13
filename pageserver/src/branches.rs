@@ -173,7 +173,7 @@ fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
     Ok(Lsn(lsn))
 }
 
-// Create the cluster temporarily in a initdbpath directory inside the repository
+// Create the cluster temporarily in 'initdbpath' directory inside the repository
 // to get bootstrap data for timeline initialization.
 //
 fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {

@@ -429,7 +429,7 @@ pub fn save_decoded_record(
             let dropdb = XlDropDatabase::decode(&mut buf);
 
             // To drop the database, we need to drop all the relations in it. Like in
-            // save_xlog_dbase_create(), use the the previous record's LSN in the list_rels() call
+            // save_xlog_dbase_create(), use the previous record's LSN in the list_rels() call
             let req_lsn = min(timeline.get_last_record_lsn(), lsn);
 
             for tablespace_id in dropdb.tablespace_ids {

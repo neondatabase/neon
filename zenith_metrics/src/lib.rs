@@ -34,12 +34,12 @@ lazy_static! {
 }
 
 // Records I/O stats in a "cross-platform" way.
-// Compiles both on macOs and Linux, but current macOs implementation always returns 0 as values for I/O stats.
-// An alternative is to read procfs (`/proc/[pid]/io`) which does not work under macOs at all, hence abandoned.
+// Compiles both on macOS and Linux, but current macOS implementation always returns 0 as values for I/O stats.
+// An alternative is to read procfs (`/proc/[pid]/io`) which does not work under macOS at all, hence abandoned.
 //
 // Uses https://www.freebsd.org/cgi/man.cgi?query=getrusage to retrieve the number of block operations
 // performed by the process.
-// We know the the size of the block, so we can determine the I/O bytes out of it.
+// We know the size of the block, so we can determine the I/O bytes out of it.
 // The value might be not 100% exact, but should be fine for Prometheus metrics in this case.
 #[allow(clippy::unnecessary_cast)]
 fn update_io_metrics() {

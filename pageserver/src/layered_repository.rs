@@ -96,7 +96,8 @@ lazy_static! {
 }
 
 lazy_static! {
-    // NOTE: can be zero if pageserver was restarted an no activity happening
+    // NOTE: can be zero if pageserver was restarted and there hasn't been any
+    // activity yet.
     static ref LOGICAL_TIMELINE_SIZE: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_logical_timeline_size",
         "Logical timeline size (bytes)",
