@@ -388,7 +388,9 @@ pub fn save_decoded_record(
     recdata: Bytes,
     lsn: Lsn,
 ) -> Result<()> {
-    checkpoint.update_next_xid(decoded.xl_xid);
+    if decoded.xl_xid > 0 {
+        checkpoint.update_next_xid(decoded.xl_xid);
+    }
 
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.

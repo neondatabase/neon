@@ -286,6 +286,14 @@ workflows:
           requires:
             - build-zenith-<< matrix.build_type >>
       - run-pytest:
+          name: xid wraparound tests << matrix.build_type >>
+          matrix:
+            parameters:
+              build_type: ["debug", "release"]
+          test_selection: batch_wraparound
+          requires:
+            - build-zenith-<< matrix.build_type >>
+      - run-pytest:
           name: other tests << matrix.build_type >>
           matrix:
             parameters:

@@ -20,10 +20,11 @@ Prerequisites:
 
 The tests are divided into a few batches, such that each batch takes roughly
 the same amount of time. The batches can be run in parallel, to minimize total
-runtime. Currently, there are only two batches:
+runtime.
 
-- test_batch_pg_regress: Runs PostgreSQL regression tests
-- test_others: All other tests
+- batch_pg_regress: Runs PostgreSQL regression tests
+- batch_wraparound: Runs xid wraparound tests.
+- batch_others: All other tests
 
 ### Running the tests
 
