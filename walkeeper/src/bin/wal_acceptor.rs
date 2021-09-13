@@ -1,15 +1,14 @@
 //
 // Main entry point for the wal_acceptor executable
 //
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{App, Arg};
 use daemonize::Daemonize;
 use log::*;
-use slog::Drain;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::{env, io};
-use std::{fs::File, fs::OpenOptions};
+use zenith_utils::logging;
 
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
@@ -113,20 +112,7 @@ fn main() -> Result<()> {
 
 fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     let log_filename = conf.data_dir.join("wal_acceptor.log");
-    // Don't open the same file for output multiple times;
-    // the different fds could overwrite each other's output.
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_filename)
-        .with_context(|| format!("failed to open {:?}", &log_filename))?;
-
-    // Initialize logger
-    let logger_file = log_file.try_clone().unwrap();
-    let _scope_guard = init_logging(&conf, logger_file)?;
-    let _log_guard = slog_stdlog::init().unwrap();
-    // Note: this `info!(...)` macro comes from `log` crate
-    info!("standard logging redirected to slog");
+    let (_scope_guard, log_file) = logging::init(log_filename, conf.daemonize)?;
 
     if conf.daemonize {
         info!("daemonizing...");
@@ -178,30 +164,4 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         t.join().unwrap()
     }
     Ok(())
-}
-
-fn init_logging(
-    conf: &WalAcceptorConf,
-    log_file: File,
-) -> Result<slog_scope::GlobalLoggerGuard, io::Error> {
-    if conf.daemonize {
-        let decorator = slog_term::PlainSyncDecorator::new(log_file);
-        let drain = slog_term::CompactFormat::new(decorator).build();
-        let drain = slog::Filter::new(drain, |record: &slog::Record| {
-            record.level().is_at_least(slog::Level::Info)
-        });
-        let drain = std::sync::Mutex::new(drain).fuse();
-        let logger = slog::Logger::root(drain, slog::o!());
-        Ok(slog_scope::set_global_logger(logger))
-    } else {
-        let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let drain = slog::Filter::new(drain, |record: &slog::Record| {
-            record.level().is_at_least(slog::Level::Info)
-        })
-        .fuse();
-        let drain = slog_async::Async::new(drain).chan_size(1000).build().fuse();
-        let logger = slog::Logger::root(drain, slog::o!());
-        Ok(slog_scope::set_global_logger(logger))
-    }
 }
