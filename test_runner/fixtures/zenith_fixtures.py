@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from functools import cached_property
+import aiopg
 import os
 import pathlib
 import uuid
@@ -127,6 +128,20 @@ class PgProtocol:
         ))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
+        return conn
+
+    async def connect_async(self, *, dbname: str = 'postgres', username: Optional[str] = None, password: Optional[str] = None) -> aiopg.Connection:
+        """
+        Connect to the node.
+        Returns aiopg's connection object, which is similar to psycopg2.
+        This method passes all extra params to connstr.
+        """
+
+        conn = await aiopg.connect(self.connstr(
+            dbname=dbname,
+            username=username,
+            password=password,
+        ))
         return conn
 
     def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
