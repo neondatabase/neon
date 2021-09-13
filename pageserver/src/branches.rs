@@ -17,13 +17,13 @@ use std::{
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use log::*;
+use zenith_utils::logging;
 use zenith_utils::lsn::Lsn;
 
-use crate::logger;
-use crate::restore_local_repo;
 use crate::tenant_mgr;
 use crate::walredo::WalRedoManager;
 use crate::{repository::Repository, PageServerConf};
+use crate::{restore_local_repo, LOG_FILE_NAME};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -98,8 +98,8 @@ pub struct PointInTime {
 
 pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str>) -> Result<()> {
     // Initialize logger
-    let (_scope_guard, _log_file) = logger::init_logging(conf, "pageserver.log")?;
-    let _log_guard = slog_stdlog::init()?;
+    // use true as daemonize parameter because otherwise we pollute zenith cli output with a few pages long output of info messages
+    let (_scope_guard, _log_file) = logging::init(LOG_FILE_NAME, true)?;
 
     // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
     // process during repository initialization.
@@ -137,9 +137,6 @@ pub fn create_repo(
     // top-level dir may exist if we are creating it through CLI
     fs::create_dir_all(&repo_dir)
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
-
-    // Note: this `info!(...)` macro comes from `log` crate
-    info!("standard logging redirected to slog");
 
     fs::create_dir(conf.timelines_path(&tenantid))?;
     fs::create_dir_all(conf.branches_path(&tenantid))?;

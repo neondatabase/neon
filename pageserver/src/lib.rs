@@ -11,7 +11,6 @@ pub mod basebackup;
 pub mod branches;
 pub mod http;
 pub mod layered_repository;
-pub mod logger;
 pub mod page_service;
 pub mod relish;
 pub mod repository;
@@ -29,6 +28,8 @@ lazy_static! {
     )
     .expect("failed to define a metric");
 }
+
+pub const LOG_FILE_NAME: &str = "pageserver.log";
 
 #[derive(Debug, Clone)]
 pub struct PageServerConf {

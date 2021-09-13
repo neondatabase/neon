@@ -28,3 +28,6 @@ pub mod http;
 
 // socket splitting utils
 pub mod sock_split;
+
+// common log initialisation routine
+pub mod logging;

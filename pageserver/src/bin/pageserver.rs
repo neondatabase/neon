@@ -13,13 +13,13 @@ use std::{
     thread,
     time::Duration,
 };
-use zenith_utils::{auth::JwtAuth, postgres_backend::AuthType};
+use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
 
 use anyhow::{ensure, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
-use pageserver::{branches, http, logger, page_service, tenant_mgr, PageServerConf};
+use pageserver::{branches, http, page_service, tenant_mgr, PageServerConf, LOG_FILE_NAME};
 use zenith_utils::http::endpoint;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:64000";
@@ -273,11 +273,7 @@ fn main() -> Result<()> {
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Initialize logger
-    let (_scope_guard, log_file) = logger::init_logging(conf, "pageserver.log")?;
-    let _log_guard = slog_stdlog::init()?;
-
-    // Note: this `info!(...)` macro comes from `log` crate
-    info!("standard logging redirected to slog");
+    let (_scope_guard, log_file) = logging::init(LOG_FILE_NAME, conf.daemonize)?;
 
     // TODO: Check that it looks like a valid repository before going further
 
