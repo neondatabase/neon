@@ -17,7 +17,7 @@ log = "0.4.14"
 clap = "2.33.0"
 daemonize = "0.4.1"
 rust-s3 = { version = "0.27.0-rc4", features = ["no-verify-ssl"] }
-tokio = { version = "1.3.0", features = ["full"] }
+tokio = "1.11"
 tokio-stream = { version = "0.1.4" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
