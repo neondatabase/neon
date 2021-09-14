@@ -1,10 +1,9 @@
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
-use control_plane::local_env::{self, LocalEnv};
+use control_plane::local_env;
 use control_plane::storage::PageServerNode;
-use std::collections::btree_map::Entry;
 use std::collections::HashMap;
 use std::process::exit;
 use std::str::FromStr;
@@ -29,7 +28,7 @@ struct BranchTreeEl {
 // This utility helps to manage zenith installation. That includes following:
 //   * Management of local postgres installations running on top of the
 //     pageserver.
-//   * Providing CLI api to the pageserver (local or remote)
+//   * Providing CLI api to the pageserver
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
     let timeline_arg = Arg::with_name("timeline")
@@ -49,12 +48,6 @@ fn main() -> Result<()> {
         .subcommand(
             SubCommand::with_name("init")
                 .about("Initialize a new Zenith repository")
-                .arg(
-                    Arg::with_name("remote-pageserver")
-                        .long("remote-pageserver")
-                        .required(false)
-                        .value_name("pageserver-url"),
-                )
                 .arg(
                     Arg::with_name("enable-auth")
                         .long("enable-auth")
@@ -108,34 +101,17 @@ fn main() -> Result<()> {
                         )
                 )
         )
-        .subcommand(
-            SubCommand::with_name("remote")
-                .setting(AppSettings::ArgRequiredElseHelp)
-                .about("Manage remote pagerservers")
-                .subcommand(
-                    SubCommand::with_name("add")
-                        .about("Add a new remote pageserver")
-                        .arg(Arg::with_name("name").required(true))
-                        .arg(
-                            Arg::with_name("url")
-                                .help("PostgreSQL connection URI")
-                                .required(true),
-                        ),
-                ),
-        )
         .get_matches();
 
     // Create config file
     if let ("init", Some(init_match)) = matches.subcommand() {
         let tenantid = ZTenantId::generate();
-        let pageserver_uri = init_match.value_of("pageserver-url");
         let auth_type = if init_match.is_present("enable-auth") {
             AuthType::ZenithJWT
         } else {
             AuthType::Trust
         };
-        local_env::init(pageserver_uri, tenantid, auth_type)
-            .with_context(|| "Failed to create config file")?;
+        local_env::init(tenantid, auth_type).with_context(|| "Failed to create config file")?;
     }
 
     // all other commands would need config
@@ -209,13 +185,6 @@ fn main() -> Result<()> {
         ("pg", Some(pg_match)) => {
             if let Err(e) = handle_pg(pg_match, &env) {
                 eprintln!("pg operation failed: {:?}", e);
-                exit(1);
-            }
-        }
-
-        ("remote", Some(remote_match)) => {
-            if let Err(e) = handle_remote(remote_match, &env) {
-                eprintln!("remote operation failed: {}", e);
                 exit(1);
             }
         }
@@ -487,32 +456,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
         }
 
         _ => {}
-    }
-
-    Ok(())
-}
-
-fn handle_remote(remote_match: &ArgMatches, local_env: &LocalEnv) -> Result<()> {
-    match remote_match.subcommand() {
-        ("add", Some(args)) => {
-            let name = args.value_of("name").unwrap();
-            let url = args.value_of("url").unwrap();
-
-            // validate the URL
-            postgres::Config::from_str(url)?;
-
-            let mut new_local_env = local_env.clone();
-
-            match new_local_env.remotes.entry(name.to_string()) {
-                Entry::Vacant(vacant) => {
-                    vacant.insert(url.to_string());
-                }
-                Entry::Occupied(_) => bail!("origin '{}' already exists", name),
-            }
-
-            local_env::save_config(&new_local_env)?;
-        }
-        _ => bail!("unknown command"),
     }
 
     Ok(())

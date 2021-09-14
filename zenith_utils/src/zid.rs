@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 // Zenith ID is a 128-bit random ID.
 // Used to represent various identifiers. Provides handy utility methods and impls.
-// TODO (LizardWizzard) figure out best way to remove boiler plate with trait impls caused by newtype pattern
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 struct ZId([u8; 16]);
 
