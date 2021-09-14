@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
+use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
 use crate::repository::{GcResult, Repository, Timeline, WALRecord};
 use crate::restore_local_repo::import_timeline_wal;
@@ -1272,11 +1273,22 @@ impl LayeredTimeline {
             }
 
             // freeze it
-            let (new_historics, new_open) = oldest_layer.freeze(last_record_lsn, self)?;
+            let FreezeLayers {
+                frozen,
+                open: maybe_new_open,
+            } = oldest_layer.freeze(last_record_lsn)?;
+
+            let new_historics = frozen.write_to_disk(self)?;
+
+            if let Some(last_historic) = new_historics.last() {
+                if let Some(new_open) = &maybe_new_open {
+                    new_open.update_predecessor(Arc::clone(last_historic));
+                }
+            }
 
             // replace this layer with the new layers that 'freeze' returned
             layers.pop_oldest_open();
-            if let Some(n) = new_open {
+            if let Some(n) = maybe_new_open {
                 layers.insert_open(n);
             }
             for n in new_historics {
