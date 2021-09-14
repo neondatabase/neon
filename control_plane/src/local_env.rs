@@ -4,19 +4,16 @@
 // Now it also provides init method which acts like a stub for proper installation
 // script which will use local paths.
 //
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use hex;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::{collections::BTreeMap, env};
-use url::Url;
 use zenith_utils::auth::{encode_from_key_path, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::ZTenantId;
-
-pub type Remotes = BTreeMap<String, String>;
 
 //
 // This data structures represent deserialized zenith CLI config
@@ -35,8 +32,8 @@ pub struct LocalEnv {
     // to four separate paths and match OS-specific installation layout.
     pub pg_distrib_dir: PathBuf,
 
-    // Path to pageserver binary. Empty for remote pageserver.
-    pub zenith_distrib_dir: Option<PathBuf>,
+    // Path to pageserver binary.
+    pub zenith_distrib_dir: PathBuf,
 
     // keeping tenant id in config to reduce copy paste when running zenith locally with single tenant
     #[serde(with = "hex")]
@@ -50,8 +47,6 @@ pub struct LocalEnv {
 
     // used to issue tokens during e.g pg start
     pub private_key_path: PathBuf,
-
-    pub remotes: Remotes,
 }
 
 impl LocalEnv {
@@ -64,11 +59,7 @@ impl LocalEnv {
     }
 
     pub fn pageserver_bin(&self) -> Result<PathBuf> {
-        Ok(self
-            .zenith_distrib_dir
-            .as_ref()
-            .ok_or_else(|| anyhow!("Can not manage remote pageserver"))?
-            .join("pageserver"))
+        Ok(self.zenith_distrib_dir.join("pageserver"))
     }
 
     pub fn pg_data_dirs_path(&self) -> PathBuf {
@@ -97,11 +88,7 @@ fn base_path() -> PathBuf {
 //
 // Initialize a new Zenith repository
 //
-pub fn init(
-    remote_pageserver: Option<&str>,
-    tenantid: ZTenantId,
-    auth_type: AuthType,
-) -> Result<()> {
+pub fn init(tenantid: ZTenantId, auth_type: AuthType) -> Result<()> {
     // check if config already exists
     let base_path = base_path();
     if base_path.exists() {
@@ -165,39 +152,21 @@ pub fn init(
     let auth_token =
         encode_from_key_path(&Claims::new(None, Scope::PageServerApi), &private_key_path)?;
 
-    let conf = if let Some(addr) = remote_pageserver {
-        // check that addr is parsable
-        let _uri = Url::parse(addr).map_err(|e| anyhow!("{}: {}", addr, e))?;
+    // Find zenith binaries.
+    let zenith_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
+    if !zenith_distrib_dir.join("pageserver").exists() {
+        anyhow::bail!("Can't find pageserver binary.",);
+    }
 
-        LocalEnv {
-            pageserver_connstring: format!("postgresql://{}/", addr),
-            pg_distrib_dir,
-            zenith_distrib_dir: None,
-            base_data_dir: base_path,
-            remotes: BTreeMap::default(),
-            tenantid,
-            auth_token,
-            auth_type,
-            private_key_path,
-        }
-    } else {
-        // Find zenith binaries.
-        let zenith_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
-        if !zenith_distrib_dir.join("pageserver").exists() {
-            anyhow::bail!("Can't find pageserver binary.",);
-        }
-
-        LocalEnv {
-            pageserver_connstring: "postgresql://127.0.0.1:6400".to_string(),
-            pg_distrib_dir,
-            zenith_distrib_dir: Some(zenith_distrib_dir),
-            base_data_dir: base_path,
-            remotes: BTreeMap::default(),
-            tenantid,
-            auth_token,
-            auth_type,
-            private_key_path,
-        }
+    let conf = LocalEnv {
+        pageserver_connstring: "postgresql://127.0.0.1:6400".to_string(),
+        pg_distrib_dir,
+        zenith_distrib_dir,
+        base_data_dir: base_path,
+        tenantid,
+        auth_token,
+        auth_type,
+        private_key_path,
     };
 
     fs::create_dir_all(conf.pg_data_dirs_path())?;
@@ -224,13 +193,4 @@ pub fn load_config() -> Result<LocalEnv> {
     // load and parse file
     let config = fs::read_to_string(repopath.join("config"))?;
     toml::from_str(config.as_str()).map_err(|e| e.into())
-}
-
-// Save config. We use that to change set of remotes from CLI itself.
-pub fn save_config(conf: &LocalEnv) -> Result<()> {
-    let config_path = base_path().join("config");
-    let conf_str = toml::to_string_pretty(conf)?;
-
-    fs::write(config_path, conf_str)?;
-    Ok(())
 }
