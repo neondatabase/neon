@@ -185,12 +185,16 @@ class ZenithCli:
                                 universal_newlines=True,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError as err:
-            print(f"Run failed: {err}")
-            print(f" stdout: {err.stdout}")
-            print(f" stderr: {err.stderr}")
+        except subprocess.CalledProcessError as exc:
+            # this way command output will be in recorded and shown in CI in failure message
+            msg = f"""\
+            Run failed: {exc}
+              stdout: {exc.stdout}
+              stderr: {exc.stderr}
+            """
+            print(msg)
 
-            raise err
+            raise Exception(msg) from exc
 
         return res
 
