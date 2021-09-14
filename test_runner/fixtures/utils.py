@@ -54,3 +54,7 @@ def global_counter() -> int:
     global _global_counter
     _global_counter += 1
     return _global_counter
+
+def debug_print(*args, **kwargs) -> None:
+    if os.environ.get('TEST_DEBUG_PRINT') is not None:
+        print(*args, **kwargs)

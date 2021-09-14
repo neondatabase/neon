@@ -4,12 +4,13 @@ import random
 
 from fixtures.zenith_fixtures import WalAcceptor, WalAcceptorFactory, ZenithPageserver, PostgresFactory, Postgres
 from typing import List
+from fixtures.utils import debug_print
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 class BankClient(object):
-    def __init__(self, conn: aiopg.Connection, n_accounts=None, init_amount=None):
+    def __init__(self, conn: aiopg.Connection, n_accounts=0, init_amount=0):
         self.conn: aiopg.Connection = conn
         self.n_accounts = n_accounts
         self.init_amount = init_amount
@@ -20,13 +21,14 @@ class BankClient(object):
             await cur.execute('CREATE TABLE bank_accs(uid int primary key, amount int)')
             await cur.execute(
                 '''
-            INSERT INTO bank_accs
-            SELECT *, %s FROM generate_series(0, %s)
-            ''', (
+                INSERT INTO bank_accs
+                SELECT *, %s FROM generate_series(0, %s)
+                ''', (
                     self.init_amount,
                     self.n_accounts - 1,
                 ))
 
+            await cur.execute('DROP TABLE IF EXISTS bank_log')
             await cur.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
 
     async def check_invariant(self):
@@ -61,36 +63,29 @@ class BankClient(object):
 
 class WorkerStats(object):
     def __init__(self, n_workers):
-        self.n_workers = n_workers
         self.counters = [0] * n_workers
         self.running = True
 
     def reset(self):
-        self.counters = [0] * self.n_workers
+        self.counters = [0] * len(self.counters)
 
     def inc_progress(self, worker_id):
         self.counters[worker_id] += 1
 
     def check_progress(self):
         # every worker should finish at least one tx
-        for i in range(self.n_workers):
-            assert self.counters[i] > 0
+        for cnt in self.counters:
+            assert cnt > 0
 
         progress = sum(self.counters)
         print('All workers made {} transactions'.format(progress))
 
 
-async def run_random_worker(stats: WorkerStats,
-                            pg: Postgres,
-                            worker_id,
-                            n_accounts,
-                            max_transfer,
-                            debug=False):
+async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accounts, max_transfer):
     pg_conn = await pg.connect_async()
     bank = BankClient(pg_conn)
 
-    if debug:
-        print('Started worker {}'.format(worker_id))
+    debug_print('Started worker {}'.format(worker_id))
 
     while stats.running:
         from_uid = random.randint(0, n_accounts - 1)
@@ -100,11 +95,9 @@ async def run_random_worker(stats: WorkerStats,
         await bank.transfer(from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
-        if debug:
-            print('Executed transfer({}) {} => {}'.format(amount, from_uid, to_uid))
+        debug_print('Executed transfer({}) {} => {}'.format(amount, from_uid, to_uid))
 
-    if debug:
-        print('Finished worker {}'.format(worker_id))
+    debug_print('Finished worker {}'.format(worker_id))
 
     await pg_conn.close()
 
