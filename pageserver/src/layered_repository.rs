@@ -27,7 +27,7 @@ use std::ops::Bound::Included;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
@@ -1039,6 +1039,24 @@ impl LayeredTimeline {
         seg: SegmentTag,
         lsn: Lsn,
     ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
+        let self_layers = self.layers.lock().unwrap();
+        self.get_layer_for_read_locked(seg, lsn, &self_layers)
+    }
+
+    ///
+    /// Get a handle to a Layer for reading.
+    ///
+    /// The returned Layer might be from an ancestor timeline, if the
+    /// segment hasn't been updated on this timeline yet.
+    ///
+    /// This function takes the current timeline's locked LayerMap as an argument,
+    /// so callers can avoid potential race conditions.
+    fn get_layer_for_read_locked(
+        &self,
+        seg: SegmentTag,
+        lsn: Lsn,
+        self_layers: &MutexGuard<LayerMap>,
+    ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
         trace!(
             "get_layer_for_read called for {} at {}/{}",
             seg,
@@ -1059,7 +1077,14 @@ impl LayeredTimeline {
 
         // Now we have the right starting timeline for our search.
         loop {
-            let layers = timeline.layers.lock().unwrap();
+            let layers_owned: MutexGuard<LayerMap>;
+            let layers = if self as *const LayeredTimeline != timeline as *const LayeredTimeline {
+                layers_owned = timeline.layers.lock().unwrap();
+                &layers_owned
+            } else {
+                self_layers
+            };
+
             //
             // FIXME: If the relation has been dropped, does this return the right
             // thing? The compute node should not normally request dropped relations,
@@ -1100,7 +1125,7 @@ impl LayeredTimeline {
     /// Get a handle to the latest layer for appending.
     ///
     fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
-        let layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.lock().unwrap();
 
         assert!(lsn.is_aligned());
 
@@ -1126,14 +1151,8 @@ impl LayeredTimeline {
         // Is this a completely new relation? Or the first modification after branching?
         //
 
-        // FIXME: race condition, if another thread creates the layer while
-        // we're busy looking up the previous one. We should hold the mutex throughout
-        // this operation, but for that we'll need a version of get_layer_for_read()
-        // that doesn't try to also grab the mutex.
-        drop(layers);
-
         let layer;
-        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read(seg, lsn)? {
+        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read_locked(seg, lsn, &layers)? {
             // Create new entry after the previous one.
             let start_lsn;
             if prev_layer.get_timeline_id() != self.timelineid {
@@ -1181,7 +1200,6 @@ impl LayeredTimeline {
                 InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
         }
 
-        let mut layers = self.layers.lock().unwrap();
         let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
         layers.insert_open(Arc::clone(&layer_rc));
 
