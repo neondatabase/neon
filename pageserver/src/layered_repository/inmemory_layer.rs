@@ -130,6 +130,10 @@ impl Layer for InMemoryLayer {
     }
 
     fn get_end_lsn(&self) -> Lsn {
+        if let Some(end_lsn) = self.end_lsn {
+            return Lsn(end_lsn.0 + 1);
+        }
+
         let inner = self.inner.lock().unwrap();
 
         if let Some(drop_lsn) = inner.drop_lsn {

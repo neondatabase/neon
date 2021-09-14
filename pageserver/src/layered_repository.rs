@@ -1272,13 +1272,34 @@ impl LayeredTimeline {
                 break;
             }
 
-            // freeze it
+            // Freeze the layer.
+            //
+            // This is a two-step process. First, we "freeze" the in-memory
+            // layer, to close it for new writes, and replace the original
+            // layer with the new frozen in-memory layer (and possibly a new
+            // open layer to hold changes newer than the cutoff.) Then we write
+            // the frozen layer to disk, and replace the in-memory frozen layer
+            // with the new on-disk layers.
             let FreezeLayers {
                 frozen,
                 open: maybe_new_open,
             } = oldest_layer.freeze(last_record_lsn)?;
 
+            // replace this layer with the new layers that 'freeze' returned
+            layers.pop_oldest_open();
+            if let Some(new_open) = maybe_new_open.clone() {
+                layers.insert_open(new_open);
+            }
+
+            layers.insert_historic(frozen.clone());
+
+            // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
+            drop(layers);
             let new_historics = frozen.write_to_disk(self)?;
+            layers = self.layers.lock().unwrap();
+
+            // Finally, replace the frozen in-memory layer with the new on-disk layers
+            layers.remove_historic(frozen.as_ref());
 
             if let Some(last_historic) = new_historics.last() {
                 if let Some(new_open) = &maybe_new_open {
@@ -1286,11 +1307,6 @@ impl LayeredTimeline {
                 }
             }
 
-            // replace this layer with the new layers that 'freeze' returned
-            layers.pop_oldest_open();
-            if let Some(n) = maybe_new_open {
-                layers.insert_open(n);
-            }
             for n in new_historics {
                 layers.insert_historic(n);
             }
