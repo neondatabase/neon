@@ -61,9 +61,22 @@ pub struct InMemoryLayerInner {
     /// `segsizes` tracks the size of the segment at different points in time.
     ///
     segsizes: BTreeMap<Lsn, u32>,
+
+    /// True if freeze() has been called on the layer, indicating it no longer
+    /// accepts writes.
+    frozen: bool,
 }
 
 impl InMemoryLayerInner {
+    /// Assert that the layer is not frozen
+    fn assert_writeable(&self) {
+        // TODO current this can happen when a walreceiver thread's
+        // `get_layer_for_write` and InMemoryLayer write calls interleave with
+        // a checkpoint operation, however timing should make this rare.
+        // Assert only so we can identify when the bug triggers more easily.
+        assert!(!self.frozen);
+    }
+
     fn get_seg_size(&self, lsn: Lsn) -> u32 {
         // Scan the BTreeMap backwards, starting from the given entry.
         let mut iter = self.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
@@ -304,6 +317,7 @@ impl InMemoryLayer {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
                 segsizes: BTreeMap::new(),
+                frozen: false,
             }),
             predecessor: None,
         })
@@ -348,6 +362,8 @@ impl InMemoryLayer {
             lsn
         );
         let mut inner = self.inner.lock().unwrap();
+
+        inner.assert_writeable();
 
         let old = inner.page_versions.insert((blknum, lsn), pv);
 
@@ -415,6 +431,8 @@ impl InMemoryLayer {
     pub fn put_truncation(&self, lsn: Lsn, segsize: u32) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
+        inner.assert_writeable();
+
         // check that this we truncate to a smaller size than segment was before the truncation
         let oldsize = inner.get_seg_size(lsn);
         assert!(segsize < oldsize);
@@ -432,6 +450,8 @@ impl InMemoryLayer {
     /// Remember that the segment was dropped at given LSN
     pub fn drop_segment(&self, lsn: Lsn) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
+
+        inner.assert_writeable();
 
         assert!(inner.drop_lsn.is_none());
         inner.drop_lsn = Some(lsn);
@@ -480,6 +500,7 @@ impl InMemoryLayer {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
                 segsizes,
+                frozen: false,
             }),
             predecessor: Some(src),
         })
@@ -510,7 +531,9 @@ impl InMemoryLayer {
             self.seg, self.timelineid, cutoff_lsn
         );
 
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        inner.assert_writeable();
+        inner.frozen = true;
 
         // Normally, use the cutoff LSN as the end of the frozen layer.
         // But if the relation was dropped, we know that there are no
