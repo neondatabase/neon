@@ -9,6 +9,7 @@ use crate::layered_repository::storage_layer::{
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
+use crate::relish::RelishTag;
 use crate::repository::WALRecord;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
@@ -367,8 +368,10 @@ impl InMemoryLayer {
 
         let old = inner.page_versions.insert((blknum, lsn), pv);
 
-        if old.is_some() {
-            // We already had an entry for this LSN. That's odd..
+        // We already had an entry for this LSN. That's odd..
+        // Though, that is fine for checkpoint record that we update
+        // at the end of timeline WAL import.
+        if old.is_some() && !matches!(self.seg.rel, RelishTag::Checkpoint) {
             warn!(
                 "Page version of rel {} blk {} at {} already exists",
                 self.seg.rel, blknum, lsn
