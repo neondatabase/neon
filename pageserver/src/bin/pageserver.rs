@@ -88,7 +88,7 @@ impl CfgFileParams {
             None => DEFAULT_HTTP_LISTEN_ADDR.to_owned(),
         };
 
-        let checkpoint_distance: i128 = match self.checkpoint_distance.as_ref() {
+        let checkpoint_distance: u64 = match self.checkpoint_distance.as_ref() {
             Some(checkpoint_distance_str) => checkpoint_distance_str.parse()?,
             None => DEFAULT_CHECKPOINT_DISTANCE,
         };

@@ -1232,7 +1232,7 @@ impl LayeredTimeline {
     /// Flush to disk all data that was written with the put_* functions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    fn checkpoint_internal(&self, checkpoint_distance: i128) -> Result<()> {
+    fn checkpoint_internal(&self, checkpoint_distance: u64) -> Result<()> {
         // Grab lock on the layer map.
         //
         // TODO: We hold it locked throughout the checkpoint operation. That's bad,
@@ -1280,7 +1280,7 @@ impl LayeredTimeline {
             // inserted ourselves.
             let distance = last_record_lsn.widening_sub(oldest_pending_lsn);
             if distance < 0
-                || distance < checkpoint_distance
+                || distance < checkpoint_distance.into()
                 || oldest_generation == current_generation
             {
                 info!(

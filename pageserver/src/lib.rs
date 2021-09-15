@@ -31,7 +31,7 @@ pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
     // would be more appropriate. But a low value forces the code to be exercised more,
     // which is good for now to trigger bugs.
-    pub const DEFAULT_CHECKPOINT_DISTANCE: i128 = 64 * 1024 * 1024;
+    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(100);
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
@@ -59,7 +59,7 @@ pub struct PageServerConf {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the
     // page server crashes.
-    pub checkpoint_distance: i128,
+    pub checkpoint_distance: u64,
     pub checkpoint_period: Duration,
 
     pub gc_horizon: u64,
