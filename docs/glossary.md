@@ -30,6 +30,10 @@ writes out the changes from in-memory layers into new layer files[]. This proces
 is called "checkpointing". The page server only creates layer files for
 relations that have been modified since the last checkpoint. 
 
+Configuration parameter `checkpoint_distance` defines the distance
+from current LSN to perform checkpoint of in-memory layers.
+Default is `DEFAULT_CHECKPOINT_DISTANCE`.
+Set this parameter to `0` to force checkpoint of every layer.
 ### Compute node
 
 Stateless Postgres node that stores data in pageserver.
