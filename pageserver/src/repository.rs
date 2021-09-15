@@ -213,6 +213,7 @@ mod tests {
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
     use postgres_ffi::pg_constants;
+    use postgres_ffi::xlog_utils::SIZEOF_CHECKPOINT;
     use std::fs;
     use std::str::FromStr;
     use std::time::Duration;
@@ -252,6 +253,7 @@ mod tests {
     }
 
     static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
+    static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
     fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
         let repo_dir = PageServerConf::test_repo_dir(test_name);
@@ -483,7 +485,7 @@ mod tests {
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
-        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_PAGE.clone())?;
+        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
 
         // Create a relation on the timeline
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
@@ -539,7 +541,7 @@ mod tests {
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
-        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_PAGE.clone())?;
+        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
 
         // Create a relation on the timeline
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;

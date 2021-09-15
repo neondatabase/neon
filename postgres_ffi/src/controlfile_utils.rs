@@ -58,7 +58,7 @@ impl ControlFileData {
         let expectedcrc = crc32c::crc32c(&buf[0..OFFSETOF_CRC]);
 
         // Use serde to deserialize the input as a ControlFileData struct.
-        let controlfile = ControlFileData::des(buf)?;
+        let controlfile = ControlFileData::des_prefix(buf)?;
 
         // Check the CRC
         if expectedcrc != controlfile.crc {
