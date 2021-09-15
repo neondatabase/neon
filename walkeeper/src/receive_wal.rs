@@ -74,7 +74,7 @@ fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId, tenantid: ZT
 
 impl<'pg> ReceiveWalConn<'pg> {
     pub fn new(pg: &'pg mut PostgresBackend) -> Result<ReceiveWalConn<'pg>> {
-        let peer_addr = pg.get_peer_addr().clone();
+        let peer_addr = *pg.get_peer_addr();
         Ok(ReceiveWalConn {
             pg_backend: pg,
             peer_addr,

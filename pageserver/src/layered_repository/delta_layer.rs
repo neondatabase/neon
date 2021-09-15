@@ -298,7 +298,7 @@ impl Layer for DeltaLayer {
             let mut desc = String::new();
 
             if let Some(page_image_range) = v.page_image_range.as_ref() {
-                let image = read_blob(&chapter, &page_image_range)?;
+                let image = read_blob(&chapter, page_image_range)?;
                 write!(&mut desc, " img {} bytes", image.len())?;
             }
             if let Some(record_range) = v.record_range.as_ref() {

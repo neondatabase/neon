@@ -107,7 +107,7 @@ impl LayerMap {
         // Also remove it from the SegEntry of this segment
         let mut segentry = self.segs.get_mut(&segtag).unwrap();
         assert!(Arc::ptr_eq(
-            &segentry.open.as_ref().unwrap(),
+            segentry.open.as_ref().unwrap(),
             &oldest_entry.layer
         ));
         segentry.open = None;
@@ -185,11 +185,9 @@ impl LayerMap {
 
     /// Return the oldest in-memory layer, along with its generation number.
     pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
-        if let Some(oldest_entry) = self.open_layers.peek() {
-            Some((Arc::clone(&oldest_entry.layer), oldest_entry.generation))
-        } else {
-            None
-        }
+        self.open_layers
+            .peek()
+            .map(|oldest_entry| (Arc::clone(&oldest_entry.layer), oldest_entry.generation))
     }
 
     /// Increment the generation number used to stamp open in-memory layers. Layers
@@ -336,7 +334,7 @@ impl PartialOrd for OpenLayerEntry {
 }
 impl PartialEq for OpenLayerEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.cmp(&other) == Ordering::Equal
+        self.cmp(other) == Ordering::Equal
     }
 }
 impl Eq for OpenLayerEntry {}

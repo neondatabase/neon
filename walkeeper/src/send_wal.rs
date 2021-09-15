@@ -33,13 +33,13 @@ impl postgres_backend::Handler for SendWalHandler {
         let ztimelineid = sm
             .params
             .get("ztimelineid")
-            .ok_or(anyhow!("timelineid is required"))?;
+            .ok_or_else(|| anyhow!("timelineid is required"))?;
         self.timelineid = Some(ZTimelineId::from_str(ztimelineid)?);
 
         let ztenantid = sm
             .params
             .get("ztenantid")
-            .ok_or(anyhow!("tenantid is required"))?;
+            .ok_or_else(|| anyhow!("tenantid is required"))?;
         self.tenantid = Some(ZTenantId::from_str(ztenantid)?);
 
         if let Some(app_name) = sm.params.get("application_name") {

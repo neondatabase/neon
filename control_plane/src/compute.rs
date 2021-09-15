@@ -95,7 +95,7 @@ impl ComputeControlPlane {
             .branch_get_by_name(&tenantid, branch_name)?
             .timeline_id;
 
-        let port = port.unwrap_or(self.get_port());
+        let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {
             name: branch_name.to_owned(),
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
@@ -385,7 +385,7 @@ impl PostgresNode {
             // procedure evolves quite actively right now, so let's think about it again
             // when things would be more stable (TODO).
             let lsn = self.sync_walkeepers()?;
-            if lsn == Lsn(0 as u64) {
+            if lsn == Lsn(0) {
                 None
             } else {
                 Some(lsn)

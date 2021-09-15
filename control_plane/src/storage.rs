@@ -180,7 +180,7 @@ impl PageServerNode {
                                 io::stdout().flush().unwrap();
                             } else {
                                 if retries == 5 {
-                                    print!("\n") // put a line break after dots for second message
+                                    println!() // put a line break after dots for second message
                                 }
                                 println!(
                                     "Pageserver not responding yet, err {} retrying ({})...",
