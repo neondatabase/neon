@@ -405,9 +405,10 @@ impl InMemoryLayer {
                         page_image: Some(ZERO_PAGE.clone()),
                         record: None,
                     };
-                    println!(
+                    trace!(
                         "filling gap blk {} with zeros for write of {}",
-                        gapblknum, blknum
+                        gapblknum,
+                        blknum
                     );
                     let old = inner.page_versions.insert((gapblknum, lsn), zeropv);
                     // We already had an entry for this LSN. That's odd..
