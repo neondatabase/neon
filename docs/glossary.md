@@ -34,6 +34,9 @@ Configuration parameter `checkpoint_distance` defines the distance
 from current LSN to perform checkpoint of in-memory layers.
 Default is `DEFAULT_CHECKPOINT_DISTANCE`.
 Set this parameter to `0` to force checkpoint of every layer.
+
+Configuration parameter `checkpoint_period` defines the interval between checkpoint iterations.
+Default is `DEFAULT_CHECKPOINT_PERIOD`.
 ### Compute node
 
 Stateless Postgres node that stores data in pageserver.

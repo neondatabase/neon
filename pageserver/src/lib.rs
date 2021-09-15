@@ -32,6 +32,7 @@ pub mod defaults {
     // would be more appropriate. But a low value forces the code to be exercised more,
     // which is good for now to trigger bugs.
     pub const DEFAULT_CHECKPOINT_DISTANCE: i128 = 64 * 1024 * 1024;
+    pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(100);
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
@@ -59,6 +60,8 @@ pub struct PageServerConf {
     // This puts a backstop on how much WAL needs to be re-digested if the
     // page server crashes.
     pub checkpoint_distance: i128,
+    pub checkpoint_period: Duration,
+
     pub gc_horizon: u64,
     pub gc_period: Duration,
     pub superuser: String,
@@ -145,6 +148,7 @@ impl PageServerConf {
         PageServerConf {
             daemonize: false,
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
+            checkpoint_period: Duration::from_secs(10),
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             listen_pg_addr: "127.0.0.1:5430".to_string(),

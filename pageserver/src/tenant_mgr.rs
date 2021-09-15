@@ -37,6 +37,7 @@ pub fn init(conf: &'static PageServerConf) {
             tenantid,
         ));
         LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
+        LayeredRepository::launch_gc_thread(conf, repo.clone());
 
         info!("initialized storage for tenant: {}", &tenantid);
         m.insert(tenantid, repo);
