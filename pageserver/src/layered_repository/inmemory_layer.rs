@@ -702,8 +702,8 @@ impl InMemoryLayer {
         Ok(frozen_layers)
     }
 
-    pub fn update_predecessor(&self, predecessor: Arc<dyn Layer>) {
+    pub fn update_predecessor(&self, predecessor: Arc<dyn Layer>) -> Option<Arc<dyn Layer>> {
         let mut inner = self.inner.lock().unwrap();
-        inner.predecessor = Some(predecessor);
+        inner.predecessor.replace(predecessor)
     }
 }

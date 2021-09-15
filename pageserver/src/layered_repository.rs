@@ -1303,7 +1303,11 @@ impl LayeredTimeline {
 
             if let Some(last_historic) = new_historics.last() {
                 if let Some(new_open) = &maybe_new_open {
-                    new_open.update_predecessor(Arc::clone(last_historic));
+                    let maybe_old_predecessor =
+                        new_open.update_predecessor(Arc::clone(last_historic));
+                    let old_predecessor = maybe_old_predecessor
+                        .expect("new_open should always be a successor to frozen");
+                    assert!(layer_ptr_eq(frozen.as_ref(), old_predecessor.as_ref()));
                 }
             }
 
@@ -1656,4 +1660,15 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Check for equality of Layer memory addresses
+fn layer_ptr_eq(l1: &dyn Layer, l2: &dyn Layer) -> bool {
+    let l1_ptr = l1 as *const dyn Layer;
+    let l2_ptr = l2 as *const dyn Layer;
+    // comparing *const dyn Layer will not only check for data address equality,
+    // but also for vtable address equality.
+    // to avoid this, we compare *const ().
+    // see here for more https://github.com/rust-lang/rust/issues/46139
+    std::ptr::eq(l1_ptr as *const (), l2_ptr as *const ())
 }
