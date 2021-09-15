@@ -10,7 +10,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 class BankClient(object):
-    def __init__(self, conn: aiopg.Connection, n_accounts=0, init_amount=0):
+    def __init__(self, conn: aiopg.Connection, n_accounts, init_amount):
         self.conn: aiopg.Connection = conn
         self.n_accounts = n_accounts
         self.init_amount = init_amount
@@ -36,30 +36,29 @@ class BankClient(object):
             await cur.execute('SELECT sum(amount) FROM bank_accs')
             assert await cur.fetchone() == (self.n_accounts * self.init_amount, )
 
-    async def transfer(self, from_uid, to_uid, amount):
-        # avoid deadlocks by sorting uids
-        if from_uid > to_uid:
-            from_uid, to_uid, amount = to_uid, from_uid, -amount
+async def bank_transfer(conn: aiopg.Connection, from_uid, to_uid, amount):
+    # avoid deadlocks by sorting uids
+    if from_uid > to_uid:
+        from_uid, to_uid, amount = to_uid, from_uid, -amount
 
-        async with self.conn.cursor() as cur:
-            await cur.execute('BEGIN')
-            await cur.execute('UPDATE bank_accs SET amount = amount + (%s) WHERE uid = %s', (
-                amount,
-                to_uid,
-            ))
-            assert cur.rowcount == 1
-            await cur.execute('UPDATE bank_accs SET amount = amount - (%s) WHERE uid = %s', (
-                amount,
-                from_uid,
-            ))
-            assert cur.rowcount == 1
-            await cur.execute('INSERT INTO bank_log VALUES (%s, %s, %s)', (
-                from_uid,
-                to_uid,
-                amount,
-            ))
-            await cur.execute('COMMIT')
-
+    async with conn.cursor() as cur:
+        await cur.execute('BEGIN')
+        await cur.execute('UPDATE bank_accs SET amount = amount + (%s) WHERE uid = %s', (
+            amount,
+            to_uid,
+        ))
+        assert cur.rowcount == 1
+        await cur.execute('UPDATE bank_accs SET amount = amount - (%s) WHERE uid = %s', (
+            amount,
+            from_uid,
+        ))
+        assert cur.rowcount == 1
+        await cur.execute('INSERT INTO bank_log VALUES (%s, %s, %s)', (
+            from_uid,
+            to_uid,
+            amount,
+        ))
+        await cur.execute('COMMIT')
 
 class WorkerStats(object):
     def __init__(self, n_workers):
@@ -73,9 +72,10 @@ class WorkerStats(object):
         self.counters[worker_id] += 1
 
     def check_progress(self):
+        debug_print("Workers progress: {}".format(self.counters))
+
         # every worker should finish at least one tx
-        for cnt in self.counters:
-            assert cnt > 0
+        assert all(cnt > 0 for cnt in self.counters)
 
         progress = sum(self.counters)
         print('All workers made {} transactions'.format(progress))
@@ -83,8 +83,6 @@ class WorkerStats(object):
 
 async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accounts, max_transfer):
     pg_conn = await pg.connect_async()
-    bank = BankClient(pg_conn)
-
     debug_print('Started worker {}'.format(worker_id))
 
     while stats.running:
@@ -92,7 +90,7 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accou
         to_uid = (from_uid + random.randint(1, n_accounts - 1)) % n_accounts
         amount = random.randint(1, max_transfer)
 
-        await bank.transfer(from_uid, to_uid, amount)
+        await bank_transfer(pg_conn, from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
         debug_print('Executed transfer({}) {} => {}'.format(amount, from_uid, to_uid))
