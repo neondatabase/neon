@@ -296,8 +296,7 @@ impl LayeredRepository {
     ///
     fn checkpoint_loop(&self, conf: &'static PageServerConf) -> Result<()> {
         loop {
-            std::thread::sleep(conf.gc_period);
-
+            std::thread::sleep(conf.checkpoint_period);
             info!("checkpointer thread for tenant {} waking up", self.tenantid);
 
             // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
@@ -313,6 +312,29 @@ impl LayeredRepository {
                 }
                 // release lock on 'timelines'
             }
+        }
+    }
+
+    ///
+    /// Launch the GC thread in given repository.
+    ///
+    pub fn launch_gc_thread(conf: &'static PageServerConf, rc: Arc<LayeredRepository>) {
+        let _thread = std::thread::Builder::new()
+            .name("GC thread".into())
+            .spawn(move || {
+                // FIXME: relaunch it? Panic is not good.
+                rc.gc_loop(conf).expect("GC thread died");
+            })
+            .unwrap();
+    }
+
+    ///
+    /// GC thread's main loop
+    ///
+    fn gc_loop(&self, conf: &'static PageServerConf) -> Result<()> {
+        loop {
+            std::thread::sleep(conf.gc_period);
+            info!("gc thread for tenant {} waking up", self.tenantid);
 
             // Garbage collect old files that are not needed for PITR anymore
             if conf.gc_horizon > 0 {
