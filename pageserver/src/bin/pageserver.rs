@@ -27,6 +27,7 @@ use zenith_utils::http::endpoint;
 struct CfgFileParams {
     listen_pg_addr: Option<String>,
     listen_http_addr: Option<String>,
+    checkpoint_distance: Option<String>,
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     pg_distrib_dir: Option<String>,
@@ -44,6 +45,7 @@ impl CfgFileParams {
         Self {
             listen_pg_addr: get_arg("listen-pg"),
             listen_http_addr: get_arg("listen-http"),
+            checkpoint_distance: get_arg("checkpoint_distance"),
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
             pg_distrib_dir: get_arg("postgres-distrib"),
@@ -58,6 +60,7 @@ impl CfgFileParams {
         Self {
             listen_pg_addr: self.listen_pg_addr.or(other.listen_pg_addr),
             listen_http_addr: self.listen_http_addr.or(other.listen_http_addr),
+            checkpoint_distance: self.checkpoint_distance.or(other.checkpoint_distance),
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
@@ -80,6 +83,11 @@ impl CfgFileParams {
         let listen_http_addr = match self.listen_http_addr.as_ref() {
             Some(addr) => addr.clone(),
             None => DEFAULT_HTTP_LISTEN_ADDR.to_owned(),
+        };
+
+        let checkpoint_distance: i128 = match self.checkpoint_distance.as_ref() {
+            Some(checkpoint_distance_str) => checkpoint_distance_str.parse()?,
+            None => DEFAULT_CHECKPOINT_DISTANCE,
         };
 
         let gc_horizon: u64 = match self.gc_horizon.as_ref() {
@@ -129,6 +137,7 @@ impl CfgFileParams {
 
             listen_pg_addr,
             listen_http_addr,
+            checkpoint_distance,
             gc_horizon,
             gc_period,
 
@@ -174,6 +183,12 @@ fn main() -> Result<()> {
                 .long("init")
                 .takes_value(false)
                 .help("Initialize pageserver repo"),
+        )
+        .arg(
+            Arg::with_name("checkpoint_distance")
+                .long("checkpoint_distance")
+                .takes_value(true)
+                .help("Distance from current LSN to perform checkpoint of in-memory layers"),
         )
         .arg(
             Arg::with_name("gc_horizon")

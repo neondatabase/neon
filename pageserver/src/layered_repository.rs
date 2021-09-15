@@ -70,15 +70,6 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
 
-// Flush out an inmemory layer, if it's holding WAL older than this.
-// This puts a backstop on how much WAL needs to be re-digested if the
-// page server crashes.
-//
-// FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
-// would be more appropriate. But a low value forces the code to be exercised more,
-// which is good for now to trigger bugs.
-static OLDEST_INMEM_DISTANCE: i128 = 16 * 1024 * 1024;
-
 // Metrics collected on operations on the storage repository.
 lazy_static! {
     static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
@@ -309,14 +300,16 @@ impl LayeredRepository {
 
             info!("checkpointer thread for tenant {} waking up", self.tenantid);
 
-            // checkpoint timelines that have accumulated more than CHECKPOINT_INTERVAL
+            // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
             // bytes of WAL since last checkpoint.
             {
                 let timelines = self.timelines.lock().unwrap();
                 for (_timelineid, timeline) in timelines.iter() {
                     STORAGE_TIME
                         .with_label_values(&["checkpoint_timed"])
-                        .observe_closure_duration(|| timeline.checkpoint_internal(false))?
+                        .observe_closure_duration(|| {
+                            timeline.checkpoint_internal(conf.checkpoint_distance)
+                        })?
                 }
                 // release lock on 'timelines'
             }
@@ -861,7 +854,8 @@ impl Timeline for LayeredTimeline {
     fn checkpoint(&self) -> Result<()> {
         STORAGE_TIME
             .with_label_values(&["checkpoint_force"])
-            .observe_closure_duration(|| self.checkpoint_internal(true))
+            //pass checkpoint_distance=0 to force checkpoint
+            .observe_closure_duration(|| self.checkpoint_internal(0))
     }
 
     ///
@@ -1215,9 +1209,8 @@ impl LayeredTimeline {
     ///
     /// Flush to disk all data that was written with the put_* functions
     ///
-    /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
-    /// know anything about them here in the repository.
-    fn checkpoint_internal(&self, force: bool) -> Result<()> {
+    /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
+    fn checkpoint_internal(&self, checkpoint_distance: i128) -> Result<()> {
         // Grab lock on the layer map.
         //
         // TODO: We hold it locked throughout the checkpoint operation. That's bad,
@@ -1257,15 +1250,15 @@ impl LayeredTimeline {
 
             // Does this layer need freezing?
             //
-            // Write out all in-memory layers that contain WAL older than OLDEST_INMEM_DISTANCE.
-            // Or if 'force' is true, write out all of them. If we reach a layer with the same
+            // Write out all in-memory layers that contain WAL older than CHECKPOINT_DISTANCE.
+            // If we reach a layer with the same
             // generation number, we know that we have cycled through all layers that were open
             // when we started. We don't want to process layers inserted after we started, to
             // avoid getting into an infinite loop trying to process again entries that we
             // inserted ourselves.
             let distance = last_record_lsn.widening_sub(oldest_pending_lsn);
             if distance < 0
-                || (!force && distance < OLDEST_INMEM_DISTANCE)
+                || distance < checkpoint_distance
                 || oldest_generation == current_generation
             {
                 info!(

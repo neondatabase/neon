@@ -28,6 +28,11 @@ pub mod defaults {
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = "127.0.0.1:9898";
 
+    // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
+    // would be more appropriate. But a low value forces the code to be exercised more,
+    // which is good for now to trigger bugs.
+    pub const DEFAULT_CHECKPOINT_DISTANCE: i128 = 64 * 1024 * 1024;
+
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
 
@@ -50,6 +55,10 @@ pub struct PageServerConf {
     pub daemonize: bool,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    // Flush out an inmemory layer, if it's holding WAL older than this
+    // This puts a backstop on how much WAL needs to be re-digested if the
+    // page server crashes.
+    pub checkpoint_distance: i128,
     pub gc_horizon: u64,
     pub gc_period: Duration,
     pub superuser: String,
@@ -135,7 +144,8 @@ impl PageServerConf {
     fn dummy_conf(repo_dir: PathBuf) -> Self {
         PageServerConf {
             daemonize: false,
-            gc_horizon: 64 * 1024 * 1024,
+            checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
+            gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             listen_pg_addr: "127.0.0.1:5430".to_string(),
             listen_http_addr: "127.0.0.1:9898".to_string(),

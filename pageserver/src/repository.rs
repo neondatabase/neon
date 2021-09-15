@@ -216,8 +216,6 @@ mod tests {
     use postgres_ffi::xlog_utils::SIZEOF_CHECKPOINT;
     use std::fs;
     use std::str::FromStr;
-    use std::time::Duration;
-    use zenith_utils::postgres_backend::AuthType;
     use zenith_utils::zid::ZTenantId;
 
     /// Arbitrary relation tag, for testing.
@@ -261,18 +259,8 @@ mod tests {
         fs::create_dir_all(&repo_dir)?;
         fs::create_dir_all(&repo_dir.join("timelines"))?;
 
-        let conf = PageServerConf {
-            daemonize: false,
-            gc_horizon: 64 * 1024 * 1024,
-            gc_period: Duration::from_secs(10),
-            listen_pg_addr: "127.0.0.1:5430".to_string(),
-            listen_http_addr: "127.0.0.1:9898".to_string(),
-            superuser: "zenith_admin".to_string(),
-            workdir: repo_dir,
-            pg_distrib_dir: "".into(),
-            auth_type: AuthType::Trust,
-            auth_validation_public_key_path: None,
-        };
+        let conf = PageServerConf::dummy_conf(repo_dir);
+
         // Make a static copy of the config. This can never be free'd, but that's
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));
