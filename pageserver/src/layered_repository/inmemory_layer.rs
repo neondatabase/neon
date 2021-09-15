@@ -647,7 +647,7 @@ impl InMemoryLayer {
 
         let inner = self.inner.lock().unwrap();
 
-        let drop_lsn = inner.drop_lsn.clone();
+        let drop_lsn = inner.drop_lsn;
         let predecessor = inner.predecessor.clone();
 
         let mut before_page_versions;
@@ -702,7 +702,7 @@ impl InMemoryLayer {
 
         if drop_lsn.is_none() {
             // Write a new base image layer at the cutoff point
-            let image_layer = ImageLayer::create_from_src(self.conf, &timeline, self, end_lsn)?;
+            let image_layer = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
             frozen_layers.push(Arc::new(image_layer));
             trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
         }

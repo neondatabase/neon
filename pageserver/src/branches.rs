@@ -266,12 +266,7 @@ pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Resul
     std::fs::read_dir(&branches_dir)?
         .map(|dir_entry_res| {
             let dir_entry = dir_entry_res?;
-            Ok(BranchInfo::from_path(
-                dir_entry.path(),
-                conf,
-                tenantid,
-                &repo,
-            )?)
+            BranchInfo::from_path(dir_entry.path(), conf, tenantid, &repo)
         })
         .collect()
 }

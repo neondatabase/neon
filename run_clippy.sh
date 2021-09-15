@@ -8,4 +8,8 @@
 # warnings and errors right in the editor.
 # In vscode, this setting is Rust-analyzer>Check On Save:Command
 
-cargo clippy "${@:2}" -- -A clippy::new_without_default -A clippy::manual_range_contains -A clippy::comparison_chain
+
+# * `-A unknown_lints` – do not warn about unknown lint suppressions
+#                        that people with newer toolchains might use
+# * `-D warnings`      - fail on any warnings (`cargo` returns non-zero exit status)
+cargo clippy "${@:2}" --all-targets --all-features --all --tests -- -A unknown_lints -D warnings

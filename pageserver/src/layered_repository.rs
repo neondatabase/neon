@@ -260,7 +260,7 @@ impl LayeredRepository {
                 }
 
                 timelines.insert(timelineid, timeline.clone());
-                Ok(timeline.clone())
+                Ok(timeline)
             }
         }
     }
@@ -673,8 +673,8 @@ impl Timeline for LayeredTimeline {
 
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelishTag>> {
         let request_tag = RelTag {
-            spcnode: spcnode,
-            dbnode: dbnode,
+            spcnode,
+            dbnode,
             relnode: 0,
             forknum: 0,
         };

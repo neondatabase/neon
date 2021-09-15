@@ -32,5 +32,5 @@ pub const fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> 
     }
 
     let diff = id1.wrapping_sub(id2) as i32;
-    return diff < 0;
+    diff < 0
 }

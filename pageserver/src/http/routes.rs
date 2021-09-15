@@ -77,11 +77,9 @@ fn parse_request_param<T: FromStr>(
 ) -> Result<T, ApiError> {
     match get_request_param(request, param_name)?.parse() {
         Ok(v) => Ok(v),
-        Err(_) => {
-            return Err(ApiError::BadRequest(
-                "failed to parse tenant id".to_string(),
-            ))
-        }
+        Err(_) => Err(ApiError::BadRequest(
+            "failed to parse tenant id".to_string(),
+        )),
     }
 }
 
@@ -130,7 +128,7 @@ async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let branch_name: &str = get_request_param(&request, "branch_name")?;
     let conf = get_state(&request).conf;
-    let path = conf.branch_path(&branch_name, &tenantid);
+    let path = conf.branch_path(branch_name, &tenantid);
 
     let response_data = tokio::task::spawn_blocking(move || {
         let repo = tenant_mgr::get_repository_for_tenant(&tenantid)?;

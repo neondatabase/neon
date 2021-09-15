@@ -421,7 +421,7 @@ where
 
         // do the job
         let mut last_rec_lsn = Lsn(0);
-        if msg.wal_data.len() > 0 {
+        if !msg.wal_data.is_empty() {
             self.storage
                 .write_wal(&self.s, msg.h.begin_lsn, &msg.wal_data)?;
 

@@ -5,7 +5,6 @@
 // script which will use local paths.
 //
 use anyhow::{Context, Result};
-use hex;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;

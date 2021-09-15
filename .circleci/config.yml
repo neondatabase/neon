@@ -128,6 +128,14 @@ jobs:
             - ~/.cargo/git
             - target
 
+        # Run style checks
+        # has to run separately from cargo fmt section
+        # since needs to run with dependencies
+      - run:
+          name: clippy
+          command: |
+            ./run_clippy.sh
+
         # Run rust unit tests
       - run: cargo test
 
