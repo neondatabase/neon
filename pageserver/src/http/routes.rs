@@ -133,7 +133,7 @@ async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>,
     let path = conf.branch_path(&branch_name, &tenantid);
 
     let response_data = tokio::task::spawn_blocking(move || {
-        let repo = tenant_mgr::get_repository_for_tenant(&tenantid)?;
+        let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
         BranchInfo::from_path(path, conf, &tenantid, &repo)
     })
     .await
