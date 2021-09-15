@@ -63,6 +63,8 @@ use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
 };
 
+use self::inmemory_layer::{NonWriteableError, WriteResult};
+
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
@@ -741,8 +743,10 @@ impl Timeline for LayeredTimeline {
         }
 
         let seg = SegmentTag::from_blknum(rel, blknum);
-        let layer = self.get_layer_for_write(seg, rec.lsn)?;
-        self.increase_current_logical_size(layer.put_wal_record(blknum, rec)? * BLCKSZ as u32);
+        let delta_size = self.perform_write_op(seg, rec.lsn, |layer| {
+            layer.put_wal_record(blknum, rec.clone())
+        })?;
+        self.increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
     }
 
@@ -780,8 +784,7 @@ impl Timeline for LayeredTimeline {
                 rel,
                 segno: remove_segno,
             };
-            let layer = self.get_layer_for_write(seg, lsn)?;
-            layer.drop_segment(lsn)?;
+            self.perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
         }
 
         // Truncate the last remaining segment to the specified size
@@ -790,8 +793,9 @@ impl Timeline for LayeredTimeline {
                 rel,
                 segno: last_remain_seg,
             };
-            let layer = self.get_layer_for_write(seg, lsn)?;
-            layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)?;
+            self.perform_write_op(seg, lsn, |layer| {
+                layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)
+            })?;
         }
         self.decrease_current_logical_size((oldsize - relsize) * BLCKSZ as u32);
         Ok(())
@@ -814,8 +818,7 @@ impl Timeline for LayeredTimeline {
                         rel,
                         segno: remove_segno,
                     };
-                    let layer = self.get_layer_for_write(seg, lsn)?;
-                    layer.drop_segment(lsn)?;
+                    self.perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
                 }
                 self.decrease_current_logical_size(oldsize * BLCKSZ as u32);
             } else {
@@ -827,8 +830,7 @@ impl Timeline for LayeredTimeline {
         } else {
             // TODO handle TwoPhase relishes
             let seg = SegmentTag::from_blknum(rel, 0);
-            let layer = self.get_layer_for_write(seg, lsn)?;
-            layer.drop_segment(lsn)?;
+            self.perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
         }
 
         Ok(())
@@ -845,8 +847,11 @@ impl Timeline for LayeredTimeline {
 
         let seg = SegmentTag::from_blknum(rel, blknum);
 
-        let layer = self.get_layer_for_write(seg, lsn)?;
-        self.increase_current_logical_size(layer.put_page_image(blknum, lsn, img)? * BLCKSZ as u32);
+        let delta_size = self.perform_write_op(seg, lsn, |layer| {
+            layer.put_page_image(blknum, lsn, img.clone())
+        })?;
+
+        self.increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
     }
 
@@ -1641,6 +1646,37 @@ impl LayeredTimeline {
         LOGICAL_TIMELINE_SIZE
             .with_label_values(&[&self.tenantid.to_string(), &self.timelineid.to_string()])
             .set(val as i64 - diff as i64)
+    }
+
+    /// If a layer is in the process of being replaced in [`LayerMap`], write
+    /// operations will fail with [`NonWriteableError`]. This may happen due to
+    /// a race: the checkpointer thread freezes a layer just after
+    /// [`Self::get_layer_for_write`] returned it. To handle this error, we try
+    /// again getting the layer and attempt the write.
+    fn perform_write_op<R>(
+        &self,
+        seg: SegmentTag,
+        lsn: Lsn,
+        write_op: impl Fn(&Arc<InMemoryLayer>) -> WriteResult<R>,
+    ) -> anyhow::Result<R> {
+        let mut layer = self.get_layer_for_write(seg, lsn)?;
+        loop {
+            match write_op(&layer) {
+                Ok(r) => return Ok(r),
+                Err(NonWriteableError {}) => {}
+            }
+
+            info!(
+                "attempted to write to non-writeable layer, retrying {} {}",
+                seg, lsn
+            );
+
+            // layer was non-writeable, try again
+            let new_layer = self.get_layer_for_write(seg, lsn)?;
+            // the new layer does not have to be writeable, but it should at least be different
+            assert!(!Arc::ptr_eq(&layer, &new_layer));
+            layer = new_layer;
+        }
     }
 }
 

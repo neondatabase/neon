@@ -69,13 +69,12 @@ pub struct InMemoryLayerInner {
 }
 
 impl InMemoryLayerInner {
-    /// Assert that the layer is not frozen
-    fn assert_writeable(&self) {
-        // TODO current this can happen when a walreceiver thread's
-        // `get_layer_for_write` and InMemoryLayer write calls interleave with
-        // a checkpoint operation, however timing should make this rare.
-        // Assert only so we can identify when the bug triggers more easily.
-        assert!(self.writeable);
+    fn check_writeable(&self) -> WriteResult<()> {
+        if self.writeable {
+            Ok(())
+        } else {
+            Err(NonWriteableError)
+        }
     }
 
     fn get_seg_size(&self, lsn: Lsn) -> u32 {
@@ -284,6 +283,13 @@ impl Layer for InMemoryLayer {
     }
 }
 
+/// Write failed because the layer is in process of being replaced.
+/// See [`LayeredTimeline::perform_write_op`] for how to handle this error.
+#[derive(Debug)]
+pub struct NonWriteableError;
+
+pub type WriteResult<T> = std::result::Result<T, NonWriteableError>;
+
 /// Helper struct to cleanup `InMemoryLayer::freeze` return signature.
 pub struct FreezeLayers {
     /// Replacement layer for the layer which freeze was called on.
@@ -341,7 +347,7 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> Result<u32> {
+    pub fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> WriteResult<u32> {
         self.put_page_version(
             blknum,
             rec.lsn,
@@ -353,7 +359,7 @@ impl InMemoryLayer {
     }
 
     /// Remember new page version, as a full page image
-    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<u32> {
+    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> WriteResult<u32> {
         self.put_page_version(
             blknum,
             lsn,
@@ -366,7 +372,7 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<u32> {
+    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> WriteResult<u32> {
         self.assert_not_frozen();
         assert!(self.seg.blknum_in_seg(blknum));
 
@@ -379,7 +385,7 @@ impl InMemoryLayer {
         );
         let mut inner = self.inner.lock().unwrap();
 
-        inner.assert_writeable();
+        inner.check_writeable()?;
 
         let old = inner.page_versions.insert((blknum, lsn), pv);
 
@@ -445,11 +451,11 @@ impl InMemoryLayer {
     }
 
     /// Remember that the relation was truncated at given LSN
-    pub fn put_truncation(&self, lsn: Lsn, segsize: u32) -> anyhow::Result<()> {
+    pub fn put_truncation(&self, lsn: Lsn, segsize: u32) -> WriteResult<()> {
         self.assert_not_frozen();
 
         let mut inner = self.inner.lock().unwrap();
-        inner.assert_writeable();
+        inner.check_writeable()?;
 
         // check that this we truncate to a smaller size than segment was before the truncation
         let oldsize = inner.get_seg_size(lsn);
@@ -466,12 +472,12 @@ impl InMemoryLayer {
     }
 
     /// Remember that the segment was dropped at given LSN
-    pub fn drop_segment(&self, lsn: Lsn) -> anyhow::Result<()> {
+    pub fn drop_segment(&self, lsn: Lsn) -> WriteResult<()> {
         self.assert_not_frozen();
 
         let mut inner = self.inner.lock().unwrap();
 
-        inner.assert_writeable();
+        inner.check_writeable()?;
 
         assert!(inner.drop_lsn.is_none());
         inner.drop_lsn = Some(lsn);
@@ -537,8 +543,10 @@ impl InMemoryLayer {
             self.seg, self.timelineid, cutoff_lsn
         );
 
+        self.assert_not_frozen();
+
         let mut inner = self.inner.lock().unwrap();
-        inner.assert_writeable();
+        assert!(inner.writeable);
         inner.writeable = false;
 
         // Normally, use the cutoff LSN as the end of the frozen layer.
