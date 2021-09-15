@@ -230,8 +230,7 @@ jobs:
             # --verbose prints name of each test (helpful when there are
             # multiple tests in one file)
             # -rA prints summary in the end
-            # -n4 uses for processes to run tests via pytest-xdist
-            pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short -s --verbose -n4 -rA $TEST_SELECTION $EXTRA_PARAMS
+            pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short -s --verbose -rA $TEST_SELECTION $EXTRA_PARAMS
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
