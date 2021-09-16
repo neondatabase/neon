@@ -3,17 +3,17 @@
 
 use crate::branches;
 use crate::layered_repository::LayeredRepository;
-use crate::repository::Repository;
+use crate::repository::{Repository, Timeline};
 use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
 use log::info;
 use std::collections::HashMap;
 use std::fs;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 lazy_static! {
     pub static ref REPOSITORY: Mutex<HashMap<ZTenantId, Arc<dyn Repository>>> =
@@ -67,9 +67,18 @@ pub fn insert_repository_for_tenant(tenantid: ZTenantId, repo: Arc<dyn Repositor
     o.insert(tenantid, repo);
 }
 
-pub fn get_repository_for_tenant(tenantid: &ZTenantId) -> Result<Arc<dyn Repository>> {
+pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
     let o = &REPOSITORY.lock().unwrap();
-    o.get(tenantid)
+    o.get(&tenantid)
         .map(|repo| Arc::clone(repo))
         .ok_or_else(|| anyhow!("repository not found for tenant name {}", tenantid))
+}
+
+pub fn get_timeline_for_tenant(
+    tenantid: ZTenantId,
+    timelineid: ZTimelineId,
+) -> Result<Arc<dyn Timeline>> {
+    get_repository_for_tenant(tenantid)?
+        .get_timeline(timelineid)
+        .with_context(|| format!("cannot fetch timeline {}", timelineid))
 }

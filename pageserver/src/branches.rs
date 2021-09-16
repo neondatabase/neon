@@ -257,7 +257,7 @@ pub(crate) fn get_tenants(conf: &PageServerConf) -> Result<Vec<String>> {
 }
 
 pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
-    let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+    let repo = tenant_mgr::get_repository_for_tenant(*tenantid)?;
 
     // Each branch has a corresponding record (text file) in the refs/branches
     // with timeline_id.
@@ -277,7 +277,7 @@ pub(crate) fn create_branch(
     startpoint_str: &str,
     tenantid: &ZTenantId,
 ) -> Result<BranchInfo> {
-    let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+    let repo = tenant_mgr::get_repository_for_tenant(*tenantid)?;
 
     if conf.branch_path(branchname, tenantid).exists() {
         anyhow::bail!("branch {} already exists", branchname);

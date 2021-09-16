@@ -10,7 +10,7 @@
 //     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
@@ -230,10 +230,7 @@ impl PageServerHandler {
         tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
         // Check that the timeline exists
-        let repository = tenant_mgr::get_repository_for_tenant(&tenantid)?;
-        let timeline = repository
-            .get_timeline(timelineid)
-            .context(format!("error fetching timeline {}", timelineid))?;
+        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -392,10 +389,8 @@ impl PageServerHandler {
         tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let repository = tenant_mgr::get_repository_for_tenant(&tenantid)?;
-        let timeline = repository
-            .get_timeline(timelineid)
-            .context(format!("error fetching timeline {}", timelineid))?;
+        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
+
         /* switch client to COPYOUT */
         pgb.write_message(&BeMessage::CopyOutResponse)?;
         info!("sent CopyOut");
@@ -533,10 +528,7 @@ impl postgres_backend::Handler for PageServerHandler {
             self.check_permission(Some(tenantid))?;
 
             // Check that the timeline exists
-            let repository = tenant_mgr::get_repository_for_tenant(&tenantid)?;
-            repository
-                .get_timeline(timelineid)
-                .context(format!("error fetching timeline {}", timelineid))?;
+            tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
 
             walreceiver::launch_wal_receiver(self.conf, timelineid, &connstr, tenantid.to_owned());
 
@@ -631,7 +623,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .map(|h| h.as_str().parse())
                 .unwrap_or(Ok(self.conf.gc_horizon))?;
 
-            let repo = tenant_mgr::get_repository_for_tenant(&tenantid)?;
+            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
 
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
 

@@ -72,7 +72,7 @@ pub fn launch_wal_receiver(
             let _walreceiver_thread = thread::Builder::new()
                 .name("WAL receiver thread".into())
                 .spawn(move || {
-                    thread_main(conf, timelineid, &tenantid);
+                    thread_main(conf, timelineid, tenantid);
                 })
                 .unwrap();
         }
@@ -93,7 +93,7 @@ fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
 //
 // This is the entry point for the WAL receiver thread.
 //
-fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid: &ZTenantId) {
+fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
     info!(
         "WAL receiver thread started for timeline : '{}'",
         timelineid
@@ -123,7 +123,7 @@ fn walreceiver_main(
     conf: &PageServerConf,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
-    tenantid: &ZTenantId,
+    tenantid: ZTenantId,
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
@@ -149,8 +149,7 @@ fn walreceiver_main(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
-    let repository = tenant_mgr::get_repository_for_tenant(tenantid)?;
-    let timeline = repository.get_timeline(timelineid).unwrap();
+    let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -199,7 +198,7 @@ fn walreceiver_main(
                     &timelineid,
                     pg_constants::WAL_SEGMENT_SIZE,
                     data,
-                    tenantid,
+                    &tenantid,
                 )?;
 
                 trace!("received XLogData between {} and {}", startlsn, endlsn);
@@ -260,7 +259,7 @@ fn walreceiver_main(
                         &timelineid,
                         pg_constants::WAL_SEGMENT_SIZE,
                         last_rec_lsn,
-                        tenantid,
+                        &tenantid,
                     )?;
 
                     if newest_segno - oldest_segno >= 10 {
