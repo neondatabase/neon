@@ -46,8 +46,9 @@ use crate::repository::WALRecord;
 use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use bytes::Bytes;
+use crc32c::crc32c;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -78,6 +79,17 @@ static PAGE_VERSION_METAS_CHAPTER: u64 = 1;
 /// without PAGE_VERSION_METAS_CHAPTER
 static PAGE_VERSIONS_CHAPTER: u64 = 2;
 static REL_SIZES_CHAPTER: u64 = 3;
+
+/// Contains the [`Summary`] struct
+static SUMMARY_CHAPTER: u64 = 4;
+
+#[derive(Serialize, Deserialize)]
+struct Summary {
+    /// crc32c checksum of the [`PAGE_VERSION_METAS_CHAPTER`] contents
+    metas_cksum: u32,
+    /// crc32c checksum of the [`REL_SIZES_CHAPTER`] contents
+    relsizes_cksum: u32,
+}
 
 #[derive(Serialize, Deserialize)]
 struct PageVersionMeta {
@@ -425,12 +437,23 @@ impl DeltaLayer {
         // Write out page versions
         let mut chapter = book.new_chapter(PAGE_VERSION_METAS_CHAPTER);
         let buf = BTreeMap::ser(&inner.page_version_metas)?;
+        let metas_cksum = crc32c(&buf);
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
         // and relsizes to separate chapter
         let mut chapter = book.new_chapter(REL_SIZES_CHAPTER);
         let buf = BTreeMap::ser(&inner.relsizes)?;
+        let relsizes_cksum = crc32c(&buf);
+        chapter.write_all(&buf)?;
+        let book = chapter.close()?;
+
+        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
+        let summary = Summary {
+            metas_cksum,
+            relsizes_cksum,
+        };
+        let buf = Summary::ser(&summary)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
@@ -475,10 +498,15 @@ impl DeltaLayer {
 
         let (path, book) = self.open_book()?;
 
+        let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+        let summary = Summary::des(&chapter)?;
+
         let chapter = book.read_chapter(PAGE_VERSION_METAS_CHAPTER)?;
+        ensure!(summary.metas_cksum == crc32c(&chapter));
         let page_version_metas = BTreeMap::des(&chapter)?;
 
         let chapter = book.read_chapter(REL_SIZES_CHAPTER)?;
+        ensure!(summary.relsizes_cksum == crc32c(&chapter));
         let relsizes = BTreeMap::des(&chapter)?;
 
         debug!("loaded from {}", &path.display());
