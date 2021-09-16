@@ -1384,7 +1384,9 @@ impl LayeredTimeline {
             // Finally, replace the frozen in-memory layer with the new on-disk layers
             layers.remove_historic(frozen.as_ref());
 
-            //FIXME This needs a comment.
+            // If we created a successor InMemoryLayer, its predecessor is
+            // currently the frozen layer. We need to update the predecessor
+            // to be the latest on-disk layer.
             if let Some(last_historic) = new_historics.last() {
                 if let Some(new_open) = &maybe_new_open {
                     let maybe_old_predecessor =
@@ -1395,6 +1397,7 @@ impl LayeredTimeline {
                 }
             }
 
+            // Add the historics to the LayerMap
             for n in new_historics {
                 layers.insert_historic(n);
             }
