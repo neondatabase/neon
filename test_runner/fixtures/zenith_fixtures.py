@@ -1031,12 +1031,18 @@ def check_restored_datadir_content(zenith_cli: ZenithCli, test_output_dir: str, 
     pg.stop()
 
     # Take a basebackup from pageserver
-    restored_dir_path = os.path.join(test_output_dir, "{}_restored_datadir".format(pg.branch))
+    restored_dir_path = os.path.join(test_output_dir, f"{pg.branch}_restored_datadir")
     mkdir_if_needed(restored_dir_path)
 
-    cmd = f"psql -h localhost -p {pageserver_pg_port} -c 'basebackup {pg.tenant_id} {timeline}' | tar -x -C {restored_dir_path}"
+    psql_path = os.path.join(pg.pg_bin.pg_bin_path, 'psql')
 
-    cmd = os.path.join(pg.pg_bin.pg_bin_path, cmd)
+    cmd = rf"""
+        {psql_path}                                    \
+            --no-psqlrc                                \
+            postgres://localhost:{pageserver_pg_port}  \
+            -c 'basebackup {pg.tenant_id} {timeline}'  \
+         | tar -x -C {restored_dir_path}
+    """
 
     subprocess.check_call(cmd, shell=True)
 
