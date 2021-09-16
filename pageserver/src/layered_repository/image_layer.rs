@@ -31,13 +31,16 @@ use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{anyhow, ensure, Result};
 use bytes::Bytes;
+use crc32c::crc32c;
 use log::*;
+use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use zenith_utils::bin_ser::LeSer;
 
 use bookfile::{Book, BookWriter};
 
@@ -49,6 +52,15 @@ const IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
 /// Contains each block in block # order
 const BLOCKY_IMAGES_CHAPTER: u64 = 1;
 const NONBLOCKY_IMAGE_CHAPTER: u64 = 2;
+
+/// Contains the [`Summary`] struct
+const SUMMARY_CHAPTER: u64 = 3;
+
+#[derive(Serialize, Deserialize)]
+struct Summary {
+    /// crc32c checksum of each image
+    image_cksums: Vec<u32>,
+}
 
 const BLOCK_SIZE: usize = 8192;
 
@@ -84,6 +96,8 @@ pub struct ImageLayerInner {
 
     /// Derived from filename and bookfile chapter metadata
     image_type: ImageType,
+
+    image_cksums: Vec<u32>,
 }
 
 impl Layer for ImageLayer {
@@ -152,6 +166,7 @@ impl Layer for ImageLayer {
             }
         };
 
+        ensure!(inner.image_cksums[base_blknum as usize] == crc32c(&buf));
         reconstruct_data.page_img = Some(Bytes::from(buf));
         Ok(PageReconstructResult::Complete)
     }
@@ -177,6 +192,7 @@ impl Layer for ImageLayer {
     fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.image_type = ImageType::Blocky { num_blocks: 0 };
+        inner.image_cksums = Vec::new();
         inner.loaded = false;
         Ok(())
     }
@@ -257,7 +273,7 @@ impl ImageLayer {
             ImageType::NonBlocky
         };
 
-        let layer = ImageLayer {
+        let mut layer = ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
             tenantid,
@@ -266,17 +282,21 @@ impl ImageLayer {
             inner: Mutex::new(ImageLayerInner {
                 loaded: true,
                 image_type: image_type.clone(),
+                image_cksums: Vec::new(),
             }),
         };
-        let inner = layer.inner.lock().unwrap();
 
         // Write the images into a file
         let path = layer.path();
+
+        let inner = layer.inner.get_mut().unwrap();
 
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
         let file = File::create(&path)?;
         let book = BookWriter::new(file, IMAGE_FILE_MAGIC)?;
+
+        let mut image_cksums = Vec::with_capacity(base_images.len());
 
         let book = match &image_type {
             ImageType::Blocky { .. } => {
@@ -284,21 +304,27 @@ impl ImageLayer {
                 for block_bytes in base_images {
                     assert_eq!(block_bytes.len(), BLOCK_SIZE);
                     chapter.write_all(&block_bytes)?;
+                    image_cksums.push(crc32c(&block_bytes));
                 }
                 chapter.close()?
             }
             ImageType::NonBlocky => {
                 let mut chapter = book.new_chapter(NONBLOCKY_IMAGE_CHAPTER);
                 chapter.write_all(&base_images[0])?;
+                image_cksums.push(crc32c(&base_images[0]));
                 chapter.close()?
             }
         };
 
+        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
+        let summary = Summary { image_cksums };
+        Summary::ser_into(&summary, &mut chapter)?;
+        inner.image_cksums = summary.image_cksums;
+        let book = chapter.close()?;
+
         book.close()?;
 
         trace!("saved {}", &path.display());
-
-        drop(inner);
 
         Ok(layer)
     }
@@ -354,11 +380,15 @@ impl ImageLayer {
 
         let (path, book) = self.open_book()?;
 
+        let mut chapter = book.chapter_reader(SUMMARY_CHAPTER)?;
+        let summary = Summary::des_from(&mut chapter)?;
+
         let image_type = if self.seg.rel.is_blocky() {
             let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
             let images_len = chapter.len();
             ensure!(images_len % BLOCK_SIZE as u64 == 0);
             let num_blocks: u32 = (images_len / BLOCK_SIZE as u64).try_into()?;
+            ensure!(summary.image_cksums.len() == num_blocks as usize);
             ImageType::Blocky { num_blocks }
         } else {
             let _chapter = book.chapter_reader(NONBLOCKY_IMAGE_CHAPTER)?;
@@ -370,6 +400,7 @@ impl ImageLayer {
         *inner = ImageLayerInner {
             loaded: true,
             image_type,
+            image_cksums: summary.image_cksums,
         };
 
         Ok(inner)
@@ -408,6 +439,7 @@ impl ImageLayer {
             inner: Mutex::new(ImageLayerInner {
                 loaded: false,
                 image_type: ImageType::Blocky { num_blocks: 0 },
+                image_cksums: Vec::new(),
             }),
         }
     }
@@ -430,6 +462,7 @@ impl ImageLayer {
             inner: Mutex::new(ImageLayerInner {
                 loaded: false,
                 image_type: ImageType::Blocky { num_blocks: 0 },
+                image_cksums: Vec::new(),
             }),
         }
     }
