@@ -1195,20 +1195,42 @@ impl LayeredTimeline {
         }
 
         // Do we have a layer open for writing already?
-        if let Some(layer) = layers.get_open(&seg) {
-            if layer.get_start_lsn() > lsn {
+        let layer;
+        if let Some(open_layer) = layers.get_open(&seg) {
+            if open_layer.get_start_lsn() > lsn {
                 bail!("unexpected open layer in the future");
             }
-            return Ok(layer);
-        }
 
-        // No (writeable) layer for this relation yet. Create one.
+            // Open layer exists, but it is dropped, so create a new one.
+            if open_layer.is_dropped() {
+                assert!(!open_layer.is_writeable());
+                // Layer that is created after dropped one represents a new relish segment.
+                trace!(
+                    "creating layer for write for new relish segment after dropped layer {} at {}/{}",
+                    seg,
+                    self.timelineid,
+                    lsn
+                );
+
+                layer = InMemoryLayer::create(
+                    self.conf,
+                    self.timelineid,
+                    self.tenantid,
+                    seg,
+                    lsn,
+                    lsn,
+                )?;
+            } else {
+                return Ok(open_layer);
+            }
+        }
+        // No writeable layer for this relation. Create one.
         //
         // Is this a completely new relation? Or the first modification after branching?
         //
-
-        let layer;
-        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read_locked(seg, lsn, &layers)? {
+        else if let Some((prev_layer, _prev_lsn)) =
+            self.get_layer_for_read_locked(seg, lsn, &layers)?
+        {
             // Create new entry after the previous one.
             let start_lsn;
             if prev_layer.get_timeline_id() != self.timelineid {
@@ -1345,6 +1367,8 @@ impl LayeredTimeline {
                 layers.insert_open(new_open);
             }
 
+            // We temporarily insert InMemory layer into historic list here.
+            // TODO: check that all possible concurrent users of 'historic' treat it right
             layers.insert_historic(frozen.clone());
 
             // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
@@ -1360,6 +1384,7 @@ impl LayeredTimeline {
             // Finally, replace the frozen in-memory layer with the new on-disk layers
             layers.remove_historic(frozen.as_ref());
 
+            //FIXME This needs a comment.
             if let Some(last_historic) = new_historics.last() {
                 if let Some(new_open) = &maybe_new_open {
                     let maybe_old_predecessor =

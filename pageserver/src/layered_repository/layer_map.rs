@@ -76,7 +76,7 @@ impl LayerMap {
     pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
         let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
 
-        segentry.insert_open(Arc::clone(&layer));
+        segentry.update_open(Arc::clone(&layer));
 
         // Also add it to the binary heap
         let open_layer_entry = OpenLayerEntry {
@@ -97,11 +97,14 @@ impl LayerMap {
 
         // Also remove it from the SegEntry of this segment
         let mut segentry = self.segs.get_mut(&segtag).unwrap();
-        assert!(Arc::ptr_eq(
-            segentry.open.as_ref().unwrap(),
-            &oldest_entry.layer
-        ));
-        segentry.open = None;
+        if Arc::ptr_eq(segentry.open.as_ref().unwrap(), &oldest_entry.layer) {
+            segentry.open = None;
+        } else {
+            // We could have already updated segentry.open for
+            // dropped (non-writeable) layer. This is fine.
+            assert!(!oldest_entry.layer.is_writeable());
+            assert!(oldest_entry.layer.is_dropped());
+        }
 
         NUM_INMEMORY_LAYERS.dec();
     }
@@ -291,8 +294,13 @@ impl SegEntry {
         false
     }
 
-    pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
-        assert!(self.open.is_none());
+    // Set new open layer for a SegEntry.
+    // It's ok to rewrite previous open layer,
+    // but only if it is not writeable anymore.
+    pub fn update_open(&mut self, layer: Arc<InMemoryLayer>) {
+        if let Some(prev_open) = &self.open {
+            assert!(!prev_open.is_writeable());
+        }
         self.open = Some(layer);
     }
 

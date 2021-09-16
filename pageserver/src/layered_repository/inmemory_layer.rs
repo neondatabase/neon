@@ -485,8 +485,9 @@ impl InMemoryLayer {
 
         assert!(inner.drop_lsn.is_none());
         inner.drop_lsn = Some(lsn);
+        inner.writeable = false;
 
-        info!("dropped segment {} at {}", self.seg, lsn);
+        trace!("dropped segment {} at {}", self.seg, lsn);
 
         Ok(())
     }
@@ -537,11 +538,16 @@ impl InMemoryLayer {
         })
     }
 
+    pub fn is_writeable(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.writeable
+    }
+
     /// Splits `self` into two InMemoryLayers: `frozen` and `open`.
-    /// All data up to and including `cutoff_lsn` (or the drop LSN, if dropped)
+    /// All data up to and including `cutoff_lsn`
     /// is copied to `frozen`, while the remaining data is copied to `open`.
     /// After completion, self is non-writeable, but not frozen.
-    pub fn freeze(&self, cutoff_lsn: Lsn) -> Result<FreezeLayers> {
+    pub fn freeze(self: Arc<Self>, cutoff_lsn: Lsn) -> Result<FreezeLayers> {
         info!(
             "freezing in memory layer for {} on timeline {} at {}",
             self.seg, self.timelineid, cutoff_lsn
@@ -549,53 +555,50 @@ impl InMemoryLayer {
 
         self.assert_not_frozen();
 
-        let mut inner = self.inner.lock().unwrap();
+        let self_ref = self.clone();
+        let mut inner = self_ref.inner.lock().unwrap();
+        // Dropped layers don't need any special freeze actions,
+        // they are marked as non-writeable at drop and just
+        // written out to disk by checkpointer.
+        if inner.drop_lsn.is_some() {
+            assert!(!inner.writeable);
+            info!(
+                "freezing in memory layer for {} on timeline {} is dropped at {}",
+                self.seg,
+                self.timelineid,
+                inner.drop_lsn.unwrap()
+            );
+
+            // There should be no newer layer that refers this non-writeable layer,
+            // because layer that is created after dropped one represents a new rel.
+            return Ok(FreezeLayers {
+                frozen: self,
+                open: None,
+            });
+        }
         assert!(inner.writeable);
         inner.writeable = false;
 
-        // Normally, use the cutoff LSN as the end of the frozen layer.
-        // But if the relation was dropped, we know that there are no
-        // more changes coming in for it, and in particular we know that
-        // there are no changes "in flight" for the LSN anymore, so we use
-        // the drop LSN instead. The drop-LSN could be ahead of the
-        // caller-specified LSN!
-        let dropped = inner.drop_lsn.is_some();
-        let end_lsn = if dropped {
-            inner.drop_lsn.unwrap()
-        } else {
-            cutoff_lsn
-        };
-
-        // Divide all the page versions into old and new at the 'end_lsn' cutoff point.
-        let mut before_page_versions;
-        let mut before_segsizes;
-        let mut after_page_versions;
-        let mut after_segsizes;
-        if !dropped {
-            before_segsizes = BTreeMap::new();
-            after_segsizes = BTreeMap::new();
-            for (lsn, size) in inner.segsizes.iter() {
-                if *lsn > end_lsn {
-                    after_segsizes.insert(*lsn, *size);
-                } else {
-                    before_segsizes.insert(*lsn, *size);
-                }
+        // Divide all the page versions into old and new
+        // at the 'cutoff_lsn' point.
+        let mut before_segsizes = BTreeMap::new();
+        let mut after_segsizes = BTreeMap::new();
+        for (lsn, size) in inner.segsizes.iter() {
+            if *lsn > cutoff_lsn {
+                after_segsizes.insert(*lsn, *size);
+            } else {
+                before_segsizes.insert(*lsn, *size);
             }
+        }
 
-            before_page_versions = BTreeMap::new();
-            after_page_versions = BTreeMap::new();
-            for ((blknum, lsn), pv) in inner.page_versions.iter() {
-                if *lsn > end_lsn {
-                    after_page_versions.insert((*blknum, *lsn), pv.clone());
-                } else {
-                    before_page_versions.insert((*blknum, *lsn), pv.clone());
-                }
+        let mut before_page_versions = BTreeMap::new();
+        let mut after_page_versions = BTreeMap::new();
+        for ((blknum, lsn), pv) in inner.page_versions.iter() {
+            if *lsn > cutoff_lsn {
+                after_page_versions.insert((*blknum, *lsn), pv.clone());
+            } else {
+                before_page_versions.insert((*blknum, *lsn), pv.clone());
             }
-        } else {
-            before_page_versions = inner.page_versions.clone();
-            before_segsizes = inner.segsizes.clone();
-            after_segsizes = BTreeMap::new();
-            after_page_versions = BTreeMap::new();
         }
 
         let frozen = Arc::new(InMemoryLayer {
@@ -604,7 +607,7 @@ impl InMemoryLayer {
             timelineid: self.timelineid,
             seg: self.seg,
             start_lsn: self.start_lsn,
-            end_lsn: Some(end_lsn),
+            end_lsn: Some(cutoff_lsn),
             oldest_pending_lsn: self.start_lsn,
             inner: Mutex::new(InMemoryLayerInner {
                 drop_lsn: inner.drop_lsn,
@@ -615,14 +618,14 @@ impl InMemoryLayer {
             }),
         });
 
-        let open = if !dropped && (!after_segsizes.is_empty() || !after_page_versions.is_empty()) {
+        let open = if !after_segsizes.is_empty() || !after_page_versions.is_empty() {
             let mut new_open = Self::create_successor_layer(
                 self.conf,
                 frozen.clone(),
                 self.timelineid,
                 self.tenantid,
-                end_lsn,
-                end_lsn,
+                cutoff_lsn,
+                cutoff_lsn,
             )?;
 
             let new_inner = new_open.inner.get_mut().unwrap();
@@ -634,7 +637,6 @@ impl InMemoryLayer {
             None
         };
 
-        // TODO could we avoid creating the `frozen` if it contains no data
         Ok(FreezeLayers { frozen, open })
     }
 
@@ -647,11 +649,23 @@ impl InMemoryLayer {
     /// when a new relish is created with a single LSN, so that the start and
     /// end LSN are the same.)
     pub fn write_to_disk(&self, timeline: &LayeredTimeline) -> Result<Vec<Arc<dyn Layer>>> {
-        let end_lsn = self.end_lsn.expect("can only write frozen layers to disk");
+        trace!(
+            "write_to_disk {} end_lsn is {} get_end_lsn is {}",
+            self.filename().display(),
+            self.end_lsn.unwrap_or(Lsn(0)),
+            self.get_end_lsn()
+        );
 
         let inner = self.inner.lock().unwrap();
-
         let drop_lsn = inner.drop_lsn;
+
+        assert!(!inner.writeable);
+
+        let end_lsn = match drop_lsn {
+            Some(dlsn) => dlsn,
+            None => self.end_lsn.unwrap(),
+        };
+
         let predecessor = inner.predecessor.clone();
 
         let mut before_page_versions;
