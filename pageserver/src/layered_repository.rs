@@ -1228,7 +1228,7 @@ impl LayeredTimeline {
                     if let Some((oldest_layer, _oldest_generation)) = layers.peek_oldest_open() {
                         let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
                         let distance = lsn.widening_sub(oldest_pending_lsn);
-                        let excess_factor = distance / conf.checkpoint_distance - 1;
+                        let excess_factor = distance / self.conf.checkpoint_distance as i128 - 1;
                         if excess_factor > 0 {
                             // Memory layers consume two much memory because checkpointer
                             // is not able to keep up with wal receiveer and flushes inmemory layers with
