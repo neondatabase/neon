@@ -403,7 +403,7 @@ mod tests {
 
         // Create timeline to work on
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+        let tline = repo.create_empty_timeline(timelineid)?;
 
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         tline.advance_last_record_lsn(Lsn(0x20));
@@ -440,7 +440,7 @@ mod tests {
 
         // Create timeline to work on
         let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid, Lsn(0x00))?;
+        let tline = repo.create_empty_timeline(timelineid)?;
 
         //from storage_layer.rs
         const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
