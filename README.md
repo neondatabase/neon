@@ -117,6 +117,14 @@ cd test_runner
 pytest
 ```
 
+If you see a `Found interfering processes running` error, stop pageserver and postgres nodes for all branches:
+
+```sh
+./target/debug/zenith pg stop migration_check
+./target/debug/zenith pg stop main
+./target/debug/zenith stop
+```
+
 ## Documentation
 
 Now we use README files to cover design ideas and overall architecture for each module and `rustdoc` style documentation comments. See also [/docs/](/docs/) a top-level overview of all available markdown documentation.
