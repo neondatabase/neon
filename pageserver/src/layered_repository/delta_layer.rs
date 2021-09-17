@@ -69,7 +69,7 @@ use zenith_utils::lsn::Lsn;
 use super::blob::{read_blob, BlobRange};
 
 // Magic constant to identify a Zenith delta file
-static DELTA_FILE_MAGIC: u32 = 0x5A616E01;
+pub const DELTA_FILE_MAGIC: u32 = 0x5A616E01;
 
 /// Mapping from (block #, lsn) -> page/WAL record
 /// byte ranges in PAGE_VERSIONS_CHAPTER
@@ -78,6 +78,36 @@ static PAGE_VERSION_METAS_CHAPTER: u64 = 1;
 /// without PAGE_VERSION_METAS_CHAPTER
 static PAGE_VERSIONS_CHAPTER: u64 = 2;
 static REL_SIZES_CHAPTER: u64 = 3;
+
+/// Contains the [`Summary`] struct
+static SUMMARY_CHAPTER: u64 = 4;
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct Summary {
+    tenantid: ZTenantId,
+    timelineid: ZTimelineId,
+    seg: SegmentTag,
+
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+
+    dropped: bool,
+}
+
+impl From<&DeltaLayer> for Summary {
+    fn from(layer: &DeltaLayer) -> Self {
+        Self {
+            tenantid: layer.tenantid,
+            timelineid: layer.timelineid,
+            seg: layer.seg,
+
+            start_lsn: layer.start_lsn,
+            end_lsn: layer.end_lsn,
+
+            dropped: layer.dropped,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct PageVersionMeta {
@@ -298,8 +328,8 @@ impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self) -> Result<()> {
         println!(
-            "----- delta layer for tli {} seg {} {}-{} ----",
-            self.timelineid, self.seg, self.start_lsn, self.end_lsn
+            "----- delta layer for ten {} tli {} seg {} {}-{} ----",
+            self.tenantid, self.timelineid, self.seg, self.start_lsn, self.end_lsn
         );
 
         println!("--- relsizes ---");
@@ -438,6 +468,20 @@ impl DeltaLayer {
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
+        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
+        let summary = Summary {
+            tenantid,
+            timelineid,
+            seg,
+
+            start_lsn,
+            end_lsn,
+
+            dropped,
+        };
+        Summary::ser_into(&summary, &mut chapter)?;
+        let book = chapter.close()?;
+
         book.close()?;
 
         trace!("saved {}", &path.display());
@@ -478,6 +522,31 @@ impl DeltaLayer {
         }
 
         let (path, book) = self.open_book()?;
+
+        match &self.path_or_conf {
+            PathOrConf::Conf(_) => {
+                let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+                let actual_summary = Summary::des(&chapter)?;
+
+                let expected_summary = Summary::from(self);
+
+                if actual_summary != expected_summary {
+                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
+                }
+            }
+            PathOrConf::Path(path) => {
+                let actual_filename = Path::new(path.file_name().unwrap());
+                let expected_filename = self.filename();
+
+                if actual_filename != expected_filename {
+                    println!(
+                        "warning: filename does not match what is expected from in-file summary"
+                    );
+                    println!("actual: {:?}", actual_filename);
+                    println!("expected: {:?}", expected_filename);
+                }
+            }
+        }
 
         let chapter = book.read_chapter(PAGE_VERSION_METAS_CHAPTER)?;
         let page_version_metas = BTreeMap::des(&chapter)?;
@@ -524,26 +593,24 @@ impl DeltaLayer {
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
-    pub fn new_for_path(
-        path: &Path,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        filename: &DeltaFileName,
-    ) -> DeltaLayer {
-        DeltaLayer {
+    pub fn new_for_path(path: &Path, book: &Book<File>) -> Result<Self> {
+        let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+        let summary = Summary::des(&chapter)?;
+
+        Ok(DeltaLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
-            timelineid,
-            tenantid,
-            seg: filename.seg,
-            start_lsn: filename.start_lsn,
-            end_lsn: filename.end_lsn,
-            dropped: filename.dropped,
+            timelineid: summary.timelineid,
+            tenantid: summary.tenantid,
+            seg: summary.seg,
+            start_lsn: summary.start_lsn,
+            end_lsn: summary.end_lsn,
+            dropped: summary.dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
                 page_version_metas: BTreeMap::new(),
                 relsizes: BTreeMap::new(),
             }),
             predecessor: None,
-        }
+        })
     }
 }

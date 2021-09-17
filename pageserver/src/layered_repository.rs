@@ -12,6 +12,7 @@
 //!
 
 use anyhow::{anyhow, bail, Context, Result};
+use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use log::*;
@@ -25,7 +26,6 @@ use std::fs::File;
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -57,7 +57,6 @@ mod storage_layer;
 use delta_layer::DeltaLayer;
 use image_layer::ImageLayer;
 
-use filename::{DeltaFileName, ImageFileName};
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use storage_layer::{
@@ -1716,17 +1715,17 @@ impl LayeredTimeline {
 
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
-    let fname = path.file_name().unwrap().to_str().unwrap();
+    let file = File::open(path)?;
+    let book = Book::new(file)?;
 
-    let dummy_tenantid = ZTenantId::from_str("00000000000000000000000000000000")?;
-    let dummy_timelineid = ZTimelineId::from_str("00000000000000000000000000000000")?;
-
-    if let Some(deltafilename) = DeltaFileName::from_str(fname) {
-        DeltaLayer::new_for_path(path, dummy_timelineid, dummy_tenantid, &deltafilename).dump()?;
-    } else if let Some(imgfilename) = ImageFileName::from_str(fname) {
-        ImageLayer::new_for_path(path, dummy_timelineid, dummy_tenantid, &imgfilename).dump()?;
-    } else {
-        bail!("unrecognized layer file name : {}", fname);
+    match book.magic() {
+        delta_layer::DELTA_FILE_MAGIC => {
+            DeltaLayer::new_for_path(path, &book)?.dump()?;
+        }
+        image_layer::IMAGE_FILE_MAGIC => {
+            ImageLayer::new_for_path(path, &book)?.dump()?;
+        }
+        magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
     Ok(())
