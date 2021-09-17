@@ -337,7 +337,6 @@ pub enum BeMessage<'a> {
     AuthenticationCleartextPassword,
     BindComplete,
     CommandComplete(&'a [u8]),
-    ControlFile,
     CopyData(&'a [u8]),
     CopyDone,
     CopyFail,
@@ -528,11 +527,6 @@ impl<'a> BeMessage<'a> {
                     write_cstr(cmd, buf)?;
                     Ok::<_, io::Error>(())
                 })?;
-            }
-
-            BeMessage::ControlFile => {
-                // TODO pass checkpoint and xid info in this message
-                BeMessage::write(buf, &BeMessage::DataRow(&[Some(b"hello pg_control")]))?;
             }
 
             BeMessage::CopyData(data) => {

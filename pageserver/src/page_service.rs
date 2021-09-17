@@ -254,14 +254,6 @@ impl PageServerHandler {
         }
     }
 
-    fn handle_controlfile(&self, pgb: &mut PostgresBackend) -> io::Result<()> {
-        pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-            .write_message_noflush(&BeMessage::ControlFile)?
-            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-
-        Ok(())
-    }
-
     fn handle_pagerequests(
         &self,
         pgb: &mut PostgresBackend,
@@ -502,9 +494,7 @@ impl postgres_backend::Handler for PageServerHandler {
         }
         let query_string = std::str::from_utf8(&query_string)?;
 
-        if query_string.starts_with("controlfile") {
-            self.handle_controlfile(pgb)?;
-        } else if query_string.starts_with("pagestream ") {
+        if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(
