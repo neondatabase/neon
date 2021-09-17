@@ -1194,6 +1194,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bincode",
  "bookfile",
  "byteorder",
  "bytes",
@@ -1315,7 +1316,7 @@ checksum = "3831453b3449ceb48b6d9c7ad7c96d5ea673e9b470a1dc578c2ce6521230884c"
 [[package]]
 name = "postgres"
 version = "0.19.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f744467a9904ef8258605c20ac0f318efb7659db#f744467a9904ef8258605c20ac0f318efb7659db"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -1329,7 +1330,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f744467a9904ef8258605c20ac0f318efb7659db#f744467a9904ef8258605c20ac0f318efb7659db"
 dependencies = [
  "base64 0.13.0",
  "byteorder",
@@ -1347,7 +1348,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f744467a9904ef8258605c20ac0f318efb7659db#f744467a9904ef8258605c20ac0f318efb7659db"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -2161,7 +2162,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f744467a9904ef8258605c20ac0f318efb7659db#f744467a9904ef8258605c20ac0f318efb7659db"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -2341,6 +2342,7 @@ dependencies = [
  "crc32c",
  "daemonize",
  "fs2",
+ "futures",
  "hex",
  "humantime",
  "lazy_static",
@@ -2354,6 +2356,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-postgres",
  "tokio-stream",
  "walkdir",
  "workspace_hack",
