@@ -552,8 +552,6 @@ class Postgres(PgProtocol):
 
         print(f"stdout: {run_result.stdout}")
 
-        self.pg_bin.run(['pg_controldata', self.pg_data_dir_path()])
-
         return self
 
     def pg_data_dir_path(self) -> str:
