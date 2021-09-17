@@ -25,7 +25,7 @@ Pageserver consists of:
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
 ```text
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang
+libssl-dev clang pkg-config libpq-dev
 ```
 
 [Rust] 1.52 or later is also required.
