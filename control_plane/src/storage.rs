@@ -24,7 +24,7 @@ use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
-    #[error("Reqwest error")]
+    #[error("Reqwest error: {0}")]
     Transport(#[from] reqwest::Error),
 
     #[error("Error: {0}")]
