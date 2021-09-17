@@ -29,9 +29,10 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::Bytes;
 use log::*;
+use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
@@ -41,14 +42,39 @@ use std::sync::{Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
 
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
 // Magic constant to identify a Zenith segment image file
-const IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
+pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
 
 /// Contains each block in block # order
 const BLOCKY_IMAGES_CHAPTER: u64 = 1;
 const NONBLOCKY_IMAGE_CHAPTER: u64 = 2;
+
+/// Contains the [`Summary`] struct
+const SUMMARY_CHAPTER: u64 = 3;
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct Summary {
+    tenantid: ZTenantId,
+    timelineid: ZTimelineId,
+    seg: SegmentTag,
+
+    lsn: Lsn,
+}
+
+impl From<&ImageLayer> for Summary {
+    fn from(layer: &ImageLayer) -> Self {
+        Self {
+            tenantid: layer.tenantid,
+            timelineid: layer.timelineid,
+            seg: layer.seg,
+
+            lsn: layer.lsn,
+        }
+    }
+}
 
 const BLOCK_SIZE: usize = 8192;
 
@@ -208,8 +234,8 @@ impl Layer for ImageLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self) -> Result<()> {
         println!(
-            "----- image layer for tli {} seg {} at {} ----",
-            self.timelineid, self.seg, self.lsn
+            "----- image layer for ten {} tli {} seg {} at {} ----",
+            self.tenantid, self.timelineid, self.seg, self.lsn
         );
 
         let inner = self.load()?;
@@ -297,6 +323,17 @@ impl ImageLayer {
             }
         };
 
+        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
+        let summary = Summary {
+            tenantid,
+            timelineid,
+            seg,
+
+            lsn,
+        };
+        Summary::ser_into(&summary, &mut chapter)?;
+        let book = chapter.close()?;
+
         book.close()?;
 
         trace!("saved {}", &path.display());
@@ -356,6 +393,31 @@ impl ImageLayer {
         }
 
         let (path, book) = self.open_book()?;
+
+        match &self.path_or_conf {
+            PathOrConf::Conf(_) => {
+                let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+                let actual_summary = Summary::des(&chapter)?;
+
+                let expected_summary = Summary::from(self);
+
+                if actual_summary != expected_summary {
+                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
+                }
+            }
+            PathOrConf::Path(path) => {
+                let actual_filename = Path::new(path.file_name().unwrap());
+                let expected_filename = self.filename();
+
+                if actual_filename != expected_filename {
+                    println!(
+                        "warning: filename does not match what is expected from in-file summary"
+                    );
+                    println!("actual: {:?}", actual_filename);
+                    println!("expected: {:?}", expected_filename);
+                }
+            }
+        }
 
         let image_type = if self.seg.rel.is_blocky() {
             let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
@@ -418,22 +480,20 @@ impl ImageLayer {
     /// Create an ImageLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
-    pub fn new_for_path(
-        path: &Path,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        filename: &ImageFileName,
-    ) -> ImageLayer {
-        ImageLayer {
+    pub fn new_for_path(path: &Path, book: &Book<File>) -> Result<ImageLayer> {
+        let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+        let summary = Summary::des(&chapter)?;
+
+        Ok(ImageLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
-            timelineid,
-            tenantid,
-            seg: filename.seg,
-            lsn: filename.lsn,
+            timelineid: summary.timelineid,
+            tenantid: summary.tenantid,
+            seg: summary.seg,
+            lsn: summary.lsn,
             inner: Mutex::new(ImageLayerInner {
                 loaded: false,
                 image_type: ImageType::Blocky { num_blocks: 0 },
             }),
-        }
+        })
     }
 }

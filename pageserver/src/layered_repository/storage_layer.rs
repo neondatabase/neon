@@ -21,7 +21,7 @@ pub const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
 /// Each relish stored in the repository is divided into fixed-sized "segments",
 /// with 10 MB of key-space, or 1280 8k pages each.
 ///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct SegmentTag {
     pub rel: RelishTag,
     pub segno: u32,
