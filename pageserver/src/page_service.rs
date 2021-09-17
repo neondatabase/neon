@@ -313,14 +313,52 @@ impl PageServerHandler {
         Ok(())
     }
 
-    /// Helper function to wait for given lsn, or get the latest LSN if it's 0
+    /// Helper function to handle the LSN from client request.
     ///
-    /// When invalid LSN is requested, it means "don't wait, return latest version of the page"
-    /// This is necessary for bootstrap.
-    fn wait_or_get_last_lsn(timeline: &dyn Timeline, lsn: Lsn) -> Result<Lsn> {
-        if lsn == Lsn(0) {
-            Ok(timeline.get_last_record_lsn())
+    /// Each GetPage (and Exists and Nblocks) request includes information about
+    /// which version of the page is being requested. The client can request the
+    /// latest version of the page, or the version that's valid at a particular
+    /// LSN. The primary compute node will always request the latest page
+    /// version, while a standby will request a version at the LSN that it's
+    /// currently caught up to.
+    ///
+    /// In either case, if the page server hasn't received the WAL up to the
+    /// requested LSN yet, we will wait for it to arrive. The return value is
+    /// the LSN that should be used to look up the page versions.
+    fn wait_or_get_last_lsn(timeline: &dyn Timeline, lsn: Lsn, latest: bool) -> Result<Lsn> {
+        if latest {
+            // Latest page version was requested. If LSN is given, it is a hint
+            // to the page server that there have been no modifications to the
+            // page after that LSN. If we haven't received WAL up to that point,
+            // wait until it arrives.
+            let last_record_lsn = timeline.get_last_record_lsn();
+
+            // Note: this covers the special case that lsn == Lsn(0). That
+            // special case means "return the latest version whatever it is",
+            // and it's used for bootstrapping purposes, when the page server is
+            // connected directly to the compute node. That is needed because
+            // when you connect to the compute node, to receive the WAL, the
+            // walsender process will do a look up in the pg_authid catalog
+            // table for authentication. That poses a deadlock problem: the
+            // catalog table lookup will send a GetPage request, but the GetPage
+            // request will block in the page server because the recent WAL
+            // hasn't been received yet, and it cannot be received until the
+            // walsender completes the authentication and starts streaming the
+            // WAL.
+            if lsn <= last_record_lsn {
+                Ok(last_record_lsn)
+            } else {
+                timeline.wait_lsn(lsn)?;
+                // Since we waited for 'lsn' to arrive, that is now the last
+                // record LSN. (Or close enough for our purposes; the
+                // last-record LSN can advance immediately after we return
+                // anyway)
+                Ok(lsn)
+            }
         } else {
+            if lsn == Lsn(0) {
+                bail!("invalid LSN(0) in request");
+            }
             timeline.wait_lsn(lsn)?;
             Ok(lsn)
         }
@@ -332,7 +370,7 @@ impl PageServerHandler {
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn)?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
 
         let exists = timeline.get_rel_exists(tag, lsn)?;
 
@@ -347,7 +385,7 @@ impl PageServerHandler {
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn)?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
 
         let n_blocks = timeline.get_relish_size(tag, lsn)?;
 
@@ -366,7 +404,7 @@ impl PageServerHandler {
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn)?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
 
         let page = timeline.get_page_at_lsn(tag, req.blkno, lsn)?;
 
