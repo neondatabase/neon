@@ -360,6 +360,7 @@ fn find_wal_file_range(
 ///
 /// [postgres docs]: https://www.postgresql.org/docs/current/protocol-replication.html
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct IdentifySystem {
     systemid: u64,
     timeline: u32,

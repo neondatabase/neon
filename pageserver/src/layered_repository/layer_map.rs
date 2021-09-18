@@ -32,6 +32,7 @@ lazy_static! {
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
+#[derive(Default)]
 pub struct LayerMap {
     /// All the layers keyed by segment tag
     segs: HashMap<SegmentTag, SegEntry>,
@@ -44,16 +45,6 @@ pub struct LayerMap {
     /// Generation number, used to distinguish newly inserted entries in the
     /// binary heap from older entries during checkpoint.
     current_generation: u64,
-}
-
-impl Default for LayerMap {
-    fn default() -> Self {
-        LayerMap {
-            segs: HashMap::new(),
-            open_layers: BinaryHeap::new(),
-            current_generation: 0,
-        }
-    }
 }
 
 impl LayerMap {
@@ -231,18 +222,10 @@ impl LayerMap {
 /// and is kept in a separate field, because there can be only one for
 /// each segment. The older layers, stored on disk, are kept in a
 /// BTreeMap keyed by the layer's start LSN.
+#[derive(Default)]
 struct SegEntry {
     pub open: Option<Arc<InMemoryLayer>>,
     pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
-}
-
-impl Default for SegEntry {
-    fn default() -> Self {
-        SegEntry {
-            open: None,
-            historic: BTreeMap::new(),
-        }
-    }
 }
 
 impl SegEntry {
