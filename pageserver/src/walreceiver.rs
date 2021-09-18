@@ -23,8 +23,6 @@ use postgres_types::PgLsn;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;

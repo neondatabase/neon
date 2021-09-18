@@ -1163,7 +1163,6 @@ impl LayeredTimeline {
     ///
     fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
         let mut layers = self.layers.lock().unwrap();
-        let mut delayed = false;
 
         assert!(lsn.is_aligned());
 
