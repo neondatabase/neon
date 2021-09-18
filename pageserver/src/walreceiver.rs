@@ -391,4 +391,3 @@ pub fn identify_system(client: &mut Client) -> Result<IdentifySystem, Error> {
         Err(IdentifyError.into())
     }
 }
-
