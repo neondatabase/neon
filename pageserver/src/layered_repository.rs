@@ -70,9 +70,6 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
 
-const MIN_ADD_LAYER_DELAY: u64 = 1000; // milliseconds
-const MAX_ADD_LAYER_DELAY: u64 = 10000; // milliseconds
-
 // Metrics collected on operations on the storage repository.
 lazy_static! {
     static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
@@ -948,6 +945,10 @@ impl Timeline for LayeredTimeline {
 
         Ok(total_blocks * BLCKSZ as usize)
     }
+
+    fn get_disk_consistent_lsn(&self) -> Lsn {
+        self.disk_consistent_lsn.load()
+    }
 }
 
 impl LayeredTimeline {
@@ -1235,35 +1236,6 @@ impl LayeredTimeline {
                     self.timelineid,
                     lsn
                 );
-                if !delayed {
-                    if let Some((oldest_layer, _oldest_generation)) = layers.peek_oldest_open() {
-                        let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
-                        let distance = lsn.widening_sub(oldest_pending_lsn);
-                        let excess_factor = distance / self.conf.checkpoint_distance as i128 - 1;
-                        if excess_factor > 0 {
-                            // Memory layers consume two much memory because checkpointer
-                            // is not able to keep up with wal receiveer and flushes inmemory layers with
-                            // the same speed. So we have to slowdown receiver.
-                            // But we can not delay receiver too long because get_page_at_lsn may wait
-                            // for most recent WAL records with can nto be receiver because receiver is blocked.
-                            // It may cause timeout exitration in wait_lsn and so page access error.
-                            // So we increase timeout proprtionally to memory limit excess bit limit maximal value of delay.
-                            let timeout = std::cmp::min(
-                                MIN_ADD_LAYER_DELAY * (excess_factor as u64),
-                                MAX_ADD_LAYER_DELAY,
-                            );
-                            info!(
-                                "Delay wal receiver: distance={}, excess_factor={}, timeout={}",
-                                distance, excess_factor, timeout
-                            );
-                            delayed = true;
-                            drop(layers);
-                            thread::sleep(Duration::from_millis(timeout));
-                            layers = self.layers.lock().unwrap();
-                            continue;
-                        }
-                    }
-                }
                 layer = InMemoryLayer::create(
                     self.conf,
                     self.timelineid,
