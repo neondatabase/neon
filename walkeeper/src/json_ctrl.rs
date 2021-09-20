@@ -13,6 +13,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use anyhow::{anyhow, Context, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use crc32c::*;
 use log::*;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -24,8 +25,9 @@ use crate::safekeeper::{AppendRequest, AppendRequestHeader, ProposerAcceptorMess
 use crate::send_wal::SendWalHandler;
 use crate::timeline::TimelineTools;
 use pageserver::waldecoder::{decode_wal_record, WalStreamDecoder};
-use postgres_ffi::xlog_utils::{XLogFileName, MAX_SEND_SIZE};
-use postgres_ffi::{pg_constants, uint32, uint64, Oid, XLogRecord};
+use postgres_ffi::xlog_utils;
+use postgres_ffi::pg_constants;
+use postgres_ffi::{uint32, uint64, Oid, XLogRecord};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
@@ -149,36 +151,48 @@ fn encode_logical_message(prefix: String, message: String) -> Vec<u8> {
     prefix_bytes.put(prefix.as_bytes());
     prefix_bytes.put_u8(0);
 
+    let message_bytes = message.as_bytes();
+
     let logical_message = XlLogicalMessage {
         db_id: 14236, // TODO: fetch db_id from somewhere?
         transactional: 0,
         prefix_size: prefix_bytes.len() as u64,
-        message_size: message.bytes().len() as u64,
+        message_size: message_bytes.len() as u64,
     };
 
     let mainrdata = logical_message.encode();
-    let mainrdata_len: usize = mainrdata.len() + prefix_bytes.len() + message.bytes().len();
+    let mainrdata_len: usize = mainrdata.len() + prefix_bytes.len() + message_bytes.len();
     // only short mainrdata is supported for now
     assert!(mainrdata_len <= 255);
     let mainrdata_len: u8 = mainrdata_len as u8;
 
-    let header = XLogRecord {
-        xl_tot_len: (26 + mainrdata_len) as u32, // 26 == sizeof(XLogRecord) + 2
+    let mut data: Vec<u8> = Vec::new();
+    data.push(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
+    data.push(mainrdata_len);
+    data.extend_from_slice(&mainrdata);
+    data.extend_from_slice(&prefix_bytes);
+    data.extend_from_slice(&message_bytes);
+
+    let total_len = xlog_utils::XLOG_SIZE_OF_XLOG_RECORD + data.len();
+
+    let mut header = XLogRecord {
+        xl_tot_len: total_len as u32,
         xl_xid: 0,
         xl_prev: 0, // TODO: fill prev lsn?
         xl_info: 0,
         xl_rmid: 21,
         __bindgen_padding_0: [0u8; 2usize],
-        xl_crc: 0, // TODO: calc crc?
+        xl_crc: 0, // crc will be calculated later
     };
+
+    let header_bytes = header.encode();
+    let crc = crc32c_append(0, &data);
+    let crc = crc32c_append(crc, &header_bytes[0..xlog_utils::XLOG_RECORD_CRC_OFFS]);
+    header.xl_crc = crc;
 
     let mut wal: Vec<u8> = Vec::new();
     wal.extend_from_slice(&header.encode());
-    wal.push(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
-    wal.push(mainrdata_len);
-    wal.extend_from_slice(&mainrdata);
-    wal.extend_from_slice(&prefix_bytes);
-    wal.extend_from_slice(message.as_bytes());
+    wal.extend_from_slice(&data);
 
     const PADDING: usize = 8;
     let padding_rem = wal.len() % PADDING;
@@ -246,7 +260,7 @@ fn retrieve_wal_info(swh: &mut SendWalHandler) -> Result<WalInfo> {
             None => {
                 // Open a new file.
                 let segno = start_pos.segment_number(wal_seg_size);
-                let wal_file_name = XLogFileName(timeline_id, segno, wal_seg_size);
+                let wal_file_name = xlog_utils::XLogFileName(timeline_id, segno, wal_seg_size);
                 let timeline_id = swh.timeline.get().timelineid.to_string();
                 let wal_file_path = swh.conf.data_dir.join(timeline_id).join(wal_file_name);
                 ReplicationConn::open_wal_file(&wal_file_path)?
@@ -259,7 +273,7 @@ fn retrieve_wal_info(swh: &mut SendWalHandler) -> Result<WalInfo> {
         // boundary, and we don't want send more than MAX_SEND_SIZE.
         let send_size = stop_pos.checked_sub(start_pos).unwrap().0 as usize;
         let send_size = min(send_size, wal_seg_size - xlogoff);
-        let send_size = min(send_size, MAX_SEND_SIZE);
+        let send_size = min(send_size, xlog_utils::MAX_SEND_SIZE);
 
         // Read some data from the file.
         let mut file_buf = vec![0u8; send_size];
