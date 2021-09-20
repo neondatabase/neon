@@ -49,7 +49,7 @@ Fn = TypeVar('Fn', bound=Callable[..., Any])
 DEFAULT_OUTPUT_DIR = 'test_output'
 DEFAULT_POSTGRES_DIR = 'tmp_install'
 
-BASE_PORT = 55000
+BASE_PORT = 15000
 WORKER_PORT_NUM = 100
 
 def pytest_configure(config):
@@ -58,7 +58,7 @@ def pytest_configure(config):
     Check that we do not owerflow available ports range.
     """
     numprocesses = config.getoption('numprocesses')
-    if numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 65536:
+    if numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 32768: # do not use ephemeral ports
          raise Exception('Too many workers configured. Cannot distrubute ports for services.')
 
     # does not use -c as it is not supported on macOS
@@ -301,7 +301,7 @@ def worker_seq_no(worker_id: str):
 def worker_base_port(worker_seq_no: int):
     # so we divide ports in ranges of 100 ports
     # so workers have disjoint set of ports for services
-    return BASE_PORT + worker_seq_no * 100
+    return BASE_PORT + worker_seq_no * WORKER_PORT_NUM
 
 class PortDistributor:
     def __init__(self, base_port: int, port_number: int) -> None:
@@ -316,7 +316,7 @@ class PortDistributor:
 
 @zenfixture
 def port_distributor(worker_base_port):
-    return PortDistributor(base_port=worker_base_port, port_number=100)
+    return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
 @dataclass
 class PageserverPort:
