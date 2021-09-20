@@ -198,3 +198,39 @@ def test_race_conditions(zenith_cli, pageserver: ZenithPageserver, postgres: Pos
 
     stop_value.value = 1
     proc.join()
+
+# insert wal in all safekeepers and run sync on proposer
+def test_json_ctrl_sync(zenith_cli, postgres: PostgresFactory, wa_factory: WalAcceptorFactory):
+    wa_factory.start_n_new(3)
+
+    zenith_cli.run(["branch", "test_json_ctrl_sync", "empty"])
+    pg = postgres.create_start('test_json_ctrl_sync',
+                               wal_acceptors=wa_factory.get_connstrs())
+
+    tenant_id = postgres.initial_tenant
+
+    # fetch timeline_id for safekeeper connection
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SHOW zenith.zenith_timeline")
+            timeline_id = cur.fetchone()[0]
+
+    # stop postgres to modify WAL on safekeepers
+    pg.stop()
+    
+    wa_factory.instances[0].append_logical_message(tenant_id, timeline_id, {
+        'prefix': 'prefix',
+        'message': 'message',
+    })
+
+
+def test_do_not_commit(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory):
+    wa_factory.start_n_new(3)
+
+    zenith_cli.run(["branch", "test_do_not_commit", "empty"])
+    pg = postgres.create_start('test_do_not_commit',
+                               wal_acceptors=wa_factory.get_connstrs())
+
+    print(pg.connstr(dbname='postgres'))
+
+    time.sleep(5 * 60)

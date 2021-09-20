@@ -127,7 +127,7 @@ impl ReplicationConn {
     }
 
     /// Helper function for opening a wal file.
-    fn open_wal_file(wal_file_path: &Path) -> Result<File> {
+    pub fn open_wal_file(wal_file_path: &Path) -> Result<File> {
         // First try to open the .partial file.
         let mut partial_path = wal_file_path.to_owned();
         partial_path.set_extension("partial");

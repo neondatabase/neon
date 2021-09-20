@@ -28,7 +28,7 @@ const SK_PROTOCOL_VERSION: u32 = 1;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
-type Term = u64;
+pub type Term = u64;
 
 /// Unique id of proposer. Not needed for correctness, used for monitoring.
 type PgUuid = [u8; 16];
@@ -154,24 +154,24 @@ pub struct VoteResponse {
 /// announces 1) successful election (with epoch_start_lsn); 2) commit_lsn.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppendRequest {
-    h: AppendRequestHeader,
-    wal_data: Bytes,
+    pub h: AppendRequestHeader,
+    pub wal_data: Bytes,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendRequestHeader {
-    term: Term,
+    pub term: Term,
     // LSN since the proposer appends WAL; determines epoch switch point.
-    epoch_start_lsn: Lsn,
+    pub epoch_start_lsn: Lsn,
     /// start position of message in WAL
-    begin_lsn: Lsn,
+    pub begin_lsn: Lsn,
     /// end position of message in WAL
-    end_lsn: Lsn,
+    pub end_lsn: Lsn,
     /// LSN committed by quorum of safekeepers
-    commit_lsn: Lsn,
+    pub commit_lsn: Lsn,
     /// minimal LSN which may be needed by proposer to perform recovery of some safekeeper
-    truncate_lsn: Lsn,
+    pub truncate_lsn: Lsn,
     // only for logging/debugging
-    proposer_uuid: PgUuid,
+    pub proposer_uuid: PgUuid,
 }
 
 /// Report safekeeper state to proposer

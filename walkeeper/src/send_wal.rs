@@ -2,6 +2,7 @@
 //! pageserver/any other consumer.
 //!
 
+use crate::json_ctrl::handle_json_ctrl;
 use crate::receive_wal::ReceiveWalConn;
 use crate::replication::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
@@ -75,6 +76,9 @@ impl postgres_backend::Handler for SendWalHandler {
             Ok(())
         } else if query_string.starts_with(b"START_WAL_PUSH") {
             ReceiveWalConn::new(pgb)?.run(self)?;
+            Ok(())
+        } else if query_string.starts_with(b"JSON_CTRL") {
+            handle_json_ctrl(self, pgb, &query_string)?;
             Ok(())
         } else {
             bail!("Unexpected command {:?}", query_string);
