@@ -40,7 +40,9 @@ use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{register_histogram, register_int_gauge_vec, Histogram, IntGaugeVec};
+use zenith_metrics::{
+    register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
+};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
@@ -583,6 +585,15 @@ pub struct LayeredTimeline {
     // because current_logical_size is consistent on last_record_lsn, not ondisk_consistent_lsn
     // NOTE: current_logical_size also includes size of the ancestor
     current_logical_size: AtomicUsize, // bytes
+
+    // To avoid calling .with_label_values and formatting the tenant and timeline IDs to strings
+    // every time the logical size is updated, keep a direct reference to the Gauge here.
+    // unfortunately it doesnt forward atomic methods like .fetch_add
+    // so use two fields: actual size and metric
+    // see https://github.com/zenithdb/zenith/issues/622 for discussion
+    // TODO: it is possible to combine these two fields into single one using custom metric which uses SeqCst
+    // ordering for its operations, but involves private modules, and macro trickery
+    current_logical_size_gauge: IntGauge,
 }
 
 /// Public interface functions
@@ -963,6 +974,9 @@ impl LayeredTimeline {
         relish_uploader: Option<Arc<QueueBasedRelishUploader>>,
         current_logical_size: usize,
     ) -> Result<LayeredTimeline> {
+        let current_logical_size_gauge = LOGICAL_TIMELINE_SIZE
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
+            .unwrap();
         let timeline = LayeredTimeline {
             conf,
             timelineid,
@@ -982,6 +996,7 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn,
             current_logical_size: AtomicUsize::new(current_logical_size),
+            current_logical_size_gauge,
         };
         Ok(timeline)
     }
@@ -1659,9 +1674,8 @@ impl LayeredTimeline {
             diff,
             val + diff as usize,
         );
-        LOGICAL_TIMELINE_SIZE
-            .with_label_values(&[&self.tenantid.to_string(), &self.timelineid.to_string()])
-            .set(val as i64 + diff as i64)
+        self.current_logical_size_gauge
+            .set(val as i64 + diff as i64);
     }
 
     ///
@@ -1677,9 +1691,8 @@ impl LayeredTimeline {
             diff,
             val - diff as usize,
         );
-        LOGICAL_TIMELINE_SIZE
-            .with_label_values(&[&self.tenantid.to_string(), &self.timelineid.to_string()])
-            .set(val as i64 - diff as i64)
+        self.current_logical_size_gauge
+            .set(val as i64 - diff as i64);
     }
 
     /// If a layer is in the process of being replaced in [`LayerMap`], write
