@@ -22,10 +22,11 @@ class BankClient(object):
             INSERT INTO bank_accs
             SELECT *, $1 FROM generate_series(0, $2)
         ''', self.init_amount, self.n_accounts - 1)
-        await self.conn.execute('ALTER TABLE bank_accs SET (autovacuum_enabled = false)')
-
         await self.conn.execute('DROP TABLE IF EXISTS bank_log')
         await self.conn.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
+        
+        # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
+        await self.conn.execute('ALTER TABLE bank_accs SET (autovacuum_enabled = false)')
         await self.conn.execute('ALTER TABLE bank_log SET (autovacuum_enabled = false)')
 
     async def check_invariant(self):
@@ -148,3 +149,6 @@ def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres:
                                wal_acceptors=wa_factory.get_connstrs())
 
     asyncio.run(run_restarts_under_load(pg, wa_factory.instances))
+
+    # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
+    pg.stop()
