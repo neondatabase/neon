@@ -200,37 +200,33 @@ def test_race_conditions(zenith_cli, pageserver: ZenithPageserver, postgres: Pos
     proc.join()
 
 # insert wal in all safekeepers and run sync on proposer
-def test_json_ctrl_sync(zenith_cli, postgres: PostgresFactory, wa_factory: WalAcceptorFactory):
+def test_sync_safekeepers(zenith_cli, postgres: PostgresFactory, wa_factory: WalAcceptorFactory):
     wa_factory.start_n_new(3)
 
-    zenith_cli.run(["branch", "test_json_ctrl_sync", "empty"])
-    pg = postgres.create_start('test_json_ctrl_sync',
+    zenith_cli.run(["branch", "test_sync_safekeepers", "empty"])
+    pg = postgres.create('test_sync_safekeepers',
                                wal_acceptors=wa_factory.get_connstrs())
 
+    timeline_id = pg.timeline_from_config()
     tenant_id = postgres.initial_tenant
 
-    # fetch timeline_id for safekeeper connection
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SHOW zenith.zenith_timeline")
-            timeline_id = cur.fetchone()[0]
+    # run sync to init safekeepers with ProposerGreeting
+    res = pg.sync_safekeepers()
+    initial_lsn = res.stdout
+    print(f"Initial lsn = {initial_lsn}")
 
-    # stop postgres to modify WAL on safekeepers
-    pg.stop()
-    
-    wa_factory.instances[0].append_logical_message(tenant_id, timeline_id, {
-        'prefix': 'prefix',
-        'message': 'message',
-    })
+    # append and commit WAL
+    lsn_after_append = []
+    for i in range(3):
+        res = wa_factory.instances[i].append_logical_message(tenant_id, timeline_id, {
+            'lm_prefix': 'prefix',
+            'lm_message': 'message',
+            'set_commit_lsn': True
+        })
+        lsn_after_append.append(res['inserted_wal']['end_lsn'])
 
+    # run sync safekeepers
+    res = pg.sync_safekeepers()
+    lsn_after_sync = res.stdout
 
-def test_do_not_commit(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory):
-    wa_factory.start_n_new(3)
-
-    zenith_cli.run(["branch", "test_do_not_commit", "empty"])
-    pg = postgres.create_start('test_do_not_commit',
-                               wal_acceptors=wa_factory.get_connstrs())
-
-    print(pg.connstr(dbname='postgres'))
-
-    time.sleep(5 * 60)
+    assert all(lsn == lsn_after_sync for lsn in lsn_after_append)

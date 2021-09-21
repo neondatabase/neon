@@ -609,6 +609,17 @@ class Postgres(PgProtocol):
             f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
         return self
 
+    def timeline_from_config(self) -> str:
+        """ Parse timeline_id from config file """
+
+        prefix = "zenith.zenith_timeline="
+        with open(self.config_file_path(), "r") as f:
+            cfg_lines = f.readlines()
+            for line in cfg_lines:
+                if line.startswith(prefix):
+                    return line[len(prefix):].strip("'\n")
+        return None
+
     def config(self, lines: List[str]) -> 'Postgres':
         """
         Add lines to postgresql.conf.
@@ -667,6 +678,22 @@ class Postgres(PgProtocol):
         ).start()
 
         return self
+
+    def sync_safekeepers(self) -> subprocess.CompletedProcess:
+        """
+        Run 'postgres --sync-safekeepers' with config
+        from this instance.
+        Returns execution result.
+        """
+
+        pg_path = os.path.join(self.pg_bin.pg_bin_path, 'postgres')
+        command = [pg_path, '--sync-safekeepers']
+        env = {
+            'PGDATA': self.pg_data_dir_path(),
+        }
+        
+        print('Running command "{}"'.format(' '.join(command)))
+        return subprocess.run(command, env=env, check=True)
 
     def __enter__(self):
         return self

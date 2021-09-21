@@ -34,14 +34,20 @@ use zenith_utils::pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AppendLogicalMessage {
-    prefix: String,
-    message: String,
+    // prefix and message to build LogicalMessage
+    lm_prefix: String,
+    lm_message: String,
+
+    // if true, commit_lsn will match flush_lsn after append
+    set_commit_lsn: bool,
 }
 
 #[derive(Serialize, Deserialize)]
-struct JsonResponse {
+struct AppendResult {
+    // safekeeper state after append
     state: SafeKeeperState,
     wal_hex: String,
+    // info about new record in the WAL
     inserted_wal: InsertedWAL,
 }
 
@@ -63,7 +69,7 @@ pub fn handle_json_ctrl(
 
     let inserted_wal = handle_append_logical_message(swh, append_request)?;
 
-    let response = JsonResponse {
+    let response = AppendResult {
         state: swh.timeline.get().get_info(),
         wal_hex: pretty_hex_wal(swh)?,
         inserted_wal,
@@ -97,16 +103,22 @@ fn handle_append_logical_message(
     let (wal_end, _) = swh.timeline.get().get_end_of_wal();
     let sk_state = swh.timeline.get().get_info();
 
-    let wal_data = encode_logical_message(msg.prefix, msg.message);
+    let wal_data = encode_logical_message(msg.lm_prefix, msg.lm_message);
     let lsn_after_append = wal_end + wal_data.len() as u64;
+
+    let commit_lsn = if msg.set_commit_lsn {
+        lsn_after_append
+    } else {
+        sk_state.commit_lsn
+    };
 
     let append_request = ProposerAcceptorMessage::AppendRequest(AppendRequest {
         h: AppendRequestHeader {
-            term: sk_state.acceptor_state.term,
+            term: sk_state.acceptor_state.term + 1,
             epoch_start_lsn: wal_end,
             begin_lsn: wal_end,
             end_lsn: lsn_after_append,
-            commit_lsn: sk_state.commit_lsn,
+            commit_lsn: commit_lsn,
             truncate_lsn: sk_state.truncate_lsn,
             proposer_uuid: [0u8; 16],
         },
