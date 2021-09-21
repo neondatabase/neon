@@ -56,5 +56,9 @@ def global_counter() -> int:
     return _global_counter
 
 def debug_print(*args, **kwargs) -> None:
+    """ Print to the console if TEST_DEBUG_PRINT is set in env.
+    
+    All parameters are passed to print().
+    """
     if os.environ.get('TEST_DEBUG_PRINT') is not None:
         print(*args, **kwargs)
