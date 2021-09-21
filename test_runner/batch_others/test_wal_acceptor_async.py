@@ -110,11 +110,14 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
         worker = run_random_worker(stats, pg, worker_id, bank.n_accounts, max_transfer)
         workers.append(asyncio.create_task(worker))
 
-    await asyncio.sleep(1)
 
     for it in range(iterations):
         victim = acceptors[it % len(acceptors)]
         victim.stop()
+
+        # wait for transactions that could have started and finished before
+        # victim acceptor was stopped
+        await asyncio.sleep(1)
 
         stats.reset()
         await asyncio.sleep(period_time)
