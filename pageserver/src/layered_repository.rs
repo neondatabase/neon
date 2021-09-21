@@ -1175,81 +1175,71 @@ impl LayeredTimeline {
             );
         }
 
-        loop {
-            // Do we have a layer open for writing already?
-            if let Some(layer) = layers.get_open(&seg) {
-                if layer.get_start_lsn() > lsn {
-                    bail!("unexpected open layer in the future");
-                }
-                return Ok(layer);
+        // Do we have a layer open for writing already?
+        if let Some(layer) = layers.get_open(&seg) {
+            if layer.get_start_lsn() > lsn {
+                bail!("unexpected open layer in the future");
             }
-
-            // No (writeable) layer for this relation yet. Create one.
-            //
-            // Is this a completely new relation? Or the first modification after branching?
-            //
-
-            let layer;
-            if let Some((prev_layer, _prev_lsn)) =
-                self.get_layer_for_read_locked(seg, lsn, &layers)?
-            {
-                // Create new entry after the previous one.
-                let start_lsn;
-                if prev_layer.get_timeline_id() != self.timelineid {
-                    // First modification on this timeline
-                    start_lsn = self.ancestor_lsn;
-                    trace!(
-                        "creating file for write for {} at branch point {}/{}",
-                        seg,
-                        self.timelineid,
-                        start_lsn
-                    );
-                } else {
-                    start_lsn = prev_layer.get_end_lsn();
-                    trace!(
-                        "creating file for write for {} after previous layer {}/{}",
-                        seg,
-                        self.timelineid,
-                        start_lsn
-                    );
-                }
-                trace!(
-                    "prev layer is at {}/{} - {}",
-                    prev_layer.get_timeline_id(),
-                    prev_layer.get_start_lsn(),
-                    prev_layer.get_end_lsn()
-                );
-                layer = InMemoryLayer::create_successor_layer(
-                    self.conf,
-                    prev_layer,
-                    self.timelineid,
-                    self.tenantid,
-                    start_lsn,
-                    lsn,
-                )?;
-            } else {
-                // New relation.
-                trace!(
-                    "creating layer for write for new rel {} at {}/{}",
-                    seg,
-                    self.timelineid,
-                    lsn
-                );
-                layer = InMemoryLayer::create(
-                    self.conf,
-                    self.timelineid,
-                    self.tenantid,
-                    seg,
-                    lsn,
-                    lsn,
-                )?;
-            }
-
-            let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
-            layers.insert_open(Arc::clone(&layer_rc));
-
-            return Ok(layer_rc);
+            return Ok(layer);
         }
+
+        // No (writeable) layer for this relation yet. Create one.
+        //
+        // Is this a completely new relation? Or the first modification after branching?
+        //
+
+        let layer;
+        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read_locked(seg, lsn, &layers)? {
+            // Create new entry after the previous one.
+            let start_lsn;
+            if prev_layer.get_timeline_id() != self.timelineid {
+                // First modification on this timeline
+                start_lsn = self.ancestor_lsn;
+                trace!(
+                    "creating file for write for {} at branch point {}/{}",
+                    seg,
+                    self.timelineid,
+                    start_lsn
+                );
+            } else {
+                start_lsn = prev_layer.get_end_lsn();
+                trace!(
+                    "creating file for write for {} after previous layer {}/{}",
+                    seg,
+                    self.timelineid,
+                    start_lsn
+                );
+            }
+            trace!(
+                "prev layer is at {}/{} - {}",
+                prev_layer.get_timeline_id(),
+                prev_layer.get_start_lsn(),
+                prev_layer.get_end_lsn()
+            );
+            layer = InMemoryLayer::create_successor_layer(
+                self.conf,
+                prev_layer,
+                self.timelineid,
+                self.tenantid,
+                start_lsn,
+                lsn,
+            )?;
+        } else {
+            // New relation.
+            trace!(
+                "creating layer for write for new rel {} at {}/{}",
+                seg,
+                self.timelineid,
+                lsn
+            );
+            layer =
+                InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
+        }
+
+        let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
+        layers.insert_open(Arc::clone(&layer_rc));
+
+        return Ok(layer_rc);
     }
 
     ///
