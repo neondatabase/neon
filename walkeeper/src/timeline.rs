@@ -36,6 +36,12 @@ pub struct ReplicaState {
     pub hs_feedback: HotStandbyFeedback,
 }
 
+impl Default for ReplicaState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReplicaState {
     pub fn new() -> ReplicaState {
         ReplicaState {
@@ -71,15 +77,12 @@ impl SharedState {
     /// Get combined stateof all alive replicas
     pub fn get_replicas_state(&self) -> ReplicaState {
         let mut acc = ReplicaState::new();
-        for replica in &self.replicas {
-            if let Some(state) = replica {
-                acc.hs_feedback.ts = max(acc.hs_feedback.ts, state.hs_feedback.ts);
-                acc.hs_feedback.xmin = min(acc.hs_feedback.xmin, state.hs_feedback.xmin);
-                acc.hs_feedback.catalog_xmin =
-                    min(acc.hs_feedback.catalog_xmin, state.hs_feedback.catalog_xmin);
-                acc.disk_consistent_lsn =
-                    Lsn::min(acc.disk_consistent_lsn, state.disk_consistent_lsn);
-            }
+        for state in self.replicas.iter().flatten() {
+            acc.hs_feedback.ts = max(acc.hs_feedback.ts, state.hs_feedback.ts);
+            acc.hs_feedback.xmin = min(acc.hs_feedback.xmin, state.hs_feedback.xmin);
+            acc.hs_feedback.catalog_xmin =
+                min(acc.hs_feedback.catalog_xmin, state.hs_feedback.catalog_xmin);
+            acc.disk_consistent_lsn = Lsn::min(acc.disk_consistent_lsn, state.disk_consistent_lsn);
         }
         acc
     }
