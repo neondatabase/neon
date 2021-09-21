@@ -16,14 +16,14 @@ pub fn read_blob(reader: &BoundedReader<&'_ File>, range: &BlobRange) -> Result<
     Ok(buf)
 }
 
-pub struct BlobWriter {
-    writer: ChapterWriter<File>,
+pub struct BlobWriter<W> {
+    writer: ChapterWriter<W>,
     offset: u64,
 }
 
-impl BlobWriter {
+impl<W: Write> BlobWriter<W> {
     // This function takes a BookWriter and creates a new chapter to ensure offset is 0.
-    pub fn new(book_writer: BookWriter<File>, chapter_id: impl Into<ChapterId>) -> Self {
+    pub fn new(book_writer: BookWriter<W>, chapter_id: impl Into<ChapterId>) -> Self {
         let writer = book_writer.new_chapter(chapter_id);
         Self { writer, offset: 0 }
     }
@@ -39,7 +39,7 @@ impl BlobWriter {
         Ok(range)
     }
 
-    pub fn close(self) -> bookfile::Result<BookWriter<File>> {
+    pub fn close(self) -> bookfile::Result<BookWriter<W>> {
         self.writer.close()
     }
 }

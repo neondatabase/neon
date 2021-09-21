@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -425,7 +425,8 @@ impl DeltaLayer {
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
         let file = File::create(&path)?;
-        let book = BookWriter::new(file, DELTA_FILE_MAGIC)?;
+        let buf_writer = BufWriter::new(file);
+        let book = BookWriter::new(buf_writer, DELTA_FILE_MAGIC)?;
 
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
@@ -482,6 +483,7 @@ impl DeltaLayer {
         Summary::ser_into(&summary, &mut chapter)?;
         let book = chapter.close()?;
 
+        // This flushes the underlying 'buf_writer'.
         book.close()?;
 
         trace!("saved {}", &path.display());

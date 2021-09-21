@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -305,7 +305,8 @@ impl ImageLayer {
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
         let file = File::create(&path)?;
-        let book = BookWriter::new(file, IMAGE_FILE_MAGIC)?;
+        let buf_writer = BufWriter::new(file);
+        let book = BookWriter::new(buf_writer, IMAGE_FILE_MAGIC)?;
 
         let book = match &image_type {
             ImageType::Blocky { .. } => {
@@ -334,6 +335,7 @@ impl ImageLayer {
         Summary::ser_into(&summary, &mut chapter)?;
         let book = chapter.close()?;
 
+        // This flushes the underlying 'buf_writer'.
         book.close()?;
 
         trace!("saved {}", &path.display());
