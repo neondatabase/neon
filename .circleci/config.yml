@@ -201,6 +201,9 @@ jobs:
       needs_postgres_source:
         type: boolean
         default: false
+      run_in_parallel:
+        type: boolean
+        default: true
     steps:
       - attach_workspace:
           at: /tmp/zenith
@@ -229,6 +232,9 @@ jobs:
               echo "test_selection must be set"
               exit 1
             fi
+            if << parameters.run_in_parallel >>; then
+              EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
+            fi;
             # Run the tests.
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
@@ -239,7 +245,7 @@ jobs:
             # multiple tests in one file)
             # -rA prints summary in the end
             # -n4 uses four processes to run tests via pytest-xdist
-            pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short -s --verbose -n4 -rA $TEST_SELECTION $EXTRA_PARAMS
+            pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short -s --verbose -rA $TEST_SELECTION $EXTRA_PARAMS
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
@@ -351,6 +357,7 @@ workflows:
           name: benchmarks
           build_type: release
           test_selection: performance
+          run_in_parallel: false
           requires:
             - build-zenith-release
       - docker-image:
