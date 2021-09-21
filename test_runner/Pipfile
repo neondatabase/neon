@@ -10,7 +10,7 @@ typing-extensions = "*"
 pyjwt = {extras = ["crypto"], version = "*"}
 requests = "*"
 pytest-xdist = "*"
-aiopg = "*"
+asyncpg = "*"
 
 [dev-packages]
 yapf = "*"

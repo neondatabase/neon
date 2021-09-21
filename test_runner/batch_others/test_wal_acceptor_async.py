@@ -1,5 +1,5 @@
 import asyncio
-import aiopg
+import asyncpg
 import random
 
 from fixtures.zenith_fixtures import WalAcceptor, WalAcceptorFactory, ZenithPageserver, PostgresFactory, Postgres
@@ -10,55 +10,43 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 class BankClient(object):
-    def __init__(self, conn: aiopg.Connection, n_accounts, init_amount):
-        self.conn: aiopg.Connection = conn
+    def __init__(self, conn: asyncpg.Connection, n_accounts, init_amount):
+        self.conn: asyncpg.Connection = conn
         self.n_accounts = n_accounts
         self.init_amount = init_amount
 
     async def initdb(self):
-        async with self.conn.cursor() as cur:
-            await cur.execute('DROP TABLE IF EXISTS bank_accs')
-            await cur.execute('CREATE TABLE bank_accs(uid int primary key, amount int)')
-            await cur.execute(
-                '''
-                INSERT INTO bank_accs
-                SELECT *, %s FROM generate_series(0, %s)
-                ''', (
-                    self.init_amount,
-                    self.n_accounts - 1,
-                ))
+        await self.conn.execute('DROP TABLE IF EXISTS bank_accs')
+        await self.conn.execute('CREATE TABLE bank_accs(uid int primary key, amount int)')
+        await self.conn.execute('''
+            INSERT INTO bank_accs
+            SELECT *, $1 FROM generate_series(0, $2)
+        ''', self.init_amount, self.n_accounts - 1)
 
-            await cur.execute('DROP TABLE IF EXISTS bank_log')
-            await cur.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
+        await self.conn.execute('DROP TABLE IF EXISTS bank_log')
+        await self.conn.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
 
     async def check_invariant(self):
-        async with self.conn.cursor() as cur:
-            await cur.execute('SELECT sum(amount) FROM bank_accs')
-            assert await cur.fetchone() == (self.n_accounts * self.init_amount, )
+        row = await self.conn.fetchrow('SELECT sum(amount) AS sum FROM bank_accs')
+        assert row['sum'] == self.n_accounts * self.init_amount
 
-async def bank_transfer(conn: aiopg.Connection, from_uid, to_uid, amount):
+async def bank_transfer(conn: asyncpg.Connection, from_uid, to_uid, amount):
     # avoid deadlocks by sorting uids
     if from_uid > to_uid:
         from_uid, to_uid, amount = to_uid, from_uid, -amount
 
-    async with conn.cursor() as cur:
-        await cur.execute('BEGIN')
-        await cur.execute('UPDATE bank_accs SET amount = amount + (%s) WHERE uid = %s', (
-            amount,
-            to_uid,
-        ))
-        assert cur.rowcount == 1
-        await cur.execute('UPDATE bank_accs SET amount = amount - (%s) WHERE uid = %s', (
-            amount,
-            from_uid,
-        ))
-        assert cur.rowcount == 1
-        await cur.execute('INSERT INTO bank_log VALUES (%s, %s, %s)', (
-            from_uid,
-            to_uid,
-            amount,
-        ))
-        await cur.execute('COMMIT')
+    async with conn.transaction():
+        await conn.execute(
+            'UPDATE bank_accs SET amount = amount + ($1) WHERE uid = $2',
+            amount, to_uid,
+        )
+        await conn.execute(
+            'UPDATE bank_accs SET amount = amount - ($1) WHERE uid = $2',
+            amount, from_uid,
+        )
+        await conn.execute('INSERT INTO bank_log VALUES ($1, $2, $3)',
+            from_uid, to_uid, amount,
+        )
 
 class WorkerStats(object):
     def __init__(self, n_workers):
