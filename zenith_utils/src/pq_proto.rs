@@ -732,7 +732,7 @@ impl<'a> BeMessage<'a> {
             BeMessage::KeepAlive(req) => {
                 buf.put_u8(b'd');
                 write_body(buf, |buf| {
-					buf.put_u8(b'k');
+                    buf.put_u8(b'k');
                     buf.put_u64(req.sent_ptr);
                     buf.put_i64(req.timestamp);
                     buf.put_u8(if req.request_reply { 1u8 } else { 0u8 });
