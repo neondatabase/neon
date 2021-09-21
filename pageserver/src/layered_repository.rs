@@ -1239,7 +1239,7 @@ impl LayeredTimeline {
         let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
         layers.insert_open(Arc::clone(&layer_rc));
 
-        return Ok(layer_rc);
+        Ok(layer_rc)
     }
 
     ///
