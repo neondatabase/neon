@@ -22,9 +22,11 @@ class BankClient(object):
             INSERT INTO bank_accs
             SELECT *, $1 FROM generate_series(0, $2)
         ''', self.init_amount, self.n_accounts - 1)
+        await self.conn.execute('ALTER TABLE bank_accs SET (autovacuum_enabled = false)')
 
         await self.conn.execute('DROP TABLE IF EXISTS bank_log')
         await self.conn.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
+        await self.conn.execute('ALTER TABLE bank_log SET (autovacuum_enabled = false)')
 
     async def check_invariant(self):
         row = await self.conn.fetchrow('SELECT sum(amount) AS sum FROM bank_accs')
