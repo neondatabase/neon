@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 
 use crate::replication::ReplicationConn;
-use crate::safekeeper::SafeKeeperState;
+use crate::safekeeper::{SafeKeeperState, Term};
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{AppendRequest, AppendRequestHeader, ProposerAcceptorMessage};
 use crate::send_wal::SendWalHandler;
@@ -40,6 +40,12 @@ struct AppendLogicalMessage {
 
     // if true, commit_lsn will match flush_lsn after append
     set_commit_lsn: bool,
+
+    // fields from AppendRequestHeader
+    term: Term,
+    epoch_start_lsn: Lsn,
+    begin_lsn: Lsn,
+    truncate_lsn: Lsn,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,26 +106,26 @@ fn handle_append_logical_message(
     swh: &mut SendWalHandler,
     msg: AppendLogicalMessage,
 ) -> Result<InsertedWAL> {
-    let (wal_end, _) = swh.timeline.get().get_end_of_wal();
+    let wal_data = encode_logical_message(msg.lm_prefix, msg.lm_message);
     let sk_state = swh.timeline.get().get_info();
 
-    let wal_data = encode_logical_message(msg.lm_prefix, msg.lm_message);
-    let lsn_after_append = wal_end + wal_data.len() as u64;
+    let begin_lsn = msg.begin_lsn;
+    let end_lsn = begin_lsn + wal_data.len() as u64;
 
     let commit_lsn = if msg.set_commit_lsn {
-        lsn_after_append
+        end_lsn
     } else {
         sk_state.commit_lsn
     };
 
     let append_request = ProposerAcceptorMessage::AppendRequest(AppendRequest {
         h: AppendRequestHeader {
-            term: sk_state.acceptor_state.term + 1,
-            epoch_start_lsn: wal_end,
-            begin_lsn: wal_end,
-            end_lsn: lsn_after_append,
+            term: msg.term,
+            epoch_start_lsn: begin_lsn,
+            begin_lsn: begin_lsn,
+            end_lsn: end_lsn,
             commit_lsn: commit_lsn,
-            truncate_lsn: sk_state.truncate_lsn,
+            truncate_lsn: msg.truncate_lsn,
             proposer_uuid: [0u8; 16],
         },
         wal_data: Bytes::from(wal_data),
@@ -133,8 +139,8 @@ fn handle_append_logical_message(
     };
 
     Ok(InsertedWAL {
-        start_lsn: wal_end,
-        end_lsn: lsn_after_append,
+        start_lsn: begin_lsn,
+        end_lsn: end_lsn,
         append_response,
     })
 }

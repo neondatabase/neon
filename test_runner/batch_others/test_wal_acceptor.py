@@ -5,6 +5,7 @@ import time
 from contextlib import closing
 from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import WalAcceptorFactory, ZenithPageserver, PostgresFactory
+from fixtures.utils import lsn_to_hex
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -211,9 +212,13 @@ def test_sync_safekeepers(zenith_cli, postgres: PostgresFactory, wa_factory: Wal
     tenant_id = postgres.initial_tenant
 
     # run sync to init safekeepers with ProposerGreeting
-    res = pg.sync_safekeepers()
-    initial_lsn = res.stdout
-    print(f"Initial lsn = {initial_lsn}")
+    initial_lsn = pg.sync_safekeepers()
+    # should be 0/0 for empty safekeepers
+    print(f"initial lsn = {initial_lsn}")
+
+    # valid lsn, which is not in the segment start, nor in zero segment
+    epoch_start_lsn = 23826824 # 0/16B9188
+    begin_lsn = epoch_start_lsn
 
     # append and commit WAL
     lsn_after_append = []
@@ -221,12 +226,18 @@ def test_sync_safekeepers(zenith_cli, postgres: PostgresFactory, wa_factory: Wal
         res = wa_factory.instances[i].append_logical_message(tenant_id, timeline_id, {
             'lm_prefix': 'prefix',
             'lm_message': 'message',
-            'set_commit_lsn': True
+            'set_commit_lsn': True,
+            'term': 2,
+            'begin_lsn': begin_lsn,
+            'epoch_start_lsn': epoch_start_lsn, 
+            'truncate_lsn': epoch_start_lsn,
         })
-        lsn_after_append.append(res['inserted_wal']['end_lsn'])
+        lsn_hex = lsn_to_hex(res['inserted_wal']['end_lsn'])
+        lsn_after_append.append(lsn_hex)
+        print(f"safekeeper[{i}] lsn after append: {lsn_hex}")
 
     # run sync safekeepers
-    res = pg.sync_safekeepers()
-    lsn_after_sync = res.stdout
+    lsn_after_sync = pg.sync_safekeepers()
+    print(f"lsn after sync = {lsn_after_sync}")
 
-    assert all(lsn == lsn_after_sync for lsn in lsn_after_append)
+    assert all(lsn_after_sync == lsn for lsn in lsn_after_append)

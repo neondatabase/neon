@@ -683,7 +683,7 @@ class Postgres(PgProtocol):
         """
         Run 'postgres --sync-safekeepers' with config
         from this instance.
-        Returns execution result.
+        Returns execution result, which is commit_lsn after sync.
         """
 
         pg_path = os.path.join(self.pg_bin.pg_bin_path, 'postgres')
@@ -693,7 +693,9 @@ class Postgres(PgProtocol):
         }
         
         print('Running command "{}"'.format(' '.join(command)))
-        return subprocess.run(command, env=env, check=True)
+        res = subprocess.run(command, env=env, check=True, text=True, stdout=subprocess.PIPE)
+
+        return res.stdout.strip('\n ')
 
     def __enter__(self):
         return self
