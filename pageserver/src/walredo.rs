@@ -23,7 +23,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
@@ -206,7 +205,7 @@ impl WalRedoManager for PostgresRedoManager {
                     .block_on(PostgresRedoProcess::launch(self.conf, &self.tenantid))?;
                 *process_guard = Some(p);
             }
-            let process = (*process_guard).as_ref().unwrap();
+            let process = process_guard.as_mut().unwrap();
 
             self.runtime
                 .block_on(self.handle_apply_request(process, &request))
@@ -247,7 +246,7 @@ impl PostgresRedoManager {
     ///
     async fn handle_apply_request(
         &self,
-        process: &PostgresRedoProcess,
+        process: &mut PostgresRedoProcess,
         request: &WalRedoRequest,
     ) -> Result<Bytes, WalRedoError> {
         let rel = request.rel;
@@ -438,8 +437,8 @@ impl PostgresRedoManager {
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
-    stdin: RefCell<ChildStdin>,
-    stdout: RefCell<ChildStdout>,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
 }
 
 impl PostgresRedoProcess {
@@ -532,10 +531,7 @@ impl PostgresRedoProcess {
         };
         tokio::spawn(f_stderr);
 
-        Ok(PostgresRedoProcess {
-            stdin: RefCell::new(stdin),
-            stdout: RefCell::new(stdout),
-        })
+        Ok(PostgresRedoProcess { stdin, stdout })
     }
 
     //
@@ -543,13 +539,13 @@ impl PostgresRedoProcess {
     // new page image.
     //
     async fn apply_wal_records(
-        &self,
+        &mut self,
         tag: BufferTag,
         base_img: Option<Bytes>,
         records: &[WALRecord],
     ) -> Result<Bytes, std::io::Error> {
-        let mut stdin = self.stdin.borrow_mut();
-        let mut stdout = self.stdout.borrow_mut();
+        let stdin = &mut self.stdin;
+        let stdout = &mut self.stdout;
 
         // We do three things simultaneously: send the old base image and WAL records to
         // the child process's stdin, read the result from child's stdout, and forward any logging
