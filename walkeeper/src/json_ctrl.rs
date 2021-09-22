@@ -211,6 +211,11 @@ fn encode_logical_message(prefix: String, message: String) -> Vec<u8> {
 
 #[test]
 fn test_encode_logical_message() {
-    // TODO: assert_eq the result of encoding
-    encode_logical_message("".to_string(), "12345679".to_string());
+    let expected = [
+        64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 0, 0, 170, 34, 166, 227, 255, 38,
+        0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 112, 114, 101, 102,
+        105, 120, 0, 109, 101, 115, 115, 97, 103, 101,
+    ];
+    let actual = encode_logical_message("prefix".to_string(), "message".to_string());
+    assert_eq!(expected, actual[..]);
 }
