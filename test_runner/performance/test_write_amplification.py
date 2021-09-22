@@ -12,6 +12,7 @@
 # Amplification problem at its finest.
 import os
 from contextlib import closing
+from fixtures.benchmark_fixture import MetricReport
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
@@ -76,4 +77,7 @@ def test_write_amplification(zenith_simple_env: ZenithEnv, zenbenchmark):
             timeline_size = zenbenchmark.get_timeline_size(env.repo_dir,
                                                            env.initial_tenant,
                                                            timeline)
-            zenbenchmark.record('size', timeline_size / (1024 * 1024), 'MB')
+            zenbenchmark.record('size',
+                                timeline_size / (1024 * 1024),
+                                'MB',
+                                report=MetricReport.LOWER_IS_BETTER)

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+    <style>
+        table,
+        th,
+        td {
+            border: 1px solid black;
+            border-collapse: collapse;
+        }
+
+        .positive {
+            background-color: rgba(0, 255, 0, 0.8)
+        }
+
+        .negative {
+            background-color: rgba(255, 0, 0, 0.65)
+        }
+    </style>
+
+    <h2>Zenith Performance Tests</h2>
+
+    {% for suit_name, suit_data in context.items() %}
+    <h3>Runs for {{ suit_name }} </h3>
+    <b>platform:</b> {{ suit_data.platform }}<br>
+    {% for common_column_name, common_column_value in suit_data.common_columns %}
+    <b>{{ common_column_name }}</b>: {{ common_column_value }}<br>
+    {% endfor %}
+    <br>
+
+    <table>
+        <tr>
+            <th>revision</th>
+            {% for column_name in suit_data.value_columns %}
+            <th>{{ column_name }}</th>
+            {% endfor %}
+        </tr>
+        {% for row in suit_data.rows %}
+        <tr>
+            <td><a href=https://github.com/zenithdb/zenith/commit/{{ row.revision }}>{{ row.revision[:6] }}</a></td>
+            {% for column_value in row.values %}
+            <td class="{{ column_value.color }}">{{ column_value.value }}{{column_value.ratio}}</td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </table>
+    {% endfor %}
+
+</body>
+
+</html>

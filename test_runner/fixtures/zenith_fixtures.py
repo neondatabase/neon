@@ -6,6 +6,7 @@ import asyncpg
 import os
 import pathlib
 import uuid
+import warnings
 import jwt
 import json
 import psycopg2
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 from psycopg2.extensions import connection as PgConnection
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast
 from typing_extensions import Literal
+import pytest
 
 import requests
 
@@ -58,6 +60,16 @@ DEFAULT_POSTGRES_DIR = 'tmp_install'
 BASE_PORT = 15000
 WORKER_PORT_NUM = 100
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--skip-interfering-proc-check",
+        dest="skip_interfering_proc_check",
+        action="store_true",
+        help="skip check for interferring processes",
+    )
+
+
 # These are set in pytest_configure()
 base_dir = ""
 zenith_binpath = ""
@@ -65,14 +77,10 @@ pg_distrib_dir = ""
 top_output_dir = ""
 
 
-def pytest_configure(config):
-    """
-    Ensure that no unwanted daemons are running before we start testing.
-    Check that we do not owerflow available ports range.
-    """
-    numprocesses = config.getoption('numprocesses')
-    if numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 32768:  # do not use ephemeral ports
-        raise Exception('Too many workers configured. Cannot distrubute ports for services.')
+def check_interferring_processes(config):
+    if config.getoption("skip_interfering_proc_check"):
+        warnings.warn("interferring process check is skipped")
+        return
 
     # does not use -c as it is not supported on macOS
     cmd = ['pgrep', 'pageserver|postgres|safekeeper']
@@ -86,11 +94,36 @@ def pytest_configure(config):
             'Found interfering processes running. Stop all Zenith pageservers, nodes, safekeepers, as well as stand-alone Postgres.'
         )
 
+
+def pytest_configure(config):
+    """
+    Ensure that no unwanted daemons are running before we start testing.
+    Check that we do not owerflow available ports range.
+    """
+    check_interferring_processes(config)
+
+    numprocesses = config.getoption('numprocesses')
+    if numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 32768:  # do not use ephemeral ports
+        raise Exception('Too many workers configured. Cannot distrubute ports for services.')
+
     # find the base directory (currently this is the git root)
     global base_dir
     base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
     log.info(f'base_dir is {base_dir}')
 
+    # Compute the top-level directory for all tests.
+    global top_output_dir
+    env_test_output = os.environ.get('TEST_OUTPUT')
+    if env_test_output is not None:
+        top_output_dir = env_test_output
+    else:
+        top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
+    mkdir_if_needed(top_output_dir)
+
+    if os.getenv("REMOTE_ENV"):
+        # we are in remote env and do not have zenith binaries locally
+        # this is the case for benchmarks run on self-hosted runner
+        return
     # Find the zenith binaries.
     global zenith_binpath
     env_zenith_bin = os.environ.get('ZENITH_BIN')
@@ -100,7 +133,7 @@ def pytest_configure(config):
         zenith_binpath = os.path.join(base_dir, 'target/debug')
     log.info(f'zenith_binpath is {zenith_binpath}')
     if not os.path.exists(os.path.join(zenith_binpath, 'pageserver')):
-        raise Exception('zenith binaries not found at "{}"'.format(zenith_dir))
+        raise Exception('zenith binaries not found at "{}"'.format(zenith_binpath))
 
     # Find the postgres installation.
     global pg_distrib_dir
@@ -112,15 +145,6 @@ def pytest_configure(config):
     log.info(f'pg_distrib_dir is {pg_distrib_dir}')
     if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/postgres')):
         raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
-
-    # Compute the top-level directory for all tests.
-    global top_output_dir
-    env_test_output = os.environ.get('TEST_OUTPUT')
-    if env_test_output is not None:
-        top_output_dir = env_test_output
-    else:
-        top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
-    mkdir_if_needed(top_output_dir)
 
 
 def zenfixture(func: Fn) -> Fn:
