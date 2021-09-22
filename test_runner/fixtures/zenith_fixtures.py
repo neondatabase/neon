@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from functools import cached_property
+import asyncpg
 import os
 import pathlib
 import uuid
@@ -127,6 +128,21 @@ class PgProtocol:
         ))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
+        return conn
+
+    async def connect_async(self, *, dbname: str = 'postgres', username: Optional[str] = None, password: Optional[str] = None) -> asyncpg.Connection:
+        """
+        Connect to the node from async python.
+        Returns asyncpg's connection object.
+        """
+
+        conn = await asyncpg.connect(
+            host=self.host,
+            port=self.port,
+            database=dbname,
+            user=username or self.username,
+            password=password,
+        )
         return conn
 
     def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
