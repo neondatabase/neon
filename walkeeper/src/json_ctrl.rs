@@ -11,7 +11,6 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crc32c::*;
 use log::*;
 use serde::{Deserialize, Serialize};
-use serde_json;
 
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{AppendRequest, AppendRequestHeader, ProposerAcceptorMessage};
