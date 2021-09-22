@@ -9,7 +9,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 class ProposerPostgres:
-    """ Object for running safekeepers sync with walproposer """
+    """Object for running safekeepers sync with walproposer"""
     def __init__(self, pgdata_dir: str, pg_bin: PgBin, timeline_id: str, tenant_id: str):
         self.pgdata_dir: str = pgdata_dir
         self.pg_bin: PgBin = pg_bin
@@ -40,16 +40,19 @@ class ProposerPostgres:
         Returns execution result, which is commit_lsn after sync.
         """
 
-        pg_path = os.path.join(self.pg_bin.pg_bin_path, 'postgres')
-        command = [pg_path, '--sync-safekeepers']
+        pg_path = os.path.join(self.pg_bin.pg_bin_path, "postgres")
+        command = [pg_path, "--sync-safekeepers"]
         env = {
-            'PGDATA': self.pg_data_dir_path(),
+            "PGDATA": self.pg_data_dir_path(),
         }
-        
-        print('Running command "{}"'.format(' '.join(command)))
-        res = subprocess.run(command, env=env, check=True, text=True, stdout=subprocess.PIPE)
 
-        return res.stdout.strip('\n ')
+        print('Running command "{}"'.format(" ".join(command)))
+        res = subprocess.run(
+            command, env=env, check=True, text=True, stdout=subprocess.PIPE
+        )
+
+        return res.stdout.strip("\n ")
+
 
 # insert wal in all safekeepers and run sync on proposer
 def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorFactory):
@@ -59,7 +62,7 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
     tenant_id = uuid.uuid4().hex
 
     # write config for proposer
-    pgdata_dir = os.path.join(repo_dir, 'proposer_pgdata')
+    pgdata_dir = os.path.join(repo_dir, "proposer_pgdata")
     pg = ProposerPostgres(pgdata_dir, pg_bin, timeline_id, tenant_id)
     pg.create_dir_config(wa_factory.get_connstrs())
 
@@ -69,22 +72,26 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
     print(f"initial lsn = {initial_lsn}")
 
     # valid lsn, which is not in the segment start, nor in zero segment
-    epoch_start_lsn = 23826824 # 0/16B9188
+    epoch_start_lsn = 23826824  # 0/16B9188
     begin_lsn = epoch_start_lsn
 
     # append and commit WAL
     lsn_after_append = []
     for i in range(3):
-        res = wa_factory.instances[i].append_logical_message(tenant_id, timeline_id, {
-            'lm_prefix': 'prefix',
-            'lm_message': 'message',
-            'set_commit_lsn': True,
-            'term': 2,
-            'begin_lsn': begin_lsn,
-            'epoch_start_lsn': epoch_start_lsn, 
-            'truncate_lsn': epoch_start_lsn,
-        })
-        lsn_hex = lsn_to_hex(res['inserted_wal']['end_lsn'])
+        res = wa_factory.instances[i].append_logical_message(
+            tenant_id,
+            timeline_id,
+            {
+                "lm_prefix": "prefix",
+                "lm_message": "message",
+                "set_commit_lsn": True,
+                "term": 2,
+                "begin_lsn": begin_lsn,
+                "epoch_start_lsn": epoch_start_lsn,
+                "truncate_lsn": epoch_start_lsn,
+            },
+        )
+        lsn_hex = lsn_to_hex(res["inserted_wal"]["end_lsn"])
         lsn_after_append.append(lsn_hex)
         print(f"safekeeper[{i}] lsn after append: {lsn_hex}")
 
