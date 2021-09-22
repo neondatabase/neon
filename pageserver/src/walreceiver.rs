@@ -360,6 +360,9 @@ fn find_wal_file_range(
 ///
 /// [postgres docs]: https://www.postgresql.org/docs/current/protocol-replication.html
 #[derive(Debug)]
+// As of nightly 2021-09-11, fields that are only read by the type's `Debug` impl still count as
+// unused. Relevant issue: https://github.com/rust-lang/rust/issues/88900
+#[allow(dead_code)]
 pub struct IdentifySystem {
     systemid: u64,
     timeline: u32,
