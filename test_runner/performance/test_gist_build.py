@@ -1,5 +1,6 @@
 import os
 from contextlib import closing
+from fixtures.benchmark_fixture import MetricReport
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
@@ -48,10 +49,16 @@ def test_gist_buffering_build(zenith_simple_env: ZenithEnv, zenbenchmark):
                     pscur.execute(f"do_gc {env.initial_tenant} {timeline} 1000000")
 
             # Record peak memory usage
-            zenbenchmark.record("peak_mem", zenbenchmark.get_peak_mem(env.pageserver) / 1024, 'MB')
+            zenbenchmark.record("peak_mem",
+                                zenbenchmark.get_peak_mem(env.pageserver) / 1024,
+                                'MB',
+                                report=MetricReport.LOWER_IS_BETTER)
 
             # Report disk space used by the repository
             timeline_size = zenbenchmark.get_timeline_size(env.repo_dir,
                                                            env.initial_tenant,
                                                            timeline)
-            zenbenchmark.record('size', timeline_size / (1024 * 1024), 'MB')
+            zenbenchmark.record('size',
+                                timeline_size / (1024 * 1024),
+                                'MB',
+                                report=MetricReport.LOWER_IS_BETTER)

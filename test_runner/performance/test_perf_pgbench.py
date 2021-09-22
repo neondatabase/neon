@@ -1,6 +1,7 @@
-import os
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.zenith_fixtures import PgBin, ZenithEnv
+
+from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
@@ -15,7 +16,7 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 # 2. Time to run 5000 pgbench transactions
 # 3. Disk space used
 #
-def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin, zenbenchmark):
+def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: ZenithBenchmarker):
     env = zenith_simple_env
     # Create a branch for us
     env.zenith_cli(["branch", "test_pgbench_perf", "empty"])
@@ -55,4 +56,7 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin, zenbenchmark):
 
     # Report disk space used by the repository
     timeline_size = zenbenchmark.get_timeline_size(env.repo_dir, env.initial_tenant, timeline)
-    zenbenchmark.record('size', timeline_size / (1024 * 1024), 'MB')
+    zenbenchmark.record('size',
+                        timeline_size / (1024 * 1024),
+                        'MB',
+                        report=MetricReport.LOWER_IS_BETTER)

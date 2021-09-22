@@ -1,4 +1,5 @@
 import timeit
+from fixtures.benchmark_fixture import MetricReport
 import pytest
 
 from fixtures.zenith_fixtures import ZenithEnvBuilder
@@ -54,4 +55,7 @@ def test_bulk_tenant_create(
 
         pg_tenant.stop()
 
-    zenbenchmark.record('tenant_creation_time', sum(time_slices) / len(time_slices), 's')
+    zenbenchmark.record('tenant_creation_time',
+                        sum(time_slices) / len(time_slices),
+                        's',
+                        report=MetricReport.LOWER_IS_BETTER)
