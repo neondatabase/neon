@@ -295,7 +295,6 @@ fn walreceiver_main(
             let apply_lsn = PgLsn::from(0);
             let ts = SystemTime::now();
             const NO_REPLY: u8 = 0;
-            info!("Send write lsn={}", write_lsn);
             physical_stream.standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)?;
         }
     }

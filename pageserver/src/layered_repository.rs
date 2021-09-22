@@ -1232,6 +1232,7 @@ impl LayeredTimeline {
                 self.timelineid,
                 lsn
             );
+
             layer =
                 InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
         }
