@@ -15,6 +15,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
 use regex::Regex;
+use serde::{Deserialize, Deserializer};
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
@@ -24,11 +25,12 @@ use std::{io, net::TcpStream};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
 use zenith_utils::auth::{Claims, Scope};
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
 use zenith_utils::pq_proto::{
-    BeMessage, FeMessage, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
+    BeMessage, FeMessage, Oid, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
 };
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -55,24 +57,27 @@ enum PagestreamBeMessage {
     Error(PagestreamErrorResponse),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct PagestreamExistsRequest {
     latest: bool,
     lsn: Lsn,
+    #[serde(deserialize_with = "deserialize_pagestream_reltag")]
     rel: RelTag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct PagestreamNblocksRequest {
     latest: bool,
     lsn: Lsn,
+    #[serde(deserialize_with = "deserialize_pagestream_reltag")]
     rel: RelTag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct PagestreamGetPageRequest {
     latest: bool,
     lsn: Lsn,
+    #[serde(deserialize_with = "deserialize_pagestream_reltag")]
     rel: RelTag,
     blkno: u32,
 }
@@ -97,6 +102,35 @@ struct PagestreamErrorResponse {
     message: String,
 }
 
+/// Version of [`RelTag`] with reordered fields to match what pagestore_client expects
+///
+/// This type only exists inside the [`deserialize_pagestream_reltag`] function. It's a tool for
+/// deserializing `RelTag` with a different field ordering.
+#[derive(Deserialize)]
+struct PagestreamRelTag {
+    spcnode: Oid,
+    dbnode: Oid,
+    relnode: Oid,
+    forknum: u8,
+}
+
+/// Deserialize a [`RelTag`] using the field ordering that pagestore_client expects
+///
+/// The field ordering is represented by [`PagestreamRelTag`].
+fn deserialize_pagestream_reltag<'de, D>(deserializer: D) -> Result<RelTag, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    PagestreamRelTag::deserialize(deserializer)
+        // PagestreamRelTag -> RelTag
+        .map(|t| RelTag {
+            forknum: t.forknum,
+            spcnode: t.spcnode,
+            dbnode: t.dbnode,
+            relnode: t.relnode,
+        })
+}
+
 impl PagestreamFeMessage {
     fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
         // TODO these gets can fail
@@ -107,37 +141,9 @@ impl PagestreamFeMessage {
         // serialization.
         let msg_tag = body.get_u8();
         match msg_tag {
-            0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
-                },
-            })),
-            1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
-                },
-            })),
-            2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
-                },
-                blkno: body.get_u32(),
-            })),
+            0 => Ok(PagestreamFeMessage::Exists(BeSer::des(&body)?)),
+            1 => Ok(PagestreamFeMessage::Nblocks(BeSer::des(&body)?)),
+            2 => Ok(PagestreamFeMessage::GetPage(BeSer::des(&body)?)),
             _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
         }
     }
