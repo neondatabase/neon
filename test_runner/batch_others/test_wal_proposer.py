@@ -72,7 +72,7 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
     print(f"initial lsn = {initial_lsn}")
 
     # valid lsn, which is not in the segment start, nor in zero segment
-    epoch_start_lsn = 23826824  # 0/16B9188
+    epoch_start_lsn = 0x16B9188  # 0/16B9188
     begin_lsn = epoch_start_lsn
 
     # append and commit WAL
