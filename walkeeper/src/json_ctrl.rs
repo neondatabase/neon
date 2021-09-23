@@ -53,7 +53,9 @@ pub fn handle_json_ctrl(
     pgb: &mut PostgresBackend,
     cmd: &Bytes,
 ) -> Result<()> {
-    let cmd = cmd.strip_prefix(b"JSON_CTRL").ok_or_else(|| anyhow!("invalid prefix"))?;
+    let cmd = cmd
+        .strip_prefix(b"JSON_CTRL")
+        .ok_or_else(|| anyhow!("invalid prefix"))?;
     // trim zeroes in the end
     let cmd = cmd.strip_suffix(&[0u8]).unwrap_or(cmd);
 
