@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::bail;
 use bytes::Bytes;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use zenith_utils::{
     postgres_backend::{self, query_from_cstring, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
@@ -60,13 +60,13 @@ struct MgmtHandler {
 //         "Failure": "oops"
 //     }
 // }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PsqlSessionResponse {
     session_id: String,
     result: PsqlSessionResult,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum PsqlSessionResult {
     Success(DatabaseInfo),
     Failure(String),
