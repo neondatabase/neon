@@ -308,6 +308,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "const_format"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4556f63e28a78fa5e6f310cfea5647a25636def49a338ab69e33b34a3382057b"
+dependencies = [
+ "const_format_proc_macros",
+]
+
+[[package]]
+name = "const_format_proc_macros"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "552782506c398da94466b364973b563887e0ca078bf33a76d4163736165e3594"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-xid",
+]
+
+[[package]]
 name = "control_plane"
 version = "0.1.0"
 dependencies = [
@@ -1179,6 +1199,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "const_format",
  "crc32c",
  "daemonize",
  "futures",
