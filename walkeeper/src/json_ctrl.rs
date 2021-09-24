@@ -8,7 +8,7 @@
 
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, Bytes, BytesMut};
-use crc32c::*;
+use crc32c::crc32c_append;
 use log::*;
 use serde::{Deserialize, Serialize};
 
@@ -136,7 +136,7 @@ fn append_logical_message(
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct XlLogicalMessage {
     db_id: Oid,
-    transactional: uint32, // 4 bytes bool?
+    transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
     prefix_size: uint64,
     message_size: uint64,
 }
@@ -169,7 +169,7 @@ fn encode_logical_message(prefix: String, message: String) -> Vec<u8> {
     let mainrdata_len: usize = mainrdata.len() + prefix_bytes.len() + message_bytes.len();
     // only short mainrdata is supported for now
     assert!(mainrdata_len <= 255);
-    let mainrdata_len: u8 = mainrdata_len as u8;
+    let mainrdata_len = mainrdata_len as u8;
 
     let mut data: Vec<u8> = vec![pg_constants::XLR_BLOCK_ID_DATA_SHORT, mainrdata_len];
     data.extend_from_slice(&mainrdata);
@@ -197,6 +197,8 @@ fn encode_logical_message(prefix: String, message: String) -> Vec<u8> {
     wal.extend_from_slice(&header.encode());
     wal.extend_from_slice(&data);
 
+    // WAL start position must be aligned at 8 bytes,
+    // this will add padding for the next WAL record.
     const PADDING: usize = 8;
     let padding_rem = wal.len() % PADDING;
     if padding_rem != 0 {

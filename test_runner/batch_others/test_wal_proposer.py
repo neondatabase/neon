@@ -68,8 +68,9 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
 
     # run sync to init safekeepers with ProposerGreeting
     initial_lsn = pg.sync_safekeepers()
+
     # should be 0/0 for empty safekeepers
-    print(f"initial lsn = {initial_lsn}")
+    assert initial_lsn == "0/0"
 
     # valid lsn, which is not in the segment start, nor in zero segment
     epoch_start_lsn = 0x16B9188  # 0/16B9188
