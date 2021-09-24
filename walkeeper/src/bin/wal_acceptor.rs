@@ -3,6 +3,7 @@
 //
 use anyhow::Result;
 use clap::{App, Arg};
+use const_format::formatcp;
 use daemonize::Daemonize;
 use log::*;
 use std::env;
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use zenith_utils::logging;
 
+use walkeeper::defaults::DEFAULT_PG_LISTEN_ADDR;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
@@ -30,7 +32,7 @@ fn main() -> Result<()> {
                 .long("listen-pg")
                 .alias("listen") // for compatibility
                 .takes_value(true)
-                .help("listen for incoming WAL data connections on ip:port (default: 127.0.0.1:5454)"),
+                .help(formatcp!("listen for incoming WAL data connections on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
         )
         .arg(
             Arg::with_name("pageserver")
@@ -71,7 +73,7 @@ fn main() -> Result<()> {
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
-        listen_pg_addr: "localhost:5454".to_string(),
+        listen_pg_addr: DEFAULT_PG_LISTEN_ADDR.to_string(),
         ttl: None,
         recall_period: None,
         pageserver_auth_token: env::var("PAGESERVER_AUTH_TOKEN").ok(),

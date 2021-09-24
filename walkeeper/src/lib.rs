@@ -11,6 +11,13 @@ pub mod send_wal;
 pub mod timeline;
 pub mod wal_service;
 
+pub mod defaults {
+    use const_format::formatcp;
+
+    pub const DEFAULT_PG_LISTEN_PORT: u16 = 5454;
+    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
+}
+
 #[derive(Debug, Clone)]
 pub struct WalAcceptorConf {
     pub data_dir: PathBuf,

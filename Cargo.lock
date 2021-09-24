@@ -2338,6 +2338,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "clap",
+ "const_format",
  "crc32c",
  "daemonize",
  "fs2",
