@@ -7,8 +7,10 @@ use const_format::formatcp;
 use daemonize::Daemonize;
 use log::*;
 use std::env;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::thread;
+use zenith_utils::http::endpoint;
 use zenith_utils::logging;
 
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
@@ -128,6 +130,11 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     let log_filename = conf.data_dir.join("wal_acceptor.log");
     let (_scope_guard, log_file) = logging::init(log_filename, conf.daemonize)?;
 
+    let http_listener = TcpListener::bind(conf.listen_http_addr.clone()).map_err(|e| {
+        error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
+        e
+    })?;
+
     if conf.daemonize {
         info!("daemonizing...");
 
@@ -149,6 +156,16 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     }
 
     let mut threads = Vec::new();
+
+    let http_endpoint_thread = thread::Builder::new()
+        .name("http_endpoint_thread".into())
+        .spawn(move || {
+            // TODO(yeputons): maybe add auth
+            let router = endpoint::make_router();
+            endpoint::serve_thread_main(router, http_listener).unwrap();
+        })
+        .unwrap();
+    threads.push(http_endpoint_thread);
 
     if conf.ttl.is_some() {
         let s3_conf = conf.clone();
