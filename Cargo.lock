@@ -2330,6 +2330,7 @@ dependencies = [
  "regex",
  "rust-s3",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "walkdir",

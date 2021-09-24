@@ -62,3 +62,7 @@ def debug_print(*args, **kwargs) -> None:
     """
     if os.environ.get('TEST_DEBUG_PRINT') is not None:
         print(*args, **kwargs)
+
+def lsn_to_hex(num: int) -> str:
+    """ Convert lsn from int to standard hex notation. """
+    return "{:X}/{:X}".format(num >> 32, num & 0xffffffff)
