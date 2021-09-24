@@ -15,11 +15,13 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use bytes::Bytes;
 use log::*;
+use std::cmp::min;
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use zenith_utils::accum::Accum;
 use zenith_utils::lsn::Lsn;
 
 pub struct InMemoryLayer {
@@ -506,6 +508,7 @@ impl InMemoryLayer {
     ) -> Result<InMemoryLayer> {
         let seg = src.get_seg_tag();
 
+        assert!(oldest_pending_lsn.is_aligned());
         assert!(oldest_pending_lsn >= start_lsn);
 
         trace!(
@@ -588,9 +591,11 @@ impl InMemoryLayer {
         // at the 'cutoff_lsn' point.
         let mut before_segsizes = BTreeMap::new();
         let mut after_segsizes = BTreeMap::new();
+        let mut after_oldest_lsn: Accum<Lsn> = Accum(None);
         for (lsn, size) in inner.segsizes.iter() {
             if *lsn > cutoff_lsn {
                 after_segsizes.insert(*lsn, *size);
+                after_oldest_lsn.accum(min, *lsn);
             } else {
                 before_segsizes.insert(*lsn, *size);
             }
@@ -601,6 +606,7 @@ impl InMemoryLayer {
         for ((blknum, lsn), pv) in inner.page_versions.iter() {
             if *lsn > cutoff_lsn {
                 after_page_versions.insert((*blknum, *lsn), pv.clone());
+                after_oldest_lsn.accum(min, *lsn);
             } else {
                 before_page_versions.insert((*blknum, *lsn), pv.clone());
             }
@@ -630,7 +636,7 @@ impl InMemoryLayer {
                 self.timelineid,
                 self.tenantid,
                 cutoff_lsn + 1,
-                cutoff_lsn + 1,
+                after_oldest_lsn.0.unwrap(),
             )?;
 
             let new_inner = new_open.inner.get_mut().unwrap();

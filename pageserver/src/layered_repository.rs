@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
@@ -53,6 +53,7 @@ mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
+mod interval_tree;
 mod layer_map;
 mod storage_layer;
 
@@ -783,6 +784,7 @@ impl Timeline for LayeredTimeline {
                 rel
             );
         }
+        ensure!(rec.lsn.is_aligned(), "unaligned record LSN");
 
         let seg = SegmentTag::from_blknum(rel, blknum);
         let delta_size = self.perform_write_op(seg, rec.lsn, |layer| {
@@ -796,6 +798,7 @@ impl Timeline for LayeredTimeline {
         if !rel.is_blocky() {
             bail!("invalid truncation for non-blocky relish {}", rel);
         }
+        ensure!(lsn.is_aligned(), "unaligned record LSN");
 
         debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
 
@@ -886,6 +889,7 @@ impl Timeline for LayeredTimeline {
                 rel
             );
         }
+        ensure!(lsn.is_aligned(), "unaligned record LSN");
 
         let seg = SegmentTag::from_blknum(rel, blknum);
 
@@ -1382,7 +1386,7 @@ impl LayeredTimeline {
             }
 
             // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove_historic(frozen.as_ref());
+            layers.remove_historic(frozen.clone());
 
             // If we created a successor InMemoryLayer, its predecessor is
             // currently the frozen layer. We need to update the predecessor
@@ -1559,7 +1563,7 @@ impl LayeredTimeline {
                 // Check if this layer serves as a tombstone for this timeline
                 // We have to do this separately from timeline check below,
                 // because LayerMap of this timeline is already locked.
-                let mut is_tombstone = layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn);
+                let mut is_tombstone = layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn)?;
                 if is_tombstone {
                     info!(
                         "earlier layer exists at {} in {}",
@@ -1639,7 +1643,7 @@ impl LayeredTimeline {
         // while iterating it. BTreeMap::retain() would be another option)
         for doomed_layer in layers_to_remove {
             doomed_layer.delete()?;
-            layers.remove_historic(&*doomed_layer);
+            layers.remove_historic(doomed_layer.clone());
 
             match (
                 doomed_layer.is_dropped(),
