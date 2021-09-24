@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use zenith_utils::logging;
 
-use walkeeper::defaults::DEFAULT_PG_LISTEN_ADDR;
+use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
@@ -33,6 +33,12 @@ fn main() -> Result<()> {
                 .alias("listen") // for compatibility
                 .takes_value(true)
                 .help(formatcp!("listen for incoming WAL data connections on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
+        )
+        .arg(
+            Arg::with_name("listen-http")
+                .long("listen-http")
+                .takes_value(true)
+                .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
         .arg(
             Arg::with_name("pageserver")
@@ -74,6 +80,7 @@ fn main() -> Result<()> {
         no_sync: false,
         pageserver_addr: None,
         listen_pg_addr: DEFAULT_PG_LISTEN_ADDR.to_string(),
+        listen_http_addr: DEFAULT_HTTP_LISTEN_ADDR.to_string(),
         ttl: None,
         recall_period: None,
         pageserver_auth_token: env::var("PAGESERVER_AUTH_TOKEN").ok(),
@@ -96,6 +103,10 @@ fn main() -> Result<()> {
 
     if let Some(addr) = arg_matches.value_of("listen-pg") {
         conf.listen_pg_addr = addr.to_owned();
+    }
+
+    if let Some(addr) = arg_matches.value_of("listen-http") {
+        conf.listen_http_addr = addr.to_owned();
     }
 
     if let Some(addr) = arg_matches.value_of("pageserver") {

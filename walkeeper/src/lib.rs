@@ -16,6 +16,9 @@ pub mod defaults {
 
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 5454;
     pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
+
+    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
+    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +27,7 @@ pub struct WalAcceptorConf {
     pub daemonize: bool,
     pub no_sync: bool,
     pub listen_pg_addr: String,
+    pub listen_http_addr: String,
     pub pageserver_addr: Option<String>,
     // TODO (create issue) this is temporary, until protocol between PG<->SK<->PS rework
     pub pageserver_auth_token: Option<String>,
