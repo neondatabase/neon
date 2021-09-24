@@ -20,10 +20,13 @@ use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches, http, page_service, tenant_mgr, PageServerConf, RelishStorageConfig, S3Config,
-    LOG_FILE_NAME,
+    branches,
+    defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR},
+    http, page_service, tenant_mgr, PageServerConf, RelishStorageConfig, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
+
+use const_format::formatcp;
 
 /// String arguments that can be declared via CLI or config file
 #[derive(Serialize, Deserialize)]
@@ -228,14 +231,14 @@ fn main() -> Result<()> {
                 .long("listen-pg")
                 .alias("listen") // keep some compatibility
                 .takes_value(true)
-                .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"),
+                .help(formatcp!("listen for incoming page requests on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
         )
         .arg(
             Arg::with_name("listen-http")
                 .long("listen-http")
                 .alias("http_endpoint") // keep some compatibility
                 .takes_value(true)
-                .help("http endpoint address for metrics and management API calls ip:port (default: 127.0.0.1:5430)"),
+                .help(formatcp!("http endpoint address for metrics and management API calls on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
         .arg(
             Arg::with_name("daemonize")
