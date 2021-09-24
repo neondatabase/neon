@@ -235,7 +235,7 @@ fn main() -> Result<()> {
                 .long("listen-http")
                 .alias("http_endpoint") // keep some compatibility
                 .takes_value(true)
-                .help("http endpoint address for for metrics and management API calls ip:port (default: 127.0.0.1:5430)"),
+                .help("http endpoint address for metrics and management API calls ip:port (default: 127.0.0.1:5430)"),
         )
         .arg(
             Arg::with_name("daemonize")
