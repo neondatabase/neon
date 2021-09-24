@@ -111,15 +111,14 @@ pub trait Layer: Send + Sync {
     /// Identify the relish segment
     fn get_seg_tag(&self) -> SegmentTag;
 
-    /// Inclusive start bound of the LSN range that this layer hold
+    /// Inclusive start bound of the LSN range that this layer holds
     fn get_start_lsn(&self) -> Lsn;
 
-    /// 'end_lsn' meaning depends on the layer kind:
-    /// - in-memory layer is either unbounded (end_lsn = MAX_LSN) or dropped (end_lsn = drop_lsn)
-    /// - image layer represents snapshot at one LSN, so end_lsn = lsn
-    /// - delta layer has end_lsn
+    /// Exclusive end bound of the LSN range that this layer holds.
     ///
-    /// TODO Is end_lsn always exclusive for all layer kinds?
+    /// - For an open in-memory layer, this is MAX_LSN.
+    /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
+    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     fn get_end_lsn(&self) -> Lsn;
 
     /// Is the segment represented by this layer dropped by PostgreSQL?

@@ -506,6 +506,8 @@ impl InMemoryLayer {
     ) -> Result<InMemoryLayer> {
         let seg = src.get_seg_tag();
 
+        assert!(oldest_pending_lsn >= start_lsn);
+
         trace!(
             "initializing new InMemoryLayer for writing {} on timeline {} at {}",
             seg,
@@ -549,8 +551,11 @@ impl InMemoryLayer {
     /// After completion, self is non-writeable, but not frozen.
     pub fn freeze(self: Arc<Self>, cutoff_lsn: Lsn) -> Result<FreezeLayers> {
         info!(
-            "freezing in memory layer for {} on timeline {} at {}",
-            self.seg, self.timelineid, cutoff_lsn
+            "freezing in memory layer {} on timeline {} at {} (oldest {})",
+            self.filename().display(),
+            self.timelineid,
+            cutoff_lsn,
+            self.oldest_pending_lsn
         );
 
         self.assert_not_frozen();
@@ -624,8 +629,8 @@ impl InMemoryLayer {
                 frozen.clone(),
                 self.timelineid,
                 self.tenantid,
-                cutoff_lsn,
-                cutoff_lsn,
+                cutoff_lsn + 1,
+                cutoff_lsn + 1,
             )?;
 
             let new_inner = new_open.inner.get_mut().unwrap();

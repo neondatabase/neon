@@ -58,19 +58,21 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     layer_relfiles_remain = row['layer_relfiles_total'] - row['layer_relfiles_removed']
                     assert layer_relfiles_remain > 0
 
-                    # Insert a row.
+                    # Insert a row and run GC. Checkpoint should freeze the layer
+                    # so that there is only the most recent image layer left for the rel,
+                    # removing the old image and delta layer.
                     print("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 1
-                    assert row['layer_relfiles_removed'] == 1
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
+                    assert row['layer_relfiles_removed'] == 2
                     assert row['layer_relfiles_dropped'] == 0
 
                     # Insert two more rows and run GC.
-                    # This should create a new layer file with the new contents, and
-                    # remove the old one.
+                    # This should create new image and delta layer file with the new contents, and
+                    # then remove the old one image and the just-created delta layer.
                     print("Inserting two more rows and running GC")
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
@@ -78,11 +80,11 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 1
-                    assert row['layer_relfiles_removed'] == 1
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
+                    assert row['layer_relfiles_removed'] == 2
                     assert row['layer_relfiles_dropped'] == 0
 
-                    # Do it again. Should again create a new layer file and remove old one.
+                    # Do it again. Should again create two new layer files and remove old ones.
                     print("Inserting two more rows and running GC")
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
@@ -90,8 +92,8 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 1
-                    assert row['layer_relfiles_removed'] == 1
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
+                    assert row['layer_relfiles_removed'] == 2
                     assert row['layer_relfiles_dropped'] == 0
 
                     # Run GC again, with no changes in the database. Should not remove anything.

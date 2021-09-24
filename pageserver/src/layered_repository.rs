@@ -1237,7 +1237,7 @@ impl LayeredTimeline {
                 // First modification on this timeline
                 start_lsn = self.ancestor_lsn;
                 trace!(
-                    "creating file for write for {} at branch point {}/{}",
+                    "creating layer for write for {} at branch point {}/{}",
                     seg,
                     self.timelineid,
                     start_lsn
@@ -1245,7 +1245,7 @@ impl LayeredTimeline {
             } else {
                 start_lsn = prev_layer.get_end_lsn();
                 trace!(
-                    "creating file for write for {} after previous layer {}/{}",
+                    "creating layer for write for {} after previous layer {}/{}",
                     seg,
                     self.timelineid,
                     start_lsn
