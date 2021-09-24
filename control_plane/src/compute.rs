@@ -324,6 +324,7 @@ impl PostgresNode {
                  max_connections = 100\n\
                  wal_sender_timeout = 0\n\
                  wal_level = replica\n\
+				 zenith.file_cache_size = 4096\n\
                  listen_addresses = '{address}'\n\
                  port = {port}\n",
                 address = self.address.ip(),
