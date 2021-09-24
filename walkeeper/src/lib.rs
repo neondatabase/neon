@@ -16,7 +16,7 @@ pub struct WalAcceptorConf {
     pub data_dir: PathBuf,
     pub daemonize: bool,
     pub no_sync: bool,
-    pub listen_addr: String,
+    pub listen_pg_addr: String,
     pub pageserver_addr: Option<String>,
     // TODO (create issue) this is temporary, until protocol between PG<->SK<->PS rework
     pub pageserver_auth_token: Option<String>,

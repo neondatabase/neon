@@ -25,11 +25,12 @@ fn main() -> Result<()> {
                 .help("Path to the WAL acceptor data directory"),
         )
         .arg(
-            Arg::with_name("listen")
+            Arg::with_name("listen-pg")
                 .short("l")
-                .long("listen")
+                .long("listen-pg")
+                .alias("listen") // for compatibility
                 .takes_value(true)
-                .help("listen for incoming connections on ip:port (default: 127.0.0.1:5454)"),
+                .help("listen for incoming WAL data connections on ip:port (default: 127.0.0.1:5454)"),
         )
         .arg(
             Arg::with_name("pageserver")
@@ -70,7 +71,7 @@ fn main() -> Result<()> {
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
-        listen_addr: "localhost:5454".to_string(),
+        listen_pg_addr: "localhost:5454".to_string(),
         ttl: None,
         recall_period: None,
         pageserver_auth_token: env::var("PAGESERVER_AUTH_TOKEN").ok(),
@@ -91,8 +92,8 @@ fn main() -> Result<()> {
         conf.daemonize = true;
     }
 
-    if let Some(addr) = arg_matches.value_of("listen") {
-        conf.listen_addr = addr.to_owned();
+    if let Some(addr) = arg_matches.value_of("listen-pg") {
+        conf.listen_pg_addr = addr.to_owned();
     }
 
     if let Some(addr) = arg_matches.value_of("pageserver") {
