@@ -22,12 +22,13 @@ pub mod walreceiver;
 pub mod walredo;
 
 pub mod defaults {
+    use const_format::formatcp;
     use std::time::Duration;
 
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
-    pub const DEFAULT_PG_LISTEN_ADDR: &str = "127.0.0.1:64000"; // can't format! const yet...
+    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
-    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = "127.0.0.1:9898";
+    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
     // would be more appropriate. But a low value forces the code to be exercised more,
