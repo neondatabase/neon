@@ -544,8 +544,9 @@ impl PostgresRedoProcess {
         base_img: Option<Bytes>,
         records: &[WALRecord],
     ) -> Result<Bytes, std::io::Error> {
-        let stdin = &mut self.stdin;
         let stdout = &mut self.stdout;
+        // Buffer the writes to avoid a lot of small syscalls.
+        let mut stdin = tokio::io::BufWriter::new(&mut self.stdin);
 
         // We do three things simultaneously: send the old base image and WAL records to
         // the child process's stdin, read the result from child's stdout, and forward any logging
