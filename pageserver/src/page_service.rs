@@ -293,7 +293,9 @@ impl PageServerHandler {
             };
 
             let response = response.unwrap_or_else(|e| {
-                error!("error reading relation or page version: {}", e);
+                // print the all details to the log with {:#}, but for the client the
+                // error message is enough
+                error!("error reading relation or page version: {:#}", e);
                 PagestreamBeMessage::Error(PagestreamErrorResponse {
                     message: e.to_string(),
                 })
