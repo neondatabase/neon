@@ -12,5 +12,5 @@ def test_pgbench(postgres: PostgresFactory, pg_bin, zenith_cli):
 
     connstr = pg.connstr()
 
-    pg_bin.run_capture(['pgbench', '-i', '-s', '100', connstr])
-    pg_bin.run_capture(['pgbench'] + '-c 10 -T 100 -N -P 1 -M prepared'.split() + [connstr])
+    pg_bin.run_capture(['pgbench', '-i', connstr])
+    pg_bin.run_capture(['pgbench'] + '-c 10 -T 5 -P 1 -M prepared'.split() + [connstr])
