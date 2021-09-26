@@ -1,6 +1,5 @@
 import asyncio
 import asyncpg
-import pytest
 import random
 
 from fixtures.zenith_fixtures import WalAcceptor, WalAcceptorFactory, ZenithPageserver, PostgresFactory, Postgres
@@ -119,9 +118,14 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
         victim = acceptors[it % len(acceptors)]
         victim.stop()
 
-        # wait for transactions that could have started and finished before
-        # victim acceptor was stopped
-        await asyncio.sleep(1)
+        # Wait till previous victim recovers so it is ready for the next
+        # iteration by making any writing xact.
+        conn = await pg.connect_async()
+        await conn.execute(
+            'UPDATE bank_accs SET amount = amount WHERE uid = 1',
+            timeout=120
+        )
+        await conn.close()
 
         stats.reset()
         await asyncio.sleep(period_time)
@@ -140,7 +144,6 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
 
 
 # restart acceptors one by one, while executing and validating bank transactions
-@pytest.mark.skip(reason="not stable enough")
 def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
                              wa_factory: WalAcceptorFactory):
 
