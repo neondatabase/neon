@@ -1,4 +1,5 @@
 import os
+import pytest
 import subprocess
 import uuid
 
@@ -54,6 +55,7 @@ class ProposerPostgres:
         return res.stdout.strip("\n ")
 
 
+@pytest.mark.skip(reason="not stable enough")
 # insert wal in all safekeepers and run sync on proposer
 def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorFactory):
     wa_factory.start_n_new(3)

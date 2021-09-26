@@ -1,5 +1,6 @@
 import asyncio
 import asyncpg
+import pytest
 import random
 
 from fixtures.zenith_fixtures import WalAcceptor, WalAcceptorFactory, ZenithPageserver, PostgresFactory, Postgres
@@ -139,6 +140,7 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
 
 
 # restart acceptors one by one, while executing and validating bank transactions
+@pytest.mark.skip(reason="not stable enough")
 def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
                              wa_factory: WalAcceptorFactory):
 
