@@ -57,7 +57,7 @@ pub fn proxy_conn_main(
 ) -> anyhow::Result<()> {
     let mut conn = ProxyConnection {
         state,
-        cplane: CPlaneApi::new(&state.conf.cplane_address),
+        cplane: CPlaneApi::new(&state.conf.auth_endpoint),
         user: "".into(),
         database: "".into(),
         pgb: PostgresBackend::new(
@@ -80,6 +80,8 @@ pub fn proxy_conn_main(
         conn.handle_new_user()?
     };
 
+    // XXX: move that inside handle_new_user/handle_existing_user to be able to
+    // report wrong connection error.
     proxy_pass(conn.pgb, db_info)
 }
 
@@ -172,21 +174,30 @@ impl ProxyConnection {
                 .split_last()
                 .ok_or_else(|| anyhow::Error::msg("unexpected password message"))?;
 
-            if let Err(e) = self.check_auth_md5(md5_response) {
-                self.pgb
-                    .write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
-                bail!("auth failed: {}", e);
-            } else {
-                self.pgb
-                    .write_message_noflush(&BeMessage::AuthenticationOk)?;
-                self.pgb
-                    .write_message_noflush(&BeMessage::ParameterStatus)?;
-                self.pgb.write_message(&BeMessage::ReadyForQuery)?;
-            }
-        }
+            match self.cplane.authenticate_proxy_request(
+                self.user.as_str(),
+                md5_response,
+                &self.md5_salt,
+            ) {
+                Err(e) => {
+                    self.pgb
+                        .write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
 
-        // ok, we are authorized
-        self.cplane.get_database_uri(&self.user, &self.database)
+                    bail!("auth failed: {}", e);
+                }
+                Ok(conn_info) => {
+                    self.pgb
+                        .write_message_noflush(&BeMessage::AuthenticationOk)?;
+                    self.pgb
+                        .write_message_noflush(&BeMessage::ParameterStatus)?;
+                    self.pgb.write_message(&BeMessage::ReadyForQuery)?;
+
+                    return Ok(conn_info);
+                }
+            }
+        } else {
+            bail!("protocol violation");
+        }
     }
 
     fn handle_new_user(&mut self) -> anyhow::Result<DatabaseInfo> {
@@ -232,12 +243,6 @@ databases without opening the browser.
 
         Ok(dbinfo)
     }
-
-    fn check_auth_md5(&self, md5_response: &[u8]) -> anyhow::Result<()> {
-        assert!(self.is_existing_user());
-        self.cplane
-            .check_auth(self.user.as_str(), md5_response, &self.md5_salt)
-    }
 }
 
 /// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
@@ -273,7 +278,9 @@ fn proxy(
 
 /// Proxy a client connection to a postgres database
 fn proxy_pass(pgb: PostgresBackend, db_info: DatabaseInfo) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let db_stream = runtime.block_on(connect_to_db(db_info))?;
     let db_stream = db_stream.into_std()?;
     db_stream.set_nonblocking(false)?;

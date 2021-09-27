@@ -1406,6 +1406,7 @@ dependencies = [
  "hex",
  "md5",
  "rand",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",
