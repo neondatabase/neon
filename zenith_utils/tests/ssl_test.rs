@@ -43,7 +43,7 @@ fn ssl() {
         client_sock.write_u32::<BigEndian>(80877103).unwrap();
 
         let ssl_response = client_sock.read_u8().unwrap();
-        assert_eq!(b'Y', ssl_response);
+        assert_eq!(b'S', ssl_response);
 
         let mut cfg = rustls::ClientConfig::new();
         cfg.root_store.add(&CERT).unwrap();
