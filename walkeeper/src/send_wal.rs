@@ -50,9 +50,10 @@ impl postgres_backend::Handler for SendWalHandler {
     }
 
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()> {
-        // START_WAL_PUSH is the only command that initializes the timeline
+        // START_WAL_PUSH is the only command that initializes the timeline in production.
+        // There is also JSON_CTRL command, which should initialize the timeline for testing.
         if self.timeline.is_none() {
-            if query_string.starts_with(b"START_WAL_PUSH") {
+            if query_string.starts_with(b"START_WAL_PUSH") || query_string.starts_with(b"JSON_CTRL") {
                 self.timeline.set(
                     &self.conf,
                     self.tenantid.unwrap(),

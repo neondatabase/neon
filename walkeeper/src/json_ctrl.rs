@@ -13,7 +13,7 @@ use log::*;
 use serde::{Deserialize, Serialize};
 
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
-use crate::safekeeper::{AppendRequest, AppendRequestHeader, ProposerAcceptorMessage};
+use crate::safekeeper::{AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerGreeting};
 use crate::safekeeper::{SafeKeeperState, Term};
 use crate::send_wal::SendWalHandler;
 use crate::timeline::TimelineTools;
@@ -62,6 +62,9 @@ pub fn handle_json_ctrl(
     let append_request: AppendLogicalMessage = serde_json::from_slice(cmd)?;
     info!("JSON_CTRL request: {:?}", append_request);
 
+    // need to init safekeeper state before AppendRequest
+    prepare_safekeeper(swh)?;
+
     let inserted_wal = append_logical_message(swh, append_request)?;
     let response = AppendResult {
         state: swh.timeline.get().get_info(),
@@ -78,6 +81,27 @@ pub fn handle_json_ctrl(
     .write_message_noflush(&BeMessage::DataRow(&[Some(&response_data)]))?
     .write_message(&BeMessage::CommandComplete(b"JSON_CTRL"))?;
     Ok(())
+}
+
+/// Prepare safekeeper to process append requests without crashes,
+/// by sending ProposerGreeting with default server.wal_seg_size.
+fn prepare_safekeeper(swh: &mut SendWalHandler) -> Result<()> {
+    let greeting_request = ProposerAcceptorMessage::Greeting(ProposerGreeting {
+        protocol_version: 1, // current protocol
+        pg_version: 0, // unknown
+        proposer_id: [0u8; 16],
+        system_id: 0,
+        ztli: swh.timelineid.unwrap(),
+        tenant_id: swh.tenantid.unwrap(),
+        tli: 0,
+        wal_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
+    });
+
+    let response = swh.timeline.get().process_msg(&greeting_request)?;
+    match response {
+        AcceptorProposerMessage::Greeting(_) => Ok(()),
+        _ => return Err(anyhow!("not GreetingResponse")),
+    }
 }
 
 #[derive(Serialize, Deserialize)]

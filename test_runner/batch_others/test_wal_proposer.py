@@ -55,7 +55,6 @@ class ProposerPostgres:
         return res.stdout.strip("\n ")
 
 
-@pytest.mark.skip(reason="not stable enough")
 # insert wal in all safekeepers and run sync on proposer
 def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorFactory):
     wa_factory.start_n_new(3)
@@ -67,12 +66,6 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
     pgdata_dir = os.path.join(repo_dir, "proposer_pgdata")
     pg = ProposerPostgres(pgdata_dir, pg_bin, timeline_id, tenant_id)
     pg.create_dir_config(wa_factory.get_connstrs())
-
-    # run sync to init safekeepers with ProposerGreeting
-    initial_lsn = pg.sync_safekeepers()
-
-    # should be 0/0 for empty safekeepers
-    assert initial_lsn == "0/0"
 
     # valid lsn, which is not in the segment start, nor in zero segment
     epoch_start_lsn = 0x16B9188  # 0/16B9188
