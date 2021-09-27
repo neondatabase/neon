@@ -13,7 +13,9 @@ use log::*;
 use serde::{Deserialize, Serialize};
 
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
-use crate::safekeeper::{AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerGreeting};
+use crate::safekeeper::{
+    AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerGreeting,
+};
 use crate::safekeeper::{SafeKeeperState, Term};
 use crate::send_wal::SendWalHandler;
 use crate::timeline::TimelineTools;
@@ -88,7 +90,7 @@ pub fn handle_json_ctrl(
 fn prepare_safekeeper(swh: &mut SendWalHandler) -> Result<()> {
     let greeting_request = ProposerAcceptorMessage::Greeting(ProposerGreeting {
         protocol_version: 1, // current protocol
-        pg_version: 0, // unknown
+        pg_version: 0,       // unknown
         proposer_id: [0u8; 16],
         system_id: 0,
         ztli: swh.timelineid.unwrap(),
