@@ -652,7 +652,7 @@ impl<'a> BeMessage<'a> {
             }
 
             BeMessage::EncryptionResponse(should_negotiate) => {
-                let response = if *should_negotiate { b'Y' } else { b'N' };
+                let response = if *should_negotiate { b'S' } else { b'N' };
                 buf.put_u8(response);
             }
 
