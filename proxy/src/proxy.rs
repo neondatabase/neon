@@ -192,7 +192,7 @@ impl ProxyConnection {
                         .write_message_noflush(&BeMessage::ParameterStatus)?;
                     self.pgb.write_message(&BeMessage::ReadyForQuery)?;
 
-                    return Ok(conn_info);
+                    Ok(conn_info)
                 }
             }
         } else {

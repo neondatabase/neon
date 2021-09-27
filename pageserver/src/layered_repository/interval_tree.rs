@@ -133,11 +133,7 @@ where
                 found_start_point = true;
                 // It is an error to insert the same item to the tree twice.
                 assert!(
-                    point
-                        .elements
-                        .iter()
-                        .find(|x| Arc::ptr_eq(x, &item))
-                        .is_none(),
+                    !point.elements.iter().any(|x| Arc::ptr_eq(x, &item)),
                     "interval is already in the tree"
                 );
             }
@@ -180,7 +176,7 @@ where
                 found_start_point = true;
             }
             let len_before = point.elements.len();
-            point.elements.retain(|other| !Arc::ptr_eq(other, &item));
+            point.elements.retain(|other| !Arc::ptr_eq(other, item));
             let len_after = point.elements.len();
             assert_eq!(len_after + 1, len_before);
             if len_after == 0 {
