@@ -1,6 +1,4 @@
 use anyhow::{bail, Result};
-use hex;
-use reqwest;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
