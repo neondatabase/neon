@@ -83,7 +83,7 @@ impl<'pg> ReceiveWalConn<'pg> {
             _ => bail!("unexpected message {:?} instead of greeting", msg),
         }
 
-        // if requested, ask pageserver to fetch wal from us
+        // If requested, start sending the WAL to the page server
         // xxx: this place seems not really fitting
         if let Some(ps_addr) = swh.conf.pageserver_addr.clone() {
             let timeline = swh.timeline.get().clone();
@@ -94,14 +94,20 @@ impl<'pg> ReceiveWalConn<'pg> {
                 timeline,
                 tenant_id,
                 wal_seg_size as usize,
-            )
-            .context("failed to start push replication to page server")?;
+            );
         }
 
         loop {
-            let reply = swh.timeline.get().process_msg(&msg)?;
-            self.write_msg(&reply)?;
-            msg = self.read_msg()?;
+            let reply = swh
+                .timeline
+                .get()
+                .process_msg(&msg)
+                .context("failed to process proposer message")?;
+            self.write_msg(&reply)
+                .context("failed to send response message")?;
+            msg = self
+                .read_msg()
+                .context("failed to receive proposer message")?;
         }
     }
 }

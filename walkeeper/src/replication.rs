@@ -7,7 +7,7 @@ use crate::WalAcceptorConf;
 use anyhow::{anyhow, Context, Result};
 use bincode::Options;
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{SinkExt, StreamExt};
+use futures::{pin_mut, SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use log::*;
 use postgres_ffi::xlog_utils::{
@@ -17,6 +17,7 @@ use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::HashSet;
+use std::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -25,7 +26,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use std::{str, thread};
 use tokio::runtime;
-use tokio_postgres::{CopyBothSink, CopyBothStream, NoTls};
+use tokio_postgres::{CopyBothDuplex, CopyBothSink, CopyBothStream, NoTls};
 use zenith_utils::bin_ser::{be_coder, BeSer};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
@@ -72,9 +73,9 @@ struct StandardReplicationReciever(ReadStream);
 
 /// Network connection running the postgres replication protocol in the opposite direction to
 /// usual
-pub struct PushReplicationConn {
+pub struct PushReplicationConn<'a> {
     // Cached runtime to execute on
-    rt: tokio::runtime::Runtime,
+    rt: &'a tokio::runtime::Runtime,
     send_sink: CopyBothSink<Bytes>,
 }
 
@@ -127,20 +128,37 @@ impl ReplicationReceiver for StandardReplicationReciever {
     }
 }
 
-impl ReplicationSender for PushReplicationConn {
+/// Wrapper error so we can check if an error came from `PushReplicationConn::send_xlogdata` with
+/// `anyhow::Error::is`
+///
+/// This technically messes up the original source of the error, but currently nothing is relying
+/// on that.
+#[derive(Debug)]
+struct PushReplicationSendError(anyhow::Error);
+
+impl Display for PushReplicationSendError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        <anyhow::Error as Display>::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PushReplicationSendError {}
+
+impl ReplicationSender for PushReplicationConn<'_> {
     fn send_xlogdata(&mut self, data: XLogDataBody<&[u8]>) -> Result<()> {
         let mut buf = BytesMut::new();
         buf.put_u8(XLOG_DATA_TAG_BYTE);
 
         let mut w = buf.writer();
-        // Serialization is taken
+        // Switch to BeSer::ser once #655 lands.
         be_coder()
             .serialize_into(&mut w, &data)
             .context("failed to serialize XLogData")
             .unwrap();
 
         self.rt
-            .block_on(self.send_sink.send(w.into_inner().freeze()))?;
+            .block_on(self.send_sink.send(w.into_inner().freeze()))
+            .map_err(|e| PushReplicationSendError(e.into()))?;
         Ok(())
     }
 }
@@ -385,7 +403,7 @@ lazy_static! {
     static ref ACTIVE_PUSH_CONNS: Mutex<HashSet<ZTimelineId>> = Mutex::new(HashSet::new());
 }
 
-impl PushReplicationConn {
+impl PushReplicationConn<'_> {
     /// Starts a push connection to the pageserver in another thread. Returns `Err(())` if
     /// we already have one running to the pageserver with the given timeline
     ///
@@ -400,7 +418,7 @@ impl PushReplicationConn {
         timeline: Arc<Timeline>,
         tenantid: ZTenantId,
         wal_seg_size: usize,
-    ) -> Result<()> {
+    ) {
         debug_assert_eq!(Some(&ps_addr), conf.pageserver_addr.as_ref());
 
         // If we already have an active connection to the pageserver on that timeline,
@@ -414,7 +432,7 @@ impl PushReplicationConn {
                 "already connected to page server at {} on timeline {} for tenant {}",
                 ps_addr, timeline.timelineid, tenantid,
             );
-            return Ok(());
+            return;
         }
 
         info!(
@@ -422,39 +440,93 @@ impl PushReplicationConn {
             ps_addr, timeline.timelineid, tenantid,
         );
 
-        Self::start_new_connection(ps_addr, conf, timeline, tenantid, wal_seg_size)
+        // We're going to be creating a new runtime on each new connection, but the primary thread
+        // can keep a stable one. Building it now means that we can fail quickly if there's some
+        // fundamental problem -- like if the io driver isn't enabled.
+        let rt = Self::make_rt();
+        thread::spawn(move || {
+            Self::run_connection_retry_loop(rt, ps_addr, conf, timeline, tenantid, wal_seg_size)
+        });
+    }
+
+    // Helper function to make a tokio runtime
+    fn make_rt() -> tokio::runtime::Runtime {
+        runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("failed to build tokio current-thread runtime")
     }
 
     /// Starts a fresh connection to the page server, without checking or updating
     /// `ACTIVE_PUSH_CONNS`
-    ///
-    /// We get the connection off the ground before returning, just to make sure that
-    /// everything is ok and we're starting somewhere reasonable.
-    fn start_new_connection(
+    fn run_connection_retry_loop(
+        rt: runtime::Runtime,
         ps_addr: String,
         conf: WalAcceptorConf,
         timeline: Arc<Timeline>,
         tenantid: ZTenantId,
         wal_seg_size: usize,
-    ) -> Result<()> {
-        let rt = runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()
-            .expect("failed to build tokio current-thread runtime");
-
+    ) {
         // Connect to the page server:
         let ps_connstr = format!(
             "postgresql://no_user:{}@{}/no_db",
-            conf.pageserver_auth_token
-                .as_ref()
-                .unwrap_or(&String::new()),
+            conf.pageserver_auth_token.as_deref().unwrap_or(""),
             ps_addr,
         );
 
-        let (client, _connection) = rt
-            .block_on(tokio_postgres::connect(&ps_connstr, NoTls))
-            .with_context(|| format!("Failed to connect to pageserver {}", ps_connstr))?;
+        let mut connected_at_least_once = false;
+        loop {
+            let connection_result = rt.block_on(tokio_postgres::connect(&ps_connstr, NoTls));
 
+            let (client, _connection) = match connection_result {
+                Ok(tuple) => tuple,
+                Err(e) => {
+                    error!(
+                        "WAL push: failed to {} to pageserver for tenant {}: {:#} (connstr = {})",
+                        match connected_at_least_once {
+                            true => "reconnect",
+                            false => "connect",
+                        },
+                        tenantid,
+                        e,
+                        ps_connstr,
+                    );
+
+                    if let Some(p) = conf.recall_period {
+                        thread::sleep(p);
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+            };
+
+            connected_at_least_once = true;
+
+            match Self::run_walsender(&rt, client, &conf, &timeline, tenantid, wal_seg_size) {
+                Ok(()) => break,
+                Err(e) => {
+                    error!("WAL push: {:#}", e);
+                    if let Some(p) = conf.recall_period {
+                        thread::sleep(p);
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Does the replication logic, using an existing postgres client
+    fn run_walsender(
+        rt: &tokio::runtime::Runtime,
+        client: tokio_postgres::Client,
+        conf: &WalAcceptorConf,
+        timeline: &Arc<Timeline>,
+        tenantid: ZTenantId,
+        wal_seg_size: usize,
+    ) -> Result<()> {
         let (end_of_wal, tli) = timeline.get_end_of_wal();
 
         let query_str = format!(
@@ -470,7 +542,9 @@ impl PushReplicationConn {
         let start_pos = {
             let msg: Bytes = rt
                 .block_on(recv_stream.next())
+                // Option<Result<T>> -> Result<T>
                 .ok_or_else(|| anyhow!("failed to get replication start position"))?
+                // Result<T> -> T
                 .context("failed to get replication start position")?;
 
             deserialize_tagged::<Lsn>(&msg, START_LSN_TAG_BYTE)
@@ -480,29 +554,52 @@ impl PushReplicationConn {
         // Once everything's started up correctly, properly run the connection:
         let mut sender = PushReplicationConn { rt, send_sink };
         let mut receiver = PushReplicationReceiver {
-            rt: runtime::Builder::new_current_thread()
-                .enable_io()
-                .build()
-                .expect("failed to build tokio current-thread runtime"),
+            rt: Self::make_rt(),
             recv_stream,
         };
 
         let bg_timeline = timeline.clone();
-        thread::spawn(move || do_receive_loop(&mut receiver, bg_timeline));
-
-        thread::spawn(move || {
-            do_send_loop(
-                &mut sender,
-                &conf,
-                start_pos,
-                stop_pos,
-                tli,
-                &timeline,
-                wal_seg_size,
-            )
+        let bg_handle = thread::spawn(move || {
+            if let Err(e) = do_receive_loop(&mut receiver, bg_timeline) {
+                error!("WAL push background thread failed: {:#}", e);
+            }
+            receiver
         });
 
-        Ok(())
+        let mut res = do_send_loop(
+            &mut sender,
+            conf,
+            start_pos,
+            stop_pos,
+            tli,
+            timeline,
+            wal_seg_size,
+        );
+
+        debug!("WAL push: joining on background thread");
+        if let Ok(recv) = bg_handle.join() {
+            debug!("WAL push: joined background thread, finishing connection");
+
+            let duplex = CopyBothDuplex::join(sender.send_sink, recv.recv_stream);
+            pin_mut!(duplex);
+            let join_res = sender
+                .rt
+                .block_on(duplex.finish())
+                .context("failed to shutdown pageserver connection");
+
+            match (res, join_res) {
+                (Err(e), Ok(_)) | (Ok(()), Err(e)) => res = Err(e),
+                (Ok(()), Ok(_)) => res = Ok(()),
+
+                // If there's multiple errors, join them:
+                (Err(fg), Err(bg)) => {
+                    // Write bg first because fg errors can be long
+                    res = Err(anyhow!("multiple errors: '{:#}' and '{:#}'", bg, fg));
+                }
+            }
+        }
+
+        res
     }
 }
 
