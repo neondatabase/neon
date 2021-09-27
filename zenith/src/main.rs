@@ -88,7 +88,12 @@ fn main() -> Result<()> {
         )
         .subcommand(SubCommand::with_name("status"))
         .subcommand(SubCommand::with_name("start").about("Start local pageserver"))
-        .subcommand(SubCommand::with_name("stop").about("Stop local pageserver"))
+        .subcommand(SubCommand::with_name("stop").about("Stop local pageserver")
+                    .arg(Arg::with_name("immediate")
+                    .help("Don't flush repository data at shutdown")
+                    .required(false)
+                    )
+        )
         .subcommand(SubCommand::with_name("restart").about("Restart local pageserver"))
         .subcommand(
             SubCommand::with_name("pg")
@@ -196,10 +201,12 @@ fn main() -> Result<()> {
             }
         }
 
-        ("stop", Some(_sub_m)) => {
+        ("stop", Some(stop_match)) => {
             let pageserver = PageServerNode::from_env(&env);
 
-            if let Err(e) = pageserver.stop() {
+            let immediate = stop_match.is_present("immediate");
+
+            if let Err(e) = pageserver.stop(immediate) {
                 eprintln!("pageserver stop failed: {}", e);
                 exit(1);
             }
@@ -208,7 +215,8 @@ fn main() -> Result<()> {
         ("restart", Some(_sub_m)) => {
             let pageserver = PageServerNode::from_env(&env);
 
-            if let Err(e) = pageserver.stop() {
+            //TODO what shutdown strategy should we use here?
+            if let Err(e) = pageserver.stop(false) {
                 eprintln!("pageserver stop failed: {}", e);
                 exit(1);
             }

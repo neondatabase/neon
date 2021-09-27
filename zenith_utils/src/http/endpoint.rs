@@ -12,7 +12,16 @@ use std::net::TcpListener;
 use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use zenith_metrics::{Encoder, TextEncoder};
 
+use std::sync::Mutex;
+use tokio::sync::oneshot::Sender;
+
 use super::error::ApiError;
+
+lazy_static! {
+    /// Channel used to send shutdown signal - wrapped in an Option to allow
+    /// it to be taken by value (since oneshot channels consume themselves on send)
+    static ref SHUTDOWN_SENDER: Mutex<Option<Sender<()>>> = Mutex::new(None);
+}
 
 lazy_static! {
     static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
@@ -143,11 +152,18 @@ pub fn check_permission(req: &Request<Body>, tenantid: Option<ZTenantId>) -> Res
     }
 }
 
+// Send shutdown signal
+pub fn shutdown() {
+    if let Some(tx) = SHUTDOWN_SENDER.lock().unwrap().take() {
+        let _ = tx.send(());
+    }
+}
+
 pub fn serve_thread_main(
     router_builder: RouterBuilder<hyper::Body, ApiError>,
     listener: TcpListener,
 ) -> anyhow::Result<()> {
-    log::info!("Starting a http endoint at {}", listener.local_addr()?);
+    log::info!("Starting a http endpoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
@@ -159,7 +175,14 @@ pub fn serve_thread_main(
 
     let _guard = runtime.enter();
 
-    let server = Server::from_tcp(listener)?.serve(service);
+    let (send, recv) = tokio::sync::oneshot::channel::<()>();
+    *SHUTDOWN_SENDER.lock().unwrap() = Some(send);
+
+    let server = Server::from_tcp(listener)?
+        .serve(service)
+        .with_graceful_shutdown(async {
+            recv.await.ok();
+        });
 
     runtime.block_on(server)?;
 

@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+static PGBACKEND_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub trait Handler {
     /// Handle single query.
@@ -135,13 +139,32 @@ pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
     query_string
 }
 
+// Helper function for socket read loops
+pub fn is_socket_read_timed_out(error: &anyhow::Error) -> bool {
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            if io_error.kind() == std::io::ErrorKind::WouldBlock {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl PostgresBackend {
     pub fn new(
         socket: TcpStream,
         auth_type: AuthType,
         tls_config: Option<Arc<rustls::ServerConfig>>,
+        set_read_timeout: bool,
     ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
+        if set_read_timeout {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+        }
+
         Ok(Self {
             stream: Some(Stream::Bidirectional(BidiStream::from_tcp(socket))),
             buf_out: BytesMut::with_capacity(10 * 1024),
@@ -229,12 +252,26 @@ impl PostgresBackend {
 
         let mut unnamed_query_string = Bytes::new();
 
-        while let Some(msg) = self.read_message()? {
-            trace!("got message {:?}", msg);
+        while !PGBACKEND_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            match self.read_message() {
+                Ok(message) => {
+                    if let Some(msg) = message {
+                        trace!("got message {:?}", msg);
 
-            match self.process_message(handler, msg, &mut unnamed_query_string)? {
-                ProcessMsgResult::Continue => continue,
-                ProcessMsgResult::Break => break,
+                        match self.process_message(handler, msg, &mut unnamed_query_string)? {
+                            ProcessMsgResult::Continue => continue,
+                            ProcessMsgResult::Break => break,
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // If it is a timeout error, continue the loop
+                    if !is_socket_read_timed_out(&e) {
+                        return Err(e);
+                    }
+                }
             }
         }
 
@@ -426,4 +463,9 @@ impl PostgresBackend {
 
         Ok(ProcessMsgResult::Continue)
     }
+}
+
+// Set the flag to inform connections to cancel
+pub fn set_pgbackend_shutdown_requested() {
+    PGBACKEND_SHUTDOWN_REQUESTED.swap(true, Ordering::Relaxed);
 }

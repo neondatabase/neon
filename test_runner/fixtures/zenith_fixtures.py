@@ -375,6 +375,7 @@ class ZenithPageserver(PgProtocol):
         Start the page server.
         Returns self.
         """
+        assert self.running == False
 
         self.zenith_cli.run(['start'])
         self.running = True
@@ -382,14 +383,18 @@ class ZenithPageserver(PgProtocol):
         self.initial_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.strip()
         return self
 
-    def stop(self) -> 'ZenithPageserver':
+    def stop(self, immediate=False) -> 'ZenithPageserver':
         """
         Stop the page server.
         Returns self.
         """
+        cmd = ['stop']
+        if immediate:
+            cmd.append('immediate')
 
+        print(cmd)
         if self.running:
-            self.zenith_cli.run(['stop'])
+            self.zenith_cli.run(cmd)
             self.running = False
 
         return self
@@ -398,7 +403,7 @@ class ZenithPageserver(PgProtocol):
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        self.stop()
+        self.stop(True)
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
@@ -444,7 +449,7 @@ def pageserver(zenith_cli: ZenithCli, repo_dir: str, pageserver_port: Pageserver
 
     # After the yield comes any cleanup code we need.
     print('Starting pageserver cleanup')
-    ps.stop()
+    ps.stop(True)
 
 class PgBin:
     """ A helper class for executing postgres binaries """

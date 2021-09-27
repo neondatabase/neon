@@ -1,6 +1,7 @@
 use std::time::Duration;
 use std::{collections::BinaryHeap, sync::Mutex, thread};
 
+use crate::tenant_mgr;
 use crate::{relish_storage::RelishStorage, PageServerConf};
 
 lazy_static::lazy_static! {
@@ -31,22 +32,26 @@ pub fn run_storage_sync_thread<
 
     let handle = thread::Builder::new()
         .name("Queue based relish storage sync".to_string())
-        .spawn(move || loop {
-            let mut queue_accessor = UPLOAD_QUEUE.lock().unwrap();
-            log::debug!("Upload queue length: {}", queue_accessor.len());
-            let next_task = queue_accessor.pop();
-            drop(queue_accessor);
-            match next_task {
-                Some(task) => runtime.block_on(async {
-                    // suppress warnings
-                    let _ = (config, task, &relish_storage, max_concurrent_sync);
-                    todo!("omitted for brevity")
-                }),
-                None => {
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
+        .spawn(move || {
+            while !tenant_mgr::shutdown_requested() {
+                let mut queue_accessor = UPLOAD_QUEUE.lock().unwrap();
+                log::debug!("Upload queue length: {}", queue_accessor.len());
+                let next_task = queue_accessor.pop();
+                drop(queue_accessor);
+                match next_task {
+                    Some(task) => runtime.block_on(async {
+                        // suppress warnings
+                        let _ = (config, task, &relish_storage, max_concurrent_sync);
+                        todo!("omitted for brevity")
+                    }),
+                    None => {
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
                 }
             }
+            log::debug!("Queue based relish storage sync thread shut down");
+            Ok(())
         })?;
     Ok(Some(handle))
 }
