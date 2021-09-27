@@ -56,8 +56,7 @@ fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<ServerCo
 
     let key = {
         let key_bytes = std::fs::read(key_path).context("SSL key file")?;
-        let mut keys = pemfile::rsa_private_keys(&mut &key_bytes[..])
-            .or_else(|_| pemfile::pkcs8_private_keys(&mut &key_bytes[..]))
+        let mut keys = pemfile::pkcs8_private_keys(&mut &key_bytes[..])
             .map_err(|_| anyhow!("couldn't read TLS keys"))?;
         ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
         keys.pop().unwrap()
