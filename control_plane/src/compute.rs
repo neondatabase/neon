@@ -269,6 +269,7 @@ impl PostgresNode {
         conf.append("max_connections", "100");
         conf.append("wal_sender_timeout", "0");
         conf.append("wal_level", "replica");
+        conf.append("zenith.file_cache_size", "4096");
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
 
