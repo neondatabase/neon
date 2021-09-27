@@ -229,24 +229,23 @@ class ProposerPostgres:
             f.write("synchronous_standby_names = '{}'\n".format("walproposer"))
             f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
 
-    def sync_safekeepers(self) -> subprocess.CompletedProcess:
+    def sync_safekeepers(self) -> str:
         """
         Run 'postgres --sync-safekeepers'.
         Returns execution result, which is commit_lsn after sync.
         """
 
-        pg_path = os.path.join(self.pg_bin.pg_bin_path, "postgres")
-        command = [pg_path, "--sync-safekeepers"]
+        command = ["postgres", "--sync-safekeepers"]
         env = {
             "PGDATA": self.pg_data_dir_path(),
         }
 
-        print('Running command "{}"'.format(" ".join(command)))
-        res = subprocess.run(
-            command, env=env, check=True, text=True, stdout=subprocess.PIPE
-        )
+        basepath = self.pg_bin.run_capture(command, env)
+        stdout_filename = basepath + '.stdout'
 
-        return res.stdout.strip("\n ")
+        with open(stdout_filename, 'r') as stdout_f:
+            stdout = stdout_f.read()
+            return stdout.strip("\n ")
 
 
 # insert wal in all safekeepers and run sync on proposer

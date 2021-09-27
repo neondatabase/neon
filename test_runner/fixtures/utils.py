@@ -21,7 +21,7 @@ def mkdir_if_needed(path: str) -> None:
     assert os.path.isdir(path)
 
 
-def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
+def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     """ Run a process and capture its output
 
     Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
@@ -29,6 +29,7 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
     counter.
 
     If those files already exist, we will overwrite them.
+    Returns basepath for files with captured output.
     """
     assert type(cmd) is list
     base = os.path.basename(cmd[0]) + '_{}'.format(global_counter())
@@ -40,6 +41,8 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
         with open(stderr_filename, 'w') as stderr_f:
             print('(capturing output to "{}.stdout")'.format(base))
             subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+
+    return basepath
 
 
 _global_counter = 0
