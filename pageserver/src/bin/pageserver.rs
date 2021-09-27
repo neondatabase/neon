@@ -15,6 +15,15 @@ use tracing::*;
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
 
 use anyhow::{bail, ensure, Context, Result};
+use signal_hook::consts::signal::*;
+use signal_hook::consts::TERM_SIGNALS;
+use signal_hook::flag;
+use signal_hook::iterator::exfiltrator::WithOrigin;
+use signal_hook::iterator::SignalsInfo;
+use std::process::exit;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
@@ -28,6 +37,7 @@ use pageserver::{
     RelishStorageKind, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
+use zenith_utils::postgres_backend;
 
 use const_format::formatcp;
 
@@ -449,6 +459,17 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, conf.daemonize)?;
 
+    let term_now = Arc::new(AtomicBool::new(false));
+    for sig in TERM_SIGNALS {
+        // When terminated by a second term signal, exit with exit code 1.
+        // This will do nothing the first time (because term_now is false).
+        flag::register_conditional_shutdown(*sig, 1, Arc::clone(&term_now))?;
+        // But this will "arm" the above for the second time, by setting it to true.
+        // The order of registering these is important, if you put this one first, it will
+        // first arm and then terminate ‒ all in the first round.
+        flag::register(*sig, Arc::clone(&term_now))?;
+    }
+
     // TODO: Check that it looks like a valid repository before going further
 
     // bind sockets before daemonizing so we report errors early and do not return until we are listening
@@ -525,13 +546,42 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
             page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
         })?;
 
-    join_handles.push(page_service_thread);
+    for info in SignalsInfo::<WithOrigin>::new(TERM_SIGNALS)?.into_iter() {
+        match info.signal {
+            SIGQUIT => {
+                info!("Got SIGQUIT. Terminate pageserver in immediate shutdown mode");
+                exit(111);
+            }
+            SIGTERM => {
+                info!("Got SIGINT/SIGTERM. Terminate gracefully in fast shutdown mode");
+                // Terminate postgres backends
+                postgres_backend::set_pgbackend_shutdown_requested();
+                // Stop all tenants and flush their data
+                tenant_mgr::shutdown_all_tenants()?;
+                // Wait for pageservice thread to complete the job
+                page_service_thread
+                    .join()
+                    .expect("thread panicked")
+                    .expect("thread exited with an error");
 
-    for handle in join_handles.into_iter() {
-        handle
-            .join()
-            .expect("thread panicked")
-            .expect("thread exited with an error")
+                // Shut down http router
+                endpoint::shutdown();
+
+                // Wait for all threads
+                for handle in join_handles.into_iter() {
+                    handle
+                        .join()
+                        .expect("thread panicked")
+                        .expect("thread exited with an error");
+                }
+                info!("Pageserver shut down successfully completed");
+                exit(0);
+            }
+            _ => {
+                debug!("Unknown signal.");
+            }
+        }
     }
+
     Ok(())
 }

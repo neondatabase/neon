@@ -64,6 +64,7 @@ pub fn proxy_conn_main(
             socket,
             postgres_backend::AuthType::MD5,
             state.conf.ssl_config.clone(),
+            false,
         )?,
         md5_salt: [0u8; 4],
         psql_session_id: "".into(),

@@ -25,6 +25,7 @@ use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::lsn::Lsn;
+use zenith_utils::postgres_backend::is_socket_read_timed_out;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
 use zenith_utils::pq_proto::{
@@ -187,17 +188,32 @@ pub fn thread_main(
     listener: TcpListener,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
-    loop {
+    let mut join_handles = Vec::new();
+
+    while !tenant_mgr::shutdown_requested() {
         let (socket, peer_addr) = listener.accept()?;
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
         let local_auth = auth.clone();
-        thread::spawn(move || {
-            if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
-                error!(%err, "page server thread exited with error");
-            }
-        });
+
+        let handle = thread::Builder::new()
+            .name("serving Page Service thread".into())
+            .spawn(move || {
+                if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
+                    error!(%err, "page server thread exited with error");
+                }
+            })
+            .unwrap();
+
+        join_handles.push(handle);
     }
+
+    debug!("page_service loop terminated. wait for connections to cancel");
+    for handle in join_handles.into_iter() {
+        handle.join().unwrap();
+    }
+
+    Ok(())
 }
 
 fn page_service_conn_main(
@@ -216,7 +232,7 @@ fn page_service_conn_main(
     }
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
-    let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
+    let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
     pgbackend.run(&mut conn_handler)
 }
 
@@ -268,44 +284,58 @@ impl PageServerHandler {
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
-        while let Some(message) = pgb.read_message()? {
-            trace!("query: {:?}", message);
+        while !tenant_mgr::shutdown_requested() {
+            match pgb.read_message() {
+                Ok(message) => {
+                    if let Some(message) = message {
+                        trace!("query: {:?}", message);
 
-            let copy_data_bytes = match message {
-                FeMessage::CopyData(bytes) => bytes,
-                _ => continue,
-            };
+                        let copy_data_bytes = match message {
+                            FeMessage::CopyData(bytes) => bytes,
+                            _ => continue,
+                        };
 
-            let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+                        let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
 
-            let response = match zenith_fe_msg {
-                PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
-                    .with_label_values(&["get_rel_exists"])
-                    .observe_closure_duration(|| {
-                        self.handle_get_rel_exists_request(&*timeline, &req)
-                    }),
-                PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
-                    .with_label_values(&["get_rel_size"])
-                    .observe_closure_duration(|| self.handle_get_nblocks_request(&*timeline, &req)),
-                PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
-                    .with_label_values(&["get_page_at_lsn"])
-                    .observe_closure_duration(|| {
-                        self.handle_get_page_at_lsn_request(&*timeline, &req)
-                    }),
-            };
+                        let response = match zenith_fe_msg {
+                            PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_rel_exists"])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_rel_exists_request(&*timeline, &req)
+                                }),
+                            PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_rel_size"])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_nblocks_request(&*timeline, &req)
+                                }),
+                            PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_page_at_lsn"])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_page_at_lsn_request(&*timeline, &req)
+                                }),
+                        };
 
-            let response = response.unwrap_or_else(|e| {
-                // print the all details to the log with {:#}, but for the client the
-                // error message is enough
-                error!("error reading relation or page version: {:#}", e);
-                PagestreamBeMessage::Error(PagestreamErrorResponse {
-                    message: e.to_string(),
-                })
-            });
+                        let response = response.unwrap_or_else(|e| {
+                            // print the all details to the log with {:#}, but for the client the
+                            // error message is enough
+                            error!("error reading relation or page version: {:#}", e);
+                            PagestreamBeMessage::Error(PagestreamErrorResponse {
+                                message: e.to_string(),
+                            })
+                        });
 
-            pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
+                        pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if !is_socket_read_timed_out(&e) {
+                        return Err(e);
+                    }
+                }
+            }
         }
-
         Ok(())
     }
 

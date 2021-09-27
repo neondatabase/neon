@@ -13,6 +13,8 @@ use zenith_utils::zid::ZTimelineId;
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
+    fn shutdown(&self) -> Result<()>;
+
     /// Get Timeline handle for given zenith timeline ID.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 

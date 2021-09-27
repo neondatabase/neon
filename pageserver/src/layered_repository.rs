@@ -30,12 +30,15 @@ use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, WALRecord};
+use crate::tenant_mgr;
+use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
@@ -215,6 +218,23 @@ impl Repository for LayeredRepository {
                 self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
             })
     }
+
+    // Wait for all threads to complete and persist repository data before pageserver shutdown.
+    fn shutdown(&self) -> Result<()> {
+        trace!("LayeredRepository shutdown for tenant {}", self.tenantid);
+
+        let timelines = self.timelines.lock().unwrap();
+        for (timelineid, timeline) in timelines.iter() {
+            walreceiver::stop_wal_receiver(*timelineid);
+            // Wait for syncing data to disk
+            trace!("repo shutdown. checkpoint timeline {}", timelineid);
+            timeline.checkpoint()?;
+
+            //TODO Wait for walredo process to shutdown too
+        }
+
+        Ok(())
+    }
 }
 
 /// Private functions
@@ -298,21 +318,24 @@ impl LayeredRepository {
     ///
     /// Launch the checkpointer thread in given repository.
     ///
-    pub fn launch_checkpointer_thread(conf: &'static PageServerConf, rc: Arc<LayeredRepository>) {
-        let _thread = std::thread::Builder::new()
+    pub fn launch_checkpointer_thread(
+        conf: &'static PageServerConf,
+        rc: Arc<LayeredRepository>,
+    ) -> JoinHandle<()> {
+        std::thread::Builder::new()
             .name("Checkpointer thread".into())
             .spawn(move || {
                 // FIXME: relaunch it? Panic is not good.
                 rc.checkpoint_loop(conf).expect("Checkpointer thread died");
             })
-            .unwrap();
+            .unwrap()
     }
 
     ///
     /// Checkpointer thread's main loop
     ///
     fn checkpoint_loop(&self, conf: &'static PageServerConf) -> Result<()> {
-        loop {
+        while !tenant_mgr::shutdown_requested() {
             std::thread::sleep(conf.checkpoint_period);
             info!("checkpointer thread for tenant {} waking up", self.tenantid);
 
@@ -328,40 +351,52 @@ impl LayeredRepository {
                     STORAGE_TIME
                         .with_label_values(&["checkpoint_timed"])
                         .observe_closure_duration(|| {
-                            timeline.checkpoint_internal(conf.checkpoint_distance)
+                            timeline.checkpoint_internal(conf.checkpoint_distance, false)
                         })?
                 }
                 // release lock on 'timelines'
             }
         }
+        trace!("Checkpointer thread shut down");
+        Ok(())
     }
 
     ///
     /// Launch the GC thread in given repository.
     ///
-    pub fn launch_gc_thread(conf: &'static PageServerConf, rc: Arc<LayeredRepository>) {
-        let _thread = std::thread::Builder::new()
+    pub fn launch_gc_thread(
+        conf: &'static PageServerConf,
+        rc: Arc<LayeredRepository>,
+    ) -> JoinHandle<()> {
+        std::thread::Builder::new()
             .name("GC thread".into())
             .spawn(move || {
                 // FIXME: relaunch it? Panic is not good.
                 rc.gc_loop(conf).expect("GC thread died");
             })
-            .unwrap();
+            .unwrap()
     }
 
     ///
     /// GC thread's main loop
     ///
     fn gc_loop(&self, conf: &'static PageServerConf) -> Result<()> {
-        loop {
-            std::thread::sleep(conf.gc_period);
-            info!("gc thread for tenant {} waking up", self.tenantid);
-
+        while !tenant_mgr::shutdown_requested() {
             // Garbage collect old files that are not needed for PITR anymore
             if conf.gc_horizon > 0 {
                 self.gc_iteration(None, conf.gc_horizon, false).unwrap();
             }
+
+            // TODO Write it in more adequate way using
+            // condvar.wait_timeout() or something
+            let mut sleep_time = conf.gc_period.as_secs();
+            while sleep_time > 0 && !tenant_mgr::shutdown_requested() {
+                sleep_time -= 1;
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            info!("gc thread for tenant {} waking up", self.tenantid);
         }
+        Ok(())
     }
 
     /// Save timeline metadata to file
@@ -508,6 +543,10 @@ impl LayeredRepository {
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
         for timelineid in timelineids {
+            if tenant_mgr::shutdown_requested() {
+                return Ok(totals);
+            }
+
             // We have already loaded all timelines above
             // so this operation is just a quick map lookup.
             let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
@@ -934,7 +973,7 @@ impl Timeline for LayeredTimeline {
         STORAGE_TIME
             .with_label_values(&["checkpoint_force"])
             //pass checkpoint_distance=0 to force checkpoint
-            .observe_closure_duration(|| self.checkpoint_internal(0))
+            .observe_closure_duration(|| self.checkpoint_internal(0, true))
     }
 
     ///
@@ -1309,7 +1348,7 @@ impl LayeredTimeline {
     /// Flush to disk all data that was written with the put_* functions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    fn checkpoint_internal(&self, checkpoint_distance: u64) -> Result<()> {
+    fn checkpoint_internal(&self, checkpoint_distance: u64, forced: bool) -> Result<()> {
         // Grab lock on the layer map.
         //
         // TODO: We hold it locked throughout the checkpoint operation. That's bad,
@@ -1344,6 +1383,10 @@ impl LayeredTimeline {
         let mut layer_uploads = Vec::new();
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
+
+            if tenant_mgr::shutdown_requested() && !forced {
+                return Ok(());
+            }
 
             // Does this layer need freezing?
             //
