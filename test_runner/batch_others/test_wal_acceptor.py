@@ -224,10 +224,12 @@ class ProposerPostgres:
 
         mkdir_if_needed(self.pg_data_dir_path())
         with open(self.config_file_path(), "w") as f:
-            f.write("zenith.zenith_timeline = '{}'\n".format(self.timeline_id))
-            f.write("zenith.zenith_tenant = '{}'\n".format(self.tenant_id))
-            f.write("synchronous_standby_names = '{}'\n".format("walproposer"))
-            f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
+            f.writelines([
+                "synchronous_standby_names = 'walproposer'\n",
+                f"zenith.zenith_timeline = '{self.timeline_id}'\n",
+                f"zenith.zenith_tenant = '{self.tenant_id}'\n",
+                f"wal_acceptors = '{wal_acceptors}'\n",
+            ])
 
     def sync_safekeepers(self) -> str:
         """

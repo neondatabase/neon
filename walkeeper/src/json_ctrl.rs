@@ -102,7 +102,7 @@ fn prepare_safekeeper(swh: &mut SendWalHandler) -> Result<()> {
     let response = swh.timeline.get().process_msg(&greeting_request)?;
     match response {
         AcceptorProposerMessage::Greeting(_) => Ok(()),
-        _ => return Err(anyhow!("not GreetingResponse")),
+        _ => anyhow::bail!("not GreetingResponse"),
     }
 }
 
@@ -148,7 +148,7 @@ fn append_logical_message(
 
     let append_response = match response {
         AcceptorProposerMessage::AppendResponse(resp) => resp,
-        _ => return Err(anyhow!("not AppendResponse")),
+        _ => anyhow::bail!("not AppendResponse"),
     };
 
     Ok(InsertedWAL {
