@@ -668,37 +668,46 @@ impl InMemoryLayer {
         );
 
         let inner = self.inner.read().unwrap();
-
-        let drop_lsn = inner.drop_lsn;
-
         assert!(!inner.writeable);
-
-        let end_lsn = match drop_lsn {
-            Some(dlsn) => dlsn,
-            None => self.end_lsn.unwrap(),
-        };
 
         let predecessor = inner.predecessor.clone();
 
-        let mut before_page_versions;
-        let mut before_segsizes;
-        if inner.drop_lsn.is_none() {
-            before_segsizes = BTreeMap::new();
-            for (lsn, size) in inner.segsizes.iter() {
-                if *lsn <= end_lsn {
-                    before_segsizes.insert(*lsn, *size);
-                }
-            }
+        if let Some(drop_lsn) = inner.drop_lsn {
+            let delta_layer = DeltaLayer::create(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                self.seg,
+                self.start_lsn,
+                drop_lsn,
+                true,
+                predecessor,
+                inner.page_versions.clone(),
+                inner.segsizes.clone(),
+            )?;
+            trace!(
+                "freeze: created delta layer for dropped segment {} {}-{}",
+                self.seg,
+                self.start_lsn,
+                drop_lsn
+            );
+            return Ok(vec![Arc::new(delta_layer)]);
+        }
 
-            before_page_versions = BTreeMap::new();
-            for ((blknum, lsn), pv) in inner.page_versions.iter() {
-                if *lsn < end_lsn {
-                    before_page_versions.insert((*blknum, *lsn), pv.clone());
-                }
+        let end_lsn = self.end_lsn.unwrap();
+
+        let mut before_segsizes = BTreeMap::new();
+        for (lsn, size) in inner.segsizes.iter() {
+            if *lsn <= end_lsn {
+                before_segsizes.insert(*lsn, *size);
             }
-        } else {
-            before_page_versions = inner.page_versions.clone();
-            before_segsizes = inner.segsizes.clone();
+        }
+
+        let mut before_page_versions = BTreeMap::new();
+        for ((blknum, lsn), pv) in inner.page_versions.iter() {
+            if *lsn < end_lsn {
+                before_page_versions.insert((*blknum, *lsn), pv.clone());
+            }
         }
 
         drop(inner);
@@ -714,7 +723,7 @@ impl InMemoryLayer {
                 self.seg,
                 self.start_lsn,
                 end_lsn,
-                drop_lsn.is_some(),
+                false,
                 predecessor,
                 before_page_versions,
                 before_segsizes,
@@ -730,12 +739,10 @@ impl InMemoryLayer {
             assert!(before_page_versions.is_empty());
         }
 
-        if drop_lsn.is_none() {
-            // Write a new base image layer at the cutoff point
-            let image_layer = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
-            frozen_layers.push(Arc::new(image_layer));
-            trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
-        }
+        // Write a new base image layer at the cutoff point
+        let image_layer = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
+        frozen_layers.push(Arc::new(image_layer));
+        trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
 
         Ok(frozen_layers)
     }
