@@ -381,14 +381,15 @@ impl DeltaLayer {
         }
     }
 
-    /// Create a new delta file, using the given btreemaps containing the page versions and
-    /// relsizes.
+    /// Create a new delta file, using the given page versions and relsizes.
+    /// The page versions are passed by an iterator; the iterator must return
+    /// page versions in blknum+lsn order.
     ///
     /// This is used to write the in-memory layer to disk. The in-memory layer uses the same
     /// data structure with two btreemaps as we do, so passing the btreemaps is currently
     /// expedient.
     #[allow(clippy::too_many_arguments)]
-    pub fn create(
+    pub fn create<'a>(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
@@ -397,7 +398,7 @@ impl DeltaLayer {
         end_lsn: Lsn,
         dropped: bool,
         predecessor: Option<Arc<dyn Layer>>,
-        page_versions: BTreeMap<(u32, Lsn), PageVersion>,
+        page_versions: impl Iterator<Item = (&'a (u32, Lsn), &'a PageVersion)>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         let delta_layer = DeltaLayer {
@@ -433,19 +434,21 @@ impl DeltaLayer {
         for (key, page_version) in page_versions {
             let page_image_range = page_version
                 .page_image
-                .map(|page_image| page_version_writer.write_blob(page_image.as_ref()))
+                .as_ref()
+                .map(|page_image| page_version_writer.write_blob(page_image))
                 .transpose()?;
 
             let record_range = page_version
                 .record
+                .as_ref()
                 .map(|record| {
-                    let buf = WALRecord::ser(&record)?;
+                    let buf = WALRecord::ser(record)?;
                     page_version_writer.write_blob(&buf)
                 })
                 .transpose()?;
 
             let old = inner.page_version_metas.insert(
-                key,
+                *key,
                 PageVersionMeta {
                     page_image_range,
                     record_range,

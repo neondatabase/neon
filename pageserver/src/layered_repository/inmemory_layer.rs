@@ -667,6 +667,15 @@ impl InMemoryLayer {
             self.get_end_lsn()
         );
 
+        // Grab the lock in read-mode. We hold it over the I/O, but because this
+        // layer is not writeable anymore, no one should be trying to aquire the
+        // write lock on it, so we shouldn't block anyone. There's one exception
+        // though: another thread might have grabbed a reference to this layer
+        // in `get_layer_for_write' just before the checkpointer called
+        // `freeze`, and then `write_to_disk` on it. When the thread gets the
+        // lock, it will see that it's not writeable anymore and retry, but it
+        // would have to wait until we release it. That race condition is very
+        // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
         assert!(!inner.writeable);
 
@@ -682,7 +691,7 @@ impl InMemoryLayer {
                 drop_lsn,
                 true,
                 predecessor,
-                inner.page_versions.clone(),
+                inner.page_versions.iter(),
                 inner.segsizes.clone(),
             )?;
             trace!(
@@ -702,15 +711,11 @@ impl InMemoryLayer {
                 before_segsizes.insert(*lsn, *size);
             }
         }
+        let mut before_page_versions = inner.page_versions.iter().filter(|tup| {
+            let ((_blknum, lsn), _pv) = tup;
 
-        let mut before_page_versions = BTreeMap::new();
-        for ((blknum, lsn), pv) in inner.page_versions.iter() {
-            if *lsn < end_lsn {
-                before_page_versions.insert((*blknum, *lsn), pv.clone());
-            }
-        }
-
-        drop(inner);
+            *lsn < end_lsn
+        });
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
 
@@ -736,8 +741,10 @@ impl InMemoryLayer {
                 end_lsn
             );
         } else {
-            assert!(before_page_versions.is_empty());
+            assert!(before_page_versions.next().is_none());
         }
+
+        drop(inner);
 
         // Write a new base image layer at the cutoff point
         let image_layer = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
