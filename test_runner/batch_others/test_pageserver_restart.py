@@ -44,7 +44,7 @@ def test_pageserver_restart(zenith_cli, pageserver: ZenithPageserver, postgres: 
         from pg_settings where name = 'shared_buffers'
     ''')
     row = cur.fetchone()
-    log.info("shared_buffers is {}, table size {}", row[0], row[1]);
+    log.info(f"shared_buffers is {row[0]}, table size {row[1]}");
     assert int(row[0]) < int(row[1])
 
     # Stop and restart pageserver. This is a more or less graceful shutdown, although

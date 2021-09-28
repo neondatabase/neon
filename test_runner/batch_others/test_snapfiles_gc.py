@@ -39,7 +39,7 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
 
                     cur.execute("select relfilenode from pg_class where oid = 'foo'::regclass");
                     row = cur.fetchone();
-                    log.info("relfilenode is {}", row[0]);
+                    log.info(f"relfilenode is {row[0]}");
 
                     # Run GC, to clear out any garbage left behind in the catalogs by
                     # the CREATE TABLE command. We want to have a clean slate with no garbage
