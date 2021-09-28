@@ -2,6 +2,10 @@ from contextlib import closing
 
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 #
@@ -18,7 +22,7 @@ def test_old_request_lsn(zenith_cli, pageserver: ZenithPageserver, postgres: Pos
     # Create a branch for us
     zenith_cli.run(["branch", "test_old_request_lsn", "empty"])
     pg = postgres.create_start('test_old_request_lsn')
-    print('postgres is running on test_old_request_lsn branch')
+    log.info('postgres is running on test_old_request_lsn branch')
 
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
@@ -46,7 +50,7 @@ def test_old_request_lsn(zenith_cli, pageserver: ZenithPageserver, postgres: Pos
         from pg_settings where name = 'shared_buffers'
     ''')
     row = cur.fetchone()
-    print(f'shared_buffers is {row[0]}, table size {row[1]}');
+    log.info(f'shared_buffers is {row[0]}, table size {row[1]}');
     assert int(row[0]) < int(row[1])
 
     cur.execute('VACUUM foo');
