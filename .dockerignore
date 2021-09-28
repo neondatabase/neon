@@ -2,12 +2,13 @@
 **/__pycache__
 **/.pytest_cache
 
-/target
-/tmp_check
-/tmp_install
-/tmp_check_cli
-/test_output
-/.vscode
-/.zenith
-/integration_tests/.zenith
-/Dockerfile
+.git
+target
+tmp_check
+tmp_install
+tmp_check_cli
+test_output
+.vscode
+.zenith
+integration_tests/.zenith
+.mypy_cache
