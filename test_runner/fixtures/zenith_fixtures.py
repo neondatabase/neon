@@ -487,7 +487,7 @@ class PgBin:
                     command: List[str],
                     env: Optional[Env] = None,
                     cwd: Optional[str] = None,
-                    **kwargs) -> None:
+                    **kwargs: Any) -> None:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
 
