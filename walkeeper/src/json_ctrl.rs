@@ -50,6 +50,9 @@ struct AppendResult {
     inserted_wal: InsertedWAL,
 }
 
+/// Handles command to craft logical message WAL record with given
+/// content, and then append it with specified term and lsn. This
+/// function is used to test safekeepers in different scenarios.
 pub fn handle_json_ctrl(
     swh: &mut SendWalHandler,
     pgb: &mut PostgresBackend,
@@ -174,9 +177,9 @@ impl XlLogicalMessage {
     }
 }
 
-// Create new WAL record for non-transactional logical message.
-// Used for creating artificial WAL for tests, as LogicalMessage
-// record is basically no-op.
+/// Create new WAL record for non-transactional logical message.
+/// Used for creating artificial WAL for tests, as LogicalMessage
+/// record is basically no-op.
 fn encode_logical_message(prefix: String, message: String) -> Vec<u8> {
     let mut prefix_bytes = BytesMut::with_capacity(prefix.len() + 1);
     prefix_bytes.put(prefix.as_bytes());
