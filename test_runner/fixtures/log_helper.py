@@ -28,8 +28,8 @@ LOGGING = {
             "level": "DEBUG",
             "handlers": ["console"]
         },
-        "root.subroot": {
-            "level": "INFO"
+        "root.wal_acceptor_async": { 
+            "level": "INFO" # lot of logs on DEBUG level
         }
     }
 }
