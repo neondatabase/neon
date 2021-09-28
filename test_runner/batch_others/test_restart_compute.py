@@ -40,7 +40,7 @@ def test_restart_compute(
             cur.execute('SELECT sum(key) FROM t')
             r = cur.fetchone()
             assert r == (5000050000, )
-            log.info("res = " + r)
+            log.info(f"res = {r}")
 
     # Remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
@@ -53,7 +53,7 @@ def test_restart_compute(
             cur.execute('SELECT sum(key) FROM t')
             r = cur.fetchone()
             assert r == (5000050000, )
-            log.info("res = " + r)
+            log.info(f"res = {r}")
 
             # Insert another row
             cur.execute("INSERT INTO t VALUES (100001, 'payload2')")
@@ -61,7 +61,7 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            log.info("res = " + r)
+            log.info(f"res = {r}")
 
     # Again remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
@@ -76,7 +76,7 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            log.info("res = " + r)
+            log.info(f"res = {r}")
 
     # And again remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
@@ -89,4 +89,4 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            log.info("res = " + r)
+            log.info(f"res = {r}")

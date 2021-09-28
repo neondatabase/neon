@@ -49,10 +49,10 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     # wait for autovacuum to truncate the pg_xact
     # XXX Is it worth to add a timeout here?
     pg_xact_0000_path = os.path.join(pg.pg_xact_dir_path(), '0000')
-    log.info("pg_xact_0000_path = " + pg_xact_0000_path)
+    log.info(f"pg_xact_0000_path = {pg_xact_0000_path}")
 
     while os.path.isfile(pg_xact_0000_path):
-        log.info("file exists. wait for truncation. " "pg_xact_0000_path = " + pg_xact_0000_path)
+        log.info(f"file exists. wait for truncation. " "pg_xact_0000_path = {pg_xact_0000_path}")
         time.sleep(5)
 
     # checkpoint to advance latest lsn
@@ -63,7 +63,7 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
             lsn_after_truncation = cur.fetchone()[0]
 
     # create new branch after clog truncation and start a compute node on it
-    log.info('create branch at lsn_after_truncation ' + lsn_after_truncation)
+    log.info(f'create branch at lsn_after_truncation {lsn_after_truncation}')
     zenith_cli.run(
         ["branch", "test_clog_truncate_new", "test_clog_truncate@" + lsn_after_truncation])
 

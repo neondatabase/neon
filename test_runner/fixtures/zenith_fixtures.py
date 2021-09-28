@@ -964,7 +964,7 @@ def base_dir() -> str:
     """ find the base directory (currently this is the git root) """
 
     base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
-    log.info('\nbase_dir is ' + base_dir)
+    log.info(f'base_dir is {base_dir}')
     return base_dir
 
 
@@ -993,7 +993,7 @@ def test_output_dir(request: Any, top_output_dir: str) -> str:
         test_name = 'shared'
 
     test_output_dir = os.path.join(top_output_dir, test_name)
-    log.info('test_output_dir is ' + test_output_dir)
+    log.info(f'test_output_dir is {test_output_dir}')
     shutil.rmtree(test_output_dir, ignore_errors=True)
     mkdir_if_needed(test_output_dir)
     return test_output_dir
@@ -1035,7 +1035,7 @@ def pg_distrib_dir(base_dir: str) -> str:
         pg_dir = env_postgres_bin
     else:
         pg_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
-    log.info('postgres dir is ' + pg_dir)
+    log.info(f'postgres dir is {pg_dir}')
     if not os.path.exists(os.path.join(pg_dir, 'bin/postgres')):
         raise Exception('postgres not found at "{}"'.format(pg_dir))
     return pg_dir
