@@ -10,6 +10,10 @@ from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import WalAcceptorFactory, ZenithPageserver, PostgresFactory, PgBin
 from fixtures.utils import lsn_to_hex, mkdir_if_needed
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -284,10 +288,10 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
         )
         lsn_hex = lsn_to_hex(res["inserted_wal"]["end_lsn"])
         lsn_after_append.append(lsn_hex)
-        print(f"safekeeper[{i}] lsn after append: {lsn_hex}")
+        log.info(f"safekeeper[{i}] lsn after append: {lsn_hex}")
 
     # run sync safekeepers
     lsn_after_sync = pg.sync_safekeepers()
-    print(f"lsn after sync = {lsn_after_sync}")
+    log.info(f"lsn after sync = {lsn_after_sync}")
 
     assert all(lsn_after_sync == lsn for lsn in lsn_after_append)
