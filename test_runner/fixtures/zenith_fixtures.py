@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from functools import cached_property
+from cached_property import cached_property
 import asyncpg
 import os
 import pathlib
@@ -13,7 +13,6 @@ import signal
 import subprocess
 import time
 import filecmp
-import difflib
 
 from contextlib import closing
 from pathlib import Path

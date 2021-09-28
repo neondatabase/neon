@@ -11,6 +11,7 @@ pyjwt = {extras = ["crypto"], version = "*"}
 requests = "*"
 pytest-xdist = "*"
 asyncpg = "*"
+cached-property = "*"
 
 [dev-packages]
 yapf = "*"
