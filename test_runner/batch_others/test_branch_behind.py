@@ -1,6 +1,9 @@
 import subprocess
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -13,7 +16,7 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     zenith_cli.run(["branch", "test_branch_behind", "empty"])
 
     pgmain = postgres.create_start('test_branch_behind')
-    print("postgres is running on 'test_branch_behind' branch")
+    log.info("postgres is running on 'test_branch_behind' branch")
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
@@ -27,7 +30,7 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     ''')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_a = main_cur.fetchone()[0]
-    print('LSN after 100 rows: ' + lsn_a)
+    log.info('LSN after 100 rows: ' + lsn_a)
 
     # Insert some more rows. (This generates enough WAL to fill a few segments.)
     main_cur.execute('''
@@ -37,7 +40,7 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     ''')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_b = main_cur.fetchone()[0]
-    print('LSN after 100100 rows: ' + lsn_b)
+    log.info('LSN after 100100 rows: ' + lsn_b)
 
     # Branch at the point where only 100 rows were inserted
     zenith_cli.run(["branch", "test_branch_behind_hundred", "test_branch_behind@" + lsn_a])
@@ -52,7 +55,7 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
 
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_c = main_cur.fetchone()[0]
-    print('LSN after 200100 rows: ' + lsn_c)
+    log.info('LSN after 200100 rows: ' + lsn_c)
 
     # Branch at the point where only 200 rows were inserted
     zenith_cli.run(["branch", "test_branch_behind_more", "test_branch_behind@" + lsn_b])
@@ -89,4 +92,4 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     try:
         zenith_cli.run(["branch", "test_branch_preinitdb", "test_branch_behind@0/42"])
     except subprocess.CalledProcessError:
-        print("Branch creation with pre-initdb LSN failed (as expected)")
+        log.info("Branch creation with pre-initdb LSN failed (as expected)")

@@ -2,6 +2,10 @@ from contextlib import closing
 
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -14,7 +18,7 @@ def test_config(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFact
 
     # change config
     pg = postgres.create_start('test_config', config_lines=['log_min_messages=debug1'])
-    print('postgres is running on test_config branch')
+    log.info('postgres is running on test_config branch')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:

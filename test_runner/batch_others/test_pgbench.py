@@ -1,5 +1,9 @@
 from fixtures.zenith_fixtures import PostgresFactory
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -8,7 +12,7 @@ def test_pgbench(postgres: PostgresFactory, pg_bin, zenith_cli):
     zenith_cli.run(["branch", "test_pgbench", "empty"])
 
     pg = postgres.create_start('test_pgbench')
-    print("postgres is running on 'test_pgbench' branch")
+    log.info("postgres is running on 'test_pgbench' branch")
 
     connstr = pg.connstr()
 

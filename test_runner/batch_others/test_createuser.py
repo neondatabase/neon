@@ -2,6 +2,10 @@ from contextlib import closing
 
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -12,7 +16,7 @@ def test_createuser(zenith_cli, pageserver: ZenithPageserver, postgres: Postgres
     zenith_cli.run(["branch", "test_createuser", "empty"])
 
     pg = postgres.create_start('test_createuser')
-    print("postgres is running on 'test_createuser' branch")
+    log.info("postgres is running on 'test_createuser' branch")
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:

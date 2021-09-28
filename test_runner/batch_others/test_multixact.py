@@ -1,5 +1,9 @@
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver, check_restored_datadir_content
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -15,7 +19,7 @@ def test_multixact(pageserver: ZenithPageserver, postgres: PostgresFactory,
     zenith_cli.run(["branch", "test_multixact", "empty"])
     pg = postgres.create_start('test_multixact')
 
-    print("postgres is running on 'test_multixact' branch")
+    log.info("postgres is running on 'test_multixact' branch")
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
@@ -55,7 +59,7 @@ def test_multixact(pageserver: ZenithPageserver, postgres: PostgresFactory,
     zenith_cli.run(["branch", "test_multixact_new", "test_multixact@" + lsn])
     pg_new = postgres.create_start('test_multixact_new')
 
-    print("postgres is running on 'test_multixact_new' branch")
+    log.info("postgres is running on 'test_multixact_new' branch")
     pg_new_conn = pg_new.connect()
     cur_new = pg_new_conn.cursor()
 

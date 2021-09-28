@@ -6,6 +6,10 @@ from contextlib import closing
 from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import WalAcceptorFactory, ZenithPageserver, PostgresFactory
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
@@ -40,7 +44,7 @@ def test_pageserver_restart(zenith_cli, pageserver: ZenithPageserver, postgres: 
         from pg_settings where name = 'shared_buffers'
     ''')
     row = cur.fetchone()
-    print("shared_buffers is {}, table size {}", row[0], row[1]);
+    log.info("shared_buffers is {}, table size {}", row[0], row[1]);
     assert int(row[0]) < int(row[1])
 
     # Stop and restart pageserver. This is a more or less graceful shutdown, although

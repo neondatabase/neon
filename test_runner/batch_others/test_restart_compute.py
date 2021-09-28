@@ -3,6 +3,10 @@ import pytest
 from contextlib import closing
 from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory
 
+import logging
+import fixtures.log_helper  # configures loggers
+log = logging.getLogger('root')
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -30,7 +34,7 @@ def test_restart_compute(
 
     pg = postgres.create_start('test_restart_compute',
                                wal_acceptors=wal_acceptor_connstrs)
-    print("postgres is running on 'test_restart_compute' branch")
+    log.info("postgres is running on 'test_restart_compute' branch")
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -39,7 +43,7 @@ def test_restart_compute(
             cur.execute('SELECT sum(key) FROM t')
             r = cur.fetchone()
             assert r == (5000050000, )
-            print("res = ", r)
+            log.info("res = ", r)
 
     # Remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
@@ -52,7 +56,7 @@ def test_restart_compute(
             cur.execute('SELECT sum(key) FROM t')
             r = cur.fetchone()
             assert r == (5000050000, )
-            print("res = ", r)
+            log.info("res = ", r)
 
             # Insert another row
             cur.execute("INSERT INTO t VALUES (100001, 'payload2')")
@@ -60,7 +64,7 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            print("res = ", r)
+            log.info("res = ", r)
 
     # Again remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
@@ -75,7 +79,7 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            print("res = ", r)
+            log.info("res = ", r)
 
     # And again remove data directory and restart
     pg.stop_and_destroy().create_start('test_restart_compute',
@@ -88,4 +92,4 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            print("res = ", r)
+            log.info("res = ", r)
