@@ -486,17 +486,19 @@ class PgBin:
     def run_capture(self,
                     command: List[str],
                     env: Optional[Env] = None,
-                    cwd: Optional[str] = None) -> None:
+                    cwd: Optional[str] = None,
+                    **kwargs: Any) -> None:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
 
-        This is just like `run`, but for chatty programs.
+        This is just like `run`, but for chatty programs. Returns basepath for files
+        with captured output.
         """
 
         self._fixpath(command)
         print('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
-        subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True)
+        return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
 
 
 @zenfixture
