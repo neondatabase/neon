@@ -7,7 +7,7 @@ from typing import List
 
 import logging
 import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+log = logging.getLogger('root.wal_acceptor_async')
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
