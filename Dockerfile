@@ -11,38 +11,19 @@ WORKDIR /zenith
 COPY ./vendor/postgres vendor/postgres
 COPY ./Makefile Makefile
 RUN make -j $(getconf _NPROCESSORS_ONLN) -s postgres
-
-#
-# Calculate cargo dependencies.
-# This will always run, but only generate recipe.json with list of dependencies without
-# installing them.
-#
-FROM zenithdb/build:buster AS cargo-deps-inspect
-WORKDIR /zenith
-COPY . .
-RUN cargo chef prepare --recipe-path /zenith/recipe.json
-
-#
-# Build cargo dependencies.
-# This temp cantainner should be rebuilt only if recipe.json was changed.
-#
-FROM zenithdb/build:buster AS deps-build
-WORKDIR /zenith
-COPY --from=pg-build /zenith/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
-COPY --from=cargo-deps-inspect /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/
-COPY --from=cargo-deps-inspect /zenith/recipe.json recipe.json
-RUN ROCKSDB_LIB_DIR=/usr/lib/ cargo chef cook --release --recipe-path recipe.json
+RUN rm -rf postgres_install/build
 
 #
 # Build zenith binaries
 #
+# TODO: build cargo deps as separate layer. We used cargo-chef before but that was
+# net time waste in a lot of cases. Copying Cargo.lock with empty lib.rs should do the work.
+#
 FROM zenithdb/build:buster AS build
 WORKDIR /zenith
-COPY . .
-# Copy cached dependencies
 COPY --from=pg-build /zenith/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
-COPY --from=deps-build /zenith/target target
-COPY --from=deps-build /usr/local/cargo/ /usr/local/cargo/
+
+COPY . .
 RUN cargo build --release
 
 #
@@ -51,7 +32,7 @@ RUN cargo build --release
 FROM debian:buster-slim
 WORKDIR /data
 
-RUN apt-get update && apt-get -yq install librocksdb-dev libseccomp-dev openssl && \
+RUN apt-get update && apt-get -yq install libreadline-dev libseccomp-dev openssl ca-certificates && \
     mkdir zenith_install
 
 COPY --from=build /zenith/target/release/pageserver /usr/local/bin
