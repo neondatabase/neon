@@ -9,13 +9,12 @@ use std::{
     env,
     net::TcpListener,
     path::{Path, PathBuf},
-    process::exit,
     str::FromStr,
     thread,
 };
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
@@ -349,7 +348,10 @@ fn main() -> Result<()> {
         .get_matches();
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
-    let cfg_file_path = workdir.canonicalize()?.join("pageserver.toml");
+    let cfg_file_path = workdir
+        .canonicalize()
+        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?
+        .join("pageserver.toml");
 
     let args_params = CfgFileParams::from_args(&arg_matches);
 
@@ -361,22 +363,37 @@ fn main() -> Result<()> {
         args_params
     } else {
         // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)?;
-        let file_params: CfgFileParams = toml::from_str(&cfg_file_contents)?;
+        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)
+            .with_context(|| format!("No pageserver config at '{}'", cfg_file_path.display()))?;
+        let file_params: CfgFileParams = toml::from_str(&cfg_file_contents).with_context(|| {
+            format!(
+                "Failed to read '{}' as pageserver config",
+                cfg_file_path.display()
+            )
+        })?;
         args_params.or(file_params)
     };
 
     // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&workdir)?;
+    env::set_current_dir(&workdir).with_context(|| {
+        format!(
+            "Failed to set application's current dir to '{}'",
+            workdir.display()
+        )
+    })?;
 
     // Ensure the config is valid, even if just init-ing
-    let mut conf = params.try_into_config()?;
+    let mut conf = params.try_into_config().with_context(|| {
+        format!(
+            "Pageserver config at '{}' is not valid",
+            cfg_file_path.display()
+        )
+    })?;
 
     conf.daemonize = arg_matches.is_present("daemonize");
 
     if init && conf.daemonize {
-        eprintln!("--daemonize cannot be used with --init");
-        exit(1);
+        bail!("--daemonize cannot be used with --init")
     }
 
     // The configuration is all set up now. Turn it into a 'static
@@ -386,16 +403,21 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_pageserver(conf, create_tenant)?;
+        branches::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
         // write the config file
-        let cfg_file_contents = toml::to_string_pretty(&params)?;
+        let cfg_file_contents = toml::to_string_pretty(&params)
+            .context("Failed to create pageserver config contents for initialisation")?;
         // TODO support enable-auth flag
-        std::fs::write(&cfg_file_path, cfg_file_contents)?;
-
-        return Ok(());
+        std::fs::write(&cfg_file_path, cfg_file_contents).with_context(|| {
+            format!(
+                "Failed to initialize pageserver config at '{}'",
+                cfg_file_path.display()
+            )
+        })?;
+        Ok(())
+    } else {
+        start_pageserver(conf).context("Failed to start pageserver")
     }
-
-    start_pageserver(conf)
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
