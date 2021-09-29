@@ -15,11 +15,9 @@ use zenith_metrics::{Encoder, TextEncoder};
 use super::error::ApiError;
 
 lazy_static! {
-    static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
-        "pageserver_serve_metrics_count",
-        "Number of metric requests made"
-    )
-    .expect("failed to define a metric");
+    static ref SERVE_METRICS_COUNT: IntCounter =
+        register_int_counter!("serve_metrics_count", "Number of metric requests made")
+            .expect("failed to define a metric");
 }
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
