@@ -46,6 +46,14 @@ impl<K: Ord + Copy, V> OrderedVec<K, V> {
 
         &self.0[start_idx..end_idx]
     }
+
+    pub fn append(&mut self, key: K, value: V) {
+        if let Some((last_key, _last_value)) = self.0.last() {
+            debug_assert!(last_key < &key);
+        }
+
+        self.0.push((key, value));
+    }
 }
 
 impl<K: Ord, V> From<BTreeMap<K, V>> for OrderedVec<K, V> {

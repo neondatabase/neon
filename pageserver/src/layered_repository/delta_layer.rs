@@ -145,7 +145,7 @@ pub struct DeltaLayerInner {
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
-    page_version_metas: BTreeMap<(u32, Lsn), BlobRange>,
+    page_version_metas: OrderedVec<(u32, Lsn), BlobRange>,
 
     /// `relsizes` tracks the size of the relation at different points in time.
     relsizes: OrderedVec<Lsn, u32>,
@@ -221,7 +221,8 @@ impl Layer for DeltaLayer {
             let maxkey = (blknum, lsn);
             let mut iter = inner
                 .page_version_metas
-                .range((Included(&minkey), Included(&maxkey)));
+                .range((Included(&minkey), Included(&maxkey)))
+                .iter();
             while let Some(((_blknum, _entry_lsn), blob_range)) = iter.next_back() {
                 let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
 
@@ -300,7 +301,7 @@ impl Layer for DeltaLayer {
     ///
     fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.page_version_metas = BTreeMap::new();
+        inner.page_version_metas = OrderedVec::default();
         inner.relsizes = OrderedVec::default();
         inner.loaded = false;
         Ok(())
@@ -404,7 +405,7 @@ impl DeltaLayer {
             dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: true,
-                page_version_metas: BTreeMap::new(),
+                page_version_metas: OrderedVec::default(), // TODO create with a size estimate
                 relsizes: OrderedVec::from(relsizes),
             }),
             predecessor,
@@ -428,16 +429,14 @@ impl DeltaLayer {
             let buf = PageVersion::ser(page_version)?;
             let blob_range = page_version_writer.write_blob(&buf)?;
 
-            let old = inner.page_version_metas.insert(*key, blob_range);
-
-            assert!(old.is_none());
+            inner.page_version_metas.append(*key, blob_range);
         }
 
         let book = page_version_writer.close()?;
 
         // Write out page versions
         let mut chapter = book.new_chapter(PAGE_VERSION_METAS_CHAPTER);
-        let buf = BTreeMap::ser(&inner.page_version_metas)?;
+        let buf = OrderedVec::ser(&inner.page_version_metas)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
@@ -530,7 +529,7 @@ impl DeltaLayer {
         }
 
         let chapter = book.read_chapter(PAGE_VERSION_METAS_CHAPTER)?;
-        let page_version_metas = BTreeMap::des(&chapter)?;
+        let page_version_metas = OrderedVec::des(&chapter)?;
 
         let chapter = book.read_chapter(REL_SIZES_CHAPTER)?;
         let relsizes = OrderedVec::des(&chapter)?;
@@ -564,7 +563,7 @@ impl DeltaLayer {
             dropped: filename.dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
-                page_version_metas: BTreeMap::new(),
+                page_version_metas: OrderedVec::default(),
                 relsizes: OrderedVec::default(),
             }),
             predecessor,
@@ -588,7 +587,7 @@ impl DeltaLayer {
             dropped: summary.dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
-                page_version_metas: BTreeMap::new(),
+                page_version_metas: OrderedVec::default(),
                 relsizes: OrderedVec::default(),
             }),
             predecessor: None,
