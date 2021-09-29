@@ -1311,6 +1311,8 @@ impl LayeredTimeline {
             last_record_lsn
         );
 
+        let timeline_dir = File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
+
         // Take the in-memory layer with the oldest WAL record. If it's older
         // than the threshold, write it out to disk as a new image and delta file.
         // Repeat until all remaining in-memory layers are within the threshold.
@@ -1321,6 +1323,8 @@ impl LayeredTimeline {
         // check, though. We should also aim at flushing layers that consume
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
+
+        let mut created_historics = false;
 
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
@@ -1374,6 +1378,11 @@ impl LayeredTimeline {
             drop(layers);
             let new_historics = frozen.write_to_disk(self)?;
             layers = self.layers.lock().unwrap();
+
+            if !new_historics.is_empty() {
+                created_historics = true;
+            }
+
             if let Some(relish_uploader) = &self.relish_uploader {
                 for label_path in new_historics.iter().filter_map(|layer| layer.path()) {
                     relish_uploader.schedule_upload(self.timelineid, label_path);
@@ -1407,6 +1416,14 @@ impl LayeredTimeline {
         // into memory.
         for layer in layers.iter_historic_layers() {
             layer.unload()?;
+        }
+
+        drop(layers);
+
+        if created_historics {
+            // We must fsync the timeline dir to ensure the directory entries for
+            // new layer files are durable
+            timeline_dir.sync_all()?;
         }
 
         // Save the metadata, with updated 'disk_consistent_lsn', to a
