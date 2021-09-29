@@ -26,7 +26,7 @@ pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
 
 lazy_static! {
     static ref DISK_IO_BYTES: IntGaugeVec = register_int_gauge_vec!(
-        "pageserver_disk_io_bytes",
+        "disk_io_bytes",
         "Bytes written and read from disk, grouped by the operation (read|write)",
         &["io_operation"]
     )
