@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use zenith_utils::ordered_vec::OrderedVec;
 
 use zenith_utils::accum::Accum;
 use zenith_utils::lsn::Lsn;
@@ -60,7 +61,7 @@ pub struct InMemoryLayerInner {
     ///
     /// `segsizes` tracks the size of the segment at different points in time.
     ///
-    segsizes: BTreeMap<Lsn, u32>,
+    segsizes: OrderedVec<Lsn, u32>,
 
     /// Writes are only allowed when true.
     /// Set to false when this layer is in the process of being replaced.
@@ -81,9 +82,9 @@ impl InMemoryLayerInner {
 
     fn get_seg_size(&self, lsn: Lsn) -> u32 {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let mut iter = self.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let slice = self.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
-        if let Some((_entry_lsn, entry)) = iter.next_back() {
+        if let Some((_entry_lsn, entry)) = slice.last() {
             *entry
         } else {
             0
@@ -343,7 +344,7 @@ impl InMemoryLayer {
             inner: RwLock::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
-                segsizes: BTreeMap::new(),
+                segsizes: OrderedVec::default(),
                 writeable: true,
                 predecessor: None,
             }),
@@ -449,7 +450,7 @@ impl InMemoryLayer {
                     }
                 }
 
-                inner.segsizes.insert(lsn, newsize);
+                inner.segsizes.append_update(lsn, newsize);
                 return Ok(newsize - oldsize);
             }
         }
@@ -467,12 +468,7 @@ impl InMemoryLayer {
         let oldsize = inner.get_seg_size(lsn);
         assert!(segsize < oldsize);
 
-        let old = inner.segsizes.insert(lsn, segsize);
-
-        if old.is_some() {
-            // We already had an entry for this LSN. That's odd..
-            warn!("Inserting truncation, but had an entry for the LSN already");
-        }
+        inner.segsizes.append_update(lsn, segsize);
 
         Ok(())
     }
@@ -519,10 +515,10 @@ impl InMemoryLayer {
         );
 
         // For convenience, copy the segment size from the predecessor layer
-        let mut segsizes = BTreeMap::new();
+        let mut segsizes = OrderedVec::default();
         if seg.rel.is_blocky() {
             let size = src.get_seg_size(start_lsn)?;
-            segsizes.insert(start_lsn, size);
+            segsizes.append(start_lsn, size);
         }
 
         Ok(InMemoryLayer {
@@ -589,15 +585,16 @@ impl InMemoryLayer {
 
         // Divide all the page versions into old and new
         // at the 'cutoff_lsn' point.
-        let mut before_segsizes = BTreeMap::new();
-        let mut after_segsizes = BTreeMap::new();
+        // TODO OrderedVec split method
+        let mut before_segsizes = OrderedVec::default();
+        let mut after_segsizes = OrderedVec::default();
         let mut after_oldest_lsn: Accum<Lsn> = Accum(None);
         for (lsn, size) in inner.segsizes.iter() {
             if *lsn > cutoff_lsn {
-                after_segsizes.insert(*lsn, *size);
+                after_segsizes.append(*lsn, *size);
                 after_oldest_lsn.accum(min, *lsn);
             } else {
-                before_segsizes.insert(*lsn, *size);
+                before_segsizes.append(*lsn, *size);
             }
         }
 
@@ -641,7 +638,7 @@ impl InMemoryLayer {
 
             let new_inner = new_open.inner.get_mut().unwrap();
             new_inner.page_versions.append(&mut after_page_versions);
-            new_inner.segsizes.append(&mut after_segsizes);
+            new_inner.segsizes.extend(after_segsizes);
 
             Some(Arc::new(new_open))
         } else {
@@ -705,10 +702,10 @@ impl InMemoryLayer {
 
         let end_lsn = self.end_lsn.unwrap();
 
-        let mut before_segsizes = BTreeMap::new();
+        let mut before_segsizes = OrderedVec::default();
         for (lsn, size) in inner.segsizes.iter() {
             if *lsn <= end_lsn {
-                before_segsizes.insert(*lsn, *size);
+                before_segsizes.append(*lsn, *size);
             }
         }
         let mut before_page_versions = inner.page_versions.iter().filter(|tup| {

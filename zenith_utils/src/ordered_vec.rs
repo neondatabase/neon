@@ -5,7 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrderedVec<K, V>(Vec<(K, V)>);
 
 impl<K, V> Default for OrderedVec<K, V> {
@@ -59,6 +59,36 @@ impl<K: Ord + Copy, V> OrderedVec<K, V> {
         }
 
         self.0.push((key, value));
+    }
+
+    pub fn append_update(&mut self, key: K, value: V) {
+        if let Some((last_key, this_value)) = self.0.last_mut() {
+            use std::cmp::Ordering;
+            match (*last_key).cmp(&key) {
+                Ordering::Less => {}
+                Ordering::Equal => {
+                    *this_value = value;
+                    return;
+                }
+                Ordering::Greater => {
+                    panic!();
+                }
+            }
+        }
+
+        self.0.push((key, value));
+    }
+
+    pub fn extend(&mut self, other: OrderedVec<K, V>) {
+        if let (Some((last, _)), Some((first, _))) = (self.0.last(), other.0.first()) {
+            assert!(last < first);
+        }
+
+        self.0.extend(other.0);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
