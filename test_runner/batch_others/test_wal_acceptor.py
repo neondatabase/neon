@@ -9,10 +9,7 @@ from contextlib import closing
 from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import WalAcceptorFactory, ZenithPageserver, PostgresFactory, PgBin
 from fixtures.utils import lsn_to_hex, mkdir_if_needed
-
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 

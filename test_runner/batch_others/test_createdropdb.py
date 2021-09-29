@@ -3,10 +3,7 @@ import pathlib
 
 from contextlib import closing
 from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory, ZenithCli, check_restored_datadir_content
-
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 

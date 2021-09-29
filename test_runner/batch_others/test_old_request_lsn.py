@@ -1,10 +1,7 @@
 from contextlib import closing
 
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
-
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 

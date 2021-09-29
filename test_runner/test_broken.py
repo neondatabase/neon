@@ -1,9 +1,7 @@
 import pytest
 import os
 
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 """

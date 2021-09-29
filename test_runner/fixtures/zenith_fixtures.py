@@ -27,10 +27,7 @@ from typing_extensions import Literal
 import requests
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
-
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+from fixtures.log_helper import log
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be

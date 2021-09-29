@@ -1,10 +1,7 @@
 from contextlib import closing
 import psycopg2.extras
-import time;
-
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+import time
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 

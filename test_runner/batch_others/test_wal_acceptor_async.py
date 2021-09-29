@@ -3,12 +3,10 @@ import asyncpg
 import random
 
 from fixtures.zenith_fixtures import WalAcceptor, WalAcceptorFactory, ZenithPageserver, PostgresFactory, Postgres
+from fixtures.log_helper import getLogger
 from typing import List
 
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root.wal_acceptor_async')
-
+log = getLogger('root.wal_acceptor_async')
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 

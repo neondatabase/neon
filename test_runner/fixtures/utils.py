@@ -2,10 +2,7 @@ import os
 import subprocess
 
 from typing import Any, List
-
-import logging
-import fixtures.log_helper  # configures loggers
-log = logging.getLogger('root')
+from fixtures.log_helper import log
 
 def get_self_dir() -> str:
     """ Get the path to the directory where this script lives. """
