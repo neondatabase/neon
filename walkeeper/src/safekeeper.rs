@@ -15,8 +15,11 @@ use std::cmp::min;
 use std::io;
 use std::io::Read;
 
+use lazy_static::lazy_static;
+
 use crate::replication::HotStandbyFeedback;
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
+use zenith_metrics::{register_int_gauge_vec, IntGauge, IntGaugeVec};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::pq_proto::SystemId;
@@ -279,6 +282,36 @@ pub trait Storage {
     fn write_wal(&mut self, s: &SafeKeeperState, startpos: Lsn, buf: &[u8]) -> Result<()>;
 }
 
+lazy_static! {
+    static ref FLUSH_LSN_GAUGE: IntGaugeVec = register_int_gauge_vec!(
+        "safekeeper_flush_lsn",
+        "Current flush_lsn, grouped by timeline",
+        &["ztli"]
+    )
+    .expect("Failed to register safekeeper_flush_lsn int gauge vec");
+    static ref COMMIT_LSN_GAUGE: IntGaugeVec = register_int_gauge_vec!(
+        "safekeeper_commit_lsn",
+        "Current commit_lsn (not necessarily persisted to disk), grouped by timeline",
+        &["ztli"]
+    )
+    .expect("Failed to register safekeeper_commit_lsn int gauge vec");
+}
+
+struct SafeKeeperMetrics {
+    flush_lsn: IntGauge,
+    commit_lsn: IntGauge,
+}
+
+impl SafeKeeperMetrics {
+    fn new(ztli: ZTimelineId) -> SafeKeeperMetrics {
+        let ztli_str = format!("{}", ztli);
+        SafeKeeperMetrics {
+            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&ztli_str]),
+            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
+        }
+    }
+}
+
 /// SafeKeeper which consumes events (messages from compute) and provides
 /// replies.
 pub struct SafeKeeper<ST: Storage> {
@@ -286,6 +319,8 @@ pub struct SafeKeeper<ST: Storage> {
     /// Established by reading wal.
     pub flush_lsn: Lsn,
     pub tli: u32,
+    // Cached metrics so we don't have to recompute labels on each update.
+    metrics: Option<SafeKeeperMetrics>,
     /// not-yet-flushed pairs of same named fields in s.*
     pub commit_lsn: Lsn,
     pub truncate_lsn: Lsn,
@@ -304,6 +339,7 @@ where
         SafeKeeper {
             flush_lsn,
             tli,
+            metrics: None,
             commit_lsn: state.commit_lsn,
             truncate_lsn: state.truncate_lsn,
             storage,
@@ -354,6 +390,8 @@ where
         self.s.server.tli = msg.tli;
         self.s.server.wal_seg_size = msg.wal_seg_size;
         self.storage.persist(&self.s, true)?;
+
+        self.metrics = Some(SafeKeeperMetrics::new(self.s.server.ztli));
 
         info!(
             "processed greeting from proposer {:?}, sending term {:?}",
