@@ -275,7 +275,7 @@ impl AcceptorProposerMessage {
 pub trait Storage {
     /// Persist safekeeper state on disk, optionally syncing it.
     fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()>;
-    /// Write piece of wal in buf to disk.
+    /// Write piece of wal in buf to disk and sync it.
     fn write_wal(&mut self, s: &SafeKeeperState, startpos: Lsn, buf: &[u8]) -> Result<()>;
 }
 
