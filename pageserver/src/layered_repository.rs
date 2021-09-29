@@ -223,6 +223,7 @@ impl LayeredRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
+                let disk_consistent_lsn = metadata.disk_consistent_lsn;
 
                 // Recurse to look up the ancestor timeline.
                 //
@@ -247,7 +248,7 @@ impl LayeredRepository {
                 )?;
 
                 // List the layers on disk, and load them into the layer map
-                timeline.load_layer_map()?;
+                timeline.load_layer_map(disk_consistent_lsn)?;
 
                 // needs to be after load_layer_map
                 timeline.init_current_logical_size()?;
@@ -1048,7 +1049,7 @@ impl LayeredTimeline {
     ///
     /// Scan the timeline directory to populate the layer map
     ///
-    fn load_layer_map(&self) -> anyhow::Result<()> {
+    fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         info!(
             "loading layer map for timeline {} into memory",
             self.timelineid
@@ -1057,8 +1058,20 @@ impl LayeredTimeline {
         let (imgfilenames, mut deltafilenames) =
             filename::list_files(self.conf, self.timelineid, self.tenantid)?;
 
+        let timeline_path = self.conf.timeline_path(&self.timelineid, &self.tenantid);
+
         // First create ImageLayer structs for each image file.
         for filename in imgfilenames.iter() {
+            if filename.lsn > disk_consistent_lsn {
+                warn!(
+                    "found future image layer {} on timeline {}",
+                    filename, self.timelineid
+                );
+
+                rename_to_backup(timeline_path.join(filename.to_string()))?;
+                continue;
+            }
+
             let layer = ImageLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
             info!(
@@ -1076,6 +1089,17 @@ impl LayeredTimeline {
         deltafilenames.sort();
 
         for filename in deltafilenames.iter() {
+            ensure!(filename.start_lsn < filename.end_lsn);
+            if filename.end_lsn > disk_consistent_lsn {
+                warn!(
+                    "found future delta layer {} on timeline {}",
+                    filename, self.timelineid
+                );
+
+                rename_to_backup(timeline_path.join(filename.to_string()))?;
+                continue;
+            }
+
             let predecessor = layers.get(&filename.seg, filename.start_lsn);
 
             let predecessor_str: String = if let Some(prec) = &predecessor {
@@ -1928,4 +1952,24 @@ fn layer_ptr_eq(l1: &dyn Layer, l2: &dyn Layer) -> bool {
     // to avoid this, we compare *const ().
     // see here for more https://github.com/rust-lang/rust/issues/46139
     std::ptr::eq(l1_ptr as *const (), l2_ptr as *const ())
+}
+
+/// Add a suffix to a layer file's name: .{num}.old
+/// Uses the first available num (starts at 0)
+fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    let mut new_path = path.clone();
+
+    for i in 0u32.. {
+        new_path.set_file_name(format!("{}.{}.old", filename, i));
+        if !new_path.exists() {
+            std::fs::rename(&path, &new_path)?;
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!(
+        "couldn't find an unused backup number for {:?}",
+        path
+    ))
 }
