@@ -44,6 +44,7 @@ use zenith_metrics::{
 };
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
+use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
@@ -126,7 +127,7 @@ impl Repository for LayeredRepository {
         let mut timelines = self.timelines.lock().unwrap();
 
         // Create the timeline directory, and write initial metadata to file.
-        std::fs::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
         let metadata = TimelineMetadata {
             disk_consistent_lsn: Lsn(0),
@@ -178,7 +179,7 @@ impl Repository for LayeredRepository {
             ancestor_timeline: Some(src),
             ancestor_lsn: start_lsn,
         };
-        std::fs::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
         Self::save_metadata(self.conf, dst, self.tenantid, &metadata)?;
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
