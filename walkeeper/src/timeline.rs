@@ -18,8 +18,8 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};
 use crate::safekeeper::{
-    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, Storage,
-    SK_FORMAT_VERSION, SK_MAGIC,
+    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
+    Storage, SK_FORMAT_VERSION, SK_MAGIC,
 };
 use crate::WalAcceptorConf;
 use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
@@ -337,14 +337,14 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    fn write_wal(&mut self, s: &SafeKeeperState, startpos: Lsn, buf: &[u8]) -> Result<()> {
+    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8]) -> Result<()> {
         let mut bytes_left: usize = buf.len();
         let mut bytes_written: usize = 0;
         let mut partial;
         let mut start_pos = startpos;
         const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
-        let wal_seg_size = s.server.wal_seg_size as usize;
-        let ztli = s.server.ztli;
+        let wal_seg_size = server.wal_seg_size as usize;
+        let ztli = server.ztli;
 
         /* Extract WAL location for this block */
         let mut xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
@@ -365,7 +365,7 @@ impl Storage for FileStorage {
             /* Open file */
             let segno = start_pos.segment_number(wal_seg_size);
             // note: we basically don't support changing pg timeline
-            let wal_file_name = XLogFileName(s.server.tli, segno, wal_seg_size);
+            let wal_file_name = XLogFileName(server.tli, segno, wal_seg_size);
             let wal_file_path = self
                 .conf
                 .data_dir
