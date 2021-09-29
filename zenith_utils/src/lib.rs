@@ -8,6 +8,8 @@ pub mod lsn;
 /// SeqWait allows waiting for a future sequence number to arrive
 pub mod seqwait;
 
+pub mod ordered_vec;
+
 // Async version of SeqWait. Currently unused.
 // pub mod seqwait_async;
 
