@@ -17,6 +17,7 @@ use std::{
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use log::*;
+use zenith_utils::crashsafe_dir;
 use zenith_utils::logging;
 use zenith_utils::lsn::Lsn;
 
@@ -118,7 +119,7 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
         println!("initializing tenantid {}", tenantid);
         create_repo(conf, tenantid, dummy_redo_mgr).with_context(|| "failed to create repo")?;
     }
-    fs::create_dir_all(conf.tenants_path())?;
+    crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
     println!("pageserver init succeeded");
     Ok(())
@@ -135,12 +136,12 @@ pub fn create_repo(
     }
 
     // top-level dir may exist if we are creating it through CLI
-    fs::create_dir_all(&repo_dir)
+    crashsafe_dir::create_dir_all(&repo_dir)
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
 
-    fs::create_dir(conf.timelines_path(&tenantid))?;
-    fs::create_dir_all(conf.branches_path(&tenantid))?;
-    fs::create_dir_all(conf.tags_path(&tenantid))?;
+    crashsafe_dir::create_dir(conf.timelines_path(&tenantid))?;
+    crashsafe_dir::create_dir_all(conf.branches_path(&tenantid))?;
+    crashsafe_dir::create_dir_all(conf.tags_path(&tenantid))?;
 
     info!("created directory structure in {}", repo_dir.display());
 
