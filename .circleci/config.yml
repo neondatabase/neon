@@ -233,7 +233,7 @@ jobs:
               exit 1
             fi
             if << parameters.run_in_parallel >>; then
-              EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
+              EXTRA_PARAMS="-n16 $EXTRA_PARAMS"
             fi;
             # Run the tests.
             #
