@@ -69,5 +69,5 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
 
     # check that new node doesn't contain truncated segment
     pg_xact_0000_path_new = os.path.join(pg2.pg_xact_dir_path(), '0000')
-    log.info("pg_xact_0000_path_new = " + pg_xact_0000_path_new)
+    log.info(f"pg_xact_0000_path_new = {pg_xact_0000_path_new}")
     assert os.path.isfile(pg_xact_0000_path_new) is False

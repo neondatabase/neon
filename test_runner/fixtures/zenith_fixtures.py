@@ -1117,9 +1117,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli, test_output_dir: str, 
                                                 restored_dir_path,
                                                 pgdata_files,
                                                 shallow=False)
-    log.info('filecmp result mismatch and error lists:')
-    log.info(mismatch)
-    log.info(error)
+    log.info(f'filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}')
 
     for f in mismatch:
 
