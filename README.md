@@ -108,6 +108,13 @@ postgres=# insert into t values(2,2);
 INSERT 0 1
 ```
 
+6. If you want to run tests afterwards (see below), you have to stop pageserver and all postgres instances you have just started:
+```sh
+./target/debug/zenith pg stop migration_check
+./target/debug/zenith pg stop main
+./target/debug/zenith stop
+```
+
 ## Running tests
 
 ```sh
@@ -115,14 +122,6 @@ git clone --recursive https://github.com/zenithdb/zenith.git
 make # builds also postgres and installs it to ./tmp_install
 cd test_runner
 pytest
-```
-
-If you see a `Found interfering processes running` error, stop pageserver and postgres nodes for all branches:
-
-```sh
-./target/debug/zenith pg stop migration_check
-./target/debug/zenith pg stop main
-./target/debug/zenith stop
 ```
 
 ## Documentation
