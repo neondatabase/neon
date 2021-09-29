@@ -759,6 +759,70 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn future_layerfiles() -> Result<()> {
+        const TEST_NAME: &str = "future_layerfiles";
+        let repo = get_test_repo(TEST_NAME)?;
+
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        repo.create_empty_timeline(timelineid)?;
+        drop(repo);
+
+        let dir = PageServerConf::test_repo_dir(TEST_NAME);
+        let mut read_dir = std::fs::read_dir(dir.join("tenants"))?;
+        let tenant_dir = read_dir.next().unwrap().unwrap().path();
+        assert!(tenant_dir.is_dir());
+        let tenantid = tenant_dir.file_name().unwrap().to_str().unwrap();
+        let tenantid = ZTenantId::from_str(tenantid)?;
+        assert!(read_dir.next().is_none());
+
+        let timelines_path = tenant_dir.join("timelines").join(timelineid.to_string());
+
+        let make_empty_file = |filename: &str| -> std::io::Result<()> {
+            let path = timelines_path.join(filename);
+
+            assert!(!path.exists());
+            std::fs::write(&path, &[])?;
+
+            Ok(())
+        };
+
+        let image_filename = format!("pg_control_0_{:016X}", 8000);
+        let delta_filename = format!("pg_control_0_{:016X}_{:016X}", 8000, 8008);
+
+        make_empty_file(&image_filename)?;
+        make_empty_file(&delta_filename)?;
+
+        let new_repo = load_test_repo(TEST_NAME, tenantid)?;
+        new_repo.get_timeline(timelineid).unwrap();
+        drop(new_repo);
+
+        let check_old = |filename: &str, num: u32| {
+            let path = timelines_path.join(filename);
+            assert!(!path.exists());
+
+            let backup_path = timelines_path.join(format!("{}.{}.old", filename, num));
+            assert!(backup_path.exists());
+        };
+
+        check_old(&image_filename, 0);
+        check_old(&delta_filename, 0);
+
+        make_empty_file(&image_filename)?;
+        make_empty_file(&delta_filename)?;
+
+        let new_repo = load_test_repo(TEST_NAME, tenantid)?;
+        new_repo.get_timeline(timelineid).unwrap();
+        drop(new_repo);
+
+        check_old(&image_filename, 0);
+        check_old(&delta_filename, 0);
+        check_old(&image_filename, 1);
+        check_old(&delta_filename, 1);
+
+        Ok(())
+    }
+
     // Mock WAL redo manager that doesn't do much
     struct TestRedoManager {}
 
