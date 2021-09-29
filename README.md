@@ -110,9 +110,9 @@ INSERT 0 1
 
 6. If you want to run tests afterwards (see below), you have to stop pageserver and all postgres instances you have just started:
 ```sh
-./target/debug/zenith pg stop migration_check
-./target/debug/zenith pg stop main
-./target/debug/zenith stop
+> ./target/debug/zenith pg stop migration_check
+> ./target/debug/zenith pg stop main
+> ./target/debug/zenith stop
 ```
 
 ## Running tests
