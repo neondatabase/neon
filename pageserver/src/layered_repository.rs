@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use std::fs::File;
+use std::convert::TryInto;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
+
+// Taken from PG_CONTROL_MAX_SAFE_SIZE
+const METADATA_MAX_SAFE_SIZE: usize = 512;
+const METADATA_CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
+const METADATA_MAX_DATA_SIZE: usize = METADATA_MAX_SAFE_SIZE - METADATA_CHECKSUM_SIZE;
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
@@ -135,7 +141,7 @@ impl Repository for LayeredRepository {
             ancestor_timeline: None,
             ancestor_lsn: Lsn(0),
         };
-        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata)?;
+        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
             self.conf,
@@ -180,7 +186,7 @@ impl Repository for LayeredRepository {
             ancestor_lsn: start_lsn,
         };
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
-        Self::save_metadata(self.conf, dst, self.tenantid, &metadata)?;
+        Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
@@ -353,13 +359,36 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         data: &TimelineMetadata,
+        first_save: bool,
     ) -> Result<PathBuf> {
-        let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
-        let mut file = File::create(&path)?;
+        let timeline_path = conf.timeline_path(&timelineid, &tenantid);
+        let path = timeline_path.join("metadata");
+        // use OpenOptions to ensure file presence is consistent with first_save
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(first_save)
+            .open(&path)?;
 
         info!("saving metadata {}", path.display());
 
-        file.write_all(&TimelineMetadata::ser(data)?)?;
+        let mut metadata_bytes = TimelineMetadata::ser(data)?;
+
+        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
+        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
+
+        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
+        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
+
+        if file.write(&metadata_bytes)? != metadata_bytes.len() {
+            bail!("Could not write all the metadata bytes in a single call");
+        }
+        file.sync_all()?;
+
+        // fsync the parent directory to ensure the directory entry is durable
+        if first_save {
+            let timeline_dir = File::open(&timeline_path)?;
+            timeline_dir.sync_all()?;
+        }
 
         Ok(path)
     }
@@ -370,9 +399,18 @@ impl LayeredRepository {
         tenantid: ZTenantId,
     ) -> Result<TimelineMetadata> {
         let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
-        let data = std::fs::read(&path)?;
+        let metadata_bytes = std::fs::read(&path)?;
+        ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
 
-        let data = TimelineMetadata::des(&data)?;
+        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
+        let calculated_checksum = crc32c::crc32c(&data);
+
+        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
+            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
+        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
+        ensure!(calculated_checksum == expected_checksum);
+
+        let data = TimelineMetadata::des_prefix(&data)?;
         assert!(data.disk_consistent_lsn.is_aligned());
 
         Ok(data)
@@ -1450,8 +1488,13 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
-        let metadata_path =
-            LayeredRepository::save_metadata(self.conf, self.timelineid, self.tenantid, &metadata)?;
+        let metadata_path = LayeredRepository::save_metadata(
+            self.conf,
+            self.timelineid,
+            self.tenantid,
+            &metadata,
+            false,
+        )?;
         if let Some(relish_uploader) = &self.relish_uploader {
             relish_uploader.schedule_upload(self.timelineid, metadata_path);
         }

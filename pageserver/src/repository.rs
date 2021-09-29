@@ -277,6 +277,23 @@ mod tests {
         Ok(repo)
     }
 
+    fn load_test_repo(test_name: &str, tenantid: ZTenantId) -> Result<Box<dyn Repository>> {
+        let repo_dir = PageServerConf::test_repo_dir(test_name);
+
+        let conf = PageServerConf::dummy_conf(repo_dir);
+        let conf: &'static PageServerConf = Box::leak(Box::new(conf));
+
+        let walredo_mgr = TestRedoManager {};
+
+        let repo = Box::new(LayeredRepository::new(
+            conf,
+            Arc::new(walredo_mgr),
+            tenantid,
+        ));
+
+        Ok(repo)
+    }
+
     #[test]
     fn test_relsize() -> Result<()> {
         let repo = get_test_repo("test_relsize")?;
@@ -702,6 +719,42 @@ mod tests {
         assert_eq!(newtline.get_relish_size(TESTREL_B, Lsn(0x40))?.unwrap(), 1);
 
         assert_current_logical_size(&tline, Lsn(0x40));
+
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_metadata() -> Result<()> {
+        const TEST_NAME: &str = "corrupt_metadata";
+        let repo = get_test_repo(TEST_NAME)?;
+
+        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
+        repo.create_empty_timeline(timelineid)?;
+        drop(repo);
+
+        let dir = PageServerConf::test_repo_dir(TEST_NAME);
+        let mut read_dir = std::fs::read_dir(dir.join("tenants"))?;
+        let tenant_dir = read_dir.next().unwrap().unwrap().path();
+        assert!(tenant_dir.is_dir());
+        let tenantid = tenant_dir.file_name().unwrap().to_str().unwrap();
+        let tenantid = ZTenantId::from_str(tenantid)?;
+        assert!(read_dir.next().is_none());
+
+        let metadata_path = tenant_dir
+            .join("timelines")
+            .join(timelineid.to_string())
+            .join("metadata");
+
+        assert!(metadata_path.is_file());
+
+        let mut metadata_bytes = std::fs::read(&metadata_path)?;
+        assert_eq!(metadata_bytes.len(), 512);
+        metadata_bytes[512 - 4 - 2] ^= 1;
+        std::fs::write(metadata_path, metadata_bytes)?;
+
+        let new_repo = load_test_repo(TEST_NAME, tenantid)?;
+        let err = new_repo.get_timeline(timelineid).err().unwrap();
+        assert!(err.to_string().contains("checksum"));
 
         Ok(())
     }
