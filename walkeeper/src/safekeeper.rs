@@ -283,6 +283,7 @@ pub trait Storage {
 }
 
 lazy_static! {
+    // TODO(yeputons): LSNs are u64, but IntGaugeVec expectes i64, so we convert.
     static ref FLUSH_LSN_GAUGE: IntGaugeVec = register_int_gauge_vec!(
         "safekeeper_flush_lsn",
         "Current flush_lsn, grouped by timeline",
@@ -516,6 +517,11 @@ where
         }
         if last_rec_lsn > self.flush_lsn {
             self.flush_lsn = last_rec_lsn;
+            self.metrics
+                .as_ref()
+                .unwrap()
+                .flush_lsn
+                .set(u64::from(self.flush_lsn) as i64);
         }
 
         // Advance commit_lsn taking into account what we have locally. xxx this
@@ -533,6 +539,11 @@ where
             sync_control_file |=
                 commit_lsn >= msg.h.epoch_start_lsn && self.s.commit_lsn < msg.h.epoch_start_lsn;
             self.commit_lsn = commit_lsn;
+            self.metrics
+                .as_ref()
+                .unwrap()
+                .commit_lsn
+                .set(u64::from(self.commit_lsn) as i64);
         }
 
         self.truncate_lsn = msg.h.truncate_lsn;
