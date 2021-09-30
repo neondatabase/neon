@@ -151,6 +151,7 @@ pub fn create_repo(
         conf,
         wal_redo_manager,
         tenantid,
+        false,
     ));
 
     // Load data into pageserver

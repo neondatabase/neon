@@ -8,13 +8,42 @@
 
 mod local_fs;
 mod rust_s3;
-/// A queue and the background machinery behind it to upload
-/// local page server layer files to external storage.
-pub mod storage_uploader;
+/// A queue-based storage with the background machinery behind it to synchronize
+/// local page server layer files with external storage.
+mod synced_storage;
 
 use std::path::Path;
+use std::thread;
 
 use anyhow::Context;
+
+use self::local_fs::LocalFs;
+pub use self::synced_storage::schedule_timeline_upload;
+use crate::relish_storage::rust_s3::RustS3;
+use crate::{PageServerConf, RelishStorageKind};
+
+pub fn run_storage_sync_thread(
+    config: &'static PageServerConf,
+) -> anyhow::Result<Option<thread::JoinHandle<anyhow::Result<()>>>> {
+    match &config.relish_storage_config {
+        Some(relish_storage_config) => {
+            let max_concurrent_sync = relish_storage_config.max_concurrent_sync;
+            match &relish_storage_config.storage {
+                RelishStorageKind::LocalFs(root) => synced_storage::run_storage_sync_thread(
+                    config,
+                    LocalFs::new(root.clone())?,
+                    max_concurrent_sync,
+                ),
+                RelishStorageKind::AwsS3(s3_config) => synced_storage::run_storage_sync_thread(
+                    config,
+                    RustS3::new(s3_config)?,
+                    max_concurrent_sync,
+                ),
+            }
+        }
+        None => Ok(None),
+    }
+}
 
 /// Storage (potentially remote) API to manage its state.
 #[async_trait::async_trait]
