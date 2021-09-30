@@ -298,9 +298,11 @@ impl PostgresRedoManager {
                     // Transaction manager stuff
                     let rec_segno = match rel {
                         RelishTag::Slru { slru, segno } => {
-                            if slru != SlruKind::Clog {
-                                panic!("Not valid XACT relish tag {:?}", rel);
-                            }
+                            assert!(
+                                slru == SlruKind::Clog,
+                                "Not valid XACT relish tag {:?}",
+                                rel
+                            );
                             segno
                         }
                         _ => panic!("Not valid XACT relish tag {:?}", rel),
