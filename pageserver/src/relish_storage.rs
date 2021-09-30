@@ -12,14 +12,12 @@ mod rust_s3;
 /// local page server layer files with external storage.
 mod synced_storage;
 
-use std::path::Path;
-use std::thread;
+use std::{path::Path, thread};
 
 use anyhow::Context;
 
-use self::local_fs::LocalFs;
 pub use self::synced_storage::schedule_timeline_upload;
-use crate::relish_storage::rust_s3::RustS3;
+use self::{local_fs::LocalFs, rust_s3::RustS3};
 use crate::{PageServerConf, RelishStorageKind};
 
 pub fn run_storage_sync_thread(
