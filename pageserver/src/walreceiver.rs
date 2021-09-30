@@ -12,7 +12,6 @@ use crate::tenant_mgr;
 use crate::waldecoder::{decode_wal_record, WalStreamDecoder};
 use crate::PageServerConf;
 use anyhow::{anyhow, bail, Context, Error, Result};
-use bincode::config::Options;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use log::*;
@@ -33,7 +32,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
-use zenith_utils::bin_ser::{be_coder, BeSer};
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage, XLogDataBody};
@@ -452,7 +451,7 @@ impl<'pg> PushWalReceiver<'pg> {
     ///
     /// Any returned error will be from serialization failing.
     fn serialize_with_tag<T: Serialize>(val: T, tag: u8) -> Result<Vec<u8>> {
-        let mut buf = be_coder().serialize(&val)?;
+        let mut buf = BeSer::ser(&val)?;
         buf.insert(0, tag);
         Ok(buf)
     }

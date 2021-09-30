@@ -5,7 +5,6 @@ use crate::send_wal::SendWalHandler;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::WalAcceptorConf;
 use anyhow::{anyhow, Context, Result};
-use bincode::Options;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{pin_mut, SinkExt, StreamExt};
 use lazy_static::lazy_static;
@@ -27,7 +26,7 @@ use std::time::Duration;
 use std::{str, thread};
 use tokio::runtime;
 use tokio_postgres::{CopyBothDuplex, CopyBothSink, CopyBothStream, NoTls};
-use zenith_utils::bin_ser::{be_coder, BeSer};
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage, XLogDataBody};
@@ -150,9 +149,7 @@ impl ReplicationSender for PushReplicationConn<'_> {
         buf.put_u8(XLOG_DATA_TAG_BYTE);
 
         let mut w = buf.writer();
-        // Switch to BeSer::ser once #655 lands.
-        be_coder()
-            .serialize_into(&mut w, &data)
+        BeSer::ser_into(&data, &mut w)
             .context("failed to serialize XLogData")
             .unwrap();
 
