@@ -155,7 +155,7 @@ pub fn create_repo(
     // Load data into pageserver
     // TODO To implement zenith import we need to
     //      move data loading out of create_repo()
-    bootstrap_timeline(conf, tenantid, tli, &*repo)?;
+    bootstrap_timeline(conf, tenantid, tli, repo.as_ref())?;
 
     Ok(repo)
 }
@@ -221,7 +221,11 @@ fn bootstrap_timeline(
     // Import the contents of the data directory at the initial checkpoint
     // LSN, and any WAL after that.
     let timeline = repo.create_empty_timeline(tli)?;
-    restore_local_repo::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+    restore_local_repo::import_timeline_from_postgres_datadir(
+        &pgdata_path,
+        timeline.as_ref(),
+        lsn,
+    )?;
     timeline.checkpoint()?;
 
     println!(
