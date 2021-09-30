@@ -352,13 +352,16 @@ impl<'pg> StandardReplicationConn<'pg> {
         let bg_timeline = Arc::clone(timeline);
         let bg_stream_in = self.pgb.take_stream_in().unwrap();
 
-        thread::spawn(|| {
-            let mut recv = StandardReplicationReciever(bg_stream_in);
+        thread::Builder::new()
+            .name("replication bg thread".to_owned()) // "bg" because linux only shows 15 chars
+            .spawn(|| {
+                let mut recv = StandardReplicationReciever(bg_stream_in);
 
-            if let Err(err) = do_receive_loop(&mut recv, bg_timeline) {
-                error!("Replication background thread failed: {}", err);
-            }
-        });
+                if let Err(err) = do_receive_loop(&mut recv, bg_timeline) {
+                    error!("Replication background thread failed: {}", err);
+                }
+            })
+            .expect("could not spawn replication background thread");
 
         let (mut start_pos, mut stop_pos) = Self::parse_start_stop(cmd)?;
 
@@ -441,9 +444,12 @@ impl PushReplicationConn<'_> {
         // can keep a stable one. Building it now means that we can fail quickly if there's some
         // fundamental problem -- like if the io driver isn't enabled.
         let rt = Self::make_rt();
-        thread::spawn(move || {
-            Self::run_connection_retry_loop(rt, ps_addr, conf, timeline, tenantid, wal_seg_size)
-        });
+        thread::Builder::new()
+            .name("push replication".to_owned())
+            .spawn(move || {
+                Self::run_connection_retry_loop(rt, ps_addr, conf, timeline, tenantid, wal_seg_size)
+            })
+            .expect("could not start replication thread");
     }
 
     // Helper function to make a tokio runtime
@@ -556,12 +562,15 @@ impl PushReplicationConn<'_> {
         };
 
         let bg_timeline = timeline.clone();
-        let bg_handle = thread::spawn(move || {
-            if let Err(e) = do_receive_loop(&mut receiver, bg_timeline) {
-                error!("WAL push background thread failed: {:#}", e);
-            }
-            receiver
-        });
+        let bg_handle = thread::Builder::new()
+            .name("replication bg".to_owned())
+            .spawn(move || {
+                if let Err(e) = do_receive_loop(&mut receiver, bg_timeline) {
+                    error!("WAL push background thread failed: {:#}", e);
+                }
+                receiver
+            })
+            .expect("could not spawn replication background thread");
 
         let mut res = do_send_loop(
             &mut sender,
