@@ -32,7 +32,7 @@ struct SharedState {
     sk: SafeKeeper<FileStorage>,
     /// For receiving-sending wal cooperation
     /// quorum commit LSN we've notified walsenders about
-    commit_lsn: Lsn,
+    notified_commit_lsn: Lsn,
     /// combined hot standby feedback from all replicas
     hs_feedback: HotStandbyFeedback,
 }
@@ -72,7 +72,7 @@ impl SharedState {
         };
 
         Ok(Self {
-            commit_lsn: Lsn(0),
+            notified_commit_lsn: Lsn(0),
             sk: SafeKeeper::new(Lsn(flush_lsn), tli, storage, state),
             hs_feedback: HotStandbyFeedback {
                 ts: 0,
@@ -186,7 +186,7 @@ impl Timeline {
     pub fn wait_for_lsn(&self, lsn: Lsn) -> Lsn {
         let mut shared_state = self.mutex.lock().unwrap();
         loop {
-            let commit_lsn = shared_state.commit_lsn;
+            let commit_lsn = shared_state.notified_commit_lsn;
             // This must be `>`, not `>=`.
             if commit_lsn > lsn {
                 return commit_lsn;
@@ -198,8 +198,8 @@ impl Timeline {
     // Notify caught-up WAL senders about new WAL data received
     pub fn notify_wal_senders(&self, commit_lsn: Lsn) {
         let mut shared_state = self.mutex.lock().unwrap();
-        if shared_state.commit_lsn < commit_lsn {
-            shared_state.commit_lsn = commit_lsn;
+        if shared_state.notified_commit_lsn < commit_lsn {
+            shared_state.notified_commit_lsn = commit_lsn;
             self.cond.notify_all();
         }
     }
