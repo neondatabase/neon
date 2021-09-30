@@ -90,7 +90,7 @@ async fn upload_loop_step<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
 
     if let Err(e) = upload_relish(relish_storage, page_server_workdir, &relish_local_path).await {
         log::error!(
-            "Failed to upload relish '{}' for timeline {}, reason: {}",
+            "Failed to upload relish '{}' for timeline {}, reason: {:#}",
             relish_local_path.display(),
             relish_timeline_id,
             e
