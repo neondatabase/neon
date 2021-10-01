@@ -78,6 +78,10 @@ macro_rules! zid_newtype {
             pub fn generate() -> Self {
                 $t(ZId::generate())
             }
+
+            pub const fn from_array(b: [u8; 16]) -> Self {
+                $t(ZId(b))
+            }
         }
 
         impl FromStr for $t {
