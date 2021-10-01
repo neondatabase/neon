@@ -176,6 +176,7 @@ impl ProxyConnection {
 
             match self.cplane.authenticate_proxy_request(
                 self.user.as_str(),
+                self.database.as_str(),
                 md5_response,
                 &self.md5_salt,
             ) {

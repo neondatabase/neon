@@ -36,12 +36,14 @@ impl CPlaneApi {
     pub fn authenticate_proxy_request(
         &self,
         user: &str,
+        database: &str,
         md5_response: &[u8],
         salt: &[u8; 4],
     ) -> Result<DatabaseInfo> {
         let mut url = reqwest::Url::parse(self.auth_endpoint)?;
         url.query_pairs_mut()
             .append_pair("login", user)
+            .append_pair("database", database)
             .append_pair("md5response", std::str::from_utf8(md5_response)?)
             .append_pair("salt", &hex::encode(salt));
 
