@@ -1247,13 +1247,12 @@ impl LayeredTimeline {
         assert!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
-        if lsn <= last_record_lsn {
-            panic!(
-                "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
-                lsn,
-                last_record_lsn
-            );
-        }
+        assert!(
+            lsn > last_record_lsn,
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
+            lsn,
+            last_record_lsn,
+        );
 
         // Do we have a layer open for writing already?
         let layer;
