@@ -36,6 +36,7 @@ use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
 use crate::relish_storage::storage_uploader::QueueBasedRelishUploader;
 use crate::repository::{GcResult, Repository, Timeline, WALRecord};
+use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
@@ -643,8 +644,11 @@ impl Timeline for LayeredTimeline {
     /// Wait until WAL has been received up to the given LSN.
     fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
-        // to a deadlock. FIXME: Is there a less hacky way to check that?
-        assert_ne!(thread::current().name(), Some("WAL receiver thread"));
+        // to a deadlock.
+        assert!(
+            !IS_WAL_RECEIVER.with(|c| c.get()),
+            "wait_lsn called by WAL receiver thread"
+        );
 
         self.last_record_lsn
             .wait_for_timeout(lsn, TIMEOUT)
