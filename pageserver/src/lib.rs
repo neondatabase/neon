@@ -13,7 +13,7 @@ pub mod http;
 pub mod layered_repository;
 pub mod page_service;
 pub mod relish;
-mod relish_storage;
+pub mod relish_storage;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod tenant_mgr;
@@ -40,6 +40,7 @@ pub mod defaults {
     pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
+    pub const DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
 }
 
 lazy_static! {
@@ -168,18 +169,37 @@ impl PageServerConf {
 
 /// External relish storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone)]
-pub enum RelishStorageConfig {
-    /// Root folder to place all stored relish data into.
+pub struct RelishStorageConfig {
+    /// Limits the number of concurrent sync operations between pageserver and relish storage.
+    pub max_concurrent_sync: usize,
+    /// The storage connection configuration.
+    pub storage: RelishStorageKind,
+}
+
+/// A kind of a relish storage to connect to, with its connection configuration.
+#[derive(Debug, Clone)]
+pub enum RelishStorageKind {
+    /// Storage based on local file system.
+    /// Specify a root folder to place all stored relish data into.
     LocalFs(PathBuf),
+    /// AWS S3 based storage, storing all relishes into the root
+    /// of the S3 bucket from the config.
     AwsS3(S3Config),
 }
 
 /// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
 #[derive(Clone)]
 pub struct S3Config {
+    /// Name of the bucket to connect to.
     pub bucket_name: String,
+    /// The region where the bucket is located at.
     pub bucket_region: String,
+    /// "Login" to use when connecting to bucket.
+    /// Can be empty for cases like AWS k8s IAM
+    /// where we can allow certain pods to connect
+    /// to the bucket directly without any credentials.
     pub access_key_id: Option<String>,
+    /// "Password" to use when connecting to bucket.
     pub secret_access_key: Option<String>,
 }
 

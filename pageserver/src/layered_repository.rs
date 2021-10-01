@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use std::fs::File;
+use std::convert::TryInto;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
@@ -44,6 +45,7 @@ use zenith_metrics::{
 };
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
+use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
@@ -71,6 +73,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
+
+// Taken from PG_CONTROL_MAX_SAFE_SIZE
+const METADATA_MAX_SAFE_SIZE: usize = 512;
+const METADATA_CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
+const METADATA_MAX_DATA_SIZE: usize = METADATA_MAX_SAFE_SIZE - METADATA_CHECKSUM_SIZE;
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
@@ -126,7 +133,7 @@ impl Repository for LayeredRepository {
         let mut timelines = self.timelines.lock().unwrap();
 
         // Create the timeline directory, and write initial metadata to file.
-        std::fs::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
         let metadata = TimelineMetadata {
             disk_consistent_lsn: Lsn(0),
@@ -134,7 +141,7 @@ impl Repository for LayeredRepository {
             ancestor_timeline: None,
             ancestor_lsn: Lsn(0),
         };
-        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata)?;
+        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
             self.conf,
@@ -178,8 +185,8 @@ impl Repository for LayeredRepository {
             ancestor_timeline: Some(src),
             ancestor_lsn: start_lsn,
         };
-        std::fs::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
-        Self::save_metadata(self.conf, dst, self.tenantid, &metadata)?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
+        Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
@@ -216,6 +223,7 @@ impl LayeredRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
+                let disk_consistent_lsn = metadata.disk_consistent_lsn;
 
                 // Recurse to look up the ancestor timeline.
                 //
@@ -240,7 +248,7 @@ impl LayeredRepository {
                 )?;
 
                 // List the layers on disk, and load them into the layer map
-                timeline.load_layer_map()?;
+                timeline.load_layer_map(disk_consistent_lsn)?;
 
                 // needs to be after load_layer_map
                 timeline.init_current_logical_size()?;
@@ -352,13 +360,36 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         data: &TimelineMetadata,
+        first_save: bool,
     ) -> Result<PathBuf> {
-        let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
-        let mut file = File::create(&path)?;
+        let timeline_path = conf.timeline_path(&timelineid, &tenantid);
+        let path = timeline_path.join("metadata");
+        // use OpenOptions to ensure file presence is consistent with first_save
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(first_save)
+            .open(&path)?;
 
         info!("saving metadata {}", path.display());
 
-        file.write_all(&TimelineMetadata::ser(data)?)?;
+        let mut metadata_bytes = TimelineMetadata::ser(data)?;
+
+        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
+        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
+
+        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
+        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
+
+        if file.write(&metadata_bytes)? != metadata_bytes.len() {
+            bail!("Could not write all the metadata bytes in a single call");
+        }
+        file.sync_all()?;
+
+        // fsync the parent directory to ensure the directory entry is durable
+        if first_save {
+            let timeline_dir = File::open(&timeline_path)?;
+            timeline_dir.sync_all()?;
+        }
 
         Ok(path)
     }
@@ -369,9 +400,18 @@ impl LayeredRepository {
         tenantid: ZTenantId,
     ) -> Result<TimelineMetadata> {
         let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
-        let data = std::fs::read(&path)?;
+        let metadata_bytes = std::fs::read(&path)?;
+        ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
 
-        let data = TimelineMetadata::des(&data)?;
+        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
+        let calculated_checksum = crc32c::crc32c(&data);
+
+        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
+            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
+        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
+        ensure!(calculated_checksum == expected_checksum);
+
+        let data = TimelineMetadata::des_prefix(&data)?;
         assert!(data.disk_consistent_lsn.is_aligned());
 
         Ok(data)
@@ -501,7 +541,7 @@ impl LayeredRepository {
                     error!("timeline size calculation diverged, incremental doesn't match non incremental. incremental={} non_incremental={}", incremental, non_incremental);
                 }
             }
-            Err(e) => error!("failed to calculate non incremental timeline size: {}", e),
+            Err(e) => error!("failed to calculate non incremental timeline size: {:#}", e),
         }
     }
 
@@ -1009,7 +1049,7 @@ impl LayeredTimeline {
     ///
     /// Scan the timeline directory to populate the layer map
     ///
-    fn load_layer_map(&self) -> anyhow::Result<()> {
+    fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         info!(
             "loading layer map for timeline {} into memory",
             self.timelineid
@@ -1018,8 +1058,20 @@ impl LayeredTimeline {
         let (imgfilenames, mut deltafilenames) =
             filename::list_files(self.conf, self.timelineid, self.tenantid)?;
 
+        let timeline_path = self.conf.timeline_path(&self.timelineid, &self.tenantid);
+
         // First create ImageLayer structs for each image file.
         for filename in imgfilenames.iter() {
+            if filename.lsn > disk_consistent_lsn {
+                warn!(
+                    "found future image layer {} on timeline {}",
+                    filename, self.timelineid
+                );
+
+                rename_to_backup(timeline_path.join(filename.to_string()))?;
+                continue;
+            }
+
             let layer = ImageLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
             info!(
@@ -1037,6 +1089,17 @@ impl LayeredTimeline {
         deltafilenames.sort();
 
         for filename in deltafilenames.iter() {
+            ensure!(filename.start_lsn < filename.end_lsn);
+            if filename.end_lsn > disk_consistent_lsn {
+                warn!(
+                    "found future delta layer {} on timeline {}",
+                    filename, self.timelineid
+                );
+
+                rename_to_backup(timeline_path.join(filename.to_string()))?;
+                continue;
+            }
+
             let predecessor = layers.get(&filename.seg, filename.start_lsn);
 
             let predecessor_str: String = if let Some(prec) = &predecessor {
@@ -1310,6 +1373,8 @@ impl LayeredTimeline {
             last_record_lsn
         );
 
+        let timeline_dir = File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
+
         // Take the in-memory layer with the oldest WAL record. If it's older
         // than the threshold, write it out to disk as a new image and delta file.
         // Repeat until all remaining in-memory layers are within the threshold.
@@ -1320,6 +1385,8 @@ impl LayeredTimeline {
         // check, though. We should also aim at flushing layers that consume
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
+
+        let mut created_historics = false;
 
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
@@ -1373,6 +1440,11 @@ impl LayeredTimeline {
             drop(layers);
             let new_historics = frozen.write_to_disk(self)?;
             layers = self.layers.lock().unwrap();
+
+            if !new_historics.is_empty() {
+                created_historics = true;
+            }
+
             if let Some(relish_uploader) = &self.relish_uploader {
                 for label_path in new_historics.iter().filter_map(|layer| layer.path()) {
                     relish_uploader.schedule_upload(self.timelineid, label_path);
@@ -1408,6 +1480,14 @@ impl LayeredTimeline {
             layer.unload()?;
         }
 
+        drop(layers);
+
+        if created_historics {
+            // We must fsync the timeline dir to ensure the directory entries for
+            // new layer files are durable
+            timeline_dir.sync_all()?;
+        }
+
         // Save the metadata, with updated 'disk_consistent_lsn', to a
         // file in the timeline dir. After crash, we will restart WAL
         // streaming and processing from that point.
@@ -1432,8 +1512,13 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
-        let metadata_path =
-            LayeredRepository::save_metadata(self.conf, self.timelineid, self.tenantid, &metadata)?;
+        let metadata_path = LayeredRepository::save_metadata(
+            self.conf,
+            self.timelineid,
+            self.tenantid,
+            &metadata,
+            false,
+        )?;
         if let Some(relish_uploader) = &self.relish_uploader {
             relish_uploader.schedule_upload(self.timelineid, metadata_path);
         }
@@ -1867,4 +1952,24 @@ fn layer_ptr_eq(l1: &dyn Layer, l2: &dyn Layer) -> bool {
     // to avoid this, we compare *const ().
     // see here for more https://github.com/rust-lang/rust/issues/46139
     std::ptr::eq(l1_ptr as *const (), l2_ptr as *const ())
+}
+
+/// Add a suffix to a layer file's name: .{num}.old
+/// Uses the first available num (starts at 0)
+fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    let mut new_path = path.clone();
+
+    for i in 0u32.. {
+        new_path.set_file_name(format!("{}.{}.old", filename, i));
+        if !new_path.exists() {
+            std::fs::rename(&path, &new_path)?;
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!(
+        "couldn't find an unused backup number for {:?}",
+        path
+    ))
 }

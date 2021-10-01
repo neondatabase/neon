@@ -2606,6 +2606,7 @@ dependencies = [
  "slog-scope",
  "slog-stdlog",
  "slog-term",
+ "tempfile",
  "thiserror",
  "tokio",
  "webpki",

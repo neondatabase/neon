@@ -194,7 +194,7 @@ pub fn thread_main(
         let local_auth = auth.clone();
         thread::spawn(move || {
             if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
-                error!("error: {}", err);
+                error!("page server thread exiting with error: {:#}", err);
             }
         });
     }

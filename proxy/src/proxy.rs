@@ -176,6 +176,7 @@ impl ProxyConnection {
 
             match self.cplane.authenticate_proxy_request(
                 self.user.as_str(),
+                self.database.as_str(),
                 md5_response,
                 &self.md5_salt,
             ) {
@@ -247,7 +248,7 @@ databases without opening the browser.
 
 /// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
 async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<tokio::net::TcpStream> {
-    let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()).await?;
+    let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()?).await?;
     let config = db_info.conn_string().parse::<tokio_postgres::Config>()?;
     let _ = config.connect_raw(&mut socket, NoTls).await?;
     Ok(socket)

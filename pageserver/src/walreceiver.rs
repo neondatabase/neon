@@ -10,7 +10,7 @@ use crate::restore_local_repo;
 use crate::tenant_mgr;
 use crate::waldecoder::*;
 use crate::PageServerConf;
-use anyhow::{Error, Result};
+use anyhow::{bail, Error, Result};
 use lazy_static::lazy_static;
 use log::*;
 use postgres::fallible_iterator::FallibleIterator;
@@ -158,7 +158,7 @@ fn walreceiver_main(
     let mut startpoint = last_rec_lsn;
 
     if startpoint == Lsn(0) {
-        error!("No previous WAL position");
+        bail!("No previous WAL position");
     }
 
     // There might be some padding after the last full record, skip it.
