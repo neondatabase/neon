@@ -501,7 +501,7 @@ impl LayeredRepository {
                     error!("timeline size calculation diverged, incremental doesn't match non incremental. incremental={} non_incremental={}", incremental, non_incremental);
                 }
             }
-            Err(e) => error!("failed to calculate non incremental timeline size: {}", e),
+            Err(e) => error!("failed to calculate non incremental timeline size: {:#}", e),
         }
     }
 

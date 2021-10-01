@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
 
 use crate::relish::*;
@@ -173,8 +173,7 @@ fn import_relfile(
                     break;
                 }
                 _ => {
-                    error!("error reading file: {:?} ({})", path, e);
-                    break;
+                    bail!("error reading file {}: {:#}", path.display(), e);
                 }
             },
         };
@@ -268,8 +267,7 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
                     break;
                 }
                 _ => {
-                    error!("error reading file: {:?} ({})", path, e);
-                    break;
+                    bail!("error reading file {}: {:#}", path.display(), e);
                 }
             },
         };

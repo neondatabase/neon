@@ -479,7 +479,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
         match daemonize.start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(e) => error!("Error, {}", e),
+            Err(e) => error!("could not daemonize: {:#}", e),
         }
     }
 
