@@ -20,6 +20,7 @@ use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
+use std::cell::Cell;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +28,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
 use std::thread::sleep;
+use std::thread_local;
 use std::time::{Duration, SystemTime};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantId;
@@ -42,6 +44,13 @@ struct WalReceiverEntry {
 lazy_static! {
     static ref WAL_RECEIVERS: Mutex<HashMap<ZTimelineId, WalReceiverEntry>> =
         Mutex::new(HashMap::new());
+}
+
+thread_local! {
+    // Boolean that is true only for WAL receiver threads
+    //
+    // This is used in `wait_lsn` to guard against usage that might lead to a deadlock.
+    pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
 }
 
 // Launch a new WAL receiver, or tell one that's running about change in connection string
@@ -64,12 +73,10 @@ pub fn launch_wal_receiver(
             receivers.insert(timelineid, receiver);
 
             // Also launch a new thread to handle this connection
-            //
-            // NOTE: This thread name is checked in the assertion in wait_lsn. If you change
-            // this, make sure you update the assertion too.
             let _walreceiver_thread = thread::Builder::new()
                 .name("WAL receiver thread".into())
                 .spawn(move || {
+                    IS_WAL_RECEIVER.with(|c| c.set(true));
                     thread_main(conf, timelineid, tenantid);
                 })
                 .unwrap();

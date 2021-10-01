@@ -70,7 +70,7 @@ pub fn insert_repository_for_tenant(tenantid: ZTenantId, repo: Arc<dyn Repositor
 pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
     let o = &REPOSITORY.lock().unwrap();
     o.get(&tenantid)
-        .map(|repo| Arc::clone(repo))
+        .map(Arc::clone)
         .ok_or_else(|| anyhow!("repository not found for tenant name {}", tenantid))
 }
 

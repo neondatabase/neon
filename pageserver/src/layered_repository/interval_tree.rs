@@ -283,6 +283,7 @@ mod tests {
             write!(f, "{}", self.val)
         }
     }
+    #[rustfmt::skip]
     fn assert_search(
         tree: &IntervalTree<MockItem>,
         key: u32,
@@ -291,24 +292,20 @@ mod tests {
         if let Some(v) = tree.search(key) {
             let vstr = v.to_string();
 
-            if expected.is_empty() {
-                panic!("search with {} returned {}, expected None", key, v);
-            }
+            assert!(!expected.is_empty(), "search with {} returned {}, expected None", key, v);
+            assert!(
+                expected.contains(&vstr.as_str()),
+                "search with {} returned {}, expected one of: {:?}",
+                key, v, expected,
+            );
 
-            if !expected.contains(&vstr.as_str()) {
-                panic!(
-                    "search with {} returned {}, expected one of: {:?}",
-                    key, v, expected
-                );
-            }
             Some(v)
         } else {
-            if !expected.is_empty() {
-                panic!(
-                    "search with {} returned None, expected one of {:?}",
-                    key, expected
-                );
-            }
+            assert!(
+                expected.is_empty(),
+                "search with {} returned None, expected one of {:?}",
+                key, expected
+            );
             None
         }
     }
