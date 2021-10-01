@@ -212,11 +212,17 @@ mod tests {
     use crate::layered_repository::LayeredRepository;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
+    use hex_literal::hex;
     use postgres_ffi::pg_constants;
     use postgres_ffi::xlog_utils::SIZEOF_CHECKPOINT;
     use std::fs;
     use std::str::FromStr;
     use zenith_utils::zid::ZTenantId;
+
+    const TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
+    const NEW_TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("AA223344556677881122334455667788"));
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
@@ -301,8 +307,7 @@ mod tests {
         //repo.get_timeline("11223344556677881122334455667788");
 
         // Create timeline to work on
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
@@ -419,8 +424,7 @@ mod tests {
         let repo = get_test_repo("test_drop_extend")?;
 
         // Create timeline to work on
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         tline.advance_last_record_lsn(Lsn(0x20));
@@ -456,8 +460,7 @@ mod tests {
         let repo = get_test_repo("test_truncate_extend")?;
 
         // Create timeline to work on
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         //from storage_layer.rs
         const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
@@ -555,8 +558,7 @@ mod tests {
     #[test]
     fn test_large_rel() -> Result<()> {
         let repo = get_test_repo("test_large_rel")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
@@ -618,8 +620,7 @@ mod tests {
     #[test]
     fn test_list_rels_drop() -> Result<()> {
         let repo = get_test_repo("test_list_rels_drop")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
         const TESTDB: u32 = 111;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
@@ -637,9 +638,8 @@ mod tests {
         assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
 
         // Create a branch, check that the relation is visible there
-        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
-        repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
-        let newtline = repo.get_timeline(newtimelineid)?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
 
         assert!(newtline
             .list_rels(0, TESTDB, Lsn(0x30))?
@@ -659,7 +659,7 @@ mod tests {
 
         // Run checkpoint and garbage collection and check that it's still not visible
         newtline.checkpoint()?;
-        repo.gc_iteration(Some(newtimelineid), 0, true)?;
+        repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
 
         assert!(!newtline
             .list_rels(0, TESTDB, Lsn(0x40))?
@@ -674,8 +674,7 @@ mod tests {
     #[test]
     fn test_branch() -> Result<()> {
         let repo = get_test_repo("test_branch")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
@@ -693,9 +692,8 @@ mod tests {
         assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
-        repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
-        let newtline = repo.get_timeline(newtimelineid)?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
 
         newtline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
         newtline.advance_last_record_lsn(Lsn(0x40));
@@ -728,8 +726,7 @@ mod tests {
         const TEST_NAME: &str = "corrupt_metadata";
         let repo = get_test_repo(TEST_NAME)?;
 
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        repo.create_empty_timeline(timelineid)?;
+        repo.create_empty_timeline(TIMELINE_ID)?;
         drop(repo);
 
         let dir = PageServerConf::test_repo_dir(TEST_NAME);
@@ -742,7 +739,7 @@ mod tests {
 
         let metadata_path = tenant_dir
             .join("timelines")
-            .join(timelineid.to_string())
+            .join(TIMELINE_ID.to_string())
             .join("metadata");
 
         assert!(metadata_path.is_file());
@@ -753,7 +750,7 @@ mod tests {
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let new_repo = load_test_repo(TEST_NAME, tenantid)?;
-        let err = new_repo.get_timeline(timelineid).err().unwrap();
+        let err = new_repo.get_timeline(TIMELINE_ID).err().unwrap();
         assert!(err.to_string().contains("checksum"));
 
         Ok(())
@@ -764,8 +761,7 @@ mod tests {
         const TEST_NAME: &str = "future_layerfiles";
         let repo = get_test_repo(TEST_NAME)?;
 
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        repo.create_empty_timeline(timelineid)?;
+        repo.create_empty_timeline(TIMELINE_ID)?;
         drop(repo);
 
         let dir = PageServerConf::test_repo_dir(TEST_NAME);
@@ -776,7 +772,7 @@ mod tests {
         let tenantid = ZTenantId::from_str(tenantid)?;
         assert!(read_dir.next().is_none());
 
-        let timelines_path = tenant_dir.join("timelines").join(timelineid.to_string());
+        let timelines_path = tenant_dir.join("timelines").join(TIMELINE_ID.to_string());
 
         let make_empty_file = |filename: &str| -> std::io::Result<()> {
             let path = timelines_path.join(filename);
@@ -794,7 +790,7 @@ mod tests {
         make_empty_file(&delta_filename)?;
 
         let new_repo = load_test_repo(TEST_NAME, tenantid)?;
-        new_repo.get_timeline(timelineid).unwrap();
+        new_repo.get_timeline(TIMELINE_ID).unwrap();
         drop(new_repo);
 
         let check_old = |filename: &str, num: u32| {
@@ -812,7 +808,7 @@ mod tests {
         make_empty_file(&delta_filename)?;
 
         let new_repo = load_test_repo(TEST_NAME, tenantid)?;
-        new_repo.get_timeline(timelineid).unwrap();
+        new_repo.get_timeline(TIMELINE_ID).unwrap();
         drop(new_repo);
 
         check_old(&image_filename, 0);
