@@ -505,6 +505,9 @@ def test_sync_safekeepers_old_term_ahead(repo_dir: str, pg_bin: PgBin, wa_factor
     appender.append(2, term=1, lm_message="msg1")
     appender.append(2, term=1, lm_message="msg1")
 
+    new_epoch = appender.flush_lsns[0]
+    appender.epoch_start_lsn = new_epoch
+
     appender.append(0, term=2, lm_message="msg2")
     appender.append(1, term=2, lm_message="msg2")
 
