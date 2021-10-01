@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{SocketAddr, ToSocketAddrs};
 
 pub struct CPlaneApi {
     auth_endpoint: &'static str,
@@ -8,7 +8,7 @@ pub struct CPlaneApi {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DatabaseInfo {
-    pub host: IpAddr, // TODO: allow host name here too
+    pub host: String,
     pub port: u16,
     pub dbname: String,
     pub user: String,
@@ -16,8 +16,13 @@ pub struct DatabaseInfo {
 }
 
 impl DatabaseInfo {
-    pub fn socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.host, self.port)
+    pub fn socket_addr(&self) -> Result<SocketAddr> {
+        let host_port = format!("{}:{}", self.host, self.port);
+        host_port
+            .to_socket_addrs()
+            .with_context(|| format!("cannot resolve {} to SocketAddr", host_port))?
+            .next()
+            .ok_or_else(|| anyhow::Error::msg("cannot resolve at least one SocketAddr"))
     }
 
     pub fn conn_string(&self) -> String {
