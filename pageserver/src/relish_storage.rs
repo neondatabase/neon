@@ -19,7 +19,7 @@ use anyhow::Context;
 
 use self::local_fs::LocalFs;
 pub use self::synced_storage::schedule_timeline_upload;
-use crate::relish_storage::rust_s3::RustS3;
+use crate::relish_storage::rust_s3::S3;
 use crate::{PageServerConf, RelishStorageKind};
 
 pub fn run_storage_sync_thread(
@@ -36,7 +36,7 @@ pub fn run_storage_sync_thread(
                 ),
                 RelishStorageKind::AwsS3(s3_config) => synced_storage::run_storage_sync_thread(
                     config,
-                    RustS3::new(s3_config)?,
+                    S3::new(s3_config)?,
                     max_concurrent_sync,
                 ),
             }
@@ -80,4 +80,12 @@ fn strip_workspace_prefix<'a>(
                 relish_local_path.display(),
             )
         })
+}
+
+async fn sync_file_metadata(file: &Path) -> anyhow::Result<()> {
+    tokio::fs::File::open(&file).await?.sync_all().await?;
+    if let Some(parent) = file.parent() {
+        tokio::fs::File::open(parent).await?.sync_all().await?;
+    }
+    Ok(())
 }

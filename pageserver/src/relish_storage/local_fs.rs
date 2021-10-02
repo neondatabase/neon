@@ -14,18 +14,19 @@ use std::{
 };
 
 use anyhow::{bail, Context};
+use tokio::fs;
 
-use super::{strip_workspace_prefix, RelishStorage};
+use super::{strip_workspace_prefix, sync_file_metadata, RelishStorage};
 
 pub struct LocalFs {
     root: PathBuf,
 }
 
 impl LocalFs {
-    /// Atetmpts to create local FS relish storage, also creates the directory provided, if not exists.
+    /// Attempts to create local FS relish storage, also creates the directory provided, if not exists.
     pub fn new(root: PathBuf) -> anyhow::Result<Self> {
         if !root.exists() {
-            std::fs::create_dir_all(&root).with_context(|| {
+            zenith_utils::crashsafe_dir::create_dir_all(&root).with_context(|| {
                 format!(
                     "Failed to create all directories in the given root path {}",
                     root.display(),
@@ -72,7 +73,8 @@ impl RelishStorage for LocalFs {
         let file_path = self.resolve_in_storage(from)?;
         if file_path.exists() && file_path.is_file() {
             create_target_directory(to).await?;
-            tokio::fs::copy(file_path, to).await?;
+            fs::copy(file_path, to).await?;
+            sync_file_metadata(to).await?;
             Ok(())
         } else {
             bail!(
@@ -85,7 +87,11 @@ impl RelishStorage for LocalFs {
     async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()> {
         let file_path = self.resolve_in_storage(path)?;
         if file_path.exists() && file_path.is_file() {
-            Ok(tokio::fs::remove_file(file_path).await?)
+            fs::remove_file(&file_path).await?;
+            if let Some(parent) = file_path.parent() {
+                fs::File::open(parent).await?.sync_all().await?;
+            }
+            Ok(())
         } else {
             bail!(
                 "File '{}' either does not exist or is not a file",
@@ -97,15 +103,13 @@ impl RelishStorage for LocalFs {
     async fn upload_relish(&self, from: &Path, to: &Self::RelishStoragePath) -> anyhow::Result<()> {
         let target_file_path = self.resolve_in_storage(to)?;
         create_target_directory(&target_file_path).await?;
-
-        tokio::fs::copy(&from, &target_file_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to upload relish '{}' to local storage",
-                    from.display(),
-                )
-            })?;
+        fs::copy(&from, &target_file_path).await.with_context(|| {
+            format!(
+                "Failed to upload relish '{}' to local storage",
+                from.display(),
+            )
+        })?;
+        sync_file_metadata(&target_file_path).await?;
         Ok(())
     }
 }
@@ -121,7 +125,7 @@ where
         if directory_path.exists() {
             if directory_path.is_dir() {
                 let mut paths = Vec::new();
-                let mut dir_contents = tokio::fs::read_dir(directory_path).await?;
+                let mut dir_contents = fs::read_dir(directory_path).await?;
                 while let Some(dir_entry) = dir_contents.next_entry().await? {
                     let file_type = dir_entry.file_type().await?;
                     let entry_path = dir_entry.path();
@@ -152,7 +156,11 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
         ),
     };
     if !target_dir.exists() {
-        tokio::fs::create_dir_all(target_dir).await?;
+        let target_dir = target_dir.to_owned();
+        tokio::task::spawn_blocking(move || {
+            zenith_utils::crashsafe_dir::create_dir_all(target_dir)
+        })
+        .await??;
     }
     Ok(())
 }
