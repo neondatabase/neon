@@ -1,7 +1,6 @@
 import timeit
 import pytest
 
-from contextlib import closing
 from fixtures.zenith_fixtures import (
     TenantFactory,
     ZenithCli,
@@ -18,31 +17,42 @@ pytest_plugins = ("fixtures.benchmark_fixture")
 # 2. Average creation time per tenant
 
 
-@pytest.mark.parametrize('tenants_count', [1, 10, 50])
+@pytest.mark.parametrize('tenants_count', [1, 5, 10])
+@pytest.mark.parametrize('use_wal_acceptors', ['with_wa', 'without_wa'])
 def test_bulk_tenant_create(
     zenith_cli: ZenithCli,
     tenant_factory: TenantFactory,
     postgres: PostgresFactory,
+    wa_factory,
+    use_wal_acceptors: str,
     tenants_count: int,
     zenbenchmark,
 ):
-    """Measure tenant creation time"""
-    start = timeit.default_timer()
+    """Measure tenant creation time (with and without wal acceptors)"""
+
+    time_slices = []
+
     for i in range(tenants_count):
+        start = timeit.default_timer()
+
         tenant = tenant_factory.create()
         zenith_cli.run([
-            "branch", f"test_bulk_tenant_create_{tenants_count}_{i}", "main", f"--tenantid={tenant}"
+            "branch", f"test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}", "main",
+            f"--tenantid={tenant}"
         ])
-        pg_tenant = postgres.create_start(
-            f"test_bulk_tenant_create_{tenants_count}_{i}",
-            tenant,
-            wal_acceptors=None,
-        )
-        with closing(pg_tenant.connect()) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1;")
-                assert cur.fetchone() == (1, )
-    end = timeit.default_timer()
 
-    zenbenchmark.record('tenant_creation_time_total', end - start, 's')
-    zenbenchmark.record('tenant_creation_time_avg', (end - start) / tenants_count, 's')
+        if use_wal_acceptors == 'with_wa':
+            wa_factory.start_n_new(3)
+
+        pg_tenant = postgres.create_start(
+            f"test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}",
+            tenant,
+            wal_acceptors=wa_factory.get_connstrs() if use_wal_acceptors == 'with_wa' else None,
+        )
+
+        end = timeit.default_timer()
+        time_slices.append(end - start)
+
+        pg_tenant.stop()
+
+    zenbenchmark.record('tenant_creation_time', sum(time_slices) / len(time_slices), 's')
