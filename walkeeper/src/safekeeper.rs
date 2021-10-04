@@ -19,7 +19,7 @@ use lazy_static::lazy_static;
 
 use crate::replication::HotStandbyFeedback;
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
-use zenith_metrics::{register_int_gauge_vec, IntGauge, IntGaugeVec};
+use zenith_metrics::{register_gauge_vec, Gauge, GaugeVec};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::pq_proto::SystemId;
@@ -283,14 +283,15 @@ pub trait Storage {
 }
 
 lazy_static! {
-    // TODO(yeputons): LSNs are u64, but IntGaugeVec expectes i64, so we convert.
-    static ref FLUSH_LSN_GAUGE: IntGaugeVec = register_int_gauge_vec!(
+    // The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
+    // i64 is faster than f64, so update to u64 when available.
+    static ref FLUSH_LSN_GAUGE: GaugeVec = register_gauge_vec!(
         "safekeeper_flush_lsn",
         "Current flush_lsn, grouped by timeline",
         &["ztli"]
     )
     .expect("Failed to register safekeeper_flush_lsn int gauge vec");
-    static ref COMMIT_LSN_GAUGE: IntGaugeVec = register_int_gauge_vec!(
+    static ref COMMIT_LSN_GAUGE: GaugeVec = register_gauge_vec!(
         "safekeeper_commit_lsn",
         "Current commit_lsn (not necessarily persisted to disk), grouped by timeline",
         &["ztli"]
@@ -299,8 +300,8 @@ lazy_static! {
 }
 
 struct SafeKeeperMetrics {
-    flush_lsn: IntGauge,
-    commit_lsn: IntGauge,
+    flush_lsn: Gauge,
+    commit_lsn: Gauge,
 }
 
 impl SafeKeeperMetrics {
@@ -521,7 +522,7 @@ where
                 .as_ref()
                 .unwrap()
                 .flush_lsn
-                .set(u64::from(self.flush_lsn) as i64);
+                .set(u64::from(self.flush_lsn) as f64);
         }
 
         // Advance commit_lsn taking into account what we have locally. xxx this
@@ -543,7 +544,7 @@ where
                 .as_ref()
                 .unwrap()
                 .commit_lsn
-                .set(u64::from(self.commit_lsn) as i64);
+                .set(u64::from(self.commit_lsn) as f64);
         }
 
         self.truncate_lsn = msg.h.truncate_lsn;

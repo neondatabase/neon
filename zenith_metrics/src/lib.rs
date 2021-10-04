@@ -4,6 +4,8 @@
 //! a default registry.
 use lazy_static::lazy_static;
 pub use prometheus::{exponential_buckets, linear_buckets};
+pub use prometheus::{register_gauge, Gauge};
+pub use prometheus::{register_gauge_vec, GaugeVec};
 pub use prometheus::{register_histogram, Histogram};
 pub use prometheus::{register_histogram_vec, HistogramVec};
 pub use prometheus::{register_int_counter, IntCounter};
