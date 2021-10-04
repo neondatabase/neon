@@ -9,15 +9,17 @@ use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
 use std::net::TcpListener;
-use zenith_metrics::{register_int_counter, IntCounter};
+use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use zenith_metrics::{Encoder, TextEncoder};
 
 use super::error::ApiError;
 
 lazy_static! {
-    static ref SERVE_METRICS_COUNT: IntCounter =
-        register_int_counter!("serve_metrics_count", "Number of metric requests made")
-            .expect("failed to define a metric");
+    static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
+        new_common_metric_name("serve_metrics_count"),
+        "Number of metric requests made"
+    )
+    .expect("failed to define a metric");
 }
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {

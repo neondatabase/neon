@@ -2357,6 +2357,7 @@ dependencies = [
  "tokio-stream",
  "walkdir",
  "workspace_hack",
+ "zenith_metrics",
  "zenith_utils",
 ]
 
@@ -2577,6 +2578,7 @@ version = "0.1.0"
 dependencies = [
  "lazy_static",
  "libc",
+ "once_cell",
  "prometheus",
 ]
 
