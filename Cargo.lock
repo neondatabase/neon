@@ -2358,7 +2358,6 @@ dependencies = [
  "tokio-stream",
  "walkdir",
  "workspace_hack",
- "zenith_metrics",
  "zenith_utils",
 ]
 

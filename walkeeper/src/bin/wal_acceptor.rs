@@ -15,7 +15,6 @@ use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
 
 fn main() -> Result<()> {
-    zenith_metrics::set_common_metrics_prefix("wal_acceptor");
     let arg_matches = App::new("Zenith wal_acceptor")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .arg(
