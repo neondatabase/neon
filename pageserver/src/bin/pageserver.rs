@@ -20,8 +20,12 @@ use daemonize::Daemonize;
 
 use pageserver::{
     branches,
-    defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR},
-    http, page_service, tenant_mgr, PageServerConf, RelishStorageConfig, S3Config, LOG_FILE_NAME,
+    defaults::{
+        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR,
+        DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
+    },
+    http, page_service, tenant_mgr, PageServerConf, RelishStorageConfig, RelishStorageKind,
+    S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 
@@ -41,6 +45,7 @@ struct CfgFileParams {
     auth_type: Option<String>,
     // see https://github.com/alexcrichton/toml-rs/blob/6c162e6562c3e432bf04c82a3d1d789d80761a86/examples/enum_external.rs for enum deserialisation examples
     relish_storage: Option<RelishStorage>,
+    relish_storage_max_concurrent_sync: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -91,6 +96,7 @@ impl CfgFileParams {
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
             auth_type: get_arg("auth-type"),
             relish_storage,
+            relish_storage_max_concurrent_sync: get_arg("relish-storage-max-concurrent-sync"),
         }
     }
 
@@ -110,6 +116,9 @@ impl CfgFileParams {
                 .or(other.auth_validation_public_key_path),
             auth_type: self.auth_type.or(other.auth_type),
             relish_storage: self.relish_storage.or(other.relish_storage),
+            relish_storage_max_concurrent_sync: self
+                .relish_storage_max_concurrent_sync
+                .or(other.relish_storage_max_concurrent_sync),
         }
     }
 
@@ -178,25 +187,34 @@ impl CfgFileParams {
             );
         }
 
-        let relish_storage_config =
-            self.relish_storage
-                .as_ref()
-                .map(|storage_params| match storage_params.clone() {
-                    RelishStorage::Local { local_path } => {
-                        RelishStorageConfig::LocalFs(PathBuf::from(local_path))
-                    }
-                    RelishStorage::AwsS3 {
-                        bucket_name,
-                        bucket_region,
-                        access_key_id,
-                        secret_access_key,
-                    } => RelishStorageConfig::AwsS3(S3Config {
-                        bucket_name,
-                        bucket_region,
-                        access_key_id,
-                        secret_access_key,
-                    }),
-                });
+        let max_concurrent_sync = match self.relish_storage_max_concurrent_sync.as_deref() {
+            Some(relish_storage_max_concurrent_sync) => {
+                relish_storage_max_concurrent_sync.parse()?
+            }
+            None => DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
+        };
+        let relish_storage_config = self.relish_storage.as_ref().map(|storage_params| {
+            let storage = match storage_params.clone() {
+                RelishStorage::Local { local_path } => {
+                    RelishStorageKind::LocalFs(PathBuf::from(local_path))
+                }
+                RelishStorage::AwsS3 {
+                    bucket_name,
+                    bucket_region,
+                    access_key_id,
+                    secret_access_key,
+                } => RelishStorageKind::AwsS3(S3Config {
+                    bucket_name,
+                    bucket_region,
+                    access_key_id,
+                    secret_access_key,
+                }),
+            };
+            RelishStorageConfig {
+                max_concurrent_sync,
+                storage,
+            }
+        });
 
         Ok(PageServerConf {
             daemonize: false,
@@ -346,6 +364,12 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Credentials to access the AWS S3 bucket"),
         )
+        .arg(
+            Arg::with_name("relish-storage-max-concurrent-sync")
+                .long("relish-storage-max-concurrent-sync")
+                .takes_value(true)
+                .help("Maximum allowed concurrent synchronisations with storage"),
+        )
         .get_matches();
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
@@ -456,7 +480,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
         match daemonize.start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(e) => error!("Error, {}", e),
+            Err(e) => error!("could not daemonize: {:#}", e),
         }
     }
 

@@ -298,9 +298,11 @@ impl PostgresRedoManager {
                     // Transaction manager stuff
                     let rec_segno = match rel {
                         RelishTag::Slru { slru, segno } => {
-                            if slru != SlruKind::Clog {
-                                panic!("Not valid XACT relish tag {:?}", rel);
-                            }
+                            assert!(
+                                slru == SlruKind::Clog,
+                                "Not valid XACT relish tag {:?}",
+                                rel
+                            );
                             segno
                         }
                         _ => panic!("Not valid XACT relish tag {:?}", rel),
@@ -420,7 +422,7 @@ impl PostgresRedoManager {
         );
 
         if let Err(e) = apply_result {
-            error!("could not apply WAL records: {}", e);
+            error!("could not apply WAL records: {:#}", e);
             result = Err(WalRedoError::IoError(e));
         } else {
             let img = apply_result.unwrap();
@@ -458,7 +460,7 @@ impl PostgresRedoProcess {
         if datadir.exists() {
             info!("directory {:?} exists, removing", &datadir);
             if let Err(e) = fs::remove_dir_all(&datadir) {
-                error!("could not remove old wal-redo-datadir: {:?}", e);
+                error!("could not remove old wal-redo-datadir: {:#}", e);
             }
         }
         info!("running initdb in {:?}", datadir.display());

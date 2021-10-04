@@ -7,7 +7,7 @@ use std::{
 
 use zenith_utils::zid::ZTimelineId;
 
-use crate::{relish_storage::RelishStorage, RelishStorageConfig};
+use crate::{relish_storage::RelishStorage, RelishStorageConfig, RelishStorageKind};
 
 use super::{local_fs::LocalFs, rust_s3::RustS3};
 
@@ -21,8 +21,8 @@ impl QueueBasedRelishUploader {
         page_server_workdir: &'static Path,
     ) -> anyhow::Result<Self> {
         let upload_queue = Arc::new(Mutex::new(VecDeque::new()));
-        let _handle = match config {
-            RelishStorageConfig::LocalFs(root) => {
+        let _handle = match &config.storage {
+            RelishStorageKind::LocalFs(root) => {
                 let relish_storage = LocalFs::new(root.clone())?;
                 create_upload_thread(
                     Arc::clone(&upload_queue),
@@ -30,7 +30,7 @@ impl QueueBasedRelishUploader {
                     page_server_workdir,
                 )?
             }
-            RelishStorageConfig::AwsS3(s3_config) => {
+            RelishStorageKind::AwsS3(s3_config) => {
                 let relish_storage = RustS3::new(s3_config)?;
                 create_upload_thread(
                     Arc::clone(&upload_queue),
@@ -90,7 +90,7 @@ async fn upload_loop_step<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
 
     if let Err(e) = upload_relish(relish_storage, page_server_workdir, &relish_local_path).await {
         log::error!(
-            "Failed to upload relish '{}' for timeline {}, reason: {}",
+            "Failed to upload relish '{}' for timeline {}, reason: {:#}",
             relish_local_path.display(),
             relish_timeline_id,
             e

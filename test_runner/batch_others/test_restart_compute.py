@@ -9,10 +9,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test restarting and recreating a postgres instance
 #
-# XXX: with_wal_acceptors=True fails now, would be fixed with
-# `postgres --sync-walkeepers` patches.
-#
-@pytest.mark.parametrize('with_wal_acceptors', [False])
+@pytest.mark.parametrize('with_wal_acceptors', [False, True])
 def test_restart_compute(
         zenith_cli,
         pageserver: ZenithPageserver,

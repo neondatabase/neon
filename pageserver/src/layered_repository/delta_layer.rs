@@ -487,7 +487,8 @@ impl DeltaLayer {
         let book = chapter.close()?;
 
         // This flushes the underlying 'buf_writer'.
-        book.close()?;
+        let writer = book.close()?;
+        writer.get_ref().sync_all()?;
 
         trace!("saved {}", &path.display());
 

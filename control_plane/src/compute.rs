@@ -452,9 +452,7 @@ impl PostgresNode {
             .output()
             .expect("failed to execute whoami");
 
-        if !output.status.success() {
-            panic!("whoami failed");
-        }
+        assert!(output.status.success(), "whoami failed");
 
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }

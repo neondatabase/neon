@@ -212,11 +212,17 @@ mod tests {
     use crate::layered_repository::LayeredRepository;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
+    use hex_literal::hex;
     use postgres_ffi::pg_constants;
     use postgres_ffi::xlog_utils::SIZEOF_CHECKPOINT;
     use std::fs;
-    use std::str::FromStr;
+    use std::path::PathBuf;
     use zenith_utils::zid::ZTenantId;
+
+    const TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
+    const NEW_TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("AA223344556677881122334455667788"));
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
@@ -253,39 +259,52 @@ mod tests {
     static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
-    fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
-        let repo_dir = PageServerConf::test_repo_dir(test_name);
-        let _ = fs::remove_dir_all(&repo_dir);
-        fs::create_dir_all(&repo_dir)?;
-        fs::create_dir_all(&repo_dir.join("timelines"))?;
+    struct RepoHarness {
+        conf: &'static PageServerConf,
+        tenant_id: ZTenantId,
+    }
 
-        let conf = PageServerConf::dummy_conf(repo_dir);
-        // Make a static copy of the config. This can never be free'd, but that's
-        // OK in a test.
-        let conf: &'static PageServerConf = Box::leak(Box::new(conf));
-        let tenantid = ZTenantId::generate();
-        fs::create_dir_all(conf.tenant_path(&tenantid)).unwrap();
+    impl RepoHarness {
+        fn create(test_name: &'static str) -> Result<Self> {
+            let repo_dir = PageServerConf::test_repo_dir(test_name);
+            let _ = fs::remove_dir_all(&repo_dir);
+            fs::create_dir_all(&repo_dir)?;
+            fs::create_dir_all(&repo_dir.join("timelines"))?;
 
-        let walredo_mgr = TestRedoManager {};
+            let conf = PageServerConf::dummy_conf(repo_dir);
+            // Make a static copy of the config. This can never be free'd, but that's
+            // OK in a test.
+            let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-        let repo = Box::new(LayeredRepository::new(
-            conf,
-            Arc::new(walredo_mgr),
-            tenantid,
-        ));
+            let tenant_id = ZTenantId::generate();
+            fs::create_dir_all(conf.tenant_path(&tenant_id))?;
 
-        Ok(repo)
+            Ok(Self { conf, tenant_id })
+        }
+
+        fn load(&self) -> Box<dyn Repository> {
+            let walredo_mgr = Arc::new(TestRedoManager);
+
+            Box::new(LayeredRepository::new(
+                self.conf,
+                walredo_mgr,
+                self.tenant_id,
+            ))
+        }
+
+        fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
+            self.conf.timeline_path(timeline_id, &self.tenant_id)
+        }
     }
 
     #[test]
     fn test_relsize() -> Result<()> {
-        let repo = get_test_repo("test_relsize")?;
+        let repo = RepoHarness::create("test_relsize")?.load();
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
         // Create timeline to work on
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
@@ -399,11 +418,10 @@ mod tests {
     // and then created it again within the same layer.
     #[test]
     fn test_drop_extend() -> Result<()> {
-        let repo = get_test_repo("test_drop_extend")?;
+        let repo = RepoHarness::create("test_drop_extend")?.load();
 
         // Create timeline to work on
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         tline.advance_last_record_lsn(Lsn(0x20));
@@ -436,11 +454,10 @@ mod tests {
     // and then extended it again within the same layer.
     #[test]
     fn test_truncate_extend() -> Result<()> {
-        let repo = get_test_repo("test_truncate_extend")?;
+        let repo = RepoHarness::create("test_truncate_extend")?.load();
 
         // Create timeline to work on
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         //from storage_layer.rs
         const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
@@ -537,9 +554,8 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[test]
     fn test_large_rel() -> Result<()> {
-        let repo = get_test_repo("test_large_rel")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let repo = RepoHarness::create("test_large_rel")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
@@ -600,9 +616,8 @@ mod tests {
     ///
     #[test]
     fn test_list_rels_drop() -> Result<()> {
-        let repo = get_test_repo("test_list_rels_drop")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let repo = RepoHarness::create("test_list_rels_drop")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
         const TESTDB: u32 = 111;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
@@ -620,9 +635,8 @@ mod tests {
         assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
 
         // Create a branch, check that the relation is visible there
-        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
-        repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
-        let newtline = repo.get_timeline(newtimelineid)?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
 
         assert!(newtline
             .list_rels(0, TESTDB, Lsn(0x30))?
@@ -642,7 +656,7 @@ mod tests {
 
         // Run checkpoint and garbage collection and check that it's still not visible
         newtline.checkpoint()?;
-        repo.gc_iteration(Some(newtimelineid), 0, true)?;
+        repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
 
         assert!(!newtline
             .list_rels(0, TESTDB, Lsn(0x40))?
@@ -656,9 +670,8 @@ mod tests {
     ///
     #[test]
     fn test_branch() -> Result<()> {
-        let repo = get_test_repo("test_branch")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let repo = RepoHarness::create("test_branch")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
@@ -676,9 +689,8 @@ mod tests {
         assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
-        repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
-        let newtline = repo.get_timeline(newtimelineid)?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
 
         newtline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
         newtline.advance_last_record_lsn(Lsn(0x40));
@@ -706,8 +718,89 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn corrupt_metadata() -> Result<()> {
+        const TEST_NAME: &str = "corrupt_metadata";
+        let harness = RepoHarness::create(TEST_NAME)?;
+        let repo = harness.load();
+
+        repo.create_empty_timeline(TIMELINE_ID)?;
+        drop(repo);
+
+        let metadata_path = harness.timeline_path(&TIMELINE_ID).join("metadata");
+
+        assert!(metadata_path.is_file());
+
+        let mut metadata_bytes = std::fs::read(&metadata_path)?;
+        assert_eq!(metadata_bytes.len(), 512);
+        metadata_bytes[512 - 4 - 2] ^= 1;
+        std::fs::write(metadata_path, metadata_bytes)?;
+
+        let new_repo = harness.load();
+        let err = new_repo.get_timeline(TIMELINE_ID).err().unwrap();
+        assert!(err.to_string().contains("checksum"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn future_layerfiles() -> Result<()> {
+        const TEST_NAME: &str = "future_layerfiles";
+        let harness = RepoHarness::create(TEST_NAME)?;
+        let repo = harness.load();
+
+        repo.create_empty_timeline(TIMELINE_ID)?;
+        drop(repo);
+
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        let make_empty_file = |filename: &str| -> std::io::Result<()> {
+            let path = timeline_path.join(filename);
+
+            assert!(!path.exists());
+            std::fs::write(&path, &[])?;
+
+            Ok(())
+        };
+
+        let image_filename = format!("pg_control_0_{:016X}", 8000);
+        let delta_filename = format!("pg_control_0_{:016X}_{:016X}", 8000, 8008);
+
+        make_empty_file(&image_filename)?;
+        make_empty_file(&delta_filename)?;
+
+        let new_repo = harness.load();
+        new_repo.get_timeline(TIMELINE_ID).unwrap();
+        drop(new_repo);
+
+        let check_old = |filename: &str, num: u32| {
+            let path = timeline_path.join(filename);
+            assert!(!path.exists());
+
+            let backup_path = timeline_path.join(format!("{}.{}.old", filename, num));
+            assert!(backup_path.exists());
+        };
+
+        check_old(&image_filename, 0);
+        check_old(&delta_filename, 0);
+
+        make_empty_file(&image_filename)?;
+        make_empty_file(&delta_filename)?;
+
+        let new_repo = harness.load();
+        new_repo.get_timeline(TIMELINE_ID).unwrap();
+        drop(new_repo);
+
+        check_old(&image_filename, 0);
+        check_old(&delta_filename, 0);
+        check_old(&image_filename, 1);
+        check_old(&delta_filename, 1);
+
+        Ok(())
+    }
+
     // Mock WAL redo manager that doesn't do much
-    struct TestRedoManager {}
+    struct TestRedoManager;
 
     impl WalRedoManager for TestRedoManager {
         fn request_redo(
