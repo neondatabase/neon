@@ -278,8 +278,8 @@ impl AcceptorProposerMessage {
 pub trait Storage {
     /// Persist safekeeper state on disk, optionally syncing it.
     fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()>;
-    /// Write piece of wal in buf to disk.
-    fn write_wal(&mut self, s: &SafeKeeperState, startpos: Lsn, buf: &[u8]) -> Result<()>;
+    /// Write piece of wal in buf to disk and sync it.
+    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8]) -> Result<()>;
 }
 
 lazy_static! {
@@ -462,7 +462,7 @@ where
         let mut last_rec_lsn = Lsn(0);
         if !msg.wal_data.is_empty() {
             self.storage
-                .write_wal(&self.s, msg.h.begin_lsn, &msg.wal_data)?;
+                .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data)?;
 
             // figure out last record's end lsn for reporting (if we got the
             // whole record)
@@ -595,7 +595,7 @@ mod tests {
             Ok(())
         }
 
-        fn write_wal(&mut self, _s: &SafeKeeperState, _startpos: Lsn, _buf: &[u8]) -> Result<()> {
+        fn write_wal(&mut self, _server: &ServerInfo, _startpos: Lsn, _buf: &[u8]) -> Result<()> {
             Ok(())
         }
     }

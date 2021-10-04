@@ -192,9 +192,7 @@ impl AtomicLsn {
     /// This operation will panic on overflow.
     pub fn fetch_add(&self, val: u64) -> Lsn {
         let prev = self.inner.fetch_add(val, Ordering::AcqRel);
-        if prev.checked_add(val).is_none() {
-            panic!("AtomicLsn overflow");
-        }
+        assert!(prev.checked_add(val).is_some(), "AtomicLsn overflow");
         Lsn(prev)
     }
 
