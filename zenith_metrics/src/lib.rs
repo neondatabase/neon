@@ -3,6 +3,7 @@
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
 use lazy_static::lazy_static;
+use once_cell::race::OnceBox;
 pub use prometheus::{exponential_buckets, linear_buckets};
 pub use prometheus::{register_gauge, Gauge};
 pub use prometheus::{register_gauge_vec, GaugeVec};
@@ -26,9 +27,29 @@ pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     prometheus::gather()
 }
 
+static COMMON_METRICS_PREFIX: OnceBox<&str> = OnceBox::new();
+
+/// Sets a prefix which will be used for all common metrics, typically a service
+/// name like 'pageserver'. Should be executed exactly once in the beginning of
+/// any executable which uses common metrics.
+pub fn set_common_metrics_prefix(prefix: &'static str) {
+    COMMON_METRICS_PREFIX.set(prefix.into()).unwrap();
+}
+
+/// Prepends a prefix to a common metric name so they are distinguished between
+/// different services, see https://github.com/zenithdb/zenith/pull/681
+/// A call to set_common_metrics_prefix() is necessary prior to calling this.
+pub fn new_common_metric_name(unprefixed_metric_name: &str) -> String {
+    format!(
+        "{}_{}",
+        COMMON_METRICS_PREFIX.get().unwrap(),
+        unprefixed_metric_name
+    )
+}
+
 lazy_static! {
     static ref DISK_IO_BYTES: IntGaugeVec = register_int_gauge_vec!(
-        "pageserver_disk_io_bytes",
+        new_common_metric_name("disk_io_bytes"),
         "Bytes written and read from disk, grouped by the operation (read|write)",
         &["io_operation"]
     )

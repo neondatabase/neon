@@ -24,8 +24,8 @@ use pageserver::{
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
     },
-    http, page_service, tenant_mgr, PageServerConf, RelishStorageConfig, RelishStorageKind,
-    S3Config, LOG_FILE_NAME,
+    http, page_service, relish_storage, tenant_mgr, PageServerConf, RelishStorageConfig,
+    RelishStorageKind, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 
@@ -240,6 +240,7 @@ impl CfgFileParams {
 }
 
 fn main() -> Result<()> {
+    zenith_metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .arg(
@@ -483,11 +484,15 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         }
     }
 
+    // keep join handles for spawned threads
+    // don't spawn threads before daemonizing
+    let mut join_handles = Vec::new();
+
+    if let Some(handle) = relish_storage::run_storage_sync_thread(conf)? {
+        join_handles.push(handle);
+    }
     // Initialize tenant manager.
     tenant_mgr::init(conf);
-
-    // keep join handles for spawned threads
-    let mut join_handles = vec![];
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {

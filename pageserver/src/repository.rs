@@ -289,6 +289,7 @@ mod tests {
                 self.conf,
                 walredo_mgr,
                 self.tenant_id,
+                false,
             ))
         }
 
