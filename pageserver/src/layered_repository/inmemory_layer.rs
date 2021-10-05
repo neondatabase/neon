@@ -672,13 +672,18 @@ impl InMemoryLayer {
         let mut before_page_versions = PageVersions::default();
         let mut after_page_versions = PageVersions::default();
         for (blknum, ordered_vec) in inner.page_versions.0.iter() {
-            for (lsn, pv) in ordered_vec.iter() {
-                if *lsn > cutoff_lsn {
-                    after_page_versions.update(*blknum, *lsn, pv.clone());
-                    after_oldest_lsn.accum(min, *lsn);
-                } else {
-                    before_page_versions.update(*blknum, *lsn, pv.clone());
-                }
+            let (before_ov, after_ov) = ordered_vec.copy_split(&Lsn(cutoff_lsn.0 + 1));
+
+            if let Some((lsn, _pv)) = after_ov.iter().next() {
+                after_oldest_lsn.accum(min, *lsn);
+            }
+
+            if !before_ov.is_empty() {
+                before_page_versions.0.insert(*blknum, before_ov);
+            }
+
+            if !after_ov.is_empty() {
+                after_page_versions.0.insert(*blknum, after_ov);
             }
         }
 
