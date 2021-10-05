@@ -240,6 +240,7 @@ impl CfgFileParams {
 }
 
 fn main() -> Result<()> {
+    zenith_metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .arg(

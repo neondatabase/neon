@@ -136,7 +136,8 @@ class ZenithBenchmarker:
         # The metric should be an integer, as it's a number of bytes. But in general
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
-        matches = re.search(r'pageserver_disk_io_bytes{io_operation="write"} (\S+)', all_metrics)
+        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$', all_metrics,
+                            re.MULTILINE)
         return int(round(float(matches.group(1))))
 
     @contextmanager
