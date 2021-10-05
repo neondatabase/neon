@@ -268,9 +268,22 @@ pub(crate) fn get_branches(
     // with timeline_id.
     let branches_dir = conf.branches_path(tenantid);
 
-    std::fs::read_dir(&branches_dir)?
+    std::fs::read_dir(&branches_dir)
+        .with_context(|| {
+            format!(
+                "Found no branches directory '{}' for tenant {}",
+                branches_dir.display(),
+                tenantid
+            )
+        })?
         .map(|dir_entry_res| {
-            let dir_entry = dir_entry_res?;
+            let dir_entry = dir_entry_res.with_context(|| {
+                format!(
+                    "Failed to list branches directory '{}' content for tenant {}",
+                    branches_dir.display(),
+                    tenantid
+                )
+            })?;
             BranchInfo::from_path(
                 dir_entry.path(),
                 conf,
