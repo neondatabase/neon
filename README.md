@@ -25,7 +25,7 @@ Pageserver consists of:
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
 ```text
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang
+libssl-dev clang pkg-config libpq-dev
 ```
 
 [Rust] 1.52 or later is also required.
@@ -106,6 +106,13 @@ postgres=# select * from t;
 
 postgres=# insert into t values(2,2);
 INSERT 0 1
+```
+
+6. If you want to run tests afterwards (see below), you have to stop pageserver and all postgres instances you have just started:
+```sh
+> ./target/debug/zenith pg stop migration_check
+> ./target/debug/zenith pg stop main
+> ./target/debug/zenith stop
 ```
 
 ## Running tests

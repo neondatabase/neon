@@ -71,7 +71,9 @@ def pytest_configure(config):
         # This is bad; we don't want any of those processes polluting the
         # result of the test.
         # NOTE this shows as an internal pytest error, there might be a better way
-        raise Exception('found interfering processes running')
+        raise Exception(
+            'Found interfering processes running. Stop all Zenith pageservers, nodes, WALs, as well as stand-alone Postgres.'
+        )
 
 
 def determine_scope(fixture_name: str, config: Any) -> str:
