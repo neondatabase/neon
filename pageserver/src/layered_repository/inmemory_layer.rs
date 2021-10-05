@@ -65,7 +65,7 @@ impl PageVersions {
         ordered_vec.append_update(lsn, page_version);
     }
 
-    fn iter(&self) -> OrderedBlockIter {
+    fn ordered_iter(&self, cutoff_lsn: Option<Lsn>) -> OrderedBlockIter {
         let mut block_numbers: Vec<u32> = self.0.keys().cloned().collect();
         // TODO consider counting sort given the small size of the key space
         block_numbers.sort_unstable();
@@ -78,6 +78,7 @@ impl PageVersions {
 
         OrderedBlockIter {
             page_versions: self,
+            cutoff_lsn,
 
             block_numbers,
             cur_idx,
@@ -93,6 +94,7 @@ impl PageVersions {
 
 struct OrderedBlockIter<'a> {
     page_versions: &'a PageVersions,
+    cutoff_lsn: Option<Lsn>,
 
     block_numbers: Vec<u32>,
     cur_idx: usize,
@@ -106,8 +108,15 @@ impl<'a> Iterator for OrderedBlockIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some((lsn, page_version)) = self.ordered_vec_iter.next() {
-                let blk_num = self.block_numbers[self.cur_idx];
-                return Some((blk_num, *lsn, page_version));
+                if self
+                    .cutoff_lsn
+                    .as_ref()
+                    .map(|cutoff| lsn < cutoff)
+                    .unwrap_or(true)
+                {
+                    let blk_num = self.block_numbers[self.cur_idx];
+                    return Some((blk_num, *lsn, page_version));
+                }
             }
 
             let blk_num = self.block_numbers.get(self.cur_idx + 1)?;
@@ -341,7 +350,7 @@ impl Layer for InMemoryLayer {
             println!("segsizes {}: {}", k, v);
         }
 
-        for (blknum, lsn, v) in inner.page_versions.iter() {
+        for (blknum, lsn, v) in inner.page_versions.ordered_iter(None) {
             println!(
                 "blk {} at {}: {}/{}\n",
                 blknum,
@@ -752,7 +761,7 @@ impl InMemoryLayer {
                 drop_lsn,
                 true,
                 predecessor,
-                inner.page_versions.iter(),
+                inner.page_versions.ordered_iter(None),
                 inner.segsizes.clone(),
             )?;
             trace!(
@@ -772,11 +781,7 @@ impl InMemoryLayer {
                 before_segsizes.append(*lsn, *size);
             }
         }
-        let mut before_page_versions = inner.page_versions.iter().filter(|&tup| {
-            let (_blknum, lsn, _pv) = tup;
-
-            lsn < end_lsn
-        });
+        let mut before_page_versions = inner.page_versions.ordered_iter(Some(end_lsn));
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
 
