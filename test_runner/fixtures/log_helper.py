@@ -1,32 +1,28 @@
 import logging
 import logging.config
-import time
 
-# timestamp in UTC+-00:00 aka GMT
-class UTCFormatter(logging.Formatter):
-    converter = time.gmtime
+"""
+This file configures logging to use in python tests.
+Logs are automatically captured and shown in their
+own section after all tests are executed. 
+
+To see logs for all (even successful) tests, run
+pytest with the following command:
+- `pipenv run pytest -n8 -rA`
+
+More log config can be set in pytest.ini file.
+You can add `log_cli = true` to it to watch
+logs in real time.
+
+To get more info about logging with pytest, see
+https://docs.pytest.org/en/6.2.x/logging.html
+"""
 
 LOGGING = {
     "version": 1,
-    "formatters": {
-    "defaultFormatter": {
-        "()": UTCFormatter,
-        "format": "%(asctime)s.%(msecs)-3d %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
-        "datefmt": "%Y-%m-%d %H:%M:%S"
-    }
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "defaultFormatter",
-            "level": "DEBUG",
-            "stream": "ext://sys.stderr"
-        }
-    },
     "loggers": {
         "root": {
-            "level": "DEBUG",
-            "handlers": ["console"]
+            "level": "DEBUG"
         },
         "root.wal_acceptor_async": { 
             "level": "INFO" # lot of logs on DEBUG level
