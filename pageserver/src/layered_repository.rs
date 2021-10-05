@@ -406,14 +406,14 @@ impl LayeredRepository {
         ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
 
         let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
-        let calculated_checksum = crc32c::crc32c(&data);
+        let calculated_checksum = crc32c::crc32c(data);
 
         let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
             metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
         let expected_checksum = u32::from_le_bytes(*checksum_bytes);
         ensure!(calculated_checksum == expected_checksum);
 
-        let data = TimelineMetadata::des_prefix(&data)?;
+        let data = TimelineMetadata::des_prefix(data)?;
         assert!(data.disk_consistent_lsn.is_aligned());
 
         Ok(data)
