@@ -391,7 +391,7 @@ impl DeltaLayer {
         end_lsn: Lsn,
         dropped: bool,
         predecessor: Option<Arc<dyn Layer>>,
-        page_versions: impl Iterator<Item = (&'a u32, &'a Lsn, &'a PageVersion)>,
+        page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
         relsizes: OrderedVec<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         let delta_layer = DeltaLayer {
@@ -428,7 +428,7 @@ impl DeltaLayer {
             let buf = PageVersion::ser(page_version)?;
             let blob_range = page_version_writer.write_blob(&buf)?;
 
-            inner.page_version_metas.append((*blknum, *lsn), blob_range);
+            inner.page_version_metas.append((blknum, lsn), blob_range);
         }
 
         let book = page_version_writer.close()?;
