@@ -642,18 +642,11 @@ impl InMemoryLayer {
 
         // Divide all the page versions into old and new
         // at the 'cutoff_lsn' point.
-        // TODO OrderedVec split method
-        let mut before_segsizes = OrderedVec::default();
-        let mut after_segsizes = OrderedVec::default();
-        let mut after_oldest_lsn: Accum<Lsn> = Accum(None);
-        for (lsn, size) in inner.segsizes.iter() {
-            if *lsn > cutoff_lsn {
-                after_segsizes.append(*lsn, *size);
-                after_oldest_lsn.accum(min, *lsn);
-            } else {
-                before_segsizes.append(*lsn, *size);
-            }
-        }
+        let (before_segsizes, after_segsizes) = inner.segsizes.copy_split(&Lsn(cutoff_lsn.0 + 1));
+
+        // The iterator is in Lsn order, so the first element will have the smallest Lsn
+        let mut after_oldest_lsn: Accum<Lsn> =
+            Accum(after_segsizes.iter().next().map(|(lsn, _size)| *lsn));
 
         let mut before_page_versions = PageVersions::default();
         let mut after_page_versions = PageVersions::default();

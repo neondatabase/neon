@@ -90,6 +90,22 @@ impl<K: Ord + Copy, V> OrderedVec<K, V> {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub fn copy_split(&self, key: &K) -> (Self, Self)
+    where
+        K: Clone,
+        V: Clone,
+    {
+        let idx = match self.0.binary_search_by_key(key, extract_key) {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+
+        (
+            OrderedVec(Vec::from(&self.0[..idx])),
+            OrderedVec(Vec::from(&self.0[idx..])),
+        )
+    }
 }
 
 impl<K: Ord, V> From<BTreeMap<K, V>> for OrderedVec<K, V> {
