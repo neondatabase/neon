@@ -7,8 +7,9 @@ The Page Server has a few different duties:
 - Replay WAL that's applicable to the chunks that the Page Server maintains
 - Backup to S3
 
-
-
+S3 is the main fault-tolerant storage of all data, as there are no Page Server
+replicas. We use a separate fault-tolerant WAL service to reduce latency. It
+keeps track of WAL records which are not syncted to S3 yet.
 
 The Page Server consists of multiple threads that operate on a shared
 repository of page versions:
