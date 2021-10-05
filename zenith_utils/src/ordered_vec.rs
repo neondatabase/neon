@@ -91,6 +91,19 @@ impl<K: Ord + Copy, V> OrderedVec<K, V> {
         self.0.is_empty()
     }
 
+    pub fn copy_prefix(&self, key: &K) -> Self
+    where
+        K: Clone,
+        V: Clone,
+    {
+        let idx = match self.0.binary_search_by_key(key, extract_key) {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+
+        OrderedVec(Vec::from(&self.0[..idx]))
+    }
+
     pub fn copy_split(&self, key: &K) -> (Self, Self)
     where
         K: Clone,

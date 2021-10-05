@@ -775,12 +775,7 @@ impl InMemoryLayer {
 
         let end_lsn = self.end_lsn.unwrap();
 
-        let mut before_segsizes = OrderedVec::default();
-        for (lsn, size) in inner.segsizes.iter() {
-            if *lsn <= end_lsn {
-                before_segsizes.append(*lsn, *size);
-            }
-        }
+        let before_segsizes = inner.segsizes.copy_prefix(&Lsn(end_lsn.0 + 1));
         let mut before_page_versions = inner.page_versions.ordered_iter(Some(end_lsn));
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
