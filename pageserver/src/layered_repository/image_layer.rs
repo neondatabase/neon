@@ -30,7 +30,7 @@ use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::virtual_file::VirtualFile;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
@@ -386,8 +386,14 @@ impl ImageLayer {
         }
 
         let path = self.path();
-        let file = VirtualFile::open(&path)?;
-        let book = Book::new(file)?;
+        let file = VirtualFile::open(&path)
+            .with_context(|| format!("Failed to open virtual file '{}'", path.display()))?;
+        let book = Book::new(file).with_context(|| {
+            format!(
+                "Failed to open virtual file '{}' as a bookfile",
+                path.display()
+            )
+        })?;
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
