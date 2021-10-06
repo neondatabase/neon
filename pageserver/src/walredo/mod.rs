@@ -252,14 +252,13 @@ impl PostgresRedoManager {
 
         let start = Instant::now();
 
-        let apply_result: Result<Bytes, Error>;
-        if let RelishTag::Relation(rel) = rel {
+        let apply_result = if let RelishTag::Relation(rel) = rel {
             // Relational WAL records are applied using wal-redo-postgres
             let buf_tag = BufferTag { rel, blknum };
-            apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
+            process.apply_wal_records(buf_tag, base_img, records).await
         } else {
-            apply_result = Ok(nonrel::apply_nonrel(request));
-        }
+            Ok(nonrel::apply_nonrel(request))
+        };
 
         let duration = start.elapsed();
 
