@@ -23,6 +23,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::convert::TryInto;
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Bound::Included;
@@ -30,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use std::{fs, thread};
 
 use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
@@ -257,19 +257,6 @@ impl LayeredRepository {
                 timeline.init_current_logical_size()?;
 
                 let timeline = Arc::new(timeline);
-
-                // Load any new WAL after the last checkpoint into memory.
-                info!(
-                    "Loading WAL for timeline {} starting at {}",
-                    timelineid,
-                    timeline.get_last_record_lsn()
-                );
-
-                if cfg!(debug_assertions) {
-                    // check again after wal loading
-                    Self::assert_size_calculation_matches_offloaded(Arc::clone(&timeline));
-                }
-
                 timelines.insert(timelineid, timeline.clone());
                 Ok(timeline)
             }
@@ -534,24 +521,6 @@ impl LayeredRepository {
 
         totals.elapsed = now.elapsed();
         Ok(totals)
-    }
-
-    fn assert_size_calculation_matches(incremental: usize, timeline: &LayeredTimeline) {
-        match timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn()) {
-            Ok(non_incremental) => {
-                if incremental != non_incremental {
-                    error!("timeline size calculation diverged, incremental doesn't match non incremental. incremental={} non_incremental={}", incremental, non_incremental);
-                }
-            }
-            Err(e) => error!("failed to calculate non incremental timeline size: {:#}", e),
-        }
-    }
-
-    fn assert_size_calculation_matches_offloaded(timeline: Arc<LayeredTimeline>) {
-        let incremental = timeline.get_current_logical_size();
-        thread::spawn(move || {
-            Self::assert_size_calculation_matches(incremental, &timeline);
-        });
     }
 }
 
