@@ -33,11 +33,11 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     main_cur.execute('''
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
-            FROM generate_series(1, 100000) g
+            FROM generate_series(1, 200000) g
     ''')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_b = main_cur.fetchone()[0]
-    print('LSN after 100100 rows: ' + lsn_b)
+    print('LSN after 200100 rows: ' + lsn_b)
 
     # Branch at the point where only 100 rows were inserted
     zenith_cli.run(["branch", "test_branch_behind_hundred", "test_branch_behind@" + lsn_a])
@@ -46,15 +46,15 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     main_cur.execute('''
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
-            FROM generate_series(1, 100000) g
+            FROM generate_series(1, 200000) g
     ''')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
 
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_c = main_cur.fetchone()[0]
-    print('LSN after 200100 rows: ' + lsn_c)
+    print('LSN after 400100 rows: ' + lsn_c)
 
-    # Branch at the point where only 200 rows were inserted
+    # Branch at the point where only 200100 rows were inserted
     zenith_cli.run(["branch", "test_branch_behind_more", "test_branch_behind@" + lsn_b])
 
     pg_hundred = postgres.create_start("test_branch_behind_hundred")
@@ -70,11 +70,11 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     more_pg_conn = pg_more.connect()
     more_cur = more_pg_conn.cursor()
     more_cur.execute('SELECT count(*) FROM foo')
-    assert more_cur.fetchone() == (100100, )
+    assert more_cur.fetchone() == (200100, )
 
     # All the rows are visible on the main branch
     main_cur.execute('SELECT count(*) FROM foo')
-    assert main_cur.fetchone() == (200100, )
+    assert main_cur.fetchone() == (400100, )
 
     # Check bad lsn's for branching
 
