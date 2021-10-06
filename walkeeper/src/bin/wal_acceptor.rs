@@ -161,7 +161,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     let http_endpoint_thread = thread::Builder::new()
         .name("http_endpoint_thread".into())
         .spawn(move || {
-            // TODO(yeputons): maybe add auth
+            // No authentication at all: read-only metrics only, early stage.
             let router = endpoint::make_router();
             endpoint::serve_thread_main(router, http_listener).unwrap();
         })
