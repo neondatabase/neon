@@ -7,6 +7,18 @@ else
 endif
 
 #
+# We differentiate between release / debug build types using the BUILD_TYPE
+# environment variable.
+#
+ifeq ($(BUILD_TYPE),release)
+	PG_CONFIGURE_OPTS = --enable-debug
+	PG_CFLAGS = -O2 -g3 ${CFLAGS}
+else
+	PG_CONFIGURE_OPTS = --enable-debug --enable-cassert --enable-depend
+	PG_CFLAGS = -O0 -g3 ${CFLAGS}
+endif
+
+#
 # Top level Makefile to build Zenith and PostgreSQL
 #
 all: zenith postgres
@@ -30,10 +42,8 @@ tmp_install/build/config.status:
 	+@echo "Configuring postgres build"
 	mkdir -p tmp_install/build
 	(cd tmp_install/build && \
-	../../vendor/postgres/configure CFLAGS='-O0 -g3 $(CFLAGS)' \
-		--enable-cassert \
-		--enable-debug \
-		--enable-depend \
+	../../vendor/postgres/configure CFLAGS='$(PG_CFLAGS)' \
+		$(PG_CONFIGURE_OPTS) \
 		$(SECCOMP) \
 		--prefix=$(abspath tmp_install) > configure.log)
 
