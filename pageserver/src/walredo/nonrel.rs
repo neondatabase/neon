@@ -18,14 +18,12 @@ use super::WalRedoRequest;
 pub(super) fn apply_nonrel(request: &WalRedoRequest) -> Bytes {
     let rel = request.rel;
     let blknum = request.blknum;
-    let base_img = request.base_img.clone();
-    let records = &request.records;
 
     // Non-relational WAL records are handled here, with custom code that has the
     // same effects as the corresponding Postgres WAL redo function.
     const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
     let mut page = BytesMut::new();
-    if let Some(fpi) = base_img {
+    if let Some(fpi) = &request.base_img {
         // If full-page image is provided, then use it...
         page.extend_from_slice(&fpi[..]);
     } else {
@@ -33,7 +31,7 @@ pub(super) fn apply_nonrel(request: &WalRedoRequest) -> Bytes {
         page.extend_from_slice(&ZERO_PAGE);
     }
     // Apply all collected WAL records
-    for record in records {
+    for record in &request.records {
         let mut buf = record.rec.clone();
 
         super::WAL_REDO_RECORD_COUNTER.inc();
