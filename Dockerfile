@@ -11,6 +11,7 @@ WORKDIR /zenith
 COPY ./vendor/postgres vendor/postgres
 COPY ./Makefile Makefile
 RUN make -j $(getconf _NPROCESSORS_ONLN) -s postgres
+ENV BUILD_TYPE release
 RUN rm -rf postgres_install/build
 
 #
@@ -24,6 +25,7 @@ WORKDIR /zenith
 COPY --from=pg-build /zenith/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 
 COPY . .
+ENV BUILD_TYPE release
 RUN cargo build --release
 
 #

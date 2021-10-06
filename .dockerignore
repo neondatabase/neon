@@ -12,3 +12,7 @@ test_output
 .zenith
 integration_tests/.zenith
 .mypy_cache
+
+Dockerfile
+.dockerignore
+
