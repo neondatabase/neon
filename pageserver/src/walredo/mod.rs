@@ -85,7 +85,7 @@ pub trait WalRedoManager: Send + Sync {
 /// a Repository object without launching the real WAL redo process.
 ///
 pub struct DummyRedoManager {}
-impl crate::walredo::WalRedoManager for DummyRedoManager {
+impl WalRedoManager for DummyRedoManager {
     fn request_redo(
         &self,
         _rel: RelishTag,
@@ -98,7 +98,7 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
     }
 }
 
-static TIMEOUT: Duration = Duration::from_secs(20);
+const TIMEOUT: Duration = Duration::from_secs(20);
 
 // Metrics collected on WAL redo operations
 //
