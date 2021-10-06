@@ -10,6 +10,7 @@ FROM zenithdb/build:buster AS pg-build
 WORKDIR /zenith
 COPY ./vendor/postgres vendor/postgres
 COPY ./Makefile Makefile
+ENV BUILD_TYPE release
 RUN make -j $(getconf _NPROCESSORS_ONLN) -s postgres
 RUN rm -rf postgres_install/build
 
