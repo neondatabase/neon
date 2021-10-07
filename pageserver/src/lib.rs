@@ -126,10 +126,6 @@ impl PageServerConf {
         self.timeline_path(timelineid, tenantid).join("ancestor")
     }
 
-    fn wal_dir_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
-        self.timeline_path(timelineid, tenantid).join("wal")
-    }
-
     //
     // Postgres distribution paths
     //

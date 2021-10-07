@@ -419,7 +419,6 @@ fn create_timeline(
     let timelinedir = conf.timeline_path(&timelineid, tenantid);
 
     fs::create_dir(&timelinedir)?;
-    fs::create_dir(&timelinedir.join("wal"))?;
 
     if let Some(ancestor) = ancestor {
         let data = format!("{}@{}", ancestor.timelineid, ancestor.lsn);
