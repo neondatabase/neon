@@ -31,16 +31,29 @@ static COMMON_METRICS_PREFIX: OnceBox<&str> = OnceBox::new();
 /// name like 'pageserver'. Should be executed exactly once in the beginning of
 /// any executable which uses common metrics.
 pub fn set_common_metrics_prefix(prefix: &'static str) {
-    COMMON_METRICS_PREFIX.set(prefix.into()).unwrap();
+    // Not unwrap() because metrics may be initialized after multiple threads have been started.
+    COMMON_METRICS_PREFIX
+        .set(prefix.into())
+        .unwrap_or_else(|_| {
+            eprintln!(
+                "set_common_metrics_prefix() was called second time with '{}', exiting",
+                prefix
+            );
+            std::process::exit(1);
+        });
 }
 
 /// Prepends a prefix to a common metric name so they are distinguished between
 /// different services, see https://github.com/zenithdb/zenith/pull/681
 /// A call to set_common_metrics_prefix() is necessary prior to calling this.
 pub fn new_common_metric_name(unprefixed_metric_name: &str) -> String {
+    // Not unwrap() because metrics may be initialized after multiple threads have been started.
     format!(
         "{}_{}",
-        COMMON_METRICS_PREFIX.get().unwrap(),
+        COMMON_METRICS_PREFIX.get().unwrap_or_else(|| {
+            eprintln!("set_common_metrics_prefix() was not called, but metrics are used, exiting");
+            std::process::exit(1);
+        }),
         unprefixed_metric_name
     )
 }
