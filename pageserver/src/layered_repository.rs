@@ -1030,7 +1030,7 @@ impl LayeredTimeline {
             self.timelineid
         );
         let mut layers = self.layers.lock().unwrap();
-        let (imgfilenames, mut deltafilenames) =
+        let (imgfilenames, deltafilenames) =
             filename::list_files(self.conf, self.timelineid, self.tenantid)?;
 
         let timeline_path = self.conf.timeline_path(&self.timelineid, &self.tenantid);
@@ -1058,11 +1058,7 @@ impl LayeredTimeline {
             layers.insert_historic(Arc::new(layer));
         }
 
-        // Then for the Delta files. The delta files are created in order starting
-        // from the oldest file, because each DeltaLayer needs a reference to its
-        // predecessor.
-        deltafilenames.sort();
-
+        // Then for the Delta files.
         for filename in deltafilenames.iter() {
             ensure!(filename.start_lsn < filename.end_lsn);
             if filename.end_lsn > disk_consistent_lsn {
@@ -1075,27 +1071,12 @@ impl LayeredTimeline {
                 continue;
             }
 
-            let predecessor = layers.get(&filename.seg, filename.start_lsn);
-
-            let predecessor_str: String = if let Some(prec) = &predecessor {
-                prec.filename().display().to_string()
-            } else {
-                "none".to_string()
-            };
-
-            let layer = DeltaLayer::new(
-                self.conf,
-                self.timelineid,
-                self.tenantid,
-                filename,
-                predecessor,
-            );
+            let layer = DeltaLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
             info!(
-                "found layer {} on timeline {}, predecessor: {}",
+                "found layer {} on timeline {}",
                 layer.filename().display(),
                 self.timelineid,
-                predecessor_str,
             );
             layers.insert_historic(Arc::new(layer));
         }
@@ -1270,7 +1251,7 @@ impl LayeredTimeline {
             let start_lsn;
             if prev_layer.get_timeline_id() != self.timelineid {
                 // First modification on this timeline
-                start_lsn = self.ancestor_lsn;
+                start_lsn = self.ancestor_lsn + 1;
                 trace!(
                     "creating layer for write for {} at branch point {}/{}",
                     seg,
@@ -1421,19 +1402,6 @@ impl LayeredTimeline {
 
             // Finally, replace the frozen in-memory layer with the new on-disk layers
             layers.remove_historic(frozen.clone());
-
-            // If we created a successor InMemoryLayer, its predecessor is
-            // currently the frozen layer. We need to update the predecessor
-            // to be the latest on-disk layer.
-            if let Some(last_historic) = new_historics.last() {
-                if let Some(new_open) = &maybe_new_open {
-                    let maybe_old_predecessor =
-                        new_open.update_predecessor(Arc::clone(last_historic));
-                    let old_predecessor = maybe_old_predecessor
-                        .expect("new_open should always be a successor to frozen");
-                    assert!(layer_ptr_eq(frozen.as_ref(), old_predecessor.as_ref()));
-                }
-            }
 
             // Add the historics to the LayerMap
             for n in new_historics {
@@ -1741,12 +1709,20 @@ impl LayeredTimeline {
         loop {
             match layer_ref.get_page_reconstruct_data(blknum, curr_lsn, &mut data)? {
                 PageReconstructResult::Complete => break,
-                PageReconstructResult::Continue(cont_lsn, cont_layer) => {
+                PageReconstructResult::Continue(cont_lsn) => {
                     // Fetch base image / more WAL from the returned predecessor layer
-                    layer_arc = cont_layer;
-                    layer_ref = &*layer_arc;
-                    curr_lsn = cont_lsn;
-                    continue;
+                    if let Some((cont_layer, cont_lsn)) = self.get_layer_for_read(seg, cont_lsn)? {
+                        layer_arc = cont_layer;
+                        layer_ref = &*layer_arc;
+                        curr_lsn = cont_lsn;
+                        continue;
+                    } else {
+                        bail!(
+                            "could not find predecessor layer of segment {} at {}",
+                            seg.rel,
+                            cont_lsn
+                        );
+                    }
                 }
                 PageReconstructResult::Missing(lsn) => {
                     // Oops, we could not reconstruct the page.
@@ -1917,17 +1893,6 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Check for equality of Layer memory addresses
-fn layer_ptr_eq(l1: &dyn Layer, l2: &dyn Layer) -> bool {
-    let l1_ptr = l1 as *const dyn Layer;
-    let l2_ptr = l2 as *const dyn Layer;
-    // comparing *const dyn Layer will not only check for data address equality,
-    // but also for vtable address equality.
-    // to avoid this, we compare *const ().
-    // see here for more https://github.com/rust-lang/rust/issues/46139
-    std::ptr::eq(l1_ptr as *const (), l2_ptr as *const ())
 }
 
 /// Add a suffix to a layer file's name: .{num}.old

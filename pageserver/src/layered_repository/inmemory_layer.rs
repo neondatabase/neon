@@ -12,7 +12,7 @@ use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use bytes::Bytes;
 use log::*;
 use std::cmp::min;
@@ -45,6 +45,9 @@ pub struct InMemoryLayer {
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
     inner: RwLock<InMemoryLayerInner>,
+
+    /// Predecessor layer might be needed?
+    incremental: bool,
 }
 
 pub struct InMemoryLayerInner {
@@ -60,14 +63,15 @@ pub struct InMemoryLayerInner {
     ///
     /// `segsizes` tracks the size of the segment at different points in time.
     ///
+    /// For a blocky rel, there is always one entry, at the layer's start_lsn,
+    /// so that determining the size never depends on the predecessor layer. For
+    /// a non-blocky rel, 'segsizes' is not used and is always empty.
+    ///
     segsizes: BTreeMap<Lsn, u32>,
 
     /// Writes are only allowed when true.
     /// Set to false when this layer is in the process of being replaced.
     writeable: bool,
-
-    /// Predecessor layer
-    predecessor: Option<Arc<dyn Layer>>,
 }
 
 impl InMemoryLayerInner {
@@ -83,10 +87,11 @@ impl InMemoryLayerInner {
         // Scan the BTreeMap backwards, starting from the given entry.
         let mut iter = self.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
 
+        // We make sure there is always at least one entry
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             *entry
         } else {
-            0
+            panic!("could not find seg size in in-memory layer");
         }
     }
 }
@@ -164,8 +169,6 @@ impl Layer for InMemoryLayer {
 
         assert!(self.seg.blknum_in_seg(blknum));
 
-        let predecessor: Option<Arc<dyn Layer>>;
-
         {
             let inner = self.inner.read().unwrap();
 
@@ -192,16 +195,14 @@ impl Layer for InMemoryLayer {
                     bail!("no page image or WAL record for requested page");
                 }
             }
-
-            predecessor = inner.predecessor.clone();
             // release lock on 'inner'
         }
 
         // If an older page image is needed to reconstruct the page, let the
-        // caller know about the predecessor layer.
+        // caller know
         if need_image {
-            if let Some(cont_layer) = predecessor {
-                Ok(PageReconstructResult::Continue(self.start_lsn, cont_layer))
+            if self.incremental {
+                Ok(PageReconstructResult::Continue(Lsn(self.start_lsn.0 - 1)))
             } else {
                 Ok(PageReconstructResult::Missing(self.start_lsn))
             }
@@ -213,6 +214,10 @@ impl Layer for InMemoryLayer {
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
         assert!(lsn >= self.start_lsn);
+        ensure!(
+            self.seg.rel.is_blocky(),
+            "get_seg_size() called on a non-blocky rel"
+        );
 
         let inner = self.inner.read().unwrap();
         Ok(inner.get_seg_size(lsn))
@@ -252,8 +257,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn is_incremental(&self) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner.predecessor.is_some()
+        self.incremental
     }
 
     /// debugging function to print out the contents of the layer
@@ -332,6 +336,12 @@ impl InMemoryLayer {
             start_lsn
         );
 
+        // The segment is initially empty, so initialize 'segsizes' with 0.
+        let mut segsizes = BTreeMap::new();
+        if seg.rel.is_blocky() {
+            segsizes.insert(start_lsn, 0);
+        }
+
         Ok(InMemoryLayer {
             conf,
             timelineid,
@@ -340,12 +350,12 @@ impl InMemoryLayer {
             start_lsn,
             end_lsn: None,
             oldest_pending_lsn,
+            incremental: false,
             inner: RwLock::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
-                segsizes: BTreeMap::new(),
+                segsizes,
                 writeable: true,
-                predecessor: None,
             }),
         })
     }
@@ -458,6 +468,10 @@ impl InMemoryLayer {
 
     /// Remember that the relation was truncated at given LSN
     pub fn put_truncation(&self, lsn: Lsn, segsize: u32) -> WriteResult<()> {
+        assert!(
+            self.seg.rel.is_blocky(),
+            "put_truncation() called on a non-blocky rel"
+        );
         self.assert_not_frozen();
 
         let mut inner = self.inner.write().unwrap();
@@ -518,7 +532,7 @@ impl InMemoryLayer {
             start_lsn,
         );
 
-        // For convenience, copy the segment size from the predecessor layer
+        // Copy the segment size at the start LSN from the predecessor layer.
         let mut segsizes = BTreeMap::new();
         if seg.rel.is_blocky() {
             let size = src.get_seg_size(start_lsn)?;
@@ -533,12 +547,12 @@ impl InMemoryLayer {
             start_lsn,
             end_lsn: None,
             oldest_pending_lsn,
+            incremental: true,
             inner: RwLock::new(InMemoryLayerInner {
                 drop_lsn: None,
                 page_versions: BTreeMap::new(),
                 segsizes,
                 writeable: true,
-                predecessor: Some(src),
             }),
         })
     }
@@ -620,12 +634,12 @@ impl InMemoryLayer {
             start_lsn: self.start_lsn,
             end_lsn: Some(cutoff_lsn),
             oldest_pending_lsn: self.start_lsn,
+            incremental: self.incremental,
             inner: RwLock::new(InMemoryLayerInner {
                 drop_lsn: inner.drop_lsn,
                 page_versions: before_page_versions,
                 segsizes: before_segsizes,
                 writeable: false,
-                predecessor: inner.predecessor.clone(),
             }),
         });
 
@@ -679,8 +693,6 @@ impl InMemoryLayer {
         let inner = self.inner.read().unwrap();
         assert!(!inner.writeable);
 
-        let predecessor = inner.predecessor.clone();
-
         if let Some(drop_lsn) = inner.drop_lsn {
             let delta_layer = DeltaLayer::create(
                 self.conf,
@@ -690,7 +702,6 @@ impl InMemoryLayer {
                 self.start_lsn,
                 drop_lsn,
                 true,
-                predecessor,
                 inner.page_versions.iter(),
                 inner.segsizes.clone(),
             )?;
@@ -729,7 +740,6 @@ impl InMemoryLayer {
                 self.start_lsn,
                 end_lsn,
                 false,
-                predecessor,
                 before_page_versions,
                 before_segsizes,
             )?;
@@ -752,10 +762,5 @@ impl InMemoryLayer {
         trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
 
         Ok(frozen_layers)
-    }
-
-    pub fn update_predecessor(&self, predecessor: Arc<dyn Layer>) -> Option<Arc<dyn Layer>> {
-        let mut inner = self.inner.write().unwrap();
-        inner.predecessor.replace(predecessor)
     }
 }

@@ -10,7 +10,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
 
@@ -87,9 +86,9 @@ pub struct PageReconstructData {
 pub enum PageReconstructResult {
     /// Got all the data needed to reconstruct the requested page
     Complete,
-    /// This layer didn't contain all the required data, the caller should collect
-    /// more data from the returned predecessor layer at the returned LSN.
-    Continue(Lsn, Arc<dyn Layer>),
+    /// This layer didn't contain all the required data, the caller should look up
+    /// the predecessor layer at the returned LSN and collect more data from there.
+    Continue(Lsn),
     /// This layer didn't contain data needed to reconstruct the page version at
     /// the returned LSN. This is usually considered an error, but might be OK
     /// in some circumstances.
@@ -145,8 +144,8 @@ pub trait Layer: Send + Sync {
     ///
     /// See PageReconstructResult for possible return values. The collected data
     /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call. If this returns PageReconstructResult::Continue, call
-    /// again on the returned predecessor layer with the same 'reconstruct_data'
+    /// on first call. If this returns PageReconstructResult::Continue, look up
+    /// the predecessor layer and call again with the same 'reconstruct_data'
     /// to collect more data.
     fn get_page_reconstruct_data(
         &self,

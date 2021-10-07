@@ -45,7 +45,7 @@ use crate::layered_repository::storage_layer::{
 use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -57,7 +57,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
 
@@ -130,9 +130,6 @@ pub struct DeltaLayer {
     pub end_lsn: Lsn,
 
     dropped: bool,
-
-    /// Predecessor layer
-    predecessor: Option<Arc<dyn Layer>>,
 
     inner: Mutex<DeltaLayerInner>,
 }
@@ -247,16 +244,9 @@ impl Layer for DeltaLayer {
         }
 
         // If an older page image is needed to reconstruct the page, let the
-        // caller know about the predecessor layer.
+        // caller know.
         if need_image {
-            if let Some(cont_layer) = &self.predecessor {
-                Ok(PageReconstructResult::Continue(
-                    self.start_lsn,
-                    Arc::clone(cont_layer),
-                ))
-            } else {
-                Ok(PageReconstructResult::Missing(self.start_lsn))
-            }
+            Ok(PageReconstructResult::Continue(self.start_lsn))
         } else {
             Ok(PageReconstructResult::Complete)
         }
@@ -265,6 +255,10 @@ impl Layer for DeltaLayer {
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
         assert!(lsn >= self.start_lsn);
+        ensure!(
+            self.seg.rel.is_blocky(),
+            "get_seg_size() called on a non-blocky rel"
+        );
 
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
@@ -273,11 +267,8 @@ impl Layer for DeltaLayer {
         let result;
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             result = *entry;
-        // Use the base image if needed
-        } else if let Some(predecessor) = &self.predecessor {
-            result = predecessor.get_seg_size(lsn)?;
         } else {
-            result = 0;
+            bail!("could not find seg size in delta layer");
         }
         Ok(result)
     }
@@ -389,10 +380,13 @@ impl DeltaLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        predecessor: Option<Arc<dyn Layer>>,
         page_versions: impl Iterator<Item = (&'a (u32, Lsn), &'a PageVersion)>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
+        if seg.rel.is_blocky() {
+            assert!(!relsizes.is_empty());
+        }
+
         let delta_layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
@@ -406,7 +400,6 @@ impl DeltaLayer {
                 page_version_metas: BTreeMap::new(),
                 relsizes,
             }),
-            predecessor,
         };
         let mut inner = delta_layer.inner.lock().unwrap();
 
@@ -551,7 +544,6 @@ impl DeltaLayer {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         filename: &DeltaFileName,
-        predecessor: Option<Arc<dyn Layer>>,
     ) -> DeltaLayer {
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -566,7 +558,6 @@ impl DeltaLayer {
                 page_version_metas: BTreeMap::new(),
                 relsizes: BTreeMap::new(),
             }),
-            predecessor,
         }
     }
 
@@ -590,7 +581,6 @@ impl DeltaLayer {
                 page_version_metas: BTreeMap::new(),
                 relsizes: BTreeMap::new(),
             }),
-            predecessor: None,
         })
     }
 }
