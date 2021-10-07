@@ -100,7 +100,7 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accou
 # On each iteration 1 acceptor is stopped, and 2 others should allow
 # background workers execute transactions. In the end, state should remain
 # consistent.
-async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_workers=10, period_time=10, iterations=6, large_wal=False):
+async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_workers=10, period_time=10, iterations=6, large_wal=False, normal_work_sleep=0):
     n_accounts = 100
     init_amount = 100000
     max_transfer = 100
@@ -136,6 +136,11 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
         stats.check_progress()
 
         victim.start()
+        
+        # sleep to sync all safekepeers together
+        if normal_work_sleep > 0:
+            await asyncio.sleep(normal_work_sleep)
+
 
     print('Iterations are finished, exiting coroutines...')
     stats.running = False
@@ -156,7 +161,7 @@ def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres:
     pg = postgres.create_start('test_wal_acceptors_restarts_under_load',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    asyncio.run(run_restarts_under_load(pg, wa_factory.instances))
+    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, iterations=9))
 
     # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
     pg.stop()
@@ -172,7 +177,7 @@ def test_restarts_under_load_large(zenith_cli, pageserver: ZenithPageserver, pos
     pg = postgres.create_start('test_restarts_under_load_large',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, n_workers=2, period_time=7, iterations=10, large_wal=True))
+    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, n_workers=2, period_time=0.5, iterations=10, large_wal=True))
 
     # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
     pg.stop()
