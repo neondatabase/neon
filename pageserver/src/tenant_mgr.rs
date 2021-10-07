@@ -100,10 +100,6 @@ pub fn create_repository_for_tenant(
     Ok(())
 }
 
-pub fn insert_repository_for_tenant(tenantid: ZTenantId, repo: Arc<dyn Repository>) {
-    access_repository().insert(tenantid, repo);
-}
-
 pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
     access_repository()
         .get(&tenantid)
