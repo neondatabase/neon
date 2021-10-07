@@ -140,6 +140,17 @@ class ZenithBenchmarker:
                             re.MULTILINE)
         return int(round(float(matches.group(1))))
 
+    def get_peak_mem(self, pageserver) -> int:
+        """
+        Fetch the "maxrss" metric from the pageserver
+        """
+        # Fetch all the exposed prometheus metrics from page server
+        all_metrics = pageserver.http_client().get_metrics()
+        # See comment in get_io_writes()
+        matches = re.search(r'^pageserver_maxrss_kb (\S+)$', all_metrics,
+                            re.MULTILINE)
+        return int(round(float(matches.group(1))))
+
     @contextmanager
     def record_pageserver_writes(self, pageserver, metric_name):
         """

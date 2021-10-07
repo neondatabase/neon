@@ -25,6 +25,7 @@ def get_timeline_size(repo_dir: str, tenantid: str, timelineid: str):
 # 1. Time to INSERT 5 million rows
 # 2. Disk writes
 # 3. Disk space used
+# 4. Peak memory usage
 #
 def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin, zenith_cli, zenbenchmark, repo_dir: str):
     # Create a branch for us
@@ -54,6 +55,9 @@ def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg
                     # Flush the layers from memory to disk. This is included in the reported
                     # time and I/O
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+
+            # Record peak memory usage
+            zenbenchmark.record("peak_mem", zenbenchmark.get_peak_mem(pageserver) / 1024, 'MB')
 
             # Report disk space used by the repository
             timeline_size = get_timeline_size(repo_dir, pageserver.initial_tenant, timeline)

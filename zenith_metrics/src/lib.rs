@@ -21,7 +21,7 @@ pub use wrappers::{CountedReader, CountedWriter};
 /// Metrics gathering is a relatively simple and standalone operation, so
 /// it might be fine to do it this way to keep things simple.
 pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
-    update_io_metrics();
+    update_rusage_metrics();
     prometheus::gather()
 }
 
@@ -52,6 +52,11 @@ lazy_static! {
         &["io_operation"]
     )
     .expect("Failed to register disk i/o bytes int gauge vec");
+    static ref MAXRSS_KB: IntGauge = register_int_gauge!(
+        new_common_metric_name("maxrss_kb"),
+        "Memory usage (Maximum Resident Set Size)"
+    )
+    .expect("Failed to register maxrss_kb int gauge");
 }
 
 // Records I/O stats in a "cross-platform" way.
@@ -63,7 +68,7 @@ lazy_static! {
 // We know the size of the block, so we can determine the I/O bytes out of it.
 // The value might be not 100% exact, but should be fine for Prometheus metrics in this case.
 #[allow(clippy::unnecessary_cast)]
-fn update_io_metrics() {
+fn update_rusage_metrics() {
     let rusage_stats = get_rusage_stats();
 
     const BYTES_IN_BLOCK: i64 = 512;
@@ -73,6 +78,7 @@ fn update_io_metrics() {
     DISK_IO_BYTES
         .with_label_values(&["write"])
         .set(rusage_stats.ru_oublock * BYTES_IN_BLOCK);
+    MAXRSS_KB.set(rusage_stats.ru_maxrss);
 }
 
 fn get_rusage_stats() -> libc::rusage {
