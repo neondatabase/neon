@@ -1,4 +1,4 @@
 [submodule "vendor/postgres"]
 	path = vendor/postgres
 	url = https://github.com/zenithdb/postgres
-	branch = main
+	branch = walproposer_more_logs
