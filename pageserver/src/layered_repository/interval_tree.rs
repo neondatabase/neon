@@ -219,7 +219,7 @@ where
                 }
             }
             // No more elements at this point. Move to next point.
-            if let Some((point_key, point)) = self.point_iter.next() {
+            if let Some((point_key, point)) = self.point_iter.next_back() {
                 self.elem_iter = Some((*point_key, point.elements.iter()));
                 continue;
             } else {

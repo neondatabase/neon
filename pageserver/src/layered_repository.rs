@@ -32,7 +32,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, WALRecord};
@@ -1418,58 +1417,14 @@ impl LayeredTimeline {
                 break;
             }
 
-            // Freeze the layer.
-            //
-            // This is a two-step process. First, we "freeze" the in-memory
-            // layer, to close it for new writes, and replace the original
-            // layer with the new frozen in-memory layer (and possibly a new
-            // open layer to hold changes newer than the cutoff.) Then we write
-            // the frozen layer to disk, and replace the in-memory frozen layer
-            // with the new on-disk layers.
-            let FreezeLayers {
-                frozen,
-                open: maybe_new_open,
-            } = oldest_layer.freeze(last_record_lsn)?;
-
             // replace this layer with the new layers that 'freeze' returned
             layers.pop_oldest_open();
-            if let Some(new_open) = maybe_new_open.clone() {
-                layers.insert_open(new_open);
-            }
 
-            // We temporarily insert InMemory layer into historic list here.
-            // TODO: check that all possible concurrent users of 'historic' treat it right
-            layers.insert_historic(frozen.clone());
+            let new_delta_layer = oldest_layer.write_to_disk(self)?;
+            created_historics = true;
 
-            // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
-            drop(layers);
-            let new_historics = frozen.write_to_disk(self)?;
-            layers = self.layers.lock().unwrap();
-
-            if !new_historics.is_empty() {
-                created_historics = true;
-            }
-
-            // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove_historic(frozen.clone());
-
-            // If we created a successor InMemoryLayer, its predecessor is
-            // currently the frozen layer. We need to update the predecessor
-            // to be the latest on-disk layer.
-            if let Some(last_historic) = new_historics.last() {
-                if let Some(new_open) = &maybe_new_open {
-                    let maybe_old_predecessor =
-                        new_open.update_predecessor(Arc::clone(last_historic));
-                    let old_predecessor = maybe_old_predecessor
-                        .expect("new_open should always be a successor to frozen");
-                    assert!(layer_ptr_eq(frozen.as_ref(), old_predecessor.as_ref()));
-                }
-            }
-
-            // Add the historics to the LayerMap
-            for n in new_historics {
-                layers.insert_historic(n);
-            }
+            // Add the historic to the LayerMap
+            layers.insert_historic(new_delta_layer);
         }
 
         // Call unload() on all frozen layers, to release memory.
@@ -1567,181 +1522,212 @@ impl LayeredTimeline {
             self.timelineid, cutoff
         );
         info!("retain_lsns:  {:?}", retain_lsns);
-
-        let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
-
-        // Scan all on-disk layers in the timeline.
-        //
-        // Garbage collect the layer if all conditions are satisfied:
-        // 1. it is older than cutoff LSN;
-        // 2. it doesn't need to be retained for 'retain_lsns';
-        // 3. newer on-disk layer exists (only for non-dropped segments);
-        // 4. this layer doesn't serve as a tombstone for some older layer;
-        //
         let mut layers = self.layers.lock().unwrap();
-        'outer: for l in layers.iter_historic_layers() {
-            let seg = l.get_seg_tag();
 
-            if seg.rel.is_relation() {
-                result.ondisk_relfiles_total += 1;
-            } else {
-                result.ondisk_nonrelfiles_total += 1;
-            }
+        'outer: loop {
+            let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
+            let mut layer_to_materialize: Option<Arc<dyn Layer>> = None;
 
-            // 1. Is it newer than cutoff point?
-            if l.get_end_lsn() > cutoff {
-                info!(
-                    "keeping {} {}-{} because it's newer than cutoff {}",
-                    seg,
-                    l.get_start_lsn(),
-                    l.get_end_lsn(),
-                    cutoff
-                );
+            // Scan all on-disk layers in the timeline.
+            //
+            // Garbage collect the layer if all conditions are satisfied:
+            // 1. it is older than cutoff LSN;
+            // 2. it doesn't need to be retained for 'retain_lsns';
+            // 3. newer on-disk layer exists (only for non-dropped segments);
+            // 4. this layer doesn't serve as a tombstone for some older layer;
+            //
+            'for_all_historic_layers: for l in layers.iter_historic_layers() {
+                let seg = l.get_seg_tag();
+
                 if seg.rel.is_relation() {
-                    result.ondisk_relfiles_needed_by_cutoff += 1;
+                    result.ondisk_relfiles_total += 1;
                 } else {
-                    result.ondisk_nonrelfiles_needed_by_cutoff += 1;
+                    result.ondisk_nonrelfiles_total += 1;
                 }
-                continue 'outer;
-            }
 
-            // 2. Is it needed by a child branch?
-            for retain_lsn in &retain_lsns {
-                // start_lsn is inclusive and end_lsn is exclusive
-                if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
+                // 1. Create image layer for this relation?
+                if !l.is_dropped()
+                    && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
+                {
+                    if l.is_incremental() {
+                        layer_to_materialize = Some(Arc::clone(&l));
+                        break 'for_all_historic_layers;
+                    } else {
+                        info!(
+                            "keeping {} {}-{} because it's newer than cutoff {}",
+                            seg,
+                            l.get_start_lsn(),
+                            l.get_end_lsn(),
+                            cutoff
+                        );
+                        if seg.rel.is_relation() {
+                            result.ondisk_relfiles_needed_by_cutoff += 1;
+                        } else {
+                            result.ondisk_nonrelfiles_needed_by_cutoff += 1;
+                        }
+                        continue 'for_all_historic_layers;
+                    }
+                }
+
+                // 2. Is it newer than cutoff point?
+                if l.get_end_lsn() > cutoff {
                     info!(
-                        "keeping {} {}-{} because it's needed by branch point {}",
+                        "keeping {} {}-{} because it's newer than cutoff {}",
                         seg,
                         l.get_start_lsn(),
                         l.get_end_lsn(),
-                        *retain_lsn
+                        cutoff
                     );
                     if seg.rel.is_relation() {
-                        result.ondisk_relfiles_needed_by_branches += 1;
+                        result.ondisk_relfiles_needed_by_cutoff += 1;
                     } else {
-                        result.ondisk_nonrelfiles_needed_by_branches += 1;
+                        result.ondisk_nonrelfiles_needed_by_cutoff += 1;
                     }
-                    continue 'outer;
+                    continue 'for_all_historic_layers;
                 }
-            }
 
-            // 3. Is there a later on-disk layer for this relation?
-            if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
-            {
-                info!(
-                    "keeping {} {}-{} because it is the latest layer",
-                    seg,
-                    l.get_start_lsn(),
-                    l.get_end_lsn()
-                );
-                if seg.rel.is_relation() {
-                    result.ondisk_relfiles_not_updated += 1;
-                } else {
-                    result.ondisk_nonrelfiles_not_updated += 1;
-                }
-                continue 'outer;
-            }
-
-            // 4. Does this layer serve as a tombstome for some older layer?
-            if l.is_dropped() {
-                let prior_lsn = l.get_start_lsn().checked_sub(1u64).unwrap();
-
-                // Check if this layer serves as a tombstone for this timeline
-                // We have to do this separately from timeline check below,
-                // because LayerMap of this timeline is already locked.
-                let mut is_tombstone = layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn)?;
-                if is_tombstone {
-                    info!(
-                        "earlier layer exists at {} in {}",
-                        prior_lsn, self.timelineid
-                    );
-                }
-                // Now check ancestor timelines, if any
-                else if let Some(ancestor) = &self.ancestor_timeline {
-                    let prior_lsn = ancestor.get_last_record_lsn();
-                    if seg.rel.is_blocky() {
+                // 3. Is it needed by a child branch?
+                for retain_lsn in &retain_lsns {
+                    // start_lsn is inclusive and end_lsn is exclusive
+                    if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
                         info!(
-                            "check blocky relish size {} at {} in {} for layer {}-{}",
+                            "keeping {} {}-{} because it's needed by branch point {}",
                             seg,
-                            prior_lsn,
-                            ancestor.timelineid,
                             l.get_start_lsn(),
-                            l.get_end_lsn()
+                            l.get_end_lsn(),
+                            *retain_lsn
                         );
-                        match ancestor.get_relish_size(seg.rel, prior_lsn).unwrap() {
-                            Some(size) => {
-                                let last_live_seg = SegmentTag::from_blknum(seg.rel, size - 1);
-                                info!(
-                                    "blocky rel size is {} last_live_seg.segno {} seg.segno {}",
-                                    size, last_live_seg.segno, seg.segno
-                                );
-                                if last_live_seg.segno >= seg.segno {
-                                    is_tombstone = true;
+                        if seg.rel.is_relation() {
+                            result.ondisk_relfiles_needed_by_branches += 1;
+                        } else {
+                            result.ondisk_nonrelfiles_needed_by_branches += 1;
+                        }
+                        continue 'for_all_historic_layers;
+                    }
+                }
+
+                // 4. Does this layer serve as a tombstome for some older layer?
+                if l.is_dropped() {
+                    let prior_lsn = l.get_start_lsn().checked_sub(1u64).unwrap();
+
+                    // Check if this layer serves as a tombstone for this timeline
+                    // We have to do this separately from timeline check below,
+                    // because LayerMap of this timeline is already locked.
+                    let mut is_tombstone =
+                        layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn)?;
+                    if is_tombstone {
+                        info!(
+                            "earlier layer exists at {} in {}",
+                            prior_lsn, self.timelineid
+                        );
+                    }
+                    // Now check ancestor timelines, if any
+                    else if let Some(ancestor) = &self.ancestor_timeline {
+                        let prior_lsn = ancestor.get_last_record_lsn();
+                        if seg.rel.is_blocky() {
+                            info!(
+                                "check blocky relish size {} at {} in {} for layer {}-{}",
+                                seg,
+                                prior_lsn,
+                                ancestor.timelineid,
+                                l.get_start_lsn(),
+                                l.get_end_lsn()
+                            );
+                            match ancestor.get_relish_size(seg.rel, prior_lsn).unwrap() {
+                                Some(size) => {
+                                    let last_live_seg = SegmentTag::from_blknum(seg.rel, size - 1);
+                                    info!(
+                                        "blocky rel size is {} last_live_seg.segno {} seg.segno {}",
+                                        size, last_live_seg.segno, seg.segno
+                                    );
+                                    if last_live_seg.segno >= seg.segno {
+                                        is_tombstone = true;
+                                    }
+                                }
+                                _ => {
+                                    info!("blocky rel doesn't exist");
                                 }
                             }
-                            _ => {
-                                info!("blocky rel doesn't exist");
-                            }
+                        } else {
+                            info!(
+                                "check non-blocky relish existence {} at {} in {} for layer {}-{}",
+                                seg,
+                                prior_lsn,
+                                ancestor.timelineid,
+                                l.get_start_lsn(),
+                                l.get_end_lsn()
+                            );
+                            is_tombstone =
+                                ancestor.get_rel_exists(seg.rel, prior_lsn).unwrap_or(false);
                         }
-                    } else {
+                    }
+
+                    if is_tombstone {
                         info!(
-                            "check non-blocky relish existence {} at {} in {} for layer {}-{}",
-                            seg,
-                            prior_lsn,
-                            ancestor.timelineid,
-                            l.get_start_lsn(),
-                            l.get_end_lsn()
-                        );
-                        is_tombstone = ancestor.get_rel_exists(seg.rel, prior_lsn).unwrap_or(false);
+							"keeping {} {}-{} because this layer servers as a tombstome for older layer",
+							seg,
+							l.get_start_lsn(),
+							l.get_end_lsn()
+						);
+
+                        if seg.rel.is_relation() {
+                            result.ondisk_relfiles_needed_as_tombstone += 1;
+                        } else {
+                            result.ondisk_nonrelfiles_needed_as_tombstone += 1;
+                        }
+                        continue 'for_all_historic_layers;
                     }
                 }
 
-                if is_tombstone {
-                    info!(
-                        "keeping {} {}-{} because this layer servers as a tombstome for older layer",
-                        seg,
-                        l.get_start_lsn(),
-                        l.get_end_lsn()
-                    );
+                // We didn't find any reason to keep this file, so remove it.
+                info!(
+                    "garbage collecting {} {}-{} {}",
+                    l.get_seg_tag(),
+                    l.get_start_lsn(),
+                    l.get_end_lsn(),
+                    l.is_dropped()
+                );
+                layers_to_remove.push(Arc::clone(&l));
+            }
 
-                    if seg.rel.is_relation() {
-                        result.ondisk_relfiles_needed_as_tombstone += 1;
-                    } else {
-                        result.ondisk_nonrelfiles_needed_as_tombstone += 1;
-                    }
-                    continue 'outer;
+            // Actually delete the layers from disk and remove them from the map.
+            // (couldn't do this in the loop above, because you cannot modify a collection
+            // while iterating it. BTreeMap::retain() would be another option)
+            for doomed_layer in layers_to_remove {
+                doomed_layer.delete()?;
+                layers.remove_historic(doomed_layer.clone());
+
+                match (
+                    doomed_layer.is_dropped(),
+                    doomed_layer.get_seg_tag().rel.is_relation(),
+                ) {
+                    (true, true) => result.ondisk_relfiles_dropped += 1,
+                    (true, false) => result.ondisk_nonrelfiles_dropped += 1,
+                    (false, true) => result.ondisk_relfiles_removed += 1,
+                    (false, false) => result.ondisk_nonrelfiles_removed += 1,
                 }
             }
 
-            // We didn't find any reason to keep this file, so remove it.
-            info!(
-                "garbage collecting {} {}-{} {}",
-                l.get_seg_tag(),
-                l.get_start_lsn(),
-                l.get_end_lsn(),
-                l.is_dropped()
-            );
-            layers_to_remove.push(Arc::clone(&l));
-        }
-
-        // Actually delete the layers from disk and remove them from the map.
-        // (couldn't do this in the loop above, because you cannot modify a collection
-        // while iterating it. BTreeMap::retain() would be another option)
-        for doomed_layer in layers_to_remove {
-            doomed_layer.delete()?;
-            layers.remove_historic(doomed_layer.clone());
-
-            match (
-                doomed_layer.is_dropped(),
-                doomed_layer.get_seg_tag().rel.is_relation(),
-            ) {
-                (true, true) => result.ondisk_relfiles_dropped += 1,
-                (true, false) => result.ondisk_nonrelfiles_dropped += 1,
-                (false, true) => result.ondisk_relfiles_removed += 1,
-                (false, false) => result.ondisk_nonrelfiles_removed += 1,
+            if let Some(delta_layer) = layer_to_materialize {
+                drop(layers); // release lock, as far as new image layers are created only by GC thread,
+                let image_layer = ImageLayer::create_from_src(
+                    self.conf,
+                    &self,
+                    &*delta_layer,
+                    delta_layer.get_end_lsn(),
+                )?;
+                layers = self.layers.lock().unwrap();
+                info!(
+                    "materialize layer {} {}-{}",
+                    delta_layer.get_seg_tag(),
+                    delta_layer.get_start_lsn(),
+                    delta_layer.get_end_lsn()
+                );
+                layers.insert_historic(Arc::new(image_layer));
+                continue 'outer;
             }
+            break 'outer;
         }
-
         result.elapsed = now.elapsed();
         Ok(result)
     }
@@ -1948,17 +1934,6 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Check for equality of Layer memory addresses
-fn layer_ptr_eq(l1: &dyn Layer, l2: &dyn Layer) -> bool {
-    let l1_ptr = l1 as *const dyn Layer;
-    let l2_ptr = l2 as *const dyn Layer;
-    // comparing *const dyn Layer will not only check for data address equality,
-    // but also for vtable address equality.
-    // to avoid this, we compare *const ().
-    // see here for more https://github.com/rust-lang/rust/issues/46139
-    std::ptr::eq(l1_ptr as *const (), l2_ptr as *const ())
 }
 
 /// Add a suffix to a layer file's name: .{num}.old
