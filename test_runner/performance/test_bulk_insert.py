@@ -4,19 +4,6 @@ from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
-def get_timeline_size(repo_dir: str, tenantid: str, timelineid: str):
-    path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid, timelineid)
-
-    totalbytes = 0
-    for root, dirs, files in os.walk(path):
-        for name in files:
-            totalbytes += os.path.getsize(os.path.join(root, name))
-
-        if 'wal' in dirs:
-            dirs.remove('wal')  # don't visit 'wal' subdirectory
-
-    return totalbytes
-
 #
 # Run bulk INSERT test.
 #
@@ -60,5 +47,5 @@ def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg
             zenbenchmark.record("peak_mem", zenbenchmark.get_peak_mem(pageserver) / 1024, 'MB')
 
             # Report disk space used by the repository
-            timeline_size = get_timeline_size(repo_dir, pageserver.initial_tenant, timeline)
+            timeline_size = zenbenchmark.get_timeline_size(repo_dir, pageserver.initial_tenant, timeline)
             zenbenchmark.record('size', timeline_size / (1024*1024), 'MB')
