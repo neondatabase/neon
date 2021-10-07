@@ -584,10 +584,10 @@ impl InMemoryLayer {
                 inner.page_versions.iter(),
                 inner.segsizes.clone(),
             )?;
-            Ok(Arc::new(delta_layer));
+            Ok(Arc::new(delta_layer))
         } else {
             let image_layer = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
-            Ok(Arc::new(image_layer));
+            Ok(Arc::new(image_layer))
         }
     }
 }
