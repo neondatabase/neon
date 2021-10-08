@@ -104,6 +104,24 @@ impl<K: Ord, V> VecMap<K, V> {
             VecMap(self.0[split_idx..].to_vec()),
         )
     }
+
+    /// Move items from [`other`] to the end of [`self`], leaving [`other`] empty.
+    /// If any keys in [`other`] is less than or equal to any key in [`self`],
+    /// [`InvalidKey`] error will be returned and no mutation will occur.
+    pub fn extend(&mut self, other: &mut Self) -> Result<(), InvalidKey> {
+        let self_last_opt = self.0.last().map(extract_key);
+        let other_first_opt = other.0.last().map(extract_key);
+
+        if let (Some(self_last), Some(other_first)) = (self_last_opt, other_first_opt) {
+            if self_last >= other_first {
+                return Err(InvalidKey);
+            }
+        }
+
+        self.0.append(&mut other.0);
+
+        Ok(())
+    }
 }
 
 fn extract_key<K, V>(entry: &(K, V)) -> &K {
@@ -235,5 +253,39 @@ mod tests {
                 assert_eq!(map_range, vec_slice);
             }
         }
+    }
+
+    #[test]
+    fn extend() {
+        let mut left = VecMap::default();
+        left.append(0, ()).unwrap();
+        assert_eq!(left.as_slice(), &[(0, ())]);
+
+        let mut empty = VecMap::default();
+        left.extend(&mut empty).unwrap();
+        assert_eq!(left.as_slice(), &[(0, ())]);
+        assert_eq!(empty.as_slice(), &[]);
+
+        let mut right = VecMap::default();
+        right.append(1, ()).unwrap();
+
+        left.extend(&mut right).unwrap();
+
+        assert_eq!(left.as_slice(), &[(0, ()), (1, ())]);
+        assert_eq!(right.as_slice(), &[]);
+
+        let mut zero_map = VecMap::default();
+        zero_map.append(0, ()).unwrap();
+
+        left.extend(&mut zero_map).unwrap_err();
+        assert_eq!(left.as_slice(), &[(0, ()), (1, ())]);
+        assert_eq!(zero_map.as_slice(), &[(0, ())]);
+
+        let mut one_map = VecMap::default();
+        one_map.append(1, ()).unwrap();
+
+        left.extend(&mut one_map).unwrap_err();
+        assert_eq!(left.as_slice(), &[(0, ()), (1, ())]);
+        assert_eq!(one_map.as_slice(), &[(1, ())]);
     }
 }
