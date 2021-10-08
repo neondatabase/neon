@@ -16,7 +16,6 @@ use anyhow::{bail, ensure, Result};
 use bytes::Bytes;
 use log::*;
 use std::cmp::min;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use zenith_utils::vec_map::VecMap;
@@ -691,8 +690,6 @@ impl InMemoryLayer {
         assert!(!inner.writeable);
 
         if let Some(drop_lsn) = inner.drop_lsn {
-            let segsizes_map: BTreeMap<Lsn, u32> =
-                inner.segsizes.as_slice().iter().cloned().collect();
             let delta_layer = DeltaLayer::create(
                 self.conf,
                 self.timelineid,
@@ -702,7 +699,7 @@ impl InMemoryLayer {
                 drop_lsn,
                 true,
                 inner.page_versions.ordered_page_version_iter(None),
-                segsizes_map,
+                inner.segsizes.clone(),
             )?;
             trace!(
                 "freeze: created delta layer for dropped segment {} {}-{}",
@@ -715,15 +712,13 @@ impl InMemoryLayer {
 
         let end_lsn = self.end_lsn.unwrap();
 
-        let (before_segsizes, _after_segsizes) = inner.segsizes.split_at(&Lsn(end_lsn.0 + 1));
-        let before_segsizes: BTreeMap<Lsn, u32> =
-            before_segsizes.as_slice().iter().cloned().collect();
-
         let mut before_page_versions = inner.page_versions.ordered_page_version_iter(Some(end_lsn));
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
 
         if self.start_lsn != end_lsn {
+            let (before_segsizes, _after_segsizes) = inner.segsizes.split_at(&Lsn(end_lsn.0 + 1));
+
             // Write the page versions before the cutoff to disk.
             let delta_layer = DeltaLayer::create(
                 self.conf,
