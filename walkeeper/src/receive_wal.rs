@@ -42,7 +42,7 @@ fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId, tenantid: ZT
     );
 
     // use Config parsing because SockAddr parsing doesnt allow to use host names instead of ip addresses
-    let me_connstr = format!("postgresql://no_user@{}/no_db", conf.listen_addr);
+    let me_connstr = format!("postgresql://no_user@{}/no_db", conf.listen_pg_addr);
     let me_conf: Config = me_connstr.parse().unwrap();
     let (host, port) = connection_host_port(&me_conf);
     let callme = format!(

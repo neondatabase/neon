@@ -795,11 +795,16 @@ def read_pid(path: Path):
 
 
 @dataclass
+class WalAcceptorPort:
+    pg: int
+    http: int
+
+@dataclass
 class WalAcceptor:
     """ An object representing a running wal acceptor daemon. """
     wa_bin_path: Path
     data_dir: Path
-    port: int
+    port: WalAcceptorPort
     num: int # identifier for logging
     pageserver_port: int
     auth_token: Optional[str] = None
@@ -811,7 +816,8 @@ class WalAcceptor:
 
         cmd = [str(self.wa_bin_path)]
         cmd.extend(["-D", str(self.data_dir)])
-        cmd.extend(["-l", f"localhost:{self.port}"])
+        cmd.extend(["--listen-pg", f"localhost:{self.port.pg}"])
+        cmd.extend(["--listen-http", f"localhost:{self.port.http}"])
         cmd.append("--daemonize")
         cmd.append("--no-sync")
         # Tell page server it can receive WAL from this WAL safekeeper
@@ -868,14 +874,14 @@ class WalAcceptor:
 
         # "replication=0" hacks psycopg not to send additional queries
         # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        connstr = f"host=localhost port={self.port} replication=0 options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
+        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
 
         with closing(psycopg2.connect(connstr)) as conn:
             # server doesn't support transactions
             conn.autocommit = True
             with conn.cursor() as cur:
                 request_json = json.dumps(request)
-                print(f"JSON_CTRL request on port {self.port}: {request_json}")
+                print(f"JSON_CTRL request on port {self.port.pg}: {request_json}")
                 cur.execute("JSON_CTRL " + request_json)
                 all = cur.fetchall()
                 print(f"JSON_CTRL response: {all[0][0]}")
@@ -898,7 +904,10 @@ class WalAcceptorFactory:
         wa = WalAcceptor(
             wa_bin_path=self.wa_bin_path,
             data_dir=self.data_dir / "wal_acceptor_{}".format(wa_num),
-            port=self.port_distributor.get_port(),
+            port=WalAcceptorPort(
+                pg=self.port_distributor.get_port(),
+                http=self.port_distributor.get_port(),
+            ),
             num=wa_num,
             pageserver_port=self.pageserver_port,
             auth_token=auth_token,
@@ -922,7 +931,7 @@ class WalAcceptorFactory:
 
     def get_connstrs(self) -> str:
         """ Get list of wal acceptor endpoints suitable for wal_acceptors GUC  """
-        return ','.join(["localhost:{}".format(wa.port) for wa in self.instances])
+        return ','.join(["localhost:{}".format(wa.port.pg) for wa in self.instances])
 
 
 @zenfixture

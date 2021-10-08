@@ -2339,6 +2339,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "clap",
+ "const_format",
  "crc32c",
  "daemonize",
  "fs2",
@@ -2358,6 +2359,7 @@ dependencies = [
  "tokio-stream",
  "walkdir",
  "workspace_hack",
+ "zenith_metrics",
  "zenith_utils",
 ]
 

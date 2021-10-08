@@ -28,9 +28,11 @@ humantime = "2.1.0"
 walkdir = "2"
 serde = { version = "1.0", features = ["derive"] }
 hex = "0.4.3"
+const_format = "0.2.21"
 
 # FIXME: 'pageserver' is needed for ZTimelineId. Refactor
 pageserver = { path = "../pageserver" }
 postgres_ffi = { path = "../postgres_ffi" }
 workspace_hack = { path = "../workspace_hack" }
+zenith_metrics = { path = "../zenith_metrics" }
 zenith_utils = { path = "../zenith_utils" }
