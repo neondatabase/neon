@@ -442,12 +442,7 @@ impl DeltaLayer {
     }
 
     fn open_book(&self) -> Result<(PathBuf, Book<File>)> {
-        let path = Self::path_for(
-            &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
-            &self.layer_name(),
-        );
+        let path = self.path();
 
         let file = File::open(&path)?;
         let book = Book::new(file)?;

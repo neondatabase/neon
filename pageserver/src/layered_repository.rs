@@ -113,6 +113,9 @@ lazy_static! {
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
+/// Parts of the `.zenith/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
+pub const TENANTS_SEGMENT_NAME: &str = "tenants";
+pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 ///
 /// Repository consists of multiple timelines. Keep them in a hash table.
@@ -266,7 +269,7 @@ impl LayeredRepository {
 
                 let mut timeline = LayeredTimeline::new(
                     self.conf,
-                    metadata,
+                    metadata.clone(),
                     ancestor,
                     timelineid,
                     self.tenantid,
@@ -276,15 +279,9 @@ impl LayeredRepository {
                 )?;
 
                 // List the layers on disk, and load them into the layer map
-                let _loaded_layers = timeline.load_layer_map(disk_consistent_lsn)?;
+                let loaded_layers = timeline.load_layer_map(disk_consistent_lsn)?;
                 if self.upload_relishes {
-                    schedule_timeline_upload(());
-                    // schedule_timeline_upload(
-                    //     self.tenantid,
-                    //     timelineid,
-                    //     loaded_layers,
-                    //     disk_consistent_lsn,
-                    // );
+                    schedule_timeline_upload(self.tenantid, timelineid, loaded_layers, metadata);
                 }
 
                 // needs to be after load_layer_map
@@ -412,13 +409,7 @@ impl LayeredRepository {
             .create_new(first_save)
             .open(&path)?;
 
-        let mut metadata_bytes = TimelineMetadata::ser(data)?;
-
-        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
-        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
-
-        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
-        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
+        let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
 
         if file.write(&metadata_bytes)? != metadata_bytes.len() {
             bail!("Could not write all the metadata bytes in a single call");
@@ -445,20 +436,7 @@ impl LayeredRepository {
     ) -> Result<TimelineMetadata> {
         let path = metadata_path(conf, timelineid, tenantid);
         let metadata_bytes = std::fs::read(&path)?;
-        ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
-
-        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
-        let calculated_checksum = crc32c::crc32c(data);
-
-        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
-            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
-        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
-        ensure!(calculated_checksum == expected_checksum);
-
-        let data = TimelineMetadata::des_prefix(data)?;
-        assert!(data.disk_consistent_lsn.is_aligned());
-
-        Ok(data)
+        TimelineMetadata::from_bytes(&metadata_bytes)
     }
 
     //
@@ -586,9 +564,11 @@ impl LayeredRepository {
 /// Metadata stored on disk for each timeline
 ///
 /// The fields correspond to the values we hold in memory, in LayeredTimeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimelineMetadata {
-    disk_consistent_lsn: Lsn,
+    /// [`Lsn`] that corresponds to the corresponding timeline directory
+    /// contents, stored locally in the pageserver workdir.
+    pub disk_consistent_lsn: Lsn,
 
     // This is only set if we know it. We track it in memory when the page
     // server is running, but we only track the value corresponding to
@@ -600,10 +580,45 @@ pub struct TimelineMetadata {
     // 'prev_record_lsn' value in memory again. This is only really needed when
     // doing a clean shutdown, so that there is no more WAL beyond
     // 'disk_consistent_lsn'
-    prev_record_lsn: Option<Lsn>,
+    pub prev_record_lsn: Option<Lsn>,
 
-    ancestor_timeline: Option<ZTimelineId>,
-    ancestor_lsn: Lsn,
+    pub ancestor_timeline: Option<ZTimelineId>,
+    pub ancestor_lsn: Lsn,
+}
+
+impl TimelineMetadata {
+    pub fn from_bytes(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
+        ensure!(
+            metadata_bytes.len() == METADATA_MAX_SAFE_SIZE,
+            "metadata bytes size is wrong"
+        );
+
+        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
+        let calculated_checksum = crc32c::crc32c(data);
+
+        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
+            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
+        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
+        ensure!(
+            calculated_checksum == expected_checksum,
+            "metadata checksum mismatch"
+        );
+
+        let data = TimelineMetadata::des_prefix(data)?;
+        assert!(data.disk_consistent_lsn.is_aligned());
+
+        Ok(data)
+    }
+
+    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let mut metadata_bytes = TimelineMetadata::ser(self)?;
+        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
+        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
+
+        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
+        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
+        Ok(metadata_bytes)
+    }
 }
 
 pub struct LayeredTimeline {
@@ -1374,6 +1389,7 @@ impl LayeredTimeline {
                 ancestor_timeline: ancestor_timelineid,
                 ancestor_lsn: self.ancestor_lsn,
             };
+
             LayeredRepository::save_metadata(
                 self.conf,
                 self.timelineid,
@@ -1381,19 +1397,12 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
+            if self.upload_relishes {
+                schedule_timeline_upload(self.tenantid, self.timelineid, layer_uploads, metadata);
+            }
 
             // Also update the in-memory copy
             self.disk_consistent_lsn.store(disk_consistent_lsn);
-
-            if self.upload_relishes {
-                schedule_timeline_upload(())
-                // schedule_timeline_upload(
-                //     self.tenantid,
-                //     self.timelineid,
-                //     layer_uploads,
-                //     disk_consistent_lsn,
-                // });
-            }
         }
 
         Ok(())
@@ -1947,7 +1956,7 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn metadata_path(
+pub fn metadata_path(
     conf: &'static PageServerConf,
     timelineid: ZTimelineId,
     tenantid: ZTenantId,
