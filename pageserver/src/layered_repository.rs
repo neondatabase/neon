@@ -1329,8 +1329,6 @@ impl LayeredTimeline {
             last_record_lsn
         );
 
-        let timeline_dir = File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
-
         // Take the in-memory layer with the oldest WAL record. If it's older
         // than the threshold, write it out to disk as a new image and delta file.
         // Repeat until all remaining in-memory layers are within the threshold.
@@ -1422,6 +1420,8 @@ impl LayeredTimeline {
         if created_historics {
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
+            let timeline_dir =
+                File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
             timeline_dir.sync_all()?;
         }
 
