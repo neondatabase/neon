@@ -224,7 +224,7 @@ fn bootstrap_timeline(
     let timeline = repo.create_empty_timeline(tli)?;
     restore_local_repo::import_timeline_from_postgres_datadir(
         &pgdata_path,
-        timeline.as_ref(),
+        timeline.writer().as_ref(),
         lsn,
     )?;
     timeline.checkpoint()?;

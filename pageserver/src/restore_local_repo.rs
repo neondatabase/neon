@@ -34,7 +34,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 ///
 pub fn import_timeline_from_postgres_datadir(
     path: &Path,
-    timeline: &dyn Timeline,
+    writer: &dyn TimelineWriter,
     lsn: Lsn,
 ) -> Result<()> {
     // Scan 'global'
@@ -44,10 +44,10 @@ pub fn import_timeline_from_postgres_datadir(
             None => continue,
 
             Some("pg_control") => {
-                import_control_file(timeline, lsn, &direntry.path())?;
+                import_control_file(writer, lsn, &direntry.path())?;
             }
             Some("pg_filenode.map") => import_nonrel_file(
-                timeline,
+                writer,
                 lsn,
                 RelishTag::FileNodeMap {
                     spcnode: pg_constants::GLOBALTABLESPACE_OID,
@@ -59,7 +59,7 @@ pub fn import_timeline_from_postgres_datadir(
             // Load any relation files into the page server
             _ => import_relfile(
                 &direntry.path(),
-                timeline,
+                writer,
                 lsn,
                 pg_constants::GLOBALTABLESPACE_OID,
                 0,
@@ -86,7 +86,7 @@ pub fn import_timeline_from_postgres_datadir(
 
                 Some("PG_VERSION") => continue,
                 Some("pg_filenode.map") => import_nonrel_file(
-                    timeline,
+                    writer,
                     lsn,
                     RelishTag::FileNodeMap {
                         spcnode: pg_constants::DEFAULTTABLESPACE_OID,
@@ -98,7 +98,7 @@ pub fn import_timeline_from_postgres_datadir(
                 // Load any relation files into the page server
                 _ => import_relfile(
                     &direntry.path(),
-                    timeline,
+                    writer,
                     lsn,
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
@@ -108,24 +108,24 @@ pub fn import_timeline_from_postgres_datadir(
     }
     for entry in fs::read_dir(path.join("pg_xact"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::Clog, &entry.path())?;
+        import_slru_file(writer, lsn, SlruKind::Clog, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("members"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::MultiXactMembers, &entry.path())?;
+        import_slru_file(writer, lsn, SlruKind::MultiXactMembers, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("offsets"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::MultiXactOffsets, &entry.path())?;
+        import_slru_file(writer, lsn, SlruKind::MultiXactOffsets, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_twophase"))? {
         let entry = entry?;
         let xid = u32::from_str_radix(entry.path().to_str().unwrap(), 16)?;
-        import_nonrel_file(timeline, lsn, RelishTag::TwoPhase { xid }, &entry.path())?;
+        import_nonrel_file(writer, lsn, RelishTag::TwoPhase { xid }, &entry.path())?;
     }
     // TODO: Scan pg_tblspc
 
-    timeline.advance_last_record_lsn(lsn);
+    writer.advance_last_record_lsn(lsn);
 
     Ok(())
 }
@@ -133,7 +133,7 @@ pub fn import_timeline_from_postgres_datadir(
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
 fn import_relfile(
     path: &Path,
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     spcoid: Oid,
     dboid: Oid,
@@ -191,7 +191,7 @@ fn import_relfile(
 /// are just slurped into the repository as one blob.
 ///
 fn import_nonrel_file(
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     tag: RelishTag,
     path: &Path,
@@ -212,7 +212,7 @@ fn import_nonrel_file(
 ///
 /// The control file is imported as is, but we also extract the checkpoint record
 /// from it and store it separated.
-fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result<()> {
+fn import_control_file(timeline: &dyn TimelineWriter, lsn: Lsn, path: &Path) -> Result<()> {
     let mut file = File::open(path)?;
     let mut buffer = Vec::new();
     // read the whole file
@@ -239,7 +239,12 @@ fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result
 ///
 /// Import an SLRU segment file
 ///
-fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Path) -> Result<()> {
+fn import_slru_file(
+    timeline: &dyn TimelineWriter,
+    lsn: Lsn,
+    slru: SlruKind,
+    path: &Path,
+) -> Result<()> {
     // Does it look like an SLRU file?
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
@@ -287,7 +292,7 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
 pub fn save_decoded_record(
     checkpoint: &mut CheckPoint,
     checkpoint_modified: &mut bool,
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     decoded: &DecodedWALRecord,
     recdata: Bytes,
     lsn: Lsn,
@@ -493,7 +498,11 @@ pub fn save_decoded_record(
 }
 
 /// Subroutine of save_decoded_record(), to handle an XLOG_DBASE_CREATE record.
-fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatabase) -> Result<()> {
+fn save_xlog_dbase_create(
+    timeline: &dyn TimelineWriter,
+    lsn: Lsn,
+    rec: &XlCreateDatabase,
+) -> Result<()> {
     let db_id = rec.db_id;
     let tablespace_id = rec.tablespace_id;
     let src_db_id = rec.src_db_id;
@@ -570,7 +579,11 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 /// Subroutine of save_decoded_record(), to handle an XLOG_SMGR_TRUNCATE record.
 ///
 /// This is the same logic as in PostgreSQL's smgr_redo() function.
-fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTruncate) -> Result<()> {
+fn save_xlog_smgr_truncate(
+    timeline: &dyn TimelineWriter,
+    lsn: Lsn,
+    rec: &XlSmgrTruncate,
+) -> Result<()> {
     let spcnode = rec.rnode.spcnode;
     let dbnode = rec.rnode.dbnode;
     let relnode = rec.rnode.relnode;
@@ -632,7 +645,7 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
 /// Subroutine of save_decoded_record(), to handle an XLOG_XACT_* records.
 ///
 fn save_xact_record(
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     parsed: &XlXactParsedRecord,
     decoded: &DecodedWALRecord,
@@ -690,7 +703,7 @@ fn save_xact_record(
 fn save_clog_truncate_record(
     checkpoint: &mut CheckPoint,
     checkpoint_modified: &mut bool,
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlClogTruncate,
 ) -> Result<()> {
@@ -752,7 +765,7 @@ fn save_clog_truncate_record(
 fn save_multixact_create_record(
     checkpoint: &mut CheckPoint,
     checkpoint_modified: &mut bool,
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlMultiXactCreate,
     decoded: &DecodedWALRecord,
@@ -831,7 +844,7 @@ fn save_multixact_create_record(
 fn save_multixact_truncate_record(
     checkpoint: &mut CheckPoint,
     checkpoint_modified: &mut bool,
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlMultiXactTruncate,
 ) -> Result<()> {
@@ -871,7 +884,7 @@ fn save_multixact_truncate_record(
 }
 
 fn save_relmap_page(
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlRelmapUpdate,
     decoded: &DecodedWALRecord,
