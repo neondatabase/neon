@@ -26,7 +26,7 @@ use std::convert::TryInto;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::ops::Bound::Included;
+use std::ops::{Bound::Included, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
-use crate::repository::{GcResult, Repository, Timeline, WALRecord};
+use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
 use crate::tenant_mgr;
 use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
@@ -841,131 +841,6 @@ impl Timeline for LayeredTimeline {
         Ok(result)
     }
 
-    fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
-        if !rel.is_blocky() && blknum != 0 {
-            bail!(
-                "invalid request for block {} for non-blocky relish {}",
-                blknum,
-                rel
-            );
-        }
-        ensure!(rec.lsn.is_aligned(), "unaligned record LSN");
-
-        let seg = SegmentTag::from_blknum(rel, blknum);
-        let delta_size = self.perform_write_op(seg, rec.lsn, |layer| {
-            layer.put_wal_record(blknum, rec.clone())
-        })?;
-        self.increase_current_logical_size(delta_size * BLCKSZ as u32);
-        Ok(())
-    }
-
-    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: u32) -> anyhow::Result<()> {
-        if !rel.is_blocky() {
-            bail!("invalid truncation for non-blocky relish {}", rel);
-        }
-        ensure!(lsn.is_aligned(), "unaligned record LSN");
-
-        debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
-
-        let oldsize = self
-            .get_relish_size(rel, self.get_last_record_lsn())?
-            .ok_or_else(|| {
-                anyhow!(
-                    "attempted to truncate non-existent relish {} at {}",
-                    rel,
-                    lsn
-                )
-            })?;
-
-        if oldsize <= relsize {
-            return Ok(());
-        }
-        let old_last_seg = (oldsize - 1) / RELISH_SEG_SIZE;
-
-        let last_remain_seg = if relsize == 0 {
-            0
-        } else {
-            (relsize - 1) / RELISH_SEG_SIZE
-        };
-
-        // Drop segments beyond the last remaining segment.
-        for remove_segno in (last_remain_seg + 1)..=old_last_seg {
-            let seg = SegmentTag {
-                rel,
-                segno: remove_segno,
-            };
-            self.perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
-        }
-
-        // Truncate the last remaining segment to the specified size
-        if relsize == 0 || relsize % RELISH_SEG_SIZE != 0 {
-            let seg = SegmentTag {
-                rel,
-                segno: last_remain_seg,
-            };
-            self.perform_write_op(seg, lsn, |layer| {
-                layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)
-            })?;
-        }
-        self.decrease_current_logical_size((oldsize - relsize) * BLCKSZ as u32);
-        Ok(())
-    }
-
-    fn drop_relish(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
-        trace!("drop_segment: {} at {}", rel, lsn);
-
-        if rel.is_blocky() {
-            if let Some(oldsize) = self.get_relish_size(rel, self.get_last_record_lsn())? {
-                let old_last_seg = if oldsize == 0 {
-                    0
-                } else {
-                    (oldsize - 1) / RELISH_SEG_SIZE
-                };
-
-                // Drop all segments of the relish
-                for remove_segno in 0..=old_last_seg {
-                    let seg = SegmentTag {
-                        rel,
-                        segno: remove_segno,
-                    };
-                    self.perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
-                }
-                self.decrease_current_logical_size(oldsize * BLCKSZ as u32);
-            } else {
-                warn!(
-                    "drop_segment called on non-existent relish {} at {}",
-                    rel, lsn
-                );
-            }
-        } else {
-            // TODO handle TwoPhase relishes
-            let seg = SegmentTag::from_blknum(rel, 0);
-            self.perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
-        }
-
-        Ok(())
-    }
-
-    fn put_page_image(&self, rel: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
-        if !rel.is_blocky() && blknum != 0 {
-            bail!(
-                "invalid request for block {} for non-blocky relish {}",
-                blknum,
-                rel
-            );
-        }
-        ensure!(lsn.is_aligned(), "unaligned record LSN");
-
-        let seg = SegmentTag::from_blknum(rel, blknum);
-
-        let delta_size = self.perform_write_op(seg, lsn, |layer| {
-            layer.put_page_image(blknum, lsn, img.clone())
-        })?;
-
-        self.increase_current_logical_size(delta_size * BLCKSZ as u32);
-        Ok(())
-    }
-
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
@@ -974,15 +849,6 @@ impl Timeline for LayeredTimeline {
             .with_label_values(&["checkpoint_force"])
             //pass checkpoint_distance=0 to force checkpoint
             .observe_closure_duration(|| self.checkpoint_internal(0, true))
-    }
-
-    ///
-    /// Remember the (end of) last valid WAL record remembered in the timeline.
-    ///
-    fn advance_last_record_lsn(&self, new_lsn: Lsn) {
-        assert!(new_lsn.is_aligned());
-
-        self.last_record_lsn.advance(new_lsn);
     }
 
     fn get_last_record_lsn(&self) -> Lsn {
@@ -1034,6 +900,10 @@ impl Timeline for LayeredTimeline {
         }
 
         Ok(total_blocks * BLCKSZ as usize)
+    }
+
+    fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
+        Box::new(LayeredTimelineWriter(self))
     }
 }
 
@@ -1920,6 +1790,160 @@ impl LayeredTimeline {
             assert!(!Arc::ptr_eq(&layer, &new_layer));
             layer = new_layer;
         }
+    }
+}
+
+struct LayeredTimelineWriter<'a>(&'a LayeredTimeline);
+
+impl Deref for LayeredTimelineWriter<'_> {
+    type Target = dyn Timeline;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
+    fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
+        ensure!(rec.lsn.is_aligned(), "unaligned record LSN");
+
+        let seg = SegmentTag::from_blknum(rel, blknum);
+        let delta_size = self.0.perform_write_op(seg, rec.lsn, |layer| {
+            layer.put_wal_record(blknum, rec.clone())
+        })?;
+        self.0
+            .increase_current_logical_size(delta_size * BLCKSZ as u32);
+        Ok(())
+    }
+
+    fn put_page_image(&self, rel: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
+        if !rel.is_blocky() && blknum != 0 {
+            bail!(
+                "invalid request for block {} for non-blocky relish {}",
+                blknum,
+                rel
+            );
+        }
+        ensure!(lsn.is_aligned(), "unaligned record LSN");
+
+        let seg = SegmentTag::from_blknum(rel, blknum);
+
+        let delta_size = self.0.perform_write_op(seg, lsn, |layer| {
+            layer.put_page_image(blknum, lsn, img.clone())
+        })?;
+
+        self.0
+            .increase_current_logical_size(delta_size * BLCKSZ as u32);
+        Ok(())
+    }
+
+    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: u32) -> Result<()> {
+        if !rel.is_blocky() {
+            bail!("invalid truncation for non-blocky relish {}", rel);
+        }
+        ensure!(lsn.is_aligned(), "unaligned record LSN");
+
+        debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
+
+        let oldsize = self
+            .0
+            .get_relish_size(rel, self.0.get_last_record_lsn())?
+            .ok_or_else(|| {
+                anyhow!(
+                    "attempted to truncate non-existent relish {} at {}",
+                    rel,
+                    lsn
+                )
+            })?;
+
+        if oldsize <= relsize {
+            return Ok(());
+        }
+        let old_last_seg = (oldsize - 1) / RELISH_SEG_SIZE;
+
+        let last_remain_seg = if relsize == 0 {
+            0
+        } else {
+            (relsize - 1) / RELISH_SEG_SIZE
+        };
+
+        // Drop segments beyond the last remaining segment.
+        for remove_segno in (last_remain_seg + 1)..=old_last_seg {
+            let seg = SegmentTag {
+                rel,
+                segno: remove_segno,
+            };
+            self.0
+                .perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
+        }
+
+        // Truncate the last remaining segment to the specified size
+        if relsize == 0 || relsize % RELISH_SEG_SIZE != 0 {
+            let seg = SegmentTag {
+                rel,
+                segno: last_remain_seg,
+            };
+            self.0.perform_write_op(seg, lsn, |layer| {
+                layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)
+            })?;
+        }
+        self.0
+            .decrease_current_logical_size((oldsize - relsize) * BLCKSZ as u32);
+        Ok(())
+    }
+
+    fn drop_relish(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
+        trace!("drop_segment: {} at {}", rel, lsn);
+
+        if rel.is_blocky() {
+            if let Some(oldsize) = self.0.get_relish_size(rel, self.0.get_last_record_lsn())? {
+                let old_last_seg = if oldsize == 0 {
+                    0
+                } else {
+                    (oldsize - 1) / RELISH_SEG_SIZE
+                };
+
+                // Drop all segments of the relish
+                for remove_segno in 0..=old_last_seg {
+                    let seg = SegmentTag {
+                        rel,
+                        segno: remove_segno,
+                    };
+                    self.0
+                        .perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
+                }
+                self.0
+                    .decrease_current_logical_size(oldsize * BLCKSZ as u32);
+            } else {
+                warn!(
+                    "drop_segment called on non-existent relish {} at {}",
+                    rel, lsn
+                );
+            }
+        } else {
+            // TODO handle TwoPhase relishes
+            let seg = SegmentTag::from_blknum(rel, 0);
+            self.0
+                .perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
+        }
+
+        Ok(())
+    }
+
+    ///
+    /// Remember the (end of) last valid WAL record remembered in the timeline.
+    ///
+    fn advance_last_record_lsn(&self, new_lsn: Lsn) {
+        assert!(new_lsn.is_aligned());
+
+        self.0.last_record_lsn.advance(new_lsn);
     }
 }
 

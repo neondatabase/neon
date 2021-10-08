@@ -219,13 +219,15 @@ fn walreceiver_main(
                     // at risk of hittind a deadlock.
                     assert!(lsn.is_aligned());
 
+                    let writer = timeline.writer();
+
                     let mut checkpoint_modified = false;
 
                     let decoded = decode_wal_record(recdata.clone());
                     restore_local_repo::save_decoded_record(
                         &mut checkpoint,
                         &mut checkpoint_modified,
-                        &*timeline,
+                        writer.as_ref(),
                         &decoded,
                         recdata,
                         lsn,
@@ -235,7 +237,7 @@ fn walreceiver_main(
                     if checkpoint_modified {
                         let new_checkpoint_bytes = checkpoint.encode();
 
-                        timeline.put_page_image(
+                        writer.put_page_image(
                             RelishTag::Checkpoint,
                             0,
                             lsn,
@@ -245,7 +247,7 @@ fn walreceiver_main(
 
                     // Now that this record has been fully handled, including updating the
                     // checkpoint data, let the repository know that it is up-to-date to this LSN
-                    timeline.advance_last_record_lsn(lsn);
+                    writer.advance_last_record_lsn(lsn);
                     last_rec_lsn = lsn;
                 }
 
