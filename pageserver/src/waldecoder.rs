@@ -227,12 +227,12 @@ pub struct DecodedBkpBlock {
     //char	   *bkp_image;
     hole_offset: u16,
     hole_length: u16,
-    bimg_len: u16,
+    pub bimg_len: u16,
     bimg_info: u8,
 
     /* Buffer holding the rmgr-specific data associated with this block */
     has_data: bool,
-    data_len: u16,
+    pub data_len: u16,
 }
 
 impl DecodedBkpBlock {

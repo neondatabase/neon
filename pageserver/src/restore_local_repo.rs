@@ -2,6 +2,7 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! zenith Timeline.
 //!
+use crc32c::*;
 use log::*;
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
@@ -12,7 +13,7 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{bail, Result};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::relish::*;
 use crate::repository::*;
@@ -21,7 +22,7 @@ use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::Oid;
-use postgres_ffi::{pg_constants, CheckPoint, ControlFileData};
+use postgres_ffi::{pg_constants, CheckPoint, ControlFileData, XLogRecord};
 use zenith_utils::lsn::Lsn;
 
 const MAX_MBR_BLKNO: u32 =
@@ -294,6 +295,13 @@ pub fn save_decoded_record(
 
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
+    let mut blk_dat_offs = XLOG_SIZE_OF_XLOG_RECORD as usize;
+    let mut blk_img_offs = blk_dat_offs
+        + decoded
+            .blocks
+            .iter()
+            .map(|blk| blk.data_len as usize)
+            .sum::<usize>();
     for blk in decoded.blocks.iter() {
         let tag = RelishTag::Relation(RelTag {
             spcnode: blk.rnode_spcnode,
@@ -302,13 +310,43 @@ pub fn save_decoded_record(
             forknum: blk.forknum as u8,
         });
 
+        let mut buf = recdata.clone();
+        // If FPI records contains multiple pages, then do not copy them all but split it into separate WAL records
+        if decoded.xl_rmid == pg_constants::RM_XLOG_ID
+            && decoded.xl_info == pg_constants::XLOG_FPI
+            && decoded.blocks.len() > 1
+        {
+            let mut rec = XLogRecord::from_bytes(&mut buf);
+            rec.xl_tot_len =
+                XLOG_SIZE_OF_XLOG_RECORD as u32 + blk.data_len as u32 + blk.bimg_len as u32;
+            let mut crc = crc32c_append(0, &[0u8]); // block id
+            crc = crc32c_append(
+                crc,
+                &recdata[blk_dat_offs + 1..blk_dat_offs + blk.data_len as usize],
+            ); // skip block id
+            crc = crc32c_append(
+                crc,
+                &recdata[blk_img_offs..blk_img_offs + blk.bimg_len as usize],
+            );
+            let rec_hdr = rec.encode();
+            rec.xl_crc = crc32c_append(crc, &rec_hdr[0..XLOG_RECORD_CRC_OFFS]);
+            let mut new_rec = BytesMut::with_capacity(rec.xl_tot_len as usize);
+            new_rec.extend_from_slice(&rec.encode()); // can not use rec_hdr, because xl_crc was updated
+            new_rec.put_u8(0); // block id
+            new_rec.extend_from_slice(
+                &recdata[blk_dat_offs + 1..blk_dat_offs + blk.data_len as usize],
+            );
+            new_rec.extend_from_slice(&recdata[blk_img_offs..blk_img_offs + blk.bimg_len as usize]);
+            blk_dat_offs += blk.data_len as usize;
+            blk_img_offs += blk.bimg_len as usize;
+            buf = new_rec.freeze();
+        }
         let rec = WALRecord {
             lsn,
             will_init: blk.will_init || blk.apply_image,
-            rec: recdata.clone(),
+            rec: buf,
             main_data_offset: decoded.main_data_offset as u32,
         };
-
         timeline.put_wal_record(tag, blk.blkno, rec)?;
     }
 
