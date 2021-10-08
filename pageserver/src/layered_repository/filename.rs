@@ -13,6 +13,8 @@ use anyhow::Result;
 use log::*;
 use zenith_utils::lsn::Lsn;
 
+use super::METADATA_FILE_NAME;
+
 // Note: LayeredTimeline::load_layer_map() relies on this sort order
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct DeltaFileName {
@@ -290,7 +292,7 @@ pub fn list_files(
             deltafiles.push(deltafilename);
         } else if let Some(imgfilename) = ImageFileName::parse_str(fname) {
             imgfiles.push(imgfilename);
-        } else if fname == "metadata" || fname == "ancestor" || fname.ends_with(".old") {
+        } else if fname == METADATA_FILE_NAME || fname == "ancestor" || fname.ends_with(".old") {
             // ignore these
         } else {
             warn!("unrecognized filename in timeline dir: {}", fname);

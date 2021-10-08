@@ -110,6 +110,9 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+/// The name of the metadata file pageserver creates per timeline.
+pub const METADATA_FILE_NAME: &str = "metadata";
+
 ///
 /// Repository consists of multiple timelines. Keep them in a hash table.
 ///
@@ -350,9 +353,8 @@ impl LayeredRepository {
         tenantid: ZTenantId,
         data: &TimelineMetadata,
         first_save: bool,
-    ) -> Result<PathBuf> {
-        let timeline_path = conf.timeline_path(&timelineid, &tenantid);
-        let path = timeline_path.join("metadata");
+    ) -> Result<()> {
+        let path = metadata_path(conf, timelineid, tenantid);
         // use OpenOptions to ensure file presence is consistent with first_save
         let mut file = OpenOptions::new()
             .write(true)
@@ -376,11 +378,15 @@ impl LayeredRepository {
 
         // fsync the parent directory to ensure the directory entry is durable
         if first_save {
-            let timeline_dir = File::open(&timeline_path)?;
+            let timeline_dir = File::open(
+                &path
+                    .parent()
+                    .expect("Metadata should always have a parent dir"),
+            )?;
             timeline_dir.sync_all()?;
         }
 
-        Ok(path)
+        Ok(())
     }
 
     fn load_metadata(
@@ -388,7 +394,7 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
     ) -> Result<TimelineMetadata> {
-        let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
+        let path = metadata_path(conf, timelineid, tenantid);
         let metadata_bytes = std::fs::read(&path)?;
         ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
 
@@ -1448,7 +1454,7 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
-        let _metadata_path = LayeredRepository::save_metadata(
+        LayeredRepository::save_metadata(
             self.conf,
             self.timelineid,
             self.tenantid,
@@ -1460,7 +1466,6 @@ impl LayeredTimeline {
             // schedule_timeline_upload(LocalTimeline {
             //     tenant_id: self.tenantid,
             //     timeline_id: self.timelineid,
-            //     metadata_path,
             //     image_layers: image_layer_uploads,
             //     delta_layers: delta_layer_uploads,
             //     disk_consistent_lsn,
@@ -1893,6 +1898,15 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn metadata_path(
+    conf: &'static PageServerConf,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
+) -> PathBuf {
+    conf.timeline_path(&timelineid, &tenantid)
+        .join(METADATA_FILE_NAME)
 }
 
 /// Add a suffix to a layer file's name: .{num}.old
