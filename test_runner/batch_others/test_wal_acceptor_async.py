@@ -161,7 +161,7 @@ def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres:
     pg = postgres.create_start('test_wal_acceptors_restarts_under_load',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, iterations=12))
+    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, iterations=9, n_workers=30, period_time=5))
 
     # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
     pg.stop()
