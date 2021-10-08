@@ -35,7 +35,7 @@ impl DeltaFileName {
     /// Parse a string as a delta file name. Returns None if the filename does not
     /// match the expected pattern.
     ///
-    pub fn from_str(fname: &str) -> Option<Self> {
+    pub fn parse_str(fname: &str) -> Option<Self> {
         let rel;
         let mut parts;
         if let Some(rest) = fname.strip_prefix("rel_") {
@@ -168,7 +168,7 @@ impl ImageFileName {
     /// Parse a string as an image file name. Returns None if the filename does not
     /// match the expected pattern.
     ///
-    pub fn from_str(fname: &str) -> Option<Self> {
+    pub fn parse_str(fname: &str) -> Option<Self> {
         let rel;
         let mut parts;
         if let Some(rest) = fname.strip_prefix("rel_") {
@@ -286,9 +286,9 @@ pub fn list_files(
         let fname = direntry?.file_name();
         let fname = fname.to_str().unwrap();
 
-        if let Some(deltafilename) = DeltaFileName::from_str(fname) {
+        if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
             deltafiles.push(deltafilename);
-        } else if let Some(imgfilename) = ImageFileName::from_str(fname) {
+        } else if let Some(imgfilename) = ImageFileName::parse_str(fname) {
             imgfiles.push(imgfilename);
         } else if fname == "metadata" || fname == "ancestor" || fname.ends_with(".old") {
             // ignore these
