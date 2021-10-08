@@ -24,6 +24,8 @@ use std::sync::{Arc, RwLock};
 use zenith_utils::accum::Accum;
 use zenith_utils::lsn::Lsn;
 
+use super::page_versions::PageVersions;
+
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
@@ -58,7 +60,7 @@ pub struct InMemoryLayerInner {
     /// All versions of all pages in the layer are are kept here.
     /// Indexed by block number and LSN.
     ///
-    page_versions: BTreeMap<(u32, Lsn), PageVersion>,
+    page_versions: PageVersions,
 
     ///
     /// `segsizes` tracks the size of the segment at different points in time.
@@ -172,13 +174,13 @@ impl Layer for InMemoryLayer {
         {
             let inner = self.inner.read().unwrap();
 
-            // Scan the BTreeMap backwards, starting from reconstruct_data.lsn.
-            let minkey = (blknum, Lsn(0));
-            let maxkey = (blknum, lsn);
-            let mut iter = inner
+            // Scan the page versions backwards, starting from `lsn`.
+            let iter = inner
                 .page_versions
-                .range((Included(&minkey), Included(&maxkey)));
-            while let Some(((_blknum, _entry_lsn), entry)) = iter.next_back() {
+                .get_block_lsn_range(blknum, ..=lsn)
+                .iter()
+                .rev();
+            for (_entry_lsn, entry) in iter {
                 if let Some(img) = &entry.page_image {
                     reconstruct_data.page_img = Some(img.clone());
                     need_image = false;
@@ -279,13 +281,13 @@ impl Layer for InMemoryLayer {
             println!("segsizes {}: {}", k, v);
         }
 
-        for (k, v) in inner.page_versions.iter() {
+        for (blknum, lsn, pv) in inner.page_versions.ordered_page_version_iter(None) {
             println!(
                 "blk {} at {}: {}/{}\n",
-                k.0,
-                k.1,
-                v.page_image.is_some(),
-                v.record.is_some()
+                blknum,
+                lsn,
+                pv.page_image.is_some(),
+                pv.record.is_some()
             );
         }
 
@@ -353,7 +355,7 @@ impl InMemoryLayer {
             incremental: false,
             inner: RwLock::new(InMemoryLayerInner {
                 drop_lsn: None,
-                page_versions: BTreeMap::new(),
+                page_versions: PageVersions::default(),
                 segsizes,
                 writeable: true,
             }),
@@ -403,7 +405,7 @@ impl InMemoryLayer {
 
         inner.check_writeable()?;
 
-        let old = inner.page_versions.insert((blknum, lsn), pv);
+        let old = inner.page_versions.append_or_update_last(blknum, lsn, pv);
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -448,7 +450,9 @@ impl InMemoryLayer {
                         gapblknum,
                         blknum
                     );
-                    let old = inner.page_versions.insert((gapblknum, lsn), zeropv);
+                    let old = inner
+                        .page_versions
+                        .append_or_update_last(gapblknum, lsn, zeropv);
                     // We already had an entry for this LSN. That's odd..
 
                     if old.is_some() {
@@ -550,7 +554,7 @@ impl InMemoryLayer {
             incremental: true,
             inner: RwLock::new(InMemoryLayerInner {
                 drop_lsn: None,
-                page_versions: BTreeMap::new(),
+                page_versions: PageVersions::default(),
                 segsizes,
                 writeable: true,
             }),
@@ -615,16 +619,9 @@ impl InMemoryLayer {
             }
         }
 
-        let mut before_page_versions = BTreeMap::new();
-        let mut after_page_versions = BTreeMap::new();
-        for ((blknum, lsn), pv) in inner.page_versions.iter() {
-            if *lsn > cutoff_lsn {
-                after_page_versions.insert((*blknum, *lsn), pv.clone());
-                after_oldest_lsn.accum(min, *lsn);
-            } else {
-                before_page_versions.insert((*blknum, *lsn), pv.clone());
-            }
-        }
+        let (before_page_versions, after_page_versions) = inner
+            .page_versions
+            .split_at(Lsn(cutoff_lsn.0 + 1), &mut after_oldest_lsn);
 
         let frozen = Arc::new(InMemoryLayer {
             conf: self.conf,
@@ -654,7 +651,10 @@ impl InMemoryLayer {
             )?;
 
             let new_inner = new_open.inner.get_mut().unwrap();
-            new_inner.page_versions.append(&mut after_page_versions);
+            // Ensure page_versions doesn't contain anything
+            // so we can just replace it
+            assert!(new_inner.page_versions.is_empty());
+            new_inner.page_versions = after_page_versions;
             new_inner.segsizes.append(&mut after_segsizes);
 
             Some(Arc::new(new_open))
@@ -702,7 +702,7 @@ impl InMemoryLayer {
                 self.start_lsn,
                 drop_lsn,
                 true,
-                inner.page_versions.iter(),
+                inner.page_versions.ordered_page_version_iter(None),
                 inner.segsizes.clone(),
             )?;
             trace!(
@@ -722,11 +722,7 @@ impl InMemoryLayer {
                 before_segsizes.insert(*lsn, *size);
             }
         }
-        let mut before_page_versions = inner.page_versions.iter().filter(|tup| {
-            let ((_blknum, lsn), _pv) = tup;
-
-            *lsn < end_lsn
-        });
+        let mut before_page_versions = inner.page_versions.ordered_page_version_iter(Some(end_lsn));
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
 

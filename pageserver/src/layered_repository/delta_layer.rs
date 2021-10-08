@@ -380,7 +380,7 @@ impl DeltaLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        page_versions: impl Iterator<Item = (&'a (u32, Lsn), &'a PageVersion)>,
+        page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
@@ -416,11 +416,11 @@ impl DeltaLayer {
 
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
-        for (key, page_version) in page_versions {
+        for (blknum, lsn, page_version) in page_versions {
             let buf = PageVersion::ser(page_version)?;
             let blob_range = page_version_writer.write_blob(&buf)?;
 
-            let old = inner.page_version_metas.insert(*key, blob_range);
+            let old = inner.page_version_metas.insert((blknum, lsn), blob_range);
 
             assert!(old.is_none());
         }
