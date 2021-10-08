@@ -161,23 +161,7 @@ def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres:
     pg = postgres.create_start('test_wal_acceptors_restarts_under_load',
                                wal_acceptors=wa_factory.get_connstrs())
 
-    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, iterations=9))
-
-    # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
-    pg.stop()
-
-# test conditition when wal records are too large to be contained in single wal data message
-# current MAX_SEND_SIZE is 8192 * 16 = 128kb
-def test_restarts_under_load_large(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
-                             wa_factory: WalAcceptorFactory):
-
-    wa_factory.start_n_new(3)
-
-    zenith_cli.run(["branch", "test_restarts_under_load_large", "empty"])
-    pg = postgres.create_start('test_restarts_under_load_large',
-                               wal_acceptors=wa_factory.get_connstrs())
-
-    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, n_workers=2, period_time=0.5, iterations=10, large_wal=True))
+    asyncio.run(run_restarts_under_load(pg, wa_factory.instances, iterations=12))
 
     # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
     pg.stop()
