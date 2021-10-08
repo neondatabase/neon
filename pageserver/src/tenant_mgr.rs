@@ -123,8 +123,6 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
     tenant.state = TenantState::Active;
 }
 
-// TODO kb Currently unused function, will later be used when the relish storage downloads a new layer.
-// Relevant PR: https://github.com/zenithdb/zenith/pull/686
 pub fn register_relish_download(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
@@ -138,14 +136,16 @@ pub fn register_relish_download(
 
     {
         let mut m = access_tenants();
-        let mut tenant = m.get_mut(&tenant_id).unwrap();
+        let tenant = m.entry(tenant_id).or_insert_with(|| Tenant {
+            state: TenantState::Downloading,
+            repo: None,
+        });
         tenant.state = TenantState::Downloading;
         match &tenant.repo {
             Some(repo) => init_timeline(repo.as_ref(), timeline_id),
-            None => {
-                log::info!("Initialize new repo");
-            }
+            None => log::warn!("Initialize new repo"),
         }
+        tenant.state = TenantState::Active;
     }
 
     // init repo updates Tenant state
