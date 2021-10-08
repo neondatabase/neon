@@ -124,6 +124,10 @@ impl<K: Ord, V> VecMap<K, V> {
 
         Ok(())
     }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
 }
 
 fn extract_key<K, V>(entry: &(K, V)) -> &K {

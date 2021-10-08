@@ -280,14 +280,16 @@ impl Layer for InMemoryLayer {
             println!("segsizes {}: {}", k, v);
         }
 
-        for (blknum, lsn, pv) in inner.page_versions.ordered_page_version_iter(None) {
-            println!(
-                "blk {} at {}: {}/{}\n",
-                blknum,
-                lsn,
-                pv.page_image.is_some(),
-                pv.record.is_some()
-            );
+        for (blknum, history) in inner.page_versions.ordered_block_iter(None) {
+            for (lsn, pv) in history {
+                println!(
+                    "blk {} at {}: {}/{}\n",
+                    blknum,
+                    lsn,
+                    pv.page_image.is_some(),
+                    pv.record.is_some()
+                );
+            }
         }
 
         Ok(())
@@ -698,7 +700,7 @@ impl InMemoryLayer {
                 self.start_lsn,
                 drop_lsn,
                 true,
-                inner.page_versions.ordered_page_version_iter(None),
+                inner.page_versions.ordered_block_iter(None),
                 inner.segsizes.clone(),
             )?;
             trace!(
@@ -712,7 +714,7 @@ impl InMemoryLayer {
 
         let end_lsn = self.end_lsn.unwrap();
 
-        let mut before_page_versions = inner.page_versions.ordered_page_version_iter(Some(end_lsn));
+        let mut before_page_versions = inner.page_versions.ordered_block_iter(Some(end_lsn));
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
 

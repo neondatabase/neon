@@ -65,6 +65,7 @@ use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
 use super::blob::{read_blob, BlobRange};
+use super::page_versions::OrderedBlockIter;
 
 // Magic constant to identify a Zenith delta file
 pub const DELTA_FILE_MAGIC: u32 = 0x5A616E01;
@@ -374,7 +375,7 @@ impl DeltaLayer {
     /// data structure with two btreemaps as we do, so passing the btreemaps is currently
     /// expedient.
     #[allow(clippy::too_many_arguments)]
-    pub fn create<'a>(
+    pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
@@ -382,14 +383,14 @@ impl DeltaLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
+        page_versions: OrderedBlockIter,
         relsizes: VecMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
             assert!(!relsizes.is_empty());
         }
 
-        let delta_layer = DeltaLayer {
+        let mut delta_layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
             tenantid,
@@ -403,12 +404,13 @@ impl DeltaLayer {
                 relsizes,
             }),
         };
-        let mut inner = delta_layer.inner.lock().unwrap();
 
         // Write the in-memory btreemaps into a file
         let path = delta_layer
             .path()
             .expect("DeltaLayer is supposed to have a layer path on disk");
+
+        let inner = delta_layer.inner.get_mut().unwrap();
 
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
@@ -418,14 +420,18 @@ impl DeltaLayer {
 
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
-        for (blknum, lsn, page_version) in page_versions {
-            let buf = PageVersion::ser(page_version)?;
-            let blob_range = page_version_writer.write_blob(&buf)?;
+        for (blknum, history) in page_versions {
+            inner.page_version_metas.reserve(history.len());
 
-            inner
-                .page_version_metas
-                .append((blknum, lsn), blob_range)
-                .unwrap();
+            for (lsn, page_version) in history {
+                let buf = PageVersion::ser(page_version)?;
+                let blob_range = page_version_writer.write_blob(&buf)?;
+
+                inner
+                    .page_version_metas
+                    .append((blknum, *lsn), blob_range)
+                    .unwrap();
+            }
         }
 
         let book = page_version_writer.close()?;
@@ -461,8 +467,6 @@ impl DeltaLayer {
         writer.get_ref().sync_all()?;
 
         trace!("saved {}", &path.display());
-
-        drop(inner);
 
         Ok(delta_layer)
     }
