@@ -17,9 +17,9 @@ use bytes::Bytes;
 use log::*;
 use std::cmp::min;
 use std::collections::BTreeMap;
-use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use zenith_utils::vec_map::VecMap;
 
 use zenith_utils::accum::Accum;
 use zenith_utils::lsn::Lsn;
@@ -69,7 +69,7 @@ pub struct InMemoryLayerInner {
     /// so that determining the size never depends on the predecessor layer. For
     /// a non-blocky rel, 'segsizes' is not used and is always empty.
     ///
-    segsizes: BTreeMap<Lsn, u32>,
+    segsizes: VecMap<Lsn, u32>,
 
     /// Writes are only allowed when true.
     /// Set to false when this layer is in the process of being replaced.
@@ -87,10 +87,10 @@ impl InMemoryLayerInner {
 
     fn get_seg_size(&self, lsn: Lsn) -> u32 {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let mut iter = self.segsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let slice = self.segsizes.slice_range(..=lsn);
 
         // We make sure there is always at least one entry
-        if let Some((_entry_lsn, entry)) = iter.next_back() {
+        if let Some((_entry_lsn, entry)) = slice.last() {
             *entry
         } else {
             panic!("could not find seg size in in-memory layer");
@@ -277,7 +277,7 @@ impl Layer for InMemoryLayer {
             self.timelineid, self.seg, self.start_lsn, end_str
         );
 
-        for (k, v) in inner.segsizes.iter() {
+        for (k, v) in inner.segsizes.as_slice() {
             println!("segsizes {}: {}", k, v);
         }
 
@@ -339,9 +339,9 @@ impl InMemoryLayer {
         );
 
         // The segment is initially empty, so initialize 'segsizes' with 0.
-        let mut segsizes = BTreeMap::new();
+        let mut segsizes = VecMap::default();
         if seg.rel.is_blocky() {
-            segsizes.insert(start_lsn, 0);
+            segsizes.append(start_lsn, 0).unwrap();
         }
 
         Ok(InMemoryLayer {
@@ -463,7 +463,7 @@ impl InMemoryLayer {
                     }
                 }
 
-                inner.segsizes.insert(lsn, newsize);
+                inner.segsizes.append_or_update_last(lsn, newsize).unwrap();
                 return Ok(newsize - oldsize);
             }
         }
@@ -485,7 +485,7 @@ impl InMemoryLayer {
         let oldsize = inner.get_seg_size(lsn);
         assert!(segsize < oldsize);
 
-        let old = inner.segsizes.insert(lsn, segsize);
+        let old = inner.segsizes.append_or_update_last(lsn, segsize).unwrap();
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -537,10 +537,10 @@ impl InMemoryLayer {
         );
 
         // Copy the segment size at the start LSN from the predecessor layer.
-        let mut segsizes = BTreeMap::new();
+        let mut segsizes = VecMap::default();
         if seg.rel.is_blocky() {
             let size = src.get_seg_size(start_lsn)?;
-            segsizes.insert(start_lsn, size);
+            segsizes.append(start_lsn, size).unwrap();
         }
 
         Ok(InMemoryLayer {
@@ -607,21 +607,18 @@ impl InMemoryLayer {
 
         // Divide all the page versions into old and new
         // at the 'cutoff_lsn' point.
-        let mut before_segsizes = BTreeMap::new();
-        let mut after_segsizes = BTreeMap::new();
         let mut after_oldest_lsn: Accum<Lsn> = Accum(None);
-        for (lsn, size) in inner.segsizes.iter() {
-            if *lsn > cutoff_lsn {
-                after_segsizes.insert(*lsn, *size);
-                after_oldest_lsn.accum(min, *lsn);
-            } else {
-                before_segsizes.insert(*lsn, *size);
-            }
+
+        let cutoff_lsn_exclusive = Lsn(cutoff_lsn.0 + 1);
+
+        let (before_segsizes, mut after_segsizes) = inner.segsizes.split_at(&cutoff_lsn_exclusive);
+        if let Some((lsn, _size)) = after_segsizes.as_slice().first() {
+            after_oldest_lsn.accum(min, *lsn);
         }
 
         let (before_page_versions, after_page_versions) = inner
             .page_versions
-            .split_at(Lsn(cutoff_lsn.0 + 1), &mut after_oldest_lsn);
+            .split_at(cutoff_lsn_exclusive, &mut after_oldest_lsn);
 
         let frozen = Arc::new(InMemoryLayer {
             conf: self.conf,
@@ -655,7 +652,7 @@ impl InMemoryLayer {
             // so we can just replace it
             assert!(new_inner.page_versions.is_empty());
             new_inner.page_versions = after_page_versions;
-            new_inner.segsizes.append(&mut after_segsizes);
+            new_inner.segsizes.extend(&mut after_segsizes).unwrap();
 
             Some(Arc::new(new_open))
         } else {
@@ -694,6 +691,8 @@ impl InMemoryLayer {
         assert!(!inner.writeable);
 
         if let Some(drop_lsn) = inner.drop_lsn {
+            let segsizes_map: BTreeMap<Lsn, u32> =
+                inner.segsizes.as_slice().iter().cloned().collect();
             let delta_layer = DeltaLayer::create(
                 self.conf,
                 self.timelineid,
@@ -703,7 +702,7 @@ impl InMemoryLayer {
                 drop_lsn,
                 true,
                 inner.page_versions.ordered_page_version_iter(None),
-                inner.segsizes.clone(),
+                segsizes_map,
             )?;
             trace!(
                 "freeze: created delta layer for dropped segment {} {}-{}",
@@ -716,12 +715,10 @@ impl InMemoryLayer {
 
         let end_lsn = self.end_lsn.unwrap();
 
-        let mut before_segsizes = BTreeMap::new();
-        for (lsn, size) in inner.segsizes.iter() {
-            if *lsn <= end_lsn {
-                before_segsizes.insert(*lsn, *size);
-            }
-        }
+        let (before_segsizes, _after_segsizes) = inner.segsizes.split_at(&Lsn(end_lsn.0 + 1));
+        let before_segsizes: BTreeMap<Lsn, u32> =
+            before_segsizes.as_slice().iter().cloned().collect();
+
         let mut before_page_versions = inner.page_versions.ordered_page_version_iter(Some(end_lsn));
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
