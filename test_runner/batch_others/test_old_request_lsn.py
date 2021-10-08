@@ -46,7 +46,7 @@ def test_old_request_lsn(zenith_cli, pageserver: ZenithPageserver, postgres: Pos
         from pg_settings where name = 'shared_buffers'
     ''')
     row = cur.fetchone()
-    print("shared_buffers is {}, table size {}", row[0], row[1]);
+    print(f'shared_buffers is {row[0]}, table size {row[1]}');
     assert int(row[0]) < int(row[1])
 
     cur.execute('VACUUM foo');

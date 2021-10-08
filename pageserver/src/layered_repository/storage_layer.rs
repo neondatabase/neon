@@ -10,7 +10,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use zenith_utils::lsn::Lsn;
 
@@ -87,9 +86,9 @@ pub struct PageReconstructData {
 pub enum PageReconstructResult {
     /// Got all the data needed to reconstruct the requested page
     Complete,
-    /// This layer didn't contain all the required data, the caller should collect
-    /// more data from the returned predecessor layer at the returned LSN.
-    Continue(Lsn, Arc<dyn Layer>),
+    /// This layer didn't contain all the required data, the caller should look up
+    /// the predecessor layer at the returned LSN and collect more data from there.
+    Continue(Lsn),
     /// This layer didn't contain data needed to reconstruct the page version at
     /// the returned LSN. This is usually considered an error, but might be OK
     /// in some circumstances.
@@ -111,15 +110,14 @@ pub trait Layer: Send + Sync {
     /// Identify the relish segment
     fn get_seg_tag(&self) -> SegmentTag;
 
-    /// Inclusive start bound of the LSN range that this layer hold
+    /// Inclusive start bound of the LSN range that this layer holds
     fn get_start_lsn(&self) -> Lsn;
 
-    /// 'end_lsn' meaning depends on the layer kind:
-    /// - in-memory layer is either unbounded (end_lsn = MAX_LSN) or dropped (end_lsn = drop_lsn)
-    /// - image layer represents snapshot at one LSN, so end_lsn = lsn
-    /// - delta layer has end_lsn
+    /// Exclusive end bound of the LSN range that this layer holds.
     ///
-    /// TODO Is end_lsn always exclusive for all layer kinds?
+    /// - For an open in-memory layer, this is MAX_LSN.
+    /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
+    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     fn get_end_lsn(&self) -> Lsn;
 
     /// Is the segment represented by this layer dropped by PostgreSQL?
@@ -146,8 +144,8 @@ pub trait Layer: Send + Sync {
     ///
     /// See PageReconstructResult for possible return values. The collected data
     /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call. If this returns PageReconstructResult::Continue, call
-    /// again on the returned predecessor layer with the same 'reconstruct_data'
+    /// on first call. If this returns PageReconstructResult::Continue, look up
+    /// the predecessor layer and call again with the same 'reconstruct_data'
     /// to collect more data.
     fn get_page_reconstruct_data(
         &self,

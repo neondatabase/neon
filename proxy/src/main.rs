@@ -34,7 +34,7 @@ pub struct ProxyConf {
     pub redirect_uri: String,
 
     /// control plane address where we would check auth.
-    pub cplane_address: SocketAddr,
+    pub auth_endpoint: String,
 
     pub ssl_config: Option<Arc<ServerConfig>>,
 }
@@ -56,8 +56,7 @@ fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<ServerCo
 
     let key = {
         let key_bytes = std::fs::read(key_path).context("SSL key file")?;
-        let mut keys = pemfile::rsa_private_keys(&mut &key_bytes[..])
-            .or_else(|_| pemfile::pkcs8_private_keys(&mut &key_bytes[..]))
+        let mut keys = pemfile::pkcs8_private_keys(&mut &key_bytes[..])
             .map_err(|_| anyhow!("couldn't read TLS keys"))?;
         ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
         keys.pop().unwrap()
@@ -103,6 +102,14 @@ fn main() -> anyhow::Result<()> {
                 .default_value("http://localhost:3000/psql_session/"),
         )
         .arg(
+            Arg::with_name("auth-endpoint")
+                .short("a")
+                .long("auth-endpoint")
+                .takes_value(true)
+                .help("redirect unauthenticated users to given uri")
+                .default_value("http://localhost:3000/authenticate_proxy_request/"),
+        )
+        .arg(
             Arg::with_name("ssl-key")
                 .short("k")
                 .long("ssl-key")
@@ -122,7 +129,7 @@ fn main() -> anyhow::Result<()> {
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
-        cplane_address: "127.0.0.1:3000".parse()?,
+        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         ssl_config: configure_ssl(&arg_matches)?,
     };
     let state = ProxyState {

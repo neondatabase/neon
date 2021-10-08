@@ -28,7 +28,7 @@ const SK_PROTOCOL_VERSION: u32 = 1;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
-type Term = u64;
+pub type Term = u64;
 
 /// Unique id of proposer. Not needed for correctness, used for monitoring.
 type PgUuid = [u8; 16];
@@ -111,7 +111,7 @@ impl Default for SafeKeeperState {
 // protocol messages
 
 /// Initial Proposer -> Acceptor message
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ProposerGreeting {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
@@ -128,19 +128,19 @@ pub struct ProposerGreeting {
 
 /// Acceptor -> Proposer initial response: the highest term known to me
 /// (acceptor voted for).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct AcceptorGreeting {
     term: u64,
 }
 
 /// Vote request sent from proposer to safekeepers
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct VoteRequest {
     term: Term,
 }
 
 /// Vote itself, sent from safekeeper to proposer
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct VoteResponse {
     term: Term,      // not really needed, just a sanity check
     vote_given: u64, // fixme u64 due to padding
@@ -152,26 +152,26 @@ pub struct VoteResponse {
 
 /// Request with WAL message sent from proposer to safekeeper. Along the way it
 /// announces 1) successful election (with epoch_start_lsn); 2) commit_lsn.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct AppendRequest {
-    h: AppendRequestHeader,
-    wal_data: Bytes,
+    pub h: AppendRequestHeader,
+    pub wal_data: Bytes,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AppendRequestHeader {
-    term: Term,
+    pub term: Term,
     // LSN since the proposer appends WAL; determines epoch switch point.
-    epoch_start_lsn: Lsn,
+    pub epoch_start_lsn: Lsn,
     /// start position of message in WAL
-    begin_lsn: Lsn,
+    pub begin_lsn: Lsn,
     /// end position of message in WAL
-    end_lsn: Lsn,
+    pub end_lsn: Lsn,
     /// LSN committed by quorum of safekeepers
-    commit_lsn: Lsn,
+    pub commit_lsn: Lsn,
     /// minimal LSN which may be needed by proposer to perform recovery of some safekeeper
-    truncate_lsn: Lsn,
+    pub truncate_lsn: Lsn,
     // only for logging/debugging
-    proposer_uuid: PgUuid,
+    pub proposer_uuid: PgUuid,
 }
 
 /// Report safekeeper state to proposer
@@ -277,8 +277,8 @@ impl AcceptorProposerMessage {
 pub trait Storage {
     /// Persist safekeeper state on disk, optionally syncing it.
     fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()>;
-    /// Write piece of wal in buf to disk.
-    fn write_wal(&mut self, s: &SafeKeeperState, startpos: Lsn, buf: &[u8]) -> Result<()>;
+    /// Write piece of wal in buf to disk and sync it.
+    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8]) -> Result<()>;
 }
 
 /// SafeKeeper which consumes events (messages from compute) and provides
@@ -426,7 +426,7 @@ where
         let mut last_rec_lsn = Lsn(0);
         if !msg.wal_data.is_empty() {
             self.storage
-                .write_wal(&self.s, msg.h.begin_lsn, &msg.wal_data)?;
+                .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data)?;
 
             // figure out last record's end lsn for reporting (if we got the
             // whole record)
@@ -550,7 +550,7 @@ mod tests {
             Ok(())
         }
 
-        fn write_wal(&mut self, _s: &SafeKeeperState, _startpos: Lsn, _buf: &[u8]) -> Result<()> {
+        fn write_wal(&mut self, _server: &ServerInfo, _startpos: Lsn, _buf: &[u8]) -> Result<()> {
             Ok(())
         }
     }

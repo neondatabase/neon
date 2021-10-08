@@ -194,7 +194,7 @@ pub fn thread_main(
         let local_auth = auth.clone();
         thread::spawn(move || {
             if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
-                error!("error: {}", err);
+                error!("page server thread exiting with error: {:#}", err);
             }
         });
     }
@@ -293,7 +293,9 @@ impl PageServerHandler {
             };
 
             let response = response.unwrap_or_else(|e| {
-                error!("error reading relation or page version: {}", e);
+                // print the all details to the log with {:#}, but for the client the
+                // error message is enough
+                error!("error reading relation or page version: {:#}", e);
                 PagestreamBeMessage::Error(PagestreamErrorResponse {
                     message: e.to_string(),
                 })
@@ -654,12 +656,14 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"layer_relfiles_needed_by_cutoff"),
                 RowDescriptor::int8_col(b"layer_relfiles_needed_by_branches"),
                 RowDescriptor::int8_col(b"layer_relfiles_not_updated"),
+                RowDescriptor::int8_col(b"layer_relfiles_needed_as_tombstone"),
                 RowDescriptor::int8_col(b"layer_relfiles_removed"),
                 RowDescriptor::int8_col(b"layer_relfiles_dropped"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_total"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_cutoff"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_branches"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_not_updated"),
+                RowDescriptor::int8_col(b"layer_nonrelfiles_needed_as_tombstone"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_removed"),
                 RowDescriptor::int8_col(b"layer_nonrelfiles_dropped"),
                 RowDescriptor::int8_col(b"elapsed"),
@@ -679,6 +683,12 @@ impl postgres_backend::Handler for PageServerHandler {
                         .as_bytes(),
                 ),
                 Some(result.ondisk_relfiles_not_updated.to_string().as_bytes()),
+                Some(
+                    result
+                        .ondisk_relfiles_needed_as_tombstone
+                        .to_string()
+                        .as_bytes(),
+                ),
                 Some(result.ondisk_relfiles_removed.to_string().as_bytes()),
                 Some(result.ondisk_relfiles_dropped.to_string().as_bytes()),
                 Some(result.ondisk_nonrelfiles_total.to_string().as_bytes()),
@@ -695,6 +705,12 @@ impl postgres_backend::Handler for PageServerHandler {
                         .as_bytes(),
                 ),
                 Some(result.ondisk_nonrelfiles_not_updated.to_string().as_bytes()),
+                Some(
+                    result
+                        .ondisk_nonrelfiles_needed_as_tombstone
+                        .to_string()
+                        .as_bytes(),
+                ),
                 Some(result.ondisk_nonrelfiles_removed.to_string().as_bytes()),
                 Some(result.ondisk_nonrelfiles_dropped.to_string().as_bytes()),
                 Some(result.elapsed.as_millis().to_string().as_bytes()),

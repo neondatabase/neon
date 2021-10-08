@@ -22,8 +22,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
-use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
@@ -60,7 +59,7 @@ use postgres_ffi::XLogRecord;
 /// In Postgres `BufferTag` structure is used for exactly the same purpose.
 /// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
 ///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
 pub struct BufferTag {
     pub rel: RelTag,
     pub blknum: u32,
@@ -206,7 +205,7 @@ impl WalRedoManager for PostgresRedoManager {
                     .block_on(PostgresRedoProcess::launch(self.conf, &self.tenantid))?;
                 *process_guard = Some(p);
             }
-            let process = (*process_guard).as_ref().unwrap();
+            let process = process_guard.as_mut().unwrap();
 
             self.runtime
                 .block_on(self.handle_apply_request(process, &request))
@@ -247,7 +246,7 @@ impl PostgresRedoManager {
     ///
     async fn handle_apply_request(
         &self,
-        process: &PostgresRedoProcess,
+        process: &mut PostgresRedoProcess,
         request: &WalRedoRequest,
     ) -> Result<Bytes, WalRedoError> {
         let rel = request.rel;
@@ -299,9 +298,11 @@ impl PostgresRedoManager {
                     // Transaction manager stuff
                     let rec_segno = match rel {
                         RelishTag::Slru { slru, segno } => {
-                            if slru != SlruKind::Clog {
-                                panic!("Not valid XACT relish tag {:?}", rel);
-                            }
+                            assert!(
+                                slru == SlruKind::Clog,
+                                "Not valid XACT relish tag {:?}",
+                                rel
+                            );
                             segno
                         }
                         _ => panic!("Not valid XACT relish tag {:?}", rel),
@@ -421,7 +422,7 @@ impl PostgresRedoManager {
         );
 
         if let Err(e) = apply_result {
-            error!("could not apply WAL records: {}", e);
+            error!("could not apply WAL records: {:#}", e);
             result = Err(WalRedoError::IoError(e));
         } else {
             let img = apply_result.unwrap();
@@ -438,8 +439,8 @@ impl PostgresRedoManager {
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
-    stdin: RefCell<ChildStdin>,
-    stdout: RefCell<ChildStdout>,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
 }
 
 impl PostgresRedoProcess {
@@ -459,7 +460,7 @@ impl PostgresRedoProcess {
         if datadir.exists() {
             info!("directory {:?} exists, removing", &datadir);
             if let Err(e) = fs::remove_dir_all(&datadir) {
-                error!("could not remove old wal-redo-datadir: {:?}", e);
+                error!("could not remove old wal-redo-datadir: {:#}", e);
             }
         }
         info!("running initdb in {:?}", datadir.display());
@@ -532,10 +533,7 @@ impl PostgresRedoProcess {
         };
         tokio::spawn(f_stderr);
 
-        Ok(PostgresRedoProcess {
-            stdin: RefCell::new(stdin),
-            stdout: RefCell::new(stdout),
-        })
+        Ok(PostgresRedoProcess { stdin, stdout })
     }
 
     //
@@ -543,13 +541,14 @@ impl PostgresRedoProcess {
     // new page image.
     //
     async fn apply_wal_records(
-        &self,
+        &mut self,
         tag: BufferTag,
         base_img: Option<Bytes>,
         records: &[WALRecord],
     ) -> Result<Bytes, std::io::Error> {
-        let mut stdin = self.stdin.borrow_mut();
-        let mut stdout = self.stdout.borrow_mut();
+        let stdout = &mut self.stdout;
+        // Buffer the writes to avoid a lot of small syscalls.
+        let mut stdin = tokio::io::BufWriter::new(&mut self.stdin);
 
         // We do three things simultaneously: send the old base image and WAL records to
         // the child process's stdin, read the result from child's stdout, and forward any logging

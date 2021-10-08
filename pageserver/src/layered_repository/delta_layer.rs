@@ -42,12 +42,10 @@ use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag,
 };
-use crate::repository::WALRecord;
 use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Result};
-use bytes::Bytes;
+use anyhow::{bail, ensure, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -59,7 +57,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter};
 
@@ -109,12 +107,6 @@ impl From<&DeltaLayer> for Summary {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct PageVersionMeta {
-    page_image_range: Option<BlobRange>,
-    record_range: Option<BlobRange>,
-}
-
 ///
 /// DeltaLayer is the in-memory data structure associated with an
 /// on-disk delta file.  We keep a DeltaLayer in memory for each
@@ -139,9 +131,6 @@ pub struct DeltaLayer {
 
     dropped: bool,
 
-    /// Predecessor layer
-    predecessor: Option<Arc<dyn Layer>>,
-
     inner: Mutex<DeltaLayerInner>,
 }
 
@@ -152,7 +141,7 @@ pub struct DeltaLayerInner {
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
-    page_version_metas: BTreeMap<(u32, Lsn), PageVersionMeta>,
+    page_version_metas: BTreeMap<(u32, Lsn), BlobRange>,
 
     /// `relsizes` tracks the size of the relation at different points in time.
     relsizes: BTreeMap<Lsn, u32>,
@@ -229,15 +218,15 @@ impl Layer for DeltaLayer {
             let mut iter = inner
                 .page_version_metas
                 .range((Included(&minkey), Included(&maxkey)));
-            while let Some(((_blknum, _entry_lsn), entry)) = iter.next_back() {
-                if let Some(img_range) = &entry.page_image_range {
+            while let Some(((_blknum, _entry_lsn), blob_range)) = iter.next_back() {
+                let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
+
+                if let Some(img) = pv.page_image {
                     // Found a page image, return it
-                    let img = Bytes::from(read_blob(&page_version_reader, img_range)?);
                     reconstruct_data.page_img = Some(img);
                     need_image = false;
                     break;
-                } else if let Some(rec_range) = &entry.record_range {
-                    let rec = WALRecord::des(&read_blob(&page_version_reader, rec_range)?)?;
+                } else if let Some(rec) = pv.record {
                     let will_init = rec.will_init;
                     reconstruct_data.records.push(rec);
                     if will_init {
@@ -255,16 +244,9 @@ impl Layer for DeltaLayer {
         }
 
         // If an older page image is needed to reconstruct the page, let the
-        // caller know about the predecessor layer.
+        // caller know.
         if need_image {
-            if let Some(cont_layer) = &self.predecessor {
-                Ok(PageReconstructResult::Continue(
-                    self.start_lsn,
-                    Arc::clone(cont_layer),
-                ))
-            } else {
-                Ok(PageReconstructResult::Missing(self.start_lsn))
-            }
+            Ok(PageReconstructResult::Continue(self.start_lsn))
         } else {
             Ok(PageReconstructResult::Complete)
         }
@@ -273,6 +255,10 @@ impl Layer for DeltaLayer {
     /// Get size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
         assert!(lsn >= self.start_lsn);
+        ensure!(
+            self.seg.rel.is_blocky(),
+            "get_seg_size() called on a non-blocky rel"
+        );
 
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
@@ -281,11 +267,8 @@ impl Layer for DeltaLayer {
         let result;
         if let Some((_entry_lsn, entry)) = iter.next_back() {
             result = *entry;
-        // Use the base image if needed
-        } else if let Some(predecessor) = &self.predecessor {
-            result = predecessor.get_seg_size(lsn)?;
         } else {
-            result = 0;
+            bail!("could not find seg size in delta layer");
         }
         Ok(result)
     }
@@ -340,16 +323,16 @@ impl Layer for DeltaLayer {
         println!("--- page versions ---");
         let (_path, book) = self.open_book()?;
         let chapter = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
-        for (k, v) in inner.page_version_metas.iter() {
+        for ((blk, lsn), blob_range) in inner.page_version_metas.iter() {
             let mut desc = String::new();
 
-            if let Some(page_image_range) = v.page_image_range.as_ref() {
-                let image = read_blob(&chapter, page_image_range)?;
-                write!(&mut desc, " img {} bytes", image.len())?;
+            let buf = read_blob(&chapter, blob_range)?;
+            let pv = PageVersion::des(&buf)?;
+
+            if let Some(img) = pv.page_image.as_ref() {
+                write!(&mut desc, " img {} bytes", img.len())?;
             }
-            if let Some(record_range) = v.record_range.as_ref() {
-                let record_bytes = read_blob(&chapter, record_range)?;
-                let rec = WALRecord::des(&record_bytes)?;
+            if let Some(rec) = pv.record.as_ref() {
                 let wal_desc = waldecoder::describe_wal_record(&rec.rec);
                 write!(
                     &mut desc,
@@ -359,7 +342,7 @@ impl Layer for DeltaLayer {
                     wal_desc
                 )?;
             }
-            println!("  blk {} at {}: {}", k.0, k.1, desc);
+            println!("  blk {} at {}: {}", blk, lsn, desc);
         }
 
         Ok(())
@@ -381,14 +364,15 @@ impl DeltaLayer {
         }
     }
 
-    /// Create a new delta file, using the given btreemaps containing the page versions and
-    /// relsizes.
+    /// Create a new delta file, using the given page versions and relsizes.
+    /// The page versions are passed by an iterator; the iterator must return
+    /// page versions in blknum+lsn order.
     ///
     /// This is used to write the in-memory layer to disk. The in-memory layer uses the same
     /// data structure with two btreemaps as we do, so passing the btreemaps is currently
     /// expedient.
     #[allow(clippy::too_many_arguments)]
-    pub fn create(
+    pub fn create<'a>(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
@@ -396,10 +380,13 @@ impl DeltaLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        predecessor: Option<Arc<dyn Layer>>,
-        page_versions: BTreeMap<(u32, Lsn), PageVersion>,
+        page_versions: impl Iterator<Item = (&'a (u32, Lsn), &'a PageVersion)>,
         relsizes: BTreeMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
+        if seg.rel.is_blocky() {
+            assert!(!relsizes.is_empty());
+        }
+
         let delta_layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
@@ -413,7 +400,6 @@ impl DeltaLayer {
                 page_version_metas: BTreeMap::new(),
                 relsizes,
             }),
-            predecessor,
         };
         let mut inner = delta_layer.inner.lock().unwrap();
 
@@ -431,26 +417,10 @@ impl DeltaLayer {
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
         for (key, page_version) in page_versions {
-            let page_image_range = page_version
-                .page_image
-                .map(|page_image| page_version_writer.write_blob(page_image.as_ref()))
-                .transpose()?;
+            let buf = PageVersion::ser(page_version)?;
+            let blob_range = page_version_writer.write_blob(&buf)?;
 
-            let record_range = page_version
-                .record
-                .map(|record| {
-                    let buf = WALRecord::ser(&record)?;
-                    page_version_writer.write_blob(&buf)
-                })
-                .transpose()?;
-
-            let old = inner.page_version_metas.insert(
-                key,
-                PageVersionMeta {
-                    page_image_range,
-                    record_range,
-                },
-            );
+            let old = inner.page_version_metas.insert(*key, blob_range);
 
             assert!(old.is_none());
         }
@@ -484,7 +454,8 @@ impl DeltaLayer {
         let book = chapter.close()?;
 
         // This flushes the underlying 'buf_writer'.
-        book.close()?;
+        let writer = book.close()?;
+        writer.get_ref().sync_all()?;
 
         trace!("saved {}", &path.display());
 
@@ -573,7 +544,6 @@ impl DeltaLayer {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         filename: &DeltaFileName,
-        predecessor: Option<Arc<dyn Layer>>,
     ) -> DeltaLayer {
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -588,7 +558,6 @@ impl DeltaLayer {
                 page_version_metas: BTreeMap::new(),
                 relsizes: BTreeMap::new(),
             }),
-            predecessor,
         }
     }
 
@@ -612,7 +581,6 @@ impl DeltaLayer {
                 page_version_metas: BTreeMap::new(),
                 relsizes: BTreeMap::new(),
             }),
-            predecessor: None,
         })
     }
 }

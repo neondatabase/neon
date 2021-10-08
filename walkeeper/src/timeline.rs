@@ -18,8 +18,8 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};
 use crate::safekeeper::{
-    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, Storage,
-    SK_FORMAT_VERSION, SK_MAGIC,
+    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
+    Storage, SK_FORMAT_VERSION, SK_MAGIC,
 };
 use crate::WalAcceptorConf;
 use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
@@ -61,7 +61,7 @@ struct SharedState {
     sk: SafeKeeper<FileStorage>,
     /// For receiving-sending wal cooperation
     /// quorum commit LSN we've notified walsenders about
-    commit_lsn: Lsn,
+    notified_commit_lsn: Lsn,
     /// State of replicas
     replicas: Vec<Option<ReplicaState>>,
 }
@@ -127,7 +127,7 @@ impl SharedState {
         };
 
         Ok(Self {
-            commit_lsn: Lsn(0),
+            notified_commit_lsn: Lsn(0),
             sk: SafeKeeper::new(Lsn(flush_lsn), tli, storage, state),
             replicas: Vec::new(),
         })
@@ -230,7 +230,7 @@ impl Timeline {
     pub fn wait_for_lsn(&self, lsn: Lsn) -> Option<Lsn> {
         let mut shared_state = self.mutex.lock().unwrap();
         loop {
-            let commit_lsn = shared_state.commit_lsn;
+            let commit_lsn = shared_state.notified_commit_lsn;
             // This must be `>`, not `>=`.
             if commit_lsn > lsn {
                 return Some(commit_lsn);
@@ -249,8 +249,8 @@ impl Timeline {
     // Notify caught-up WAL senders about new WAL data received
     pub fn notify_wal_senders(&self, commit_lsn: Lsn) {
         let mut shared_state = self.mutex.lock().unwrap();
-        if shared_state.commit_lsn < commit_lsn {
-            shared_state.commit_lsn = commit_lsn;
+        if shared_state.notified_commit_lsn < commit_lsn {
+            shared_state.notified_commit_lsn = commit_lsn;
             self.cond.notify_all();
         }
     }
@@ -389,14 +389,14 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    fn write_wal(&mut self, s: &SafeKeeperState, startpos: Lsn, buf: &[u8]) -> Result<()> {
+    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8]) -> Result<()> {
         let mut bytes_left: usize = buf.len();
         let mut bytes_written: usize = 0;
         let mut partial;
         let mut start_pos = startpos;
         const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
-        let wal_seg_size = s.server.wal_seg_size as usize;
-        let ztli = s.server.ztli;
+        let wal_seg_size = server.wal_seg_size as usize;
+        let ztli = server.ztli;
 
         /* Extract WAL location for this block */
         let mut xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
@@ -417,7 +417,7 @@ impl Storage for FileStorage {
             /* Open file */
             let segno = start_pos.segment_number(wal_seg_size);
             // note: we basically don't support changing pg timeline
-            let wal_file_name = XLogFileName(s.server.tli, segno, wal_seg_size);
+            let wal_file_name = XLogFileName(server.tli, segno, wal_seg_size);
             let wal_file_path = self
                 .conf
                 .data_dir

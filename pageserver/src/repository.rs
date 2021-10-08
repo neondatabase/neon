@@ -28,18 +28,14 @@ pub trait Repository: Send + Sync {
     ///
     /// 'timelineid' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
-    /// `compact` parameter is used to force compaction of storage.
-    /// some storage implementation are based on lsm tree and require periodic merge (compaction).
-    /// usually storage implementation determines itself when compaction should be performed.
-    /// but for gc tests it way be useful to force compaction just after completion of gc iteration
-    /// to make sure that all detected garbage is removed.
-    /// so right now `compact` is set to true when gc explicitly requested through page srver api,
-    /// and is st to false in gc threads which infinitely repeats gc iterations in loop.
+    /// `checkpoint_before_gc` parameter is used to force compaction of storage before CG
+    /// to make tests more deterministic.
+    /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
     fn gc_iteration(
         &self,
         timelineid: Option<ZTimelineId>,
         horizon: u64,
-        compact: bool,
+        checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
 }
 
@@ -52,6 +48,7 @@ pub struct GcResult {
     pub ondisk_relfiles_needed_by_cutoff: u64,
     pub ondisk_relfiles_needed_by_branches: u64,
     pub ondisk_relfiles_not_updated: u64,
+    pub ondisk_relfiles_needed_as_tombstone: u64,
     pub ondisk_relfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
     pub ondisk_relfiles_dropped: u64, // # of layer files removed because the relation was dropped
 
@@ -59,6 +56,7 @@ pub struct GcResult {
     pub ondisk_nonrelfiles_needed_by_cutoff: u64,
     pub ondisk_nonrelfiles_needed_by_branches: u64,
     pub ondisk_nonrelfiles_not_updated: u64,
+    pub ondisk_nonrelfiles_needed_as_tombstone: u64,
     pub ondisk_nonrelfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
     pub ondisk_nonrelfiles_dropped: u64, // # of layer files removed because the relation was dropped
 
@@ -71,6 +69,7 @@ impl AddAssign for GcResult {
         self.ondisk_relfiles_needed_by_cutoff += other.ondisk_relfiles_needed_by_cutoff;
         self.ondisk_relfiles_needed_by_branches += other.ondisk_relfiles_needed_by_branches;
         self.ondisk_relfiles_not_updated += other.ondisk_relfiles_not_updated;
+        self.ondisk_relfiles_needed_as_tombstone += other.ondisk_relfiles_needed_as_tombstone;
         self.ondisk_relfiles_removed += other.ondisk_relfiles_removed;
         self.ondisk_relfiles_dropped += other.ondisk_relfiles_dropped;
 
@@ -78,6 +77,7 @@ impl AddAssign for GcResult {
         self.ondisk_nonrelfiles_needed_by_cutoff += other.ondisk_nonrelfiles_needed_by_cutoff;
         self.ondisk_nonrelfiles_needed_by_branches += other.ondisk_nonrelfiles_needed_by_branches;
         self.ondisk_nonrelfiles_not_updated += other.ondisk_nonrelfiles_not_updated;
+        self.ondisk_nonrelfiles_needed_as_tombstone += other.ondisk_nonrelfiles_needed_as_tombstone;
         self.ondisk_nonrelfiles_removed += other.ondisk_nonrelfiles_removed;
         self.ondisk_nonrelfiles_dropped += other.ondisk_nonrelfiles_dropped;
 
@@ -213,11 +213,17 @@ mod tests {
     use crate::layered_repository::LayeredRepository;
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
+    use hex_literal::hex;
     use postgres_ffi::pg_constants;
     use postgres_ffi::xlog_utils::SIZEOF_CHECKPOINT;
     use std::fs;
-    use std::str::FromStr;
+    use std::path::PathBuf;
     use zenith_utils::zid::ZTenantId;
+
+    const TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
+    const NEW_TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("AA223344556677881122334455667788"));
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
@@ -254,39 +260,53 @@ mod tests {
     static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
-    fn get_test_repo(test_name: &str) -> Result<Box<dyn Repository>> {
-        let repo_dir = PageServerConf::test_repo_dir(test_name);
-        let _ = fs::remove_dir_all(&repo_dir);
-        fs::create_dir_all(&repo_dir)?;
-        fs::create_dir_all(&repo_dir.join("timelines"))?;
+    struct RepoHarness {
+        conf: &'static PageServerConf,
+        tenant_id: ZTenantId,
+    }
 
-        let conf = PageServerConf::dummy_conf(repo_dir);
-        // Make a static copy of the config. This can never be free'd, but that's
-        // OK in a test.
-        let conf: &'static PageServerConf = Box::leak(Box::new(conf));
-        let tenantid = ZTenantId::generate();
-        fs::create_dir_all(conf.tenant_path(&tenantid)).unwrap();
+    impl RepoHarness {
+        fn create(test_name: &'static str) -> Result<Self> {
+            let repo_dir = PageServerConf::test_repo_dir(test_name);
+            let _ = fs::remove_dir_all(&repo_dir);
+            fs::create_dir_all(&repo_dir)?;
+            fs::create_dir_all(&repo_dir.join("timelines"))?;
 
-        let walredo_mgr = TestRedoManager {};
+            let conf = PageServerConf::dummy_conf(repo_dir);
+            // Make a static copy of the config. This can never be free'd, but that's
+            // OK in a test.
+            let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-        let repo = Box::new(LayeredRepository::new(
-            conf,
-            Arc::new(walredo_mgr),
-            tenantid,
-        ));
+            let tenant_id = ZTenantId::generate();
+            fs::create_dir_all(conf.tenant_path(&tenant_id))?;
 
-        Ok(repo)
+            Ok(Self { conf, tenant_id })
+        }
+
+        fn load(&self) -> Box<dyn Repository> {
+            let walredo_mgr = Arc::new(TestRedoManager);
+
+            Box::new(LayeredRepository::new(
+                self.conf,
+                walredo_mgr,
+                self.tenant_id,
+                false,
+            ))
+        }
+
+        fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
+            self.conf.timeline_path(timeline_id, &self.tenant_id)
+        }
     }
 
     #[test]
     fn test_relsize() -> Result<()> {
-        let repo = get_test_repo("test_relsize")?;
+        let repo = RepoHarness::create("test_relsize")?.load();
         // get_timeline() with non-existent timeline id should fail
         //repo.get_timeline("11223344556677881122334455667788");
 
         // Create timeline to work on
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
@@ -396,13 +416,148 @@ mod tests {
         Ok(())
     }
 
+    // Test what happens if we dropped a relation
+    // and then created it again within the same layer.
+    #[test]
+    fn test_drop_extend() -> Result<()> {
+        let repo = RepoHarness::create("test_drop_extend")?.load();
+
+        // Create timeline to work on
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+
+        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        tline.advance_last_record_lsn(Lsn(0x20));
+
+        // Check that rel exists and size is correct
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(), 1);
+
+        // Drop relish
+        tline.drop_relish(TESTREL_A, Lsn(0x30))?;
+        tline.advance_last_record_lsn(Lsn(0x30));
+
+        // Check that rel is not visible anymore
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
+        assert!(tline.get_relish_size(TESTREL_A, Lsn(0x30))?.is_none());
+
+        // Extend it again
+        tline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
+        tline.advance_last_record_lsn(Lsn(0x40));
+
+        // Check that rel exists and size is correct
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x40))?.unwrap(), 1);
+
+        Ok(())
+    }
+
+    // Test what happens if we truncated a relation
+    // so that one of its segments was dropped
+    // and then extended it again within the same layer.
+    #[test]
+    fn test_truncate_extend() -> Result<()> {
+        let repo = RepoHarness::create("test_truncate_extend")?.load();
+
+        // Create timeline to work on
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+
+        //from storage_layer.rs
+        const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
+        let relsize = RELISH_SEG_SIZE * 2;
+
+        // Create relation with relsize blocks
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+        }
+
+        tline.advance_last_record_lsn(Lsn(0x20));
+
+        // The relation was created at LSN 2, not visible at LSN 1 yet.
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
+        assert!(tline.get_relish_size(TESTREL_A, Lsn(0x10))?.is_none());
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
+        assert_eq!(
+            tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(),
+            relsize
+        );
+
+        // Check relation content
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, lsn)?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // Truncate relation so that second segment was dropped
+        // - only leave one page
+        tline.put_truncation(TESTREL_A, Lsn(0x60), 1)?;
+        tline.advance_last_record_lsn(Lsn(0x60));
+
+        // Check reported size and contents after truncation
+        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 1);
+
+        for blkno in 0..1 {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x60))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // should still see all blocks with older LSN
+        assert_eq!(
+            tline.get_relish_size(TESTREL_A, Lsn(0x50))?.unwrap(),
+            relsize
+        );
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x50))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // Extend relation again.
+        // Add enough blocks to create second segment
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x80);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+        }
+        tline.advance_last_record_lsn(Lsn(0x80));
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
+        assert_eq!(
+            tline.get_relish_size(TESTREL_A, Lsn(0x80))?.unwrap(),
+            relsize
+        );
+        // Check relation content
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x80);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x80))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        Ok(())
+    }
+
     /// Test get_relsize() and truncation with a file larger than 1 GB, so that it's
     /// split into multiple 1 GB segments in Postgres.
     #[test]
     fn test_large_rel() -> Result<()> {
-        let repo = get_test_repo("test_large_rel")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let repo = RepoHarness::create("test_large_rel")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
@@ -462,13 +617,9 @@ mod tests {
     /// Test list_rels() function, with branches and dropped relations
     ///
     #[test]
-    // FIXME: The last assertion in this test is currently failing, see
-    // https://github.com/zenithdb/zenith/issues/502. Ignore the failure until that's fixed.
-    #[ignore]
     fn test_list_rels_drop() -> Result<()> {
-        let repo = get_test_repo("test_list_rels_drop")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let repo = RepoHarness::create("test_list_rels_drop")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
         const TESTDB: u32 = 111;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
@@ -486,9 +637,8 @@ mod tests {
         assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
 
         // Create a branch, check that the relation is visible there
-        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
-        repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
-        let newtline = repo.get_timeline(newtimelineid)?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
 
         assert!(newtline
             .list_rels(0, TESTDB, Lsn(0x30))?
@@ -508,9 +658,8 @@ mod tests {
 
         // Run checkpoint and garbage collection and check that it's still not visible
         newtline.checkpoint()?;
-        repo.gc_iteration(Some(newtimelineid), 0, true)?;
+        repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
 
-        // FIXME: this is currently failing
         assert!(!newtline
             .list_rels(0, TESTDB, Lsn(0x40))?
             .contains(&TESTREL_A));
@@ -523,9 +672,8 @@ mod tests {
     ///
     #[test]
     fn test_branch() -> Result<()> {
-        let repo = get_test_repo("test_branch")?;
-        let timelineid = ZTimelineId::from_str("11223344556677881122334455667788").unwrap();
-        let tline = repo.create_empty_timeline(timelineid)?;
+        let repo = RepoHarness::create("test_branch")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
@@ -543,9 +691,8 @@ mod tests {
         assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        let newtimelineid = ZTimelineId::from_str("AA223344556677881122334455667788").unwrap();
-        repo.branch_timeline(timelineid, newtimelineid, Lsn(0x30))?;
-        let newtline = repo.get_timeline(newtimelineid)?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
 
         newtline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
         newtline.advance_last_record_lsn(Lsn(0x40));
@@ -573,8 +720,89 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn corrupt_metadata() -> Result<()> {
+        const TEST_NAME: &str = "corrupt_metadata";
+        let harness = RepoHarness::create(TEST_NAME)?;
+        let repo = harness.load();
+
+        repo.create_empty_timeline(TIMELINE_ID)?;
+        drop(repo);
+
+        let metadata_path = harness.timeline_path(&TIMELINE_ID).join("metadata");
+
+        assert!(metadata_path.is_file());
+
+        let mut metadata_bytes = std::fs::read(&metadata_path)?;
+        assert_eq!(metadata_bytes.len(), 512);
+        metadata_bytes[512 - 4 - 2] ^= 1;
+        std::fs::write(metadata_path, metadata_bytes)?;
+
+        let new_repo = harness.load();
+        let err = new_repo.get_timeline(TIMELINE_ID).err().unwrap();
+        assert!(err.to_string().contains("checksum"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn future_layerfiles() -> Result<()> {
+        const TEST_NAME: &str = "future_layerfiles";
+        let harness = RepoHarness::create(TEST_NAME)?;
+        let repo = harness.load();
+
+        repo.create_empty_timeline(TIMELINE_ID)?;
+        drop(repo);
+
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        let make_empty_file = |filename: &str| -> std::io::Result<()> {
+            let path = timeline_path.join(filename);
+
+            assert!(!path.exists());
+            std::fs::write(&path, &[])?;
+
+            Ok(())
+        };
+
+        let image_filename = format!("pg_control_0_{:016X}", 8000);
+        let delta_filename = format!("pg_control_0_{:016X}_{:016X}", 8000, 8008);
+
+        make_empty_file(&image_filename)?;
+        make_empty_file(&delta_filename)?;
+
+        let new_repo = harness.load();
+        new_repo.get_timeline(TIMELINE_ID).unwrap();
+        drop(new_repo);
+
+        let check_old = |filename: &str, num: u32| {
+            let path = timeline_path.join(filename);
+            assert!(!path.exists());
+
+            let backup_path = timeline_path.join(format!("{}.{}.old", filename, num));
+            assert!(backup_path.exists());
+        };
+
+        check_old(&image_filename, 0);
+        check_old(&delta_filename, 0);
+
+        make_empty_file(&image_filename)?;
+        make_empty_file(&delta_filename)?;
+
+        let new_repo = harness.load();
+        new_repo.get_timeline(TIMELINE_ID).unwrap();
+        drop(new_repo);
+
+        check_old(&image_filename, 0);
+        check_old(&delta_filename, 0);
+        check_old(&image_filename, 1);
+        check_old(&delta_filename, 1);
+
+        Ok(())
+    }
+
     // Mock WAL redo manager that doesn't do much
-    struct TestRedoManager {}
+    struct TestRedoManager;
 
     impl WalRedoManager for TestRedoManager {
         fn request_redo(

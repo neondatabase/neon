@@ -6,8 +6,8 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 def print_gc_result(row):
     print("GC duration {elapsed} ms".format_map(row));
-    print("  REL    total: {layer_relfiles_total}, needed_by_cutoff {layer_relfiles_needed_by_cutoff}, needed_by_branches: {layer_relfiles_needed_by_branches}, not_updated: {layer_relfiles_not_updated}, removed: {layer_relfiles_removed}, dropped: {layer_relfiles_dropped}".format_map(row))
-    print("  NONREL total: {layer_nonrelfiles_total}, needed_by_cutoff {layer_nonrelfiles_needed_by_cutoff}, needed_by_branches: {layer_nonrelfiles_needed_by_branches}, not_updated: {layer_nonrelfiles_not_updated}, removed: {layer_nonrelfiles_removed}, dropped: {layer_nonrelfiles_dropped}".format_map(row))
+    print("  REL    total: {layer_relfiles_total}, needed_by_cutoff {layer_relfiles_needed_by_cutoff}, needed_by_branches: {layer_relfiles_needed_by_branches}, not_updated: {layer_relfiles_not_updated}, needed_as_tombstone {layer_relfiles_needed_as_tombstone}, removed: {layer_relfiles_removed}, dropped: {layer_relfiles_dropped}".format_map(row))
+    print("  NONREL total: {layer_nonrelfiles_total}, needed_by_cutoff {layer_nonrelfiles_needed_by_cutoff}, needed_by_branches: {layer_nonrelfiles_needed_by_branches}, not_updated: {layer_nonrelfiles_not_updated}, needed_as_tombstone {layer_nonrelfiles_needed_as_tombstone}, removed: {layer_nonrelfiles_removed}, dropped: {layer_nonrelfiles_dropped}".format_map(row))
 
 
 #
@@ -58,19 +58,21 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     layer_relfiles_remain = row['layer_relfiles_total'] - row['layer_relfiles_removed']
                     assert layer_relfiles_remain > 0
 
-                    # Insert a row.
+                    # Insert a row and run GC. Checkpoint should freeze the layer
+                    # so that there is only the most recent image layer left for the rel,
+                    # removing the old image and delta layer.
                     print("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 1
-                    assert row['layer_relfiles_removed'] == 1
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
+                    assert row['layer_relfiles_removed'] == 2
                     assert row['layer_relfiles_dropped'] == 0
 
                     # Insert two more rows and run GC.
-                    # This should create a new layer file with the new contents, and
-                    # remove the old one.
+                    # This should create new image and delta layer file with the new contents, and
+                    # then remove the old one image and the just-created delta layer.
                     print("Inserting two more rows and running GC")
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
@@ -78,11 +80,11 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 1
-                    assert row['layer_relfiles_removed'] == 1
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
+                    assert row['layer_relfiles_removed'] == 2
                     assert row['layer_relfiles_dropped'] == 0
 
-                    # Do it again. Should again create a new layer file and remove old one.
+                    # Do it again. Should again create two new layer files and remove old ones.
                     print("Inserting two more rows and running GC")
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
@@ -90,8 +92,8 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row);
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 1
-                    assert row['layer_relfiles_removed'] == 1
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
+                    assert row['layer_relfiles_removed'] == 2
                     assert row['layer_relfiles_dropped'] == 0
 
                     # Run GC again, with no changes in the database. Should not remove anything.
@@ -113,12 +115,19 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     row = pscur.fetchone()
                     print_gc_result(row);
 
+                    # We still cannot remove the latest layers
+                    # because they serve as tombstones for earlier layers.
+                    assert row['layer_relfiles_dropped'] == 0
                     # Each relation fork is counted separately, hence 3.
-                    assert row['layer_relfiles_dropped'] == 3
+                    assert row['layer_relfiles_needed_as_tombstone'] == 3
 
                     # The catalog updates also create new layer files of the catalogs, which
                     # are counted as 'removed'
                     assert row['layer_relfiles_removed'] > 0
+
+                    # TODO Change the test to check actual CG of dropped layers.
+                    # Each relation fork is counted separately, hence 3.
+                    #assert row['layer_relfiles_dropped'] == 3
 
                     # TODO: perhaps we should count catalog and user relations separately,
                     # to make this kind of testing more robust

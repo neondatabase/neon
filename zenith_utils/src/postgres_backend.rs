@@ -377,7 +377,11 @@ impl PostgresBackend {
                 // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, m.body.clone()) {
                     let errmsg = format!("{}", e);
-                    warn!("query handler for {:?} failed: {}", m.body, errmsg);
+                    // ":#" uses the alternate formatting style, which makes anyhow display the
+                    // full cause of the error, not just the top-level context. We don't want to
+                    // send that in the ErrorResponse though, because it's not relevant to the
+                    // compute node logs.
+                    warn!("query handler for {:?} failed: {:#}", m.body, e);
                     self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;

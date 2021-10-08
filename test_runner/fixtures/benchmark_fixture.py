@@ -136,8 +136,33 @@ class ZenithBenchmarker:
         # The metric should be an integer, as it's a number of bytes. But in general
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
-        matches = re.search(r'pageserver_disk_io_bytes{io_operation="write"} (\S+)', all_metrics)
+        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$', all_metrics,
+                            re.MULTILINE)
         return int(round(float(matches.group(1))))
+
+    def get_peak_mem(self, pageserver) -> int:
+        """
+        Fetch the "maxrss" metric from the pageserver
+        """
+        # Fetch all the exposed prometheus metrics from page server
+        all_metrics = pageserver.http_client().get_metrics()
+        # See comment in get_io_writes()
+        matches = re.search(r'^pageserver_maxrss_kb (\S+)$', all_metrics,
+                            re.MULTILINE)
+        return int(round(float(matches.group(1))))
+
+    def get_timeline_size(self, repo_dir: str, tenantid: str, timelineid: str):
+        """
+        Calculate the on-disk size of a timeline
+        """
+        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid, timelineid)
+
+        totalbytes = 0
+        for root, dirs, files in os.walk(path):
+            for name in files:
+                totalbytes += os.path.getsize(os.path.join(root, name))
+
+        return totalbytes
 
     @contextmanager
     def record_pageserver_writes(self, pageserver, metric_name):

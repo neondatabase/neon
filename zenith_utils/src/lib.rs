@@ -18,6 +18,9 @@ pub mod pq_proto;
 // dealing with connstring parsing and handy access to it's parts
 pub mod connstring;
 
+// helper functions for creating and fsyncing directories/trees
+pub mod crashsafe_dir;
+
 // common authentication routines
 pub mod auth;
 
@@ -31,3 +34,6 @@ pub mod sock_split;
 
 // common log initialisation routine
 pub mod logging;
+
+// Misc
+pub mod accum;

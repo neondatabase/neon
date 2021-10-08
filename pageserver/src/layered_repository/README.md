@@ -25,11 +25,13 @@ OnDisk layers can be Image or Delta:
 Dropped segments are always represented on disk by DeltaLayer.
 
 LSN range defined by start_lsn and end_lsn:
-- start_lsn is always inclusive.
-- end_lsn depends on layer kind:
-	- InMemoryLayer is either unbounded (end_lsn = MAX_LSN) or dropped (end_lsn = drop_lsn)
-    - ImageLayer represents snapshot at one LSN, so end_lsn = lsn.
-    - DeltaLayer has explicit end_lsn, which represents end of incremental layer.
+- start_lsn is inclusive.
+- end_lsn is exclusive.
+
+For an open in-memory layer, the end_lsn is MAX_LSN. For a frozen
+in-memory layer or a delta layer, it is a valid end bound. An image
+layer represents snapshot at one LSN, so end_lsn is always the
+snapshot LSN + 1
 
 Layers can be open or historical:
 - Open layer is a writeable one. Only InMemory layer can be open.

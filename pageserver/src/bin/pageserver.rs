@@ -9,21 +9,27 @@ use std::{
     env,
     net::TcpListener,
     path::{Path, PathBuf},
-    process::exit,
     str::FromStr,
     thread,
 };
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches, http, page_service, tenant_mgr, PageServerConf, RelishStorageConfig, S3Config,
-    LOG_FILE_NAME,
+    branches,
+    defaults::{
+        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR,
+        DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
+    },
+    http, page_service, relish_storage, tenant_mgr, PageServerConf, RelishStorageConfig,
+    RelishStorageKind, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
+
+use const_format::formatcp;
 
 /// String arguments that can be declared via CLI or config file
 #[derive(Serialize, Deserialize)]
@@ -39,6 +45,7 @@ struct CfgFileParams {
     auth_type: Option<String>,
     // see https://github.com/alexcrichton/toml-rs/blob/6c162e6562c3e432bf04c82a3d1d789d80761a86/examples/enum_external.rs for enum deserialisation examples
     relish_storage: Option<RelishStorage>,
+    relish_storage_max_concurrent_sync: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -89,6 +96,7 @@ impl CfgFileParams {
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
             auth_type: get_arg("auth-type"),
             relish_storage,
+            relish_storage_max_concurrent_sync: get_arg("relish-storage-max-concurrent-sync"),
         }
     }
 
@@ -108,6 +116,9 @@ impl CfgFileParams {
                 .or(other.auth_validation_public_key_path),
             auth_type: self.auth_type.or(other.auth_type),
             relish_storage: self.relish_storage.or(other.relish_storage),
+            relish_storage_max_concurrent_sync: self
+                .relish_storage_max_concurrent_sync
+                .or(other.relish_storage_max_concurrent_sync),
         }
     }
 
@@ -176,25 +187,34 @@ impl CfgFileParams {
             );
         }
 
-        let relish_storage_config =
-            self.relish_storage
-                .as_ref()
-                .map(|storage_params| match storage_params.clone() {
-                    RelishStorage::Local { local_path } => {
-                        RelishStorageConfig::LocalFs(PathBuf::from(local_path))
-                    }
-                    RelishStorage::AwsS3 {
-                        bucket_name,
-                        bucket_region,
-                        access_key_id,
-                        secret_access_key,
-                    } => RelishStorageConfig::AwsS3(S3Config {
-                        bucket_name,
-                        bucket_region,
-                        access_key_id,
-                        secret_access_key,
-                    }),
-                });
+        let max_concurrent_sync = match self.relish_storage_max_concurrent_sync.as_deref() {
+            Some(relish_storage_max_concurrent_sync) => {
+                relish_storage_max_concurrent_sync.parse()?
+            }
+            None => DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
+        };
+        let relish_storage_config = self.relish_storage.as_ref().map(|storage_params| {
+            let storage = match storage_params.clone() {
+                RelishStorage::Local { local_path } => {
+                    RelishStorageKind::LocalFs(PathBuf::from(local_path))
+                }
+                RelishStorage::AwsS3 {
+                    bucket_name,
+                    bucket_region,
+                    access_key_id,
+                    secret_access_key,
+                } => RelishStorageKind::AwsS3(S3Config {
+                    bucket_name,
+                    bucket_region,
+                    access_key_id,
+                    secret_access_key,
+                }),
+            };
+            RelishStorageConfig {
+                max_concurrent_sync,
+                storage,
+            }
+        });
 
         Ok(PageServerConf {
             daemonize: false,
@@ -220,6 +240,7 @@ impl CfgFileParams {
 }
 
 fn main() -> Result<()> {
+    zenith_metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .arg(
@@ -228,14 +249,14 @@ fn main() -> Result<()> {
                 .long("listen-pg")
                 .alias("listen") // keep some compatibility
                 .takes_value(true)
-                .help("listen for incoming page requests on ip:port (default: 127.0.0.1:5430)"),
+                .help(formatcp!("listen for incoming page requests on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
         )
         .arg(
             Arg::with_name("listen-http")
                 .long("listen-http")
                 .alias("http_endpoint") // keep some compatibility
                 .takes_value(true)
-                .help("http endpoint address for for metrics and management API calls ip:port (default: 127.0.0.1:5430)"),
+                .help(formatcp!("http endpoint address for metrics and management API calls on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
         .arg(
             Arg::with_name("daemonize")
@@ -343,10 +364,19 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Credentials to access the AWS S3 bucket"),
         )
+        .arg(
+            Arg::with_name("relish-storage-max-concurrent-sync")
+                .long("relish-storage-max-concurrent-sync")
+                .takes_value(true)
+                .help("Maximum allowed concurrent synchronisations with storage"),
+        )
         .get_matches();
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
-    let cfg_file_path = workdir.canonicalize()?.join("pageserver.toml");
+    let cfg_file_path = workdir
+        .canonicalize()
+        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?
+        .join("pageserver.toml");
 
     let args_params = CfgFileParams::from_args(&arg_matches);
 
@@ -358,22 +388,37 @@ fn main() -> Result<()> {
         args_params
     } else {
         // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)?;
-        let file_params: CfgFileParams = toml::from_str(&cfg_file_contents)?;
+        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)
+            .with_context(|| format!("No pageserver config at '{}'", cfg_file_path.display()))?;
+        let file_params: CfgFileParams = toml::from_str(&cfg_file_contents).with_context(|| {
+            format!(
+                "Failed to read '{}' as pageserver config",
+                cfg_file_path.display()
+            )
+        })?;
         args_params.or(file_params)
     };
 
     // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&workdir)?;
+    env::set_current_dir(&workdir).with_context(|| {
+        format!(
+            "Failed to set application's current dir to '{}'",
+            workdir.display()
+        )
+    })?;
 
     // Ensure the config is valid, even if just init-ing
-    let mut conf = params.try_into_config()?;
+    let mut conf = params.try_into_config().with_context(|| {
+        format!(
+            "Pageserver config at '{}' is not valid",
+            cfg_file_path.display()
+        )
+    })?;
 
     conf.daemonize = arg_matches.is_present("daemonize");
 
     if init && conf.daemonize {
-        eprintln!("--daemonize cannot be used with --init");
-        exit(1);
+        bail!("--daemonize cannot be used with --init")
     }
 
     // The configuration is all set up now. Turn it into a 'static
@@ -383,16 +428,21 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_pageserver(conf, create_tenant)?;
+        branches::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
         // write the config file
-        let cfg_file_contents = toml::to_string_pretty(&params)?;
+        let cfg_file_contents = toml::to_string_pretty(&params)
+            .context("Failed to create pageserver config contents for initialisation")?;
         // TODO support enable-auth flag
-        std::fs::write(&cfg_file_path, cfg_file_contents)?;
-
-        return Ok(());
+        std::fs::write(&cfg_file_path, cfg_file_contents).with_context(|| {
+            format!(
+                "Failed to initialize pageserver config at '{}'",
+                cfg_file_path.display()
+            )
+        })?;
+        Ok(())
+    } else {
+        start_pageserver(conf).context("Failed to start pageserver")
     }
-
-    start_pageserver(conf)
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
@@ -430,15 +480,19 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
         match daemonize.start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(e) => error!("Error, {}", e),
+            Err(e) => error!("could not daemonize: {:#}", e),
         }
     }
 
+    // keep join handles for spawned threads
+    // don't spawn threads before daemonizing
+    let mut join_handles = Vec::new();
+
+    if let Some(handle) = relish_storage::run_storage_sync_thread(conf)? {
+        join_handles.push(handle);
+    }
     // Initialize tenant manager.
     tenant_mgr::init(conf);
-
-    // keep join handles for spawned threads
-    let mut join_handles = vec![];
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {

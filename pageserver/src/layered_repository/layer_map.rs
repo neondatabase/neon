@@ -9,13 +9,14 @@
 //! new image and delta layers and corresponding files are written to disk.
 //!
 
+use crate::layered_repository::interval_tree::{IntervalItem, IntervalIter, IntervalTree};
 use crate::layered_repository::storage_layer::{Layer, SegmentTag};
 use crate::layered_repository::InMemoryLayer;
 use crate::relish::*;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
@@ -32,6 +33,7 @@ lazy_static! {
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
+#[derive(Default)]
 pub struct LayerMap {
     /// All the layers keyed by segment tag
     segs: HashMap<SegmentTag, SegEntry>,
@@ -44,16 +46,6 @@ pub struct LayerMap {
     /// Generation number, used to distinguish newly inserted entries in the
     /// binary heap from older entries during checkpoint.
     current_generation: u64,
-}
-
-impl Default for LayerMap {
-    fn default() -> Self {
-        LayerMap {
-            segs: HashMap::new(),
-            open_layers: BinaryHeap::new(),
-            current_generation: 0,
-        }
-    }
 }
 
 impl LayerMap {
@@ -85,7 +77,14 @@ impl LayerMap {
     pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
         let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
 
-        segentry.insert_open(Arc::clone(&layer));
+        segentry.update_open(Arc::clone(&layer));
+
+        let oldest_pending_lsn = layer.get_oldest_pending_lsn();
+
+        // After a crash and restart, 'oldest_pending_lsn' of the oldest in-memory
+        // layer becomes the WAL streaming starting point, so it better not point
+        // in the middle of a WAL record.
+        assert!(oldest_pending_lsn.is_aligned());
 
         // Also add it to the binary heap
         let open_layer_entry = OpenLayerEntry {
@@ -106,11 +105,14 @@ impl LayerMap {
 
         // Also remove it from the SegEntry of this segment
         let mut segentry = self.segs.get_mut(&segtag).unwrap();
-        assert!(Arc::ptr_eq(
-            segentry.open.as_ref().unwrap(),
-            &oldest_entry.layer
-        ));
-        segentry.open = None;
+        if Arc::ptr_eq(segentry.open.as_ref().unwrap(), &oldest_entry.layer) {
+            segentry.open = None;
+        } else {
+            // We could have already updated segentry.open for
+            // dropped (non-writeable) layer. This is fine.
+            assert!(!oldest_entry.layer.is_writeable());
+            assert!(oldest_entry.layer.is_dropped());
+        }
 
         NUM_INMEMORY_LAYERS.dec();
     }
@@ -130,12 +132,11 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: &dyn Layer) {
+    pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         let tag = layer.get_seg_tag();
-        let start_lsn = layer.get_start_lsn();
 
         if let Some(segentry) = self.segs.get_mut(&tag) {
-            segentry.historic.remove(&start_lsn);
+            segentry.historic.remove(&layer);
         }
         NUM_ONDISK_LAYERS.dec();
     }
@@ -153,7 +154,7 @@ impl LayerMap {
                         if (request_rel.spcnode == 0 || reltag.spcnode == request_rel.spcnode)
                             && (request_rel.dbnode == 0 || reltag.dbnode == request_rel.dbnode)
                         {
-                            if let Some(exists) = segentry.exists_at_lsn(lsn) {
+                            if let Some(exists) = segentry.exists_at_lsn(lsn)? {
                                 rels.insert(seg.rel, exists);
                             }
                         }
@@ -161,7 +162,7 @@ impl LayerMap {
                 }
                 _ => {
                     if tag == None {
-                        if let Some(exists) = segentry.exists_at_lsn(lsn) {
+                        if let Some(exists) = segentry.exists_at_lsn(lsn)? {
                             rels.insert(seg.rel, exists);
                         }
                     }
@@ -183,6 +184,20 @@ impl LayerMap {
         }
     }
 
+    /// Is there any layer for given segment that is alive at the lsn?
+    ///
+    /// This is a public wrapper for SegEntry fucntion,
+    /// used for garbage collection, to determine if some alive layer
+    /// exists at the lsn. If so, we shouldn't delete a newer dropped layer
+    /// to avoid incorrectly making it visible.
+    pub fn layer_exists_at_lsn(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
+        Ok(if let Some(segentry) = self.segs.get(&seg) {
+            segentry.exists_at_lsn(lsn)?.unwrap_or(false)
+        } else {
+            false
+        })
+    }
+
     /// Return the oldest in-memory layer, along with its generation number.
     pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
         self.open_layers
@@ -200,7 +215,7 @@ impl LayerMap {
 
     pub fn iter_historic_layers(&self) -> HistoricLayerIter {
         HistoricLayerIter {
-            segiter: self.segs.iter(),
+            seg_iter: self.segs.iter(),
             iter: None,
         }
     }
@@ -214,12 +229,23 @@ impl LayerMap {
                 open.dump()?;
             }
 
-            for (_, layer) in segentry.historic.iter() {
+            for layer in segentry.historic.iter() {
                 layer.dump()?;
             }
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+}
+
+impl IntervalItem for dyn Layer {
+    type Key = Lsn;
+
+    fn start_key(&self) -> Lsn {
+        self.get_start_lsn()
+    }
+    fn end_key(&self) -> Lsn {
+        self.get_end_lsn()
     }
 }
 
@@ -229,36 +255,23 @@ impl LayerMap {
 ///
 /// The last layer that is open for writes is always an InMemoryLayer,
 /// and is kept in a separate field, because there can be only one for
-/// each segment. The older layers, stored on disk, are kept in a
-/// BTreeMap keyed by the layer's start LSN.
+/// each segment. The older layers, stored on disk, are kept in an
+/// IntervalTree.
+#[derive(Default)]
 struct SegEntry {
-    pub open: Option<Arc<InMemoryLayer>>,
-    pub historic: BTreeMap<Lsn, Arc<dyn Layer>>,
-}
-
-impl Default for SegEntry {
-    fn default() -> Self {
-        SegEntry {
-            open: None,
-            historic: BTreeMap::new(),
-        }
-    }
+    open: Option<Arc<InMemoryLayer>>,
+    historic: IntervalTree<dyn Layer>,
 }
 
 impl SegEntry {
     /// Does the segment exist at given LSN?
     /// Return None if object is not found in this SegEntry.
-    fn exists_at_lsn(&self, lsn: Lsn) -> Option<bool> {
-        if let Some(layer) = &self.open {
-            if layer.get_start_lsn() <= lsn && lsn <= layer.get_end_lsn() {
-                let exists = layer.get_seg_exists(lsn).ok()?;
-                return Some(exists);
-            }
-        } else if let Some((_, layer)) = self.historic.range(..=lsn).next_back() {
-            let exists = layer.get_seg_exists(lsn).ok()?;
-            return Some(exists);
+    fn exists_at_lsn(&self, lsn: Lsn) -> Result<Option<bool>> {
+        if let Some(layer) = self.get(lsn) {
+            Ok(Some(layer.get_seg_exists(lsn)?))
+        } else {
+            Ok(None)
         }
-        None
     }
 
     pub fn get(&self, lsn: Lsn) -> Option<Arc<dyn Layer>> {
@@ -269,40 +282,30 @@ impl SegEntry {
             }
         }
 
-        if let Some((_start_lsn, layer)) = self.historic.range(..=lsn).next_back() {
-            Some(Arc::clone(layer))
-        } else {
-            None
-        }
+        self.historic.search(lsn)
     }
 
     pub fn newer_image_layer_exists(&self, lsn: Lsn) -> bool {
         // We only check on-disk layers, because
         // in-memory layers are not durable
 
-        for (_newer_lsn, layer) in self.historic.range(lsn..) {
-            // Ignore incremental layers.
-            if layer.is_incremental() {
-                continue;
-            }
-            if layer.get_end_lsn() > lsn {
-                return true;
-            } else {
-                continue;
-            }
-        }
-        false
+        self.historic
+            .iter_newer(lsn)
+            .any(|layer| !layer.is_incremental())
     }
 
-    pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
-        assert!(self.open.is_none());
+    // Set new open layer for a SegEntry.
+    // It's ok to rewrite previous open layer,
+    // but only if it is not writeable anymore.
+    pub fn update_open(&mut self, layer: Arc<InMemoryLayer>) {
+        if let Some(prev_open) = &self.open {
+            assert!(!prev_open.is_writeable());
+        }
         self.open = Some(layer);
     }
 
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        let start_lsn = layer.get_start_lsn();
-
-        self.historic.insert(start_lsn, layer);
+        self.historic.insert(layer);
     }
 }
 
@@ -341,8 +344,8 @@ impl Eq for OpenLayerEntry {}
 
 /// Iterator returned by LayerMap::iter_historic_layers()
 pub struct HistoricLayerIter<'a> {
-    segiter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
-    iter: Option<std::collections::btree_map::Iter<'a, Lsn, Arc<dyn Layer>>>,
+    seg_iter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
+    iter: Option<IntervalIter<'a, dyn Layer>>,
 }
 
 impl<'a> Iterator for HistoricLayerIter<'a> {
@@ -352,11 +355,11 @@ impl<'a> Iterator for HistoricLayerIter<'a> {
         loop {
             if let Some(x) = &mut self.iter {
                 if let Some(x) = x.next() {
-                    return Some(Arc::clone(&*x.1));
+                    return Some(Arc::clone(&x));
                 }
             }
-            if let Some(seg) = self.segiter.next() {
-                self.iter = Some(seg.1.historic.iter());
+            if let Some((_tag, segentry)) = self.seg_iter.next() {
+                self.iter = Some(segentry.historic.iter());
                 continue;
             } else {
                 return None;
@@ -411,14 +414,14 @@ mod tests {
         let mut layers = LayerMap::default();
 
         let gen1 = layers.increment_generation();
-        layers.insert_open(dummy_inmem_layer(conf, 0, Lsn(100), Lsn(100)));
-        layers.insert_open(dummy_inmem_layer(conf, 1, Lsn(100), Lsn(200)));
-        layers.insert_open(dummy_inmem_layer(conf, 2, Lsn(100), Lsn(120)));
-        layers.insert_open(dummy_inmem_layer(conf, 3, Lsn(100), Lsn(110)));
+        layers.insert_open(dummy_inmem_layer(conf, 0, Lsn(0x100), Lsn(0x100)));
+        layers.insert_open(dummy_inmem_layer(conf, 1, Lsn(0x100), Lsn(0x200)));
+        layers.insert_open(dummy_inmem_layer(conf, 2, Lsn(0x100), Lsn(0x120)));
+        layers.insert_open(dummy_inmem_layer(conf, 3, Lsn(0x100), Lsn(0x110)));
 
         let gen2 = layers.increment_generation();
-        layers.insert_open(dummy_inmem_layer(conf, 4, Lsn(100), Lsn(110)));
-        layers.insert_open(dummy_inmem_layer(conf, 5, Lsn(100), Lsn(100)));
+        layers.insert_open(dummy_inmem_layer(conf, 4, Lsn(0x100), Lsn(0x110)));
+        layers.insert_open(dummy_inmem_layer(conf, 5, Lsn(0x100), Lsn(0x100)));
 
         // A helper function (closure) to pop the next oldest open entry from the layer map,
         // and assert that it is what we'd expect
@@ -429,12 +432,12 @@ mod tests {
             layers.pop_oldest_open();
         };
 
-        assert_pop_layer(0, gen1); // 100
-        assert_pop_layer(5, gen2); // 100
-        assert_pop_layer(3, gen1); // 110
-        assert_pop_layer(4, gen2); // 110
-        assert_pop_layer(2, gen1); // 120
-        assert_pop_layer(1, gen1); // 200
+        assert_pop_layer(0, gen1); // 0x100
+        assert_pop_layer(5, gen2); // 0x100
+        assert_pop_layer(3, gen1); // 0x110
+        assert_pop_layer(4, gen2); // 0x110
+        assert_pop_layer(2, gen1); // 0x120
+        assert_pop_layer(1, gen1); // 0x200
 
         Ok(())
     }

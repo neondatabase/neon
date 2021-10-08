@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
@@ -22,27 +22,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use std::fs::File;
+use std::convert::TryInto;
+use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use std::{fs, thread};
 
 use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
-use crate::relish_storage::storage_uploader::QueueBasedRelishUploader;
+use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, WALRecord};
-use crate::restore_local_repo::import_timeline_wal;
+use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{register_histogram, register_int_gauge_vec, Histogram, IntGaugeVec};
+use zenith_metrics::{
+    register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
+};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
+use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
@@ -51,6 +55,7 @@ mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
+mod interval_tree;
 mod layer_map;
 mod storage_layer;
 
@@ -69,6 +74,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
+
+// Taken from PG_CONTROL_MAX_SAFE_SIZE
+const METADATA_MAX_SAFE_SIZE: usize = 512;
+const METADATA_CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
+const METADATA_MAX_DATA_SIZE: usize = METADATA_MAX_SAFE_SIZE - METADATA_CHECKSUM_SIZE;
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
@@ -109,7 +119,9 @@ pub struct LayeredRepository {
     timelines: Mutex<HashMap<ZTimelineId, Arc<LayeredTimeline>>>,
 
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-    relish_uploader: Option<Arc<QueueBasedRelishUploader>>,
+    /// Makes evey repo's timelines to backup their files to remote storage,
+    /// when they get frozen.
+    upload_relishes: bool,
 }
 
 /// Public interface
@@ -124,7 +136,7 @@ impl Repository for LayeredRepository {
         let mut timelines = self.timelines.lock().unwrap();
 
         // Create the timeline directory, and write initial metadata to file.
-        std::fs::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
         let metadata = TimelineMetadata {
             disk_consistent_lsn: Lsn(0),
@@ -132,7 +144,7 @@ impl Repository for LayeredRepository {
             ancestor_timeline: None,
             ancestor_lsn: Lsn(0),
         };
-        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata)?;
+        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
             self.conf,
@@ -141,8 +153,8 @@ impl Repository for LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            self.relish_uploader.as_ref().map(Arc::clone),
             0,
+            false,
         )?;
 
         let timeline_rc = Arc::new(timeline);
@@ -176,8 +188,8 @@ impl Repository for LayeredRepository {
             ancestor_timeline: Some(src),
             ancestor_lsn: start_lsn,
         };
-        std::fs::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
-        Self::save_metadata(self.conf, dst, self.tenantid, &metadata)?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
+        Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
@@ -191,12 +203,12 @@ impl Repository for LayeredRepository {
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
-        compact: bool,
+        checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         STORAGE_TIME
             .with_label_values(&["gc"])
             .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, compact)
+                self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
             })
     }
 }
@@ -214,6 +226,7 @@ impl LayeredRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
+                let disk_consistent_lsn = metadata.disk_consistent_lsn;
 
                 // Recurse to look up the ancestor timeline.
                 //
@@ -233,35 +246,17 @@ impl LayeredRepository {
                     timelineid,
                     self.tenantid,
                     Arc::clone(&self.walredo_mgr),
-                    self.relish_uploader.as_ref().map(Arc::clone),
-                    0, // init with 0 and update after layers are loaded
+                    0, // init with 0 and update after layers are loaded,
+                    self.upload_relishes,
                 )?;
 
                 // List the layers on disk, and load them into the layer map
-                timeline.load_layer_map()?;
+                timeline.load_layer_map(disk_consistent_lsn)?;
 
                 // needs to be after load_layer_map
                 timeline.init_current_logical_size()?;
 
                 let timeline = Arc::new(timeline);
-
-                // Load any new WAL after the last checkpoint into memory.
-                info!(
-                    "Loading WAL for timeline {} starting at {}",
-                    timelineid,
-                    timeline.get_last_record_lsn()
-                );
-                let wal_dir = self
-                    .conf
-                    .timeline_path(&timelineid, &self.tenantid)
-                    .join("wal");
-                import_timeline_wal(&wal_dir, timeline.as_ref(), timeline.get_last_record_lsn())?;
-
-                if cfg!(debug_assertions) {
-                    // check again after wal loading
-                    Self::assert_size_calculation_matches_offloaded(Arc::clone(&timeline));
-                }
-
                 timelines.insert(timelineid, timeline.clone());
                 Ok(timeline)
             }
@@ -272,15 +267,14 @@ impl LayeredRepository {
         conf: &'static PageServerConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenantid: ZTenantId,
+        upload_relishes: bool,
     ) -> LayeredRepository {
         LayeredRepository {
             tenantid,
             conf,
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
-            relish_uploader: conf.relish_storage_config.as_ref().map(|config| {
-                Arc::new(QueueBasedRelishUploader::new(config, &conf.workdir).unwrap())
-            }),
+            upload_relishes,
         }
     }
 
@@ -355,13 +349,36 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         data: &TimelineMetadata,
+        first_save: bool,
     ) -> Result<PathBuf> {
-        let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
-        let mut file = File::create(&path)?;
+        let timeline_path = conf.timeline_path(&timelineid, &tenantid);
+        let path = timeline_path.join("metadata");
+        // use OpenOptions to ensure file presence is consistent with first_save
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(first_save)
+            .open(&path)?;
 
         info!("saving metadata {}", path.display());
 
-        file.write_all(&TimelineMetadata::ser(data)?)?;
+        let mut metadata_bytes = TimelineMetadata::ser(data)?;
+
+        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
+        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
+
+        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
+        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
+
+        if file.write(&metadata_bytes)? != metadata_bytes.len() {
+            bail!("Could not write all the metadata bytes in a single call");
+        }
+        file.sync_all()?;
+
+        // fsync the parent directory to ensure the directory entry is durable
+        if first_save {
+            let timeline_dir = File::open(&timeline_path)?;
+            timeline_dir.sync_all()?;
+        }
 
         Ok(path)
     }
@@ -372,9 +389,18 @@ impl LayeredRepository {
         tenantid: ZTenantId,
     ) -> Result<TimelineMetadata> {
         let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
-        let data = std::fs::read(&path)?;
+        let metadata_bytes = std::fs::read(&path)?;
+        ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
 
-        let data = TimelineMetadata::des(&data)?;
+        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
+        let calculated_checksum = crc32c::crc32c(data);
+
+        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
+            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
+        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
+        ensure!(calculated_checksum == expected_checksum);
+
+        let data = TimelineMetadata::des_prefix(data)?;
         assert!(data.disk_consistent_lsn.is_aligned());
 
         Ok(data)
@@ -401,14 +427,14 @@ impl LayeredRepository {
     //    don't cover any branch point LSNs.
     //
     // TODO:
-    // - if a relation has been modified on a child branch, then we
+    // - if a relation has a non-incremental persistent layer on a child branch, then we
     //   don't need to keep that in the parent anymore. But currently
     //   we do.
     fn gc_iteration_internal(
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
-        compact: bool,
+        checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -420,63 +446,71 @@ impl LayeredRepository {
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
         //
+        let mut timelineids: Vec<ZTimelineId> = Vec::new();
+
         // We scan the directory, not the in-memory hash table, because the hash
         // table only contains entries for timelines that have been accessed. We
         // need to take all timelines into account, not only the active ones.
-        let mut timelineids: Vec<ZTimelineId> = Vec::new();
-        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
         let timelines_path = self.conf.timelines_path(&self.tenantid);
+
         for direntry in fs::read_dir(timelines_path)? {
             let direntry = direntry?;
             if let Some(fname) = direntry.file_name().to_str() {
                 if let Ok(timelineid) = fname.parse::<ZTimelineId>() {
                     timelineids.push(timelineid);
-
-                    // Read the metadata of this timeline to get its parent timeline.
-                    //
-                    // We read the ancestor information directly from the file, instead
-                    // of calling get_timeline(). We don't want to load the timeline
-                    // into memory just for GC.
-                    //
-                    // FIXME: we open the timeline in the loop below with
-                    // get_timeline_locked() anyway, so maybe we should just do it
-                    // here, too.
-                    let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
-                    if let Some(ancestor_timeline) = metadata.ancestor_timeline {
-                        all_branchpoints.insert((ancestor_timeline, metadata.ancestor_lsn));
-                    }
                 }
             }
         }
 
-        // Ok, we now know all the branch points. Iterate through them.
+        //Now collect info about branchpoints
+        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
+        for timelineid in &timelineids {
+            let timeline = self.get_timeline_locked(*timelineid, &mut *timelines)?;
+
+            if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
+                // If target_timeline is specified, we only need to know branchpoints of its childs
+                if let Some(timelineid) = target_timelineid {
+                    if ancestor_timeline.timelineid == timelineid {
+                        all_branchpoints
+                            .insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
+                    }
+                }
+                // Collect branchpoints for all timelines
+                else {
+                    all_branchpoints.insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
+                }
+            }
+        }
+
+        // Ok, we now know all the branch points.
+        // Perform GC for each timeline.
         for timelineid in timelineids {
-            // If a target timeline was specified, leave the other timelines alone.
-            // This is a bit inefficient, because we still collect the information for
-            // all the timelines above.
-            if let Some(x) = target_timelineid {
-                if x != timelineid {
+            // We have already loaded all timelines above
+            // so this operation is just a quick map lookup.
+            let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
+
+            // If target_timeline is specified, only GC it
+            if let Some(target_timelineid) = target_timelineid {
+                if timelineid != target_timelineid {
                     continue;
                 }
             }
 
-            let branchpoints: Vec<Lsn> = all_branchpoints
-                .range((
-                    Included((timelineid, Lsn(0))),
-                    Included((timelineid, Lsn(u64::MAX))),
-                ))
-                .map(|&x| x.1)
-                .collect();
+            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
+                let branchpoints: Vec<Lsn> = all_branchpoints
+                    .range((
+                        Included((timelineid, Lsn(0))),
+                        Included((timelineid, Lsn(u64::MAX))),
+                    ))
+                    .map(|&x| x.1)
+                    .collect();
 
-            let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
-            let last_lsn = timeline.get_last_record_lsn();
-
-            if let Some(cutoff) = last_lsn.checked_sub(horizon) {
-                // If GC was explicitly requested by the admin, force flush all in-memory
-                // layers to disk first, so that they too can be garbage collected. That's
+                // If requested, force flush all in-memory layers to disk first,
+                // so that they too can be garbage collected. That's
                 // used in tests, so we want as deterministic results as possible.
-                if compact {
+                if checkpoint_before_gc {
                     timeline.checkpoint()?;
+                    info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
 
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
@@ -487,24 +521,6 @@ impl LayeredRepository {
 
         totals.elapsed = now.elapsed();
         Ok(totals)
-    }
-
-    fn assert_size_calculation_matches(incremental: usize, timeline: &LayeredTimeline) {
-        match timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn()) {
-            Ok(non_incremental) => {
-                if incremental != non_incremental {
-                    error!("timeline size calculation diverged, incremental doesn't match non incremental. incremental={} non_incremental={}", incremental, non_incremental);
-                }
-            }
-            Err(e) => error!("failed to calculate non incremental timeline size: {}", e),
-        }
-    }
-
-    fn assert_size_calculation_matches_offloaded(timeline: Arc<LayeredTimeline>) {
-        let incremental = timeline.get_current_logical_size();
-        thread::spawn(move || {
-            Self::assert_size_calculation_matches(incremental, &timeline);
-        });
     }
 }
 
@@ -541,8 +557,6 @@ pub struct LayeredTimeline {
 
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
-
-    relish_uploader: Option<Arc<QueueBasedRelishUploader>>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -582,6 +596,18 @@ pub struct LayeredTimeline {
     // because current_logical_size is consistent on last_record_lsn, not ondisk_consistent_lsn
     // NOTE: current_logical_size also includes size of the ancestor
     current_logical_size: AtomicUsize, // bytes
+
+    // To avoid calling .with_label_values and formatting the tenant and timeline IDs to strings
+    // every time the logical size is updated, keep a direct reference to the Gauge here.
+    // unfortunately it doesnt forward atomic methods like .fetch_add
+    // so use two fields: actual size and metric
+    // see https://github.com/zenithdb/zenith/issues/622 for discussion
+    // TODO: it is possible to combine these two fields into single one using custom metric which uses SeqCst
+    // ordering for its operations, but involves private modules, and macro trickery
+    current_logical_size_gauge: IntGauge,
+
+    /// If `true`, will backup its timeline files to remote storage after freezing.
+    upload_relishes: bool,
 }
 
 /// Public interface functions
@@ -589,8 +615,11 @@ impl Timeline for LayeredTimeline {
     /// Wait until WAL has been received up to the given LSN.
     fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
-        // to a deadlock. FIXME: Is there a less hacky way to check that?
-        assert_ne!(thread::current().name(), Some("WAL receiver thread"));
+        // to a deadlock.
+        assert!(
+            !IS_WAL_RECEIVER.with(|c| c.get()),
+            "wait_lsn called by WAL receiver thread"
+        );
 
         self.last_record_lsn
             .wait_for_timeout(lsn, TIMEOUT)
@@ -764,6 +793,7 @@ impl Timeline for LayeredTimeline {
                 rel
             );
         }
+        ensure!(rec.lsn.is_aligned(), "unaligned record LSN");
 
         let seg = SegmentTag::from_blknum(rel, blknum);
         let delta_size = self.perform_write_op(seg, rec.lsn, |layer| {
@@ -777,6 +807,7 @@ impl Timeline for LayeredTimeline {
         if !rel.is_blocky() {
             bail!("invalid truncation for non-blocky relish {}", rel);
         }
+        ensure!(lsn.is_aligned(), "unaligned record LSN");
 
         debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
 
@@ -867,6 +898,7 @@ impl Timeline for LayeredTimeline {
                 rel
             );
         }
+        ensure!(lsn.is_aligned(), "unaligned record LSN");
 
         let seg = SegmentTag::from_blknum(rel, blknum);
 
@@ -963,9 +995,12 @@ impl LayeredTimeline {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        relish_uploader: Option<Arc<QueueBasedRelishUploader>>,
         current_logical_size: usize,
+        upload_relishes: bool,
     ) -> Result<LayeredTimeline> {
+        let current_logical_size_gauge = LOGICAL_TIMELINE_SIZE
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
+            .unwrap();
         let timeline = LayeredTimeline {
             conf,
             timelineid,
@@ -973,7 +1008,6 @@ impl LayeredTimeline {
             layers: Mutex::new(LayerMap::default()),
 
             walredo_mgr,
-            relish_uploader,
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
@@ -985,6 +1019,8 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn,
             current_logical_size: AtomicUsize::new(current_logical_size),
+            current_logical_size_gauge,
+            upload_relishes,
         };
         Ok(timeline)
     }
@@ -992,17 +1028,29 @@ impl LayeredTimeline {
     ///
     /// Scan the timeline directory to populate the layer map
     ///
-    fn load_layer_map(&self) -> anyhow::Result<()> {
+    fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         info!(
             "loading layer map for timeline {} into memory",
             self.timelineid
         );
         let mut layers = self.layers.lock().unwrap();
-        let (imgfilenames, mut deltafilenames) =
+        let (imgfilenames, deltafilenames) =
             filename::list_files(self.conf, self.timelineid, self.tenantid)?;
+
+        let timeline_path = self.conf.timeline_path(&self.timelineid, &self.tenantid);
 
         // First create ImageLayer structs for each image file.
         for filename in imgfilenames.iter() {
+            if filename.lsn > disk_consistent_lsn {
+                warn!(
+                    "found future image layer {} on timeline {}",
+                    filename, self.timelineid
+                );
+
+                rename_to_backup(timeline_path.join(filename.to_string()))?;
+                continue;
+            }
+
             let layer = ImageLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
             info!(
@@ -1014,33 +1062,25 @@ impl LayeredTimeline {
             layers.insert_historic(Arc::new(layer));
         }
 
-        // Then for the Delta files. The delta files are created in order starting
-        // from the oldest file, because each DeltaLayer needs a reference to its
-        // predecessor.
-        deltafilenames.sort();
-
+        // Then for the Delta files.
         for filename in deltafilenames.iter() {
-            let predecessor = layers.get(&filename.seg, filename.start_lsn);
+            ensure!(filename.start_lsn < filename.end_lsn);
+            if filename.end_lsn > disk_consistent_lsn {
+                warn!(
+                    "found future delta layer {} on timeline {}",
+                    filename, self.timelineid
+                );
 
-            let predecessor_str: String = if let Some(prec) = &predecessor {
-                prec.filename().display().to_string()
-            } else {
-                "none".to_string()
-            };
+                rename_to_backup(timeline_path.join(filename.to_string()))?;
+                continue;
+            }
 
-            let layer = DeltaLayer::new(
-                self.conf,
-                self.timelineid,
-                self.tenantid,
-                filename,
-                predecessor,
-            );
+            let layer = DeltaLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
             info!(
-                "found layer {} on timeline {}, predecessor: {}",
+                "found layer {} on timeline {}",
                 layer.filename().display(),
                 self.timelineid,
-                predecessor_str,
             );
             layers.insert_historic(Arc::new(layer));
         }
@@ -1167,36 +1207,57 @@ impl LayeredTimeline {
         assert!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
-        if lsn <= last_record_lsn {
-            panic!(
-                "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
-                lsn,
-                last_record_lsn
-            );
-        }
+        assert!(
+            lsn > last_record_lsn,
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
+            lsn,
+            last_record_lsn,
+        );
 
         // Do we have a layer open for writing already?
-        if let Some(layer) = layers.get_open(&seg) {
-            if layer.get_start_lsn() > lsn {
+        let layer;
+        if let Some(open_layer) = layers.get_open(&seg) {
+            if open_layer.get_start_lsn() > lsn {
                 bail!("unexpected open layer in the future");
             }
-            return Ok(layer);
-        }
 
-        // No (writeable) layer for this relation yet. Create one.
+            // Open layer exists, but it is dropped, so create a new one.
+            if open_layer.is_dropped() {
+                assert!(!open_layer.is_writeable());
+                // Layer that is created after dropped one represents a new relish segment.
+                trace!(
+                    "creating layer for write for new relish segment after dropped layer {} at {}/{}",
+                    seg,
+                    self.timelineid,
+                    lsn
+                );
+
+                layer = InMemoryLayer::create(
+                    self.conf,
+                    self.timelineid,
+                    self.tenantid,
+                    seg,
+                    lsn,
+                    lsn,
+                )?;
+            } else {
+                return Ok(open_layer);
+            }
+        }
+        // No writeable layer for this relation. Create one.
         //
         // Is this a completely new relation? Or the first modification after branching?
         //
-
-        let layer;
-        if let Some((prev_layer, _prev_lsn)) = self.get_layer_for_read_locked(seg, lsn, &layers)? {
+        else if let Some((prev_layer, _prev_lsn)) =
+            self.get_layer_for_read_locked(seg, lsn, &layers)?
+        {
             // Create new entry after the previous one.
             let start_lsn;
             if prev_layer.get_timeline_id() != self.timelineid {
                 // First modification on this timeline
-                start_lsn = self.ancestor_lsn;
+                start_lsn = self.ancestor_lsn + 1;
                 trace!(
-                    "creating file for write for {} at branch point {}/{}",
+                    "creating layer for write for {} at branch point {}/{}",
                     seg,
                     self.timelineid,
                     start_lsn
@@ -1204,7 +1265,7 @@ impl LayeredTimeline {
             } else {
                 start_lsn = prev_layer.get_end_lsn();
                 trace!(
-                    "creating file for write for {} after previous layer {}/{}",
+                    "creating layer for write for {} after previous layer {}/{}",
                     seg,
                     self.timelineid,
                     start_lsn
@@ -1271,6 +1332,8 @@ impl LayeredTimeline {
             last_record_lsn
         );
 
+        let timeline_dir = File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
+
         // Take the in-memory layer with the oldest WAL record. If it's older
         // than the threshold, write it out to disk as a new image and delta file.
         // Repeat until all remaining in-memory layers are within the threshold.
@@ -1281,6 +1344,8 @@ impl LayeredTimeline {
         // check, though. We should also aim at flushing layers that consume
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
+
+        let mut created_historics = false;
 
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
@@ -1326,31 +1391,23 @@ impl LayeredTimeline {
                 layers.insert_open(new_open);
             }
 
+            // We temporarily insert InMemory layer into historic list here.
+            // TODO: check that all possible concurrent users of 'historic' treat it right
             layers.insert_historic(frozen.clone());
 
             // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
             drop(layers);
             let new_historics = frozen.write_to_disk(self)?;
             layers = self.layers.lock().unwrap();
-            if let Some(relish_uploader) = &self.relish_uploader {
-                for label_path in new_historics.iter().filter_map(|layer| layer.path()) {
-                    relish_uploader.schedule_upload(self.timelineid, label_path);
-                }
+
+            if !new_historics.is_empty() {
+                created_historics = true;
             }
 
             // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove_historic(frozen.as_ref());
+            layers.remove_historic(frozen.clone());
 
-            if let Some(last_historic) = new_historics.last() {
-                if let Some(new_open) = &maybe_new_open {
-                    let maybe_old_predecessor =
-                        new_open.update_predecessor(Arc::clone(last_historic));
-                    let old_predecessor = maybe_old_predecessor
-                        .expect("new_open should always be a successor to frozen");
-                    assert!(layer_ptr_eq(frozen.as_ref(), old_predecessor.as_ref()));
-                }
-            }
-
+            // Add the historics to the LayerMap
             for n in new_historics {
                 layers.insert_historic(n);
             }
@@ -1361,6 +1418,14 @@ impl LayeredTimeline {
         // into memory.
         for layer in layers.iter_historic_layers() {
             layer.unload()?;
+        }
+
+        drop(layers);
+
+        if created_historics {
+            // We must fsync the timeline dir to ensure the directory entries for
+            // new layer files are durable
+            timeline_dir.sync_all()?;
         }
 
         // Save the metadata, with updated 'disk_consistent_lsn', to a
@@ -1387,10 +1452,23 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
-        let metadata_path =
-            LayeredRepository::save_metadata(self.conf, self.timelineid, self.tenantid, &metadata)?;
-        if let Some(relish_uploader) = &self.relish_uploader {
-            relish_uploader.schedule_upload(self.timelineid, metadata_path);
+        let _metadata_path = LayeredRepository::save_metadata(
+            self.conf,
+            self.timelineid,
+            self.tenantid,
+            &metadata,
+            false,
+        )?;
+        if self.upload_relishes {
+            schedule_timeline_upload(())
+            // schedule_timeline_upload(LocalTimeline {
+            //     tenant_id: self.tenantid,
+            //     timeline_id: self.timelineid,
+            //     metadata_path,
+            //     image_layers: image_layer_uploads,
+            //     delta_layers: delta_layer_uploads,
+            //     disk_consistent_lsn,
+            // });
         }
 
         // Also update the in-memory copy
@@ -1429,15 +1507,18 @@ impl LayeredTimeline {
             "running GC on timeline {}, cutoff {}",
             self.timelineid, cutoff
         );
+        info!("retain_lsns:  {:?}", retain_lsns);
 
         let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
-        // Scan all layer files in the directory. For each file, if a newer file
-        // exists, we can remove the old one.
+        // Scan all on-disk layers in the timeline.
         //
-        // Determine for each file if it needs to be retained
-        // FIXME: also scan open in-memory layers. Normally we cannot remove the
-        // latest layer of any seg, but if it was dropped it's possible
+        // Garbage collect the layer if all conditions are satisfied:
+        // 1. it is older than cutoff LSN;
+        // 2. it doesn't need to be retained for 'retain_lsns';
+        // 3. newer on-disk layer exists (only for non-dropped segments);
+        // 4. this layer doesn't serve as a tombstone for some older layer;
+        //
         let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
             let seg = l.get_seg_tag();
@@ -1448,7 +1529,7 @@ impl LayeredTimeline {
                 result.ondisk_nonrelfiles_total += 1;
             }
 
-            // Is it newer than cutoff point?
+            // 1. Is it newer than cutoff point?
             if l.get_end_lsn() > cutoff {
                 info!(
                     "keeping {} {}-{} because it's newer than cutoff {}",
@@ -1465,10 +1546,10 @@ impl LayeredTimeline {
                 continue 'outer;
             }
 
-            // Is it needed by a child branch?
+            // 2. Is it needed by a child branch?
             for retain_lsn in &retain_lsns {
-                // FIXME: are the bounds inclusive or exclusive?
-                if l.get_start_lsn() <= *retain_lsn && *retain_lsn <= l.get_end_lsn() {
+                // start_lsn is inclusive and end_lsn is exclusive
+                if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
                     info!(
                         "keeping {} {}-{} because it's needed by branch point {}",
                         seg,
@@ -1485,15 +1566,92 @@ impl LayeredTimeline {
                 }
             }
 
-            // Unless the relation was dropped, is there a later image file for this relation?
+            // 3. Is there a later on-disk layer for this relation?
             if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
             {
+                info!(
+                    "keeping {} {}-{} because it is the latest layer",
+                    seg,
+                    l.get_start_lsn(),
+                    l.get_end_lsn()
+                );
                 if seg.rel.is_relation() {
                     result.ondisk_relfiles_not_updated += 1;
                 } else {
                     result.ondisk_nonrelfiles_not_updated += 1;
                 }
                 continue 'outer;
+            }
+
+            // 4. Does this layer serve as a tombstome for some older layer?
+            if l.is_dropped() {
+                let prior_lsn = l.get_start_lsn().checked_sub(1u64).unwrap();
+
+                // Check if this layer serves as a tombstone for this timeline
+                // We have to do this separately from timeline check below,
+                // because LayerMap of this timeline is already locked.
+                let mut is_tombstone = layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn)?;
+                if is_tombstone {
+                    info!(
+                        "earlier layer exists at {} in {}",
+                        prior_lsn, self.timelineid
+                    );
+                }
+                // Now check ancestor timelines, if any
+                else if let Some(ancestor) = &self.ancestor_timeline {
+                    let prior_lsn = ancestor.get_last_record_lsn();
+                    if seg.rel.is_blocky() {
+                        info!(
+                            "check blocky relish size {} at {} in {} for layer {}-{}",
+                            seg,
+                            prior_lsn,
+                            ancestor.timelineid,
+                            l.get_start_lsn(),
+                            l.get_end_lsn()
+                        );
+                        match ancestor.get_relish_size(seg.rel, prior_lsn).unwrap() {
+                            Some(size) => {
+                                let last_live_seg = SegmentTag::from_blknum(seg.rel, size - 1);
+                                info!(
+                                    "blocky rel size is {} last_live_seg.segno {} seg.segno {}",
+                                    size, last_live_seg.segno, seg.segno
+                                );
+                                if last_live_seg.segno >= seg.segno {
+                                    is_tombstone = true;
+                                }
+                            }
+                            _ => {
+                                info!("blocky rel doesn't exist");
+                            }
+                        }
+                    } else {
+                        info!(
+                            "check non-blocky relish existence {} at {} in {} for layer {}-{}",
+                            seg,
+                            prior_lsn,
+                            ancestor.timelineid,
+                            l.get_start_lsn(),
+                            l.get_end_lsn()
+                        );
+                        is_tombstone = ancestor.get_rel_exists(seg.rel, prior_lsn).unwrap_or(false);
+                    }
+                }
+
+                if is_tombstone {
+                    info!(
+                        "keeping {} {}-{} because this layer servers as a tombstome for older layer",
+                        seg,
+                        l.get_start_lsn(),
+                        l.get_end_lsn()
+                    );
+
+                    if seg.rel.is_relation() {
+                        result.ondisk_relfiles_needed_as_tombstone += 1;
+                    } else {
+                        result.ondisk_nonrelfiles_needed_as_tombstone += 1;
+                    }
+                    continue 'outer;
+                }
             }
 
             // We didn't find any reason to keep this file, so remove it.
@@ -1512,7 +1670,7 @@ impl LayeredTimeline {
         // while iterating it. BTreeMap::retain() would be another option)
         for doomed_layer in layers_to_remove {
             doomed_layer.delete()?;
-            layers.remove_historic(&*doomed_layer);
+            layers.remove_historic(doomed_layer.clone());
 
             match (
                 doomed_layer.is_dropped(),
@@ -1555,12 +1713,20 @@ impl LayeredTimeline {
         loop {
             match layer_ref.get_page_reconstruct_data(blknum, curr_lsn, &mut data)? {
                 PageReconstructResult::Complete => break,
-                PageReconstructResult::Continue(cont_lsn, cont_layer) => {
+                PageReconstructResult::Continue(cont_lsn) => {
                     // Fetch base image / more WAL from the returned predecessor layer
-                    layer_arc = cont_layer;
-                    layer_ref = &*layer_arc;
-                    curr_lsn = cont_lsn;
-                    continue;
+                    if let Some((cont_layer, cont_lsn)) = self.get_layer_for_read(seg, cont_lsn)? {
+                        layer_arc = cont_layer;
+                        layer_ref = &*layer_arc;
+                        curr_lsn = cont_lsn;
+                        continue;
+                    } else {
+                        bail!(
+                            "could not find predecessor layer of segment {} at {}",
+                            seg.rel,
+                            cont_lsn
+                        );
+                    }
                 }
                 PageReconstructResult::Missing(lsn) => {
                     // Oops, we could not reconstruct the page.
@@ -1662,9 +1828,8 @@ impl LayeredTimeline {
             diff,
             val + diff as usize,
         );
-        LOGICAL_TIMELINE_SIZE
-            .with_label_values(&[&self.tenantid.to_string(), &self.timelineid.to_string()])
-            .set(val as i64 + diff as i64)
+        self.current_logical_size_gauge
+            .set(val as i64 + diff as i64);
     }
 
     ///
@@ -1680,9 +1845,8 @@ impl LayeredTimeline {
             diff,
             val - diff as usize,
         );
-        LOGICAL_TIMELINE_SIZE
-            .with_label_values(&[&self.tenantid.to_string(), &self.timelineid.to_string()])
-            .set(val as i64 - diff as i64)
+        self.current_logical_size_gauge
+            .set(val as i64 - diff as i64);
     }
 
     /// If a layer is in the process of being replaced in [`LayerMap`], write
@@ -1735,13 +1899,22 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check for equality of Layer memory addresses
-fn layer_ptr_eq(l1: &dyn Layer, l2: &dyn Layer) -> bool {
-    let l1_ptr = l1 as *const dyn Layer;
-    let l2_ptr = l2 as *const dyn Layer;
-    // comparing *const dyn Layer will not only check for data address equality,
-    // but also for vtable address equality.
-    // to avoid this, we compare *const ().
-    // see here for more https://github.com/rust-lang/rust/issues/46139
-    std::ptr::eq(l1_ptr as *const (), l2_ptr as *const ())
+/// Add a suffix to a layer file's name: .{num}.old
+/// Uses the first available num (starts at 0)
+fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    let mut new_path = path.clone();
+
+    for i in 0u32.. {
+        new_path.set_file_name(format!("{}.{}.old", filename, i));
+        if !new_path.exists() {
+            std::fs::rename(&path, &new_path)?;
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!(
+        "couldn't find an unused backup number for {:?}",
+        path
+    ))
 }

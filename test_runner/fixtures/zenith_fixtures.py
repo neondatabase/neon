@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from functools import cached_property
+import asyncpg
 import os
 import pathlib
 import uuid
 import jwt
+import json
 import psycopg2
 import pytest
 import shutil
@@ -69,7 +71,9 @@ def pytest_configure(config):
         # This is bad; we don't want any of those processes polluting the
         # result of the test.
         # NOTE this shows as an internal pytest error, there might be a better way
-        raise Exception('found interfering processes running')
+        raise Exception(
+            'Found interfering processes running. Stop all Zenith pageservers, nodes, WALs, as well as stand-alone Postgres.'
+        )
 
 
 def determine_scope(fixture_name: str, config: Any) -> str:
@@ -127,6 +131,21 @@ class PgProtocol:
         ))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
+        return conn
+
+    async def connect_async(self, *, dbname: str = 'postgres', username: Optional[str] = None, password: Optional[str] = None) -> asyncpg.Connection:
+        """
+        Connect to the node from async python.
+        Returns asyncpg's connection object.
+        """
+
+        conn = await asyncpg.connect(
+            host=self.host,
+            port=self.port,
+            database=dbname,
+            user=username or self.username,
+            password=password,
+        )
         return conn
 
     def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
@@ -469,17 +488,19 @@ class PgBin:
     def run_capture(self,
                     command: List[str],
                     env: Optional[Env] = None,
-                    cwd: Optional[str] = None) -> None:
+                    cwd: Optional[str] = None,
+                    **kwargs: Any) -> None:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
 
-        This is just like `run`, but for chatty programs.
+        This is just like `run`, but for chatty programs. Returns basepath for files
+        with captured output.
         """
 
         self._fixpath(command)
         print('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
-        subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True)
+        return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
 
 
 @zenfixture
@@ -838,6 +859,27 @@ class WalAcceptor:
             pass # pidfile might be obsolete
         return self
 
+    def append_logical_message(self, tenant_id: str, timeline_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Send JSON_CTRL query to append LogicalMessage to WAL and modify 
+        safekeeper state. It will construct LogicalMessage from provided
+        prefix and message, and then will write it to WAL.
+        """
+
+        # "replication=0" hacks psycopg not to send additional queries
+        # on startup, see https://github.com/psycopg/psycopg2/pull/482
+        connstr = f"host=localhost port={self.port} replication=0 options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
+
+        with closing(psycopg2.connect(connstr)) as conn:
+            # server doesn't support transactions
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                request_json = json.dumps(request)
+                print(f"JSON_CTRL request on port {self.port}: {request_json}")
+                cur.execute("JSON_CTRL " + request_json)
+                all = cur.fetchall()
+                print(f"JSON_CTRL response: {all[0][0]}")
+                return json.loads(all[0][0])
 
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """

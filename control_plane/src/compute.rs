@@ -1,17 +1,16 @@
-use std::fs::{self, File, OpenOptions};
+use std::collections::BTreeMap;
+use std::fs::{self, File};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
-use regex::Regex;
 use zenith_utils::connstring::connection_host_port;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
@@ -19,6 +18,7 @@ use zenith_utils::zid::ZTenantId;
 use zenith_utils::zid::ZTimelineId;
 
 use crate::local_env::LocalEnv;
+use crate::postgresql_conf::PostgresConf;
 use crate::storage::PageServerNode;
 
 //
@@ -144,76 +144,25 @@ impl PostgresNode {
             );
         }
 
-        lazy_static! {
-            static ref CONF_PORT_RE: Regex = Regex::new(r"(?m)^\s*port\s*=\s*(\d+)\s*$").unwrap();
-            static ref CONF_TIMELINE_RE: Regex =
-                Regex::new(r"(?m)^\s*zenith.zenith_timeline\s*=\s*'(\w+)'\s*$").unwrap();
-            static ref CONF_TENANT_RE: Regex =
-                Regex::new(r"(?m)^\s*zenith.zenith_tenant\s*=\s*'(\w+)'\s*$").unwrap();
-        }
-
         // parse data directory name
         let fname = entry.file_name();
         let name = fname.to_str().unwrap().to_string();
 
-        // find out tcp port in config file
+        // Read config file into memory
         let cfg_path = entry.path().join("postgresql.conf");
-        let config = fs::read_to_string(cfg_path.clone()).with_context(|| {
-            format!(
-                "failed to read config file in {}",
-                cfg_path.to_str().unwrap()
-            )
-        })?;
+        let cfg_path_str = cfg_path.to_string_lossy();
+        let mut conf_file = File::open(&cfg_path)
+            .with_context(|| format!("failed to open config file in {}", cfg_path_str))?;
+        let conf = PostgresConf::read(&mut conf_file)
+            .with_context(|| format!("failed to read config file in {}", cfg_path_str))?;
 
-        // parse port
-        let err_msg = format!(
-            "failed to find port definition in config file {}",
-            cfg_path.to_str().unwrap()
-        );
-        let port: u16 = CONF_PORT_RE
-            .captures(config.as_str())
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 1"))?
-            .iter()
-            .last()
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 2"))?
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 3"))?
-            .as_str()
-            .parse()
-            .with_context(|| err_msg)?;
+        // Read a few options from the config file
+        let context = format!("in config file {}", cfg_path_str);
+        let port: u16 = conf.parse_field("port", &context)?;
+        let timelineid: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
+        let tenantid: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
 
-        // parse timeline
-        let err_msg = format!(
-            "failed to find timeline definition in config file {}",
-            cfg_path.to_str().unwrap()
-        );
-        let timelineid: ZTimelineId = CONF_TIMELINE_RE
-            .captures(config.as_str())
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 1"))?
-            .iter()
-            .last()
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 2"))?
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 3"))?
-            .as_str()
-            .parse()
-            .with_context(|| err_msg)?;
-
-        // parse tenant
-        let err_msg = format!(
-            "failed to find tenant definition in config file {}",
-            cfg_path.to_str().unwrap()
-        );
-        let tenantid = CONF_TENANT_RE
-            .captures(config.as_str())
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 1"))?
-            .iter()
-            .last()
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 2"))?
-            .ok_or_else(|| anyhow::Error::msg(err_msg.clone() + " 3"))?
-            .as_str()
-            .parse()
-            .with_context(|| err_msg)?;
-
-        let uses_wal_proposer = config.contains("wal_acceptors");
+        let uses_wal_proposer = conf.get("wal_acceptors").is_some();
 
         // ok now
         Ok(PostgresNode {
@@ -308,72 +257,58 @@ impl PostgresNode {
     // Connect to a page server, get base backup, and untar it to initialize a
     // new data directory
     fn setup_pg_conf(&self, auth_type: AuthType) -> Result<()> {
-        File::create(self.pgdata().join("postgresql.conf").to_str().unwrap())?;
-
+        let mut conf = PostgresConf::new();
+        conf.append("max_wal_senders", "10");
         // wal_log_hints is mandatory when running against pageserver (see gh issue#192)
         // TODO: is it possible to check wal_log_hints at pageserver side via XLOG_PARAMETER_CHANGE?
-        self.append_conf(
-            "postgresql.conf",
-            &format!(
-                "max_wal_senders = 10\n\
-                 wal_log_hints = on\n\
-                 max_replication_slots = 10\n\
-                 hot_standby = on\n\
-                 shared_buffers = 1MB\n\
-                 fsync = off\n\
-                 max_connections = 100\n\
-                 wal_sender_timeout = 10s\n\
-                 wal_level = replica\n\
-                 listen_addresses = '{address}'\n\
-                 port = {port}\n",
-                address = self.address.ip(),
-                port = self.address.port()
-            ),
-        )?;
+        conf.append("wal_log_hints", "on");
+        conf.append("max_replication_slots", "10");
+        conf.append("hot_standby", "on");
+        conf.append("shared_buffers", "1MB");
+        conf.append("fsync", "off");
+        conf.append("max_connections", "100");
+        conf.append("wal_sender_timeout", "10s");
+        conf.append("wal_level", "replica");
+        conf.append("listen_addresses", &self.address.ip().to_string());
+        conf.append("port", &self.address.port().to_string());
 
         // Never clean up old WAL. TODO: We should use a replication
         // slot or something proper, to prevent the compute node
         // from removing WAL that hasn't been streamed to the safekeeper or
         // page server yet. (gh issue #349)
-        self.append_conf("postgresql.conf", "wal_keep_size='10TB'\n")?;
+        conf.append("wal_keep_size", "10TB");
 
-        // set up authentication
-        let password = if let AuthType::ZenithJWT = auth_type {
-            "$ZENITH_AUTH_TOKEN"
-        } else {
-            ""
+        // Configure the node to fetch pages from pageserver
+        let pageserver_connstr = {
+            let (host, port) = connection_host_port(&self.pageserver.pg_connection_config);
+
+            // Set up authentication
+            //
+            // $ZENITH_AUTH_TOKEN will be replaced with value from environment
+            // variable during compute pg startup. It is done this way because
+            // otherwise user will be able to retrieve the value using SHOW
+            // command or pg_settings
+            let password = if let AuthType::ZenithJWT = auth_type {
+                "$ZENITH_AUTH_TOKEN"
+            } else {
+                ""
+            };
+
+            format!("host={} port={} password={}", host, port, password)
         };
-
-        // Configure that node to take pages from pageserver
-        let (host, port) = connection_host_port(&self.pageserver.pg_connection_config);
-        self.append_conf(
-            "postgresql.conf",
-            format!(
-                concat!(
-                    "shared_preload_libraries = zenith\n",
-                    // $ZENITH_AUTH_TOKEN will be replaced with value from environment variable during compute pg startup
-                    // it is done this way because otherwise user will be able to retrieve the value using SHOW command or pg_settings
-                    "zenith.page_server_connstring = 'host={} port={} password={}'\n",
-                    "zenith.zenith_timeline='{}'\n",
-                    "zenith.zenith_tenant='{}'\n",
-                ),
-                host, port, password, self.timelineid, self.tenantid,
-            )
-            .as_str(),
-        )?;
+        conf.append("shared_preload_libraries", "zenith");
+        conf.append_line("");
+        conf.append("zenith.page_server_connstring", &pageserver_connstr);
+        conf.append("zenith.zenith_tenant", &self.tenantid.to_string());
+        conf.append("zenith.zenith_timeline", &self.timelineid.to_string());
+        conf.append_line("");
 
         // Configure the node to stream WAL directly to the pageserver
-        self.append_conf(
-            "postgresql.conf",
-            format!(
-                concat!(
-                    "synchronous_standby_names = 'pageserver'\n", // TODO: add a new function arg?
-                    "zenith.callmemaybe_connstring = '{}'\n",     // FIXME escaping
-                ),
-                self.connstr(),
-            )
-            .as_str(),
-        )?;
+        conf.append("synchronous_standby_names", "pageserver"); // TODO: add a new function arg?
+        conf.append("zenith.callmemaybe_connstring", &self.connstr());
+
+        let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
+        file.write_all(conf.to_string().as_bytes())?;
 
         Ok(())
     }
@@ -414,14 +349,6 @@ impl PostgresNode {
             (true, false) => "crashed",
             (false, true) => "running, no pidfile",
         }
-    }
-
-    pub fn append_conf(&self, config: &str, opts: &str) -> Result<()> {
-        OpenOptions::new()
-            .append(true)
-            .open(self.pgdata().join(config).to_str().unwrap())?
-            .write_all(opts.as_bytes())?;
-        Ok(())
     }
 
     fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
@@ -525,9 +452,7 @@ impl PostgresNode {
             .output()
             .expect("failed to execute whoami");
 
-        if !output.status.success() {
-            panic!("whoami failed");
-        }
+        assert!(output.status.success(), "whoami failed");
 
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }

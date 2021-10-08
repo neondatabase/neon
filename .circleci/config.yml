@@ -24,6 +24,12 @@ jobs:
   # A job to build postgres
   build-postgres:
     executor: zenith-build-executor
+    parameters:
+      build_type:
+        type: enum
+        enum: ["debug", "release"]
+    environment:
+      BUILD_TYPE: << parameters.build_type >>
     steps:
         # Checkout the git repo (circleci doesn't have a flag to enable submodules here)
       - checkout
@@ -39,7 +45,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v03-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
+            - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
 
         # FIXME We could cache our own docker container, instead of installing packages every time.
       - run:
@@ -59,12 +65,12 @@ jobs:
             if [ ! -e tmp_install/bin/postgres ]; then
               # "depth 1" saves some time by not cloning the whole repo
               git submodule update --init --depth 1
-              make postgres
+              make postgres -j8
             fi
 
       - save_cache:
           name: Save postgres cache
-          key: v03-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
+          key: v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
           paths:
             - tmp_install
 
@@ -96,7 +102,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v03-postgres-cache-{{ checksum "/tmp/cache-key-postgres" }}
+            - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
 
       - restore_cache:
           name: Restore rust cache
@@ -254,7 +260,7 @@ jobs:
           when: always
           command: |
             du -sh /tmp/test_output/*
-            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "wal_acceptor.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" -delete
+            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "wal_acceptor.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" -delete
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output
@@ -328,14 +334,18 @@ workflows:
   build_and_test:
     jobs:
       - check-codestyle
-      - build-postgres
+      - build-postgres:
+          name: build-postgres-<< matrix.build_type >>
+          matrix:
+            parameters:
+              build_type: ["debug", "release"]
       - build-zenith:
           name: build-zenith-<< matrix.build_type >>
           matrix:
             parameters:
               build_type: ["debug", "release"]
           requires:
-            - build-postgres
+            - build-postgres-<< matrix.build_type >>
       - run-pytest:
           name: pg_regress-tests-<< matrix.build_type >>
           matrix:

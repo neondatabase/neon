@@ -2,6 +2,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod json_ctrl;
 pub mod receive_wal;
 pub mod replication;
 pub mod s3_offload;

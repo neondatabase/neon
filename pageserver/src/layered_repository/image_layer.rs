@@ -152,7 +152,8 @@ impl Layer for ImageLayer {
     }
 
     fn get_end_lsn(&self) -> Lsn {
-        self.lsn
+        // End-bound is exclusive
+        self.lsn + 1
     }
 
     /// Look up given page in the file
@@ -336,7 +337,8 @@ impl ImageLayer {
         let book = chapter.close()?;
 
         // This flushes the underlying 'buf_writer'.
-        book.close()?;
+        let writer = book.close()?;
+        writer.get_ref().sync_all()?;
 
         trace!("saved {}", &path.display());
 
