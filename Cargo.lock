@@ -2592,6 +2592,7 @@ dependencies = [
  "bincode",
  "byteorder",
  "bytes",
+ "crossbeam-utils",
  "hex",
  "hex-literal",
  "hyper",

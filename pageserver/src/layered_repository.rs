@@ -18,6 +18,7 @@ use lazy_static::lazy_static;
 use log::*;
 use postgres_ffi::pg_constants::BLCKSZ;
 use serde::{Deserialize, Serialize};
+use zenith_utils::batch_fsync::batch_fsync;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -1442,9 +1443,9 @@ impl LayeredTimeline {
         if created_historics {
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
-            let timeline_dir =
-                File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
-            timeline_dir.sync_all()?;
+            layer_uploads.push(self.conf.timeline_path(&self.timelineid, &self.tenantid));
+            batch_fsync(&layer_uploads)?;
+            layer_uploads.pop().unwrap();
         }
 
         // Save the metadata, with updated 'disk_consistent_lsn', to a

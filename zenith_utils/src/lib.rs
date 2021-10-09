@@ -40,3 +40,6 @@ pub mod logging;
 
 // Misc
 pub mod accum;
+
+/// Utility for quickly fsyncing many files at once
+pub mod batch_fsync;

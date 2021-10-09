@@ -315,8 +315,7 @@ impl ImageLayer {
         let book = chapter.close()?;
 
         // This flushes the underlying 'buf_writer'.
-        let writer = book.close()?;
-        writer.get_ref().sync_all()?;
+        book.close()?;
 
         trace!("saved {}", path.display());
 
