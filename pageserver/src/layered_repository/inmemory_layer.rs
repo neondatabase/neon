@@ -280,14 +280,16 @@ impl Layer for InMemoryLayer {
             println!("segsizes {}: {}", k, v);
         }
 
-        for (blknum, lsn, pv) in inner.page_versions.ordered_page_version_iter(None) {
-            println!(
-                "blk {} at {}: {}/{}\n",
-                blknum,
-                lsn,
-                pv.page_image.is_some(),
-                pv.record.is_some()
-            );
+        for (blknum, history) in inner.page_versions.ordered_block_iter() {
+            for (lsn, pv) in history.as_slice() {
+                println!(
+                    "blk {} at {}: {}/{}\n",
+                    blknum,
+                    lsn,
+                    pv.page_image.is_some(),
+                    pv.record.is_some()
+                );
+            }
         }
 
         Ok(())
@@ -698,7 +700,7 @@ impl InMemoryLayer {
                 self.start_lsn,
                 drop_lsn,
                 true,
-                inner.page_versions.ordered_page_version_iter(None),
+                inner.page_versions.ordered_block_iter(),
                 inner.segsizes.clone(),
             )?;
             trace!(
@@ -711,8 +713,6 @@ impl InMemoryLayer {
         }
 
         let end_lsn = self.end_lsn.unwrap();
-
-        let mut before_page_versions = inner.page_versions.ordered_page_version_iter(Some(end_lsn));
 
         let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
 
@@ -728,7 +728,7 @@ impl InMemoryLayer {
                 self.start_lsn,
                 end_lsn,
                 false,
-                before_page_versions,
+                inner.page_versions.ordered_block_iter(),
                 before_segsizes,
             )?;
             frozen_layers.push(Arc::new(delta_layer));
@@ -739,7 +739,10 @@ impl InMemoryLayer {
                 end_lsn
             );
         } else {
-            assert!(before_page_versions.next().is_none());
+            for (_blknum, history) in inner.page_versions.ordered_block_iter() {
+                let (lsn, _pv) = history.as_slice().first().unwrap();
+                assert!(lsn >= &end_lsn);
+            }
         }
 
         drop(inner);
