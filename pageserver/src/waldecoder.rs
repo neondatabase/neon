@@ -218,21 +218,23 @@ pub struct DecodedBkpBlock {
     pub blkno: u32,
 
     /* copy of the fork_flags field from the XLogRecordBlockHeader */
-    flags: u8,
+    pub flags: u8,
 
     /* Information on full-page image, if any */
-    has_image: bool,       /* has image, even for consistency checking */
+    pub has_image: bool,   /* has image, even for consistency checking */
     pub apply_image: bool, /* has image that should be restored */
     pub will_init: bool,   /* record doesn't need previous page version to apply */
     //char	   *bkp_image;
-    hole_offset: u16,
-    hole_length: u16,
+    pub hole_offset: u16,
+    pub hole_length: u16,
     pub bimg_len: u16,
-    bimg_info: u8,
+    pub bimg_info: u8,
 
     /* Buffer holding the rmgr-specific data associated with this block */
-    has_data: bool,
+    pub has_data: bool,
     pub data_len: u16,
+    pub hdr_offs: u16,
+    pub hdr_len: u16,
 }
 
 impl DecodedBkpBlock {
@@ -648,7 +650,8 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         xlogrec.xl_info
     );
 
-    let remaining: usize = xlogrec.xl_tot_len as usize - XLOG_SIZE_OF_XLOG_RECORD;
+    let rec_len = xlogrec.xl_tot_len as usize;
+    let remaining: usize = rec_len - XLOG_SIZE_OF_XLOG_RECORD;
 
     if buf.remaining() != remaining {
         //TODO error
@@ -704,7 +707,8 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     //    goto err;
                 }
                 max_block_id = block_id;
-
+                // very strange way to get current position in bytes.Buf
+                blk.hdr_offs = (rec_len - buf.remaining() - 1) as u16;
                 fork_flags = buf.get_u8();
                 blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
                 blk.flags = fork_flags;
@@ -830,6 +834,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 blk.rnode_relnode = rnode_relnode;
 
                 blk.blkno = buf.get_u32_le();
+                blk.hdr_len = (rec_len - buf.remaining() - blk.hdr_offs as usize) as u16;
                 trace!(
                     "this record affects {}/{}/{} blk {}",
                     rnode_spcnode,

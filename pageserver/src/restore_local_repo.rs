@@ -295,13 +295,13 @@ pub fn save_decoded_record(
 
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
-    let mut blk_dat_offs = XLOG_SIZE_OF_XLOG_RECORD as usize;
-    let mut blk_img_offs = blk_dat_offs
+    let mut blk_img_offs = XLOG_SIZE_OF_XLOG_RECORD as usize
         + decoded
             .blocks
             .iter()
-            .map(|blk| blk.data_len as usize)
+            .map(|blk| blk.hdr_len as usize)
             .sum::<usize>();
+    let mut last_relid_offs: usize = 0; // offset of last block with relation ID
     for blk in decoded.blocks.iter() {
         let tag = RelishTag::Relation(RelTag {
             spcnode: blk.rnode_spcnode,
@@ -312,40 +312,65 @@ pub fn save_decoded_record(
 
         let mut buf = recdata.clone();
         // If FPI records contains multiple pages, then do not copy them all but split it into separate WAL records
-        if decoded.xl_rmid == pg_constants::RM_XLOG_ID
+        let rec = if decoded.xl_rmid == pg_constants::RM_XLOG_ID
             && decoded.xl_info == pg_constants::XLOG_FPI
             && decoded.blocks.len() > 1
         {
-            let mut rec = XLogRecord::from_bytes(&mut buf);
-            rec.xl_tot_len =
-                XLOG_SIZE_OF_XLOG_RECORD as u32 + blk.data_len as u32 + blk.bimg_len as u32;
-            let mut crc = crc32c_append(0, &[0u8]); // block id
-            crc = crc32c_append(
-                crc,
-                &recdata[blk_dat_offs + 1..blk_dat_offs + blk.data_len as usize],
-            ); // skip block id
-            crc = crc32c_append(
-                crc,
-                &recdata[blk_img_offs..blk_img_offs + blk.bimg_len as usize],
-            );
-            let rec_hdr = rec.encode();
-            rec.xl_crc = crc32c_append(crc, &rec_hdr[0..XLOG_RECORD_CRC_OFFS]);
-            let mut new_rec = BytesMut::with_capacity(rec.xl_tot_len as usize);
-            new_rec.extend_from_slice(&rec.encode()); // can not use rec_hdr, because xl_crc was updated
-            new_rec.put_u8(0); // block id
-            new_rec.extend_from_slice(
-                &recdata[blk_dat_offs + 1..blk_dat_offs + blk.data_len as usize],
-            );
-            new_rec.extend_from_slice(&recdata[blk_img_offs..blk_img_offs + blk.bimg_len as usize]);
-            blk_dat_offs += blk.data_len as usize;
-            blk_img_offs += blk.bimg_len as usize;
-            buf = new_rec.freeze();
-        }
-        let rec = WALRecord {
-            lsn,
-            will_init: blk.will_init || blk.apply_image,
-            rec: buf,
-            main_data_offset: decoded.main_data_offset as u32,
+            let mut old_rec = XLogRecord::from_bytes(&mut buf);
+            let blk_body_len = blk.data_len as usize + blk.bimg_len as usize;
+            let mut new_hdr = BytesMut::new();
+            trace!("rec.xl_tot_len={}, blk_img_offs={}, blk.hdr_offs={},  blk.hdr_len={}, blk.data_len={}, blk.bimg_len={}",
+				  old_rec.xl_tot_len, blk_img_offs, blk.hdr_offs, blk.hdr_len, blk.data_len, blk.bimg_len);
+            new_hdr.put_u8(0); // new block id
+
+            // If block grab relation ID from previous blocks, then wehave to copy it here
+            if blk.flags & pg_constants::BKPBLOCK_SAME_REL != 0 {
+                assert!(last_relid_offs != 0);
+                new_hdr.put_u8(blk.flags & !pg_constants::BKPBLOCK_SAME_REL);
+                new_hdr.extend_from_slice(
+                    &recdata[blk.hdr_offs as usize + 2
+                        ..blk.hdr_offs as usize + blk.hdr_len as usize - 4],
+                ); // exclude last field: blkno
+                new_hdr.extend_from_slice(&recdata[last_relid_offs..last_relid_offs + 4 * 3]); // scpnode+dbnode+relno
+                new_hdr.extend_from_slice(
+                    &recdata[blk.hdr_offs as usize + blk.hdr_len as usize - 4
+                        ..blk.hdr_offs as usize + blk.hdr_len as usize],
+                ); // blkno
+            } else {
+                last_relid_offs = blk.hdr_offs as usize + blk.hdr_len as usize - 4 * 4;
+                new_hdr.extend_from_slice(
+                    &recdata
+                        [blk.hdr_offs as usize + 1..blk.hdr_offs as usize + blk.hdr_len as usize],
+                );
+            }
+            old_rec.xl_tot_len =
+                XLOG_SIZE_OF_XLOG_RECORD as u32 + new_hdr.len() as u32 + blk_body_len as u32;
+
+            // Calculate CRC of new WAL record
+            let mut crc = crc32c_append(0, &new_hdr);
+            let blk_body = &recdata[blk_img_offs as usize..blk_img_offs as usize + blk_body_len];
+            crc = crc32c_append(crc, blk_body);
+            old_rec.xl_crc = crc32c_append(crc, &old_rec.encode()[0..XLOG_RECORD_CRC_OFFS]);
+
+            // Construct new WAL records
+            let mut new_rec = BytesMut::with_capacity(old_rec.xl_tot_len as usize);
+            new_rec.extend_from_slice(&old_rec.encode());
+            new_rec.extend_from_slice(&new_hdr);
+            new_rec.extend_from_slice(blk_body);
+            blk_img_offs += blk_body_len;
+            WALRecord {
+                lsn,
+                will_init: blk.will_init || blk.apply_image,
+                rec: new_rec.freeze(),
+                main_data_offset: decoded.main_data_offset as u32,
+            }
+        } else {
+            WALRecord {
+                lsn,
+                will_init: blk.will_init || blk.apply_image,
+                rec: buf,
+                main_data_offset: decoded.main_data_offset as u32,
+            }
         };
         timeline.put_wal_record(tag, blk.blkno, rec)?;
     }
