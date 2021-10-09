@@ -10,6 +10,7 @@ use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::MutexGuard;
 
 use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
@@ -37,6 +38,8 @@ pub fn import_timeline_from_postgres_datadir(
     timeline: &dyn Timeline,
     lsn: Lsn,
 ) -> Result<()> {
+    let guard = timeline.start_writing();
+
     // Scan 'global'
     for direntry in fs::read_dir(path.join("global"))? {
         let direntry = direntry?;
@@ -44,10 +47,11 @@ pub fn import_timeline_from_postgres_datadir(
             None => continue,
 
             Some("pg_control") => {
-                import_control_file(timeline, lsn, &direntry.path())?;
+                import_control_file(timeline, &guard, lsn, &direntry.path())?;
             }
             Some("pg_filenode.map") => import_nonrel_file(
                 timeline,
+                &guard,
                 lsn,
                 RelishTag::FileNodeMap {
                     spcnode: pg_constants::GLOBALTABLESPACE_OID,
@@ -60,6 +64,7 @@ pub fn import_timeline_from_postgres_datadir(
             _ => import_relfile(
                 &direntry.path(),
                 timeline,
+                &guard,
                 lsn,
                 pg_constants::GLOBALTABLESPACE_OID,
                 0,
@@ -87,6 +92,7 @@ pub fn import_timeline_from_postgres_datadir(
                 Some("PG_VERSION") => continue,
                 Some("pg_filenode.map") => import_nonrel_file(
                     timeline,
+                    &guard,
                     lsn,
                     RelishTag::FileNodeMap {
                         spcnode: pg_constants::DEFAULTTABLESPACE_OID,
@@ -99,6 +105,7 @@ pub fn import_timeline_from_postgres_datadir(
                 _ => import_relfile(
                     &direntry.path(),
                     timeline,
+                    &guard,
                     lsn,
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
@@ -108,24 +115,42 @@ pub fn import_timeline_from_postgres_datadir(
     }
     for entry in fs::read_dir(path.join("pg_xact"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::Clog, &entry.path())?;
+        import_slru_file(timeline, &guard, lsn, SlruKind::Clog, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("members"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::MultiXactMembers, &entry.path())?;
+        import_slru_file(
+            timeline,
+            &guard,
+            lsn,
+            SlruKind::MultiXactMembers,
+            &entry.path(),
+        )?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("offsets"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::MultiXactOffsets, &entry.path())?;
+        import_slru_file(
+            timeline,
+            &guard,
+            lsn,
+            SlruKind::MultiXactOffsets,
+            &entry.path(),
+        )?;
     }
     for entry in fs::read_dir(path.join("pg_twophase"))? {
         let entry = entry?;
         let xid = u32::from_str_radix(entry.path().to_str().unwrap(), 16)?;
-        import_nonrel_file(timeline, lsn, RelishTag::TwoPhase { xid }, &entry.path())?;
+        import_nonrel_file(
+            timeline,
+            &guard,
+            lsn,
+            RelishTag::TwoPhase { xid },
+            &entry.path(),
+        )?;
     }
     // TODO: Scan pg_tblspc
 
-    timeline.advance_last_record_lsn(lsn);
+    timeline.advance_last_record_lsn(&guard, lsn);
 
     Ok(())
 }
@@ -134,6 +159,7 @@ pub fn import_timeline_from_postgres_datadir(
 fn import_relfile(
     path: &Path,
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     lsn: Lsn,
     spcoid: Oid,
     dboid: Oid,
@@ -162,7 +188,7 @@ fn import_relfile(
                     forknum,
                 };
                 let tag = RelishTag::Relation(rel);
-                timeline.put_page_image(tag, blknum, lsn, Bytes::copy_from_slice(&buf))?;
+                timeline.put_page_image(guard, tag, blknum, lsn, Bytes::copy_from_slice(&buf))?;
             }
 
             // TODO: UnexpectedEof is expected
@@ -191,6 +217,7 @@ fn import_relfile(
 ///
 fn import_nonrel_file(
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     lsn: Lsn,
     tag: RelishTag,
     path: &Path,
@@ -202,7 +229,7 @@ fn import_nonrel_file(
 
     info!("importing non-rel file {}", path.display());
 
-    timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buffer[..]))?;
+    timeline.put_page_image(guard, tag, 0, lsn, Bytes::copy_from_slice(&buffer[..]))?;
     Ok(())
 }
 
@@ -211,7 +238,12 @@ fn import_nonrel_file(
 ///
 /// The control file is imported as is, but we also extract the checkpoint record
 /// from it and store it separated.
-fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result<()> {
+fn import_control_file(
+    timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
+    lsn: Lsn,
+    path: &Path,
+) -> Result<()> {
     let mut file = File::open(path)?;
     let mut buffer = Vec::new();
     // read the whole file
@@ -221,6 +253,7 @@ fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result
 
     // Import it as ControlFile
     timeline.put_page_image(
+        guard,
         RelishTag::ControlFile,
         0,
         lsn,
@@ -230,7 +263,7 @@ fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result
     // Extract the checkpoint record and import it separately.
     let pg_control = ControlFileData::decode(&buffer)?;
     let checkpoint_bytes = pg_control.checkPointCopy.encode();
-    timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, checkpoint_bytes)?;
+    timeline.put_page_image(guard, RelishTag::Checkpoint, 0, lsn, checkpoint_bytes)?;
 
     Ok(())
 }
@@ -238,7 +271,13 @@ fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result
 ///
 /// Import an SLRU segment file
 ///
-fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Path) -> Result<()> {
+fn import_slru_file(
+    timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
+    lsn: Lsn,
+    slru: SlruKind,
+    path: &Path,
+) -> Result<()> {
     // Does it look like an SLRU file?
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
@@ -252,6 +291,7 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
         match r {
             Ok(_) => {
                 timeline.put_page_image(
+                    guard,
                     RelishTag::Slru { slru, segno },
                     rpageno,
                     lsn,
@@ -286,6 +326,7 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
 pub fn save_decoded_record(
     checkpoint: &mut CheckPoint,
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     decoded: &DecodedWALRecord,
     recdata: Bytes,
     lsn: Lsn,
@@ -309,7 +350,7 @@ pub fn save_decoded_record(
             main_data_offset: decoded.main_data_offset as u32,
         };
 
-        timeline.put_wal_record(tag, blk.blkno, rec)?;
+        timeline.put_wal_record(guard, tag, blk.blkno, rec)?;
     }
 
     let mut buf = decoded.record.clone();
@@ -320,11 +361,11 @@ pub fn save_decoded_record(
         && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_SMGR_TRUNCATE
     {
         let truncate = XlSmgrTruncate::decode(&mut buf);
-        save_xlog_smgr_truncate(timeline, lsn, &truncate)?;
+        save_xlog_smgr_truncate(timeline, guard, lsn, &truncate)?;
     } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
         if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK) == pg_constants::XLOG_DBASE_CREATE {
             let createdb = XlCreateDatabase::decode(&mut buf);
-            save_xlog_dbase_create(timeline, lsn, &createdb)?;
+            save_xlog_dbase_create(timeline, guard, lsn, &createdb)?;
         } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
             == pg_constants::XLOG_DBASE_DROP
         {
@@ -337,7 +378,7 @@ pub fn save_decoded_record(
             for tablespace_id in dropdb.tablespace_ids {
                 let rels = timeline.list_rels(tablespace_id, dropdb.db_id, req_lsn)?;
                 for rel in rels {
-                    timeline.drop_relish(rel, lsn)?;
+                    timeline.drop_relish(guard, rel, lsn)?;
                 }
                 trace!(
                     "Drop FileNodeMap {}, {} at lsn {}",
@@ -346,6 +387,7 @@ pub fn save_decoded_record(
                     lsn
                 );
                 timeline.drop_relish(
+                    guard,
                     RelishTag::FileNodeMap {
                         spcnode: tablespace_id,
                         dbnode: dropdb.db_id,
@@ -363,6 +405,7 @@ pub fn save_decoded_record(
             let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
             let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             timeline.put_page_image(
+                guard,
                 RelishTag::Slru {
                     slru: SlruKind::Clog,
                     segno,
@@ -374,18 +417,18 @@ pub fn save_decoded_record(
         } else {
             assert!(info == pg_constants::CLOG_TRUNCATE);
             let xlrec = XlClogTruncate::decode(&mut buf);
-            save_clog_truncate_record(checkpoint, timeline, lsn, &xlrec)?;
+            save_clog_truncate_record(checkpoint, timeline, guard, lsn, &xlrec)?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
         let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
         if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_ABORT {
             let parsed_xact = XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-            save_xact_record(timeline, lsn, &parsed_xact, decoded)?;
+            save_xact_record(timeline, guard, lsn, &parsed_xact, decoded)?;
         } else if info == pg_constants::XLOG_XACT_COMMIT_PREPARED
             || info == pg_constants::XLOG_XACT_ABORT_PREPARED
         {
             let parsed_xact = XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-            save_xact_record(timeline, lsn, &parsed_xact, decoded)?;
+            save_xact_record(timeline, guard, lsn, &parsed_xact, decoded)?;
             // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
             trace!(
                 "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
@@ -394,6 +437,7 @@ pub fn save_decoded_record(
                 lsn
             );
             timeline.drop_relish(
+                guard,
                 RelishTag::TwoPhase {
                     xid: parsed_xact.xid,
                 },
@@ -404,6 +448,7 @@ pub fn save_decoded_record(
             buf.advance(decoded.main_data_offset);
 
             timeline.put_page_image(
+                guard,
                 RelishTag::TwoPhase {
                     xid: decoded.xl_xid,
                 },
@@ -420,6 +465,7 @@ pub fn save_decoded_record(
             let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
             let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             timeline.put_page_image(
+                guard,
                 RelishTag::Slru {
                     slru: SlruKind::MultiXactOffsets,
                     segno,
@@ -433,6 +479,7 @@ pub fn save_decoded_record(
             let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
             let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             timeline.put_page_image(
+                guard,
                 RelishTag::Slru {
                     slru: SlruKind::MultiXactMembers,
                     segno,
@@ -443,14 +490,14 @@ pub fn save_decoded_record(
             )?;
         } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
             let xlrec = XlMultiXactCreate::decode(&mut buf);
-            save_multixact_create_record(checkpoint, timeline, lsn, &xlrec, decoded)?;
+            save_multixact_create_record(checkpoint, timeline, guard, lsn, &xlrec, decoded)?;
         } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
             let xlrec = XlMultiXactTruncate::decode(&mut buf);
-            save_multixact_truncate_record(checkpoint, timeline, lsn, &xlrec)?;
+            save_multixact_truncate_record(checkpoint, timeline, guard, lsn, &xlrec)?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
         let xlrec = XlRelmapUpdate::decode(&mut buf);
-        save_relmap_page(timeline, lsn, &xlrec, decoded)?;
+        save_relmap_page(timeline, guard, lsn, &xlrec, decoded)?;
     } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_NEXTOID {
@@ -478,7 +525,12 @@ pub fn save_decoded_record(
 }
 
 /// Subroutine of save_decoded_record(), to handle an XLOG_DBASE_CREATE record.
-fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatabase) -> Result<()> {
+fn save_xlog_dbase_create(
+    timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
+    lsn: Lsn,
+    rec: &XlCreateDatabase,
+) -> Result<()> {
     let db_id = rec.db_id;
     let tablespace_id = rec.tablespace_id;
     let src_db_id = rec.src_db_id;
@@ -516,13 +568,19 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 
                 debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
-                timeline.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content)?;
+                timeline.put_page_image(
+                    guard,
+                    RelishTag::Relation(dst_rel),
+                    blknum,
+                    lsn,
+                    content,
+                )?;
                 num_blocks_copied += 1;
             }
 
             if nblocks == 0 {
                 // make sure we have some trace of the relation, even if it's empty
-                timeline.put_truncation(RelishTag::Relation(dst_rel), lsn, 0)?;
+                timeline.put_truncation(guard, RelishTag::Relation(dst_rel), lsn, 0)?;
             }
 
             num_rels_copied += 1;
@@ -540,7 +598,7 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
                     spcnode: tablespace_id,
                     dbnode: db_id,
                 };
-                timeline.put_page_image(new_tag, 0, lsn, img)?;
+                timeline.put_page_image(guard, new_tag, 0, lsn, img)?;
                 break;
             }
         }
@@ -555,7 +613,12 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 /// Subroutine of save_decoded_record(), to handle an XLOG_SMGR_TRUNCATE record.
 ///
 /// This is the same logic as in PostgreSQL's smgr_redo() function.
-fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTruncate) -> Result<()> {
+fn save_xlog_smgr_truncate(
+    timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
+    lsn: Lsn,
+    rec: &XlSmgrTruncate,
+) -> Result<()> {
     let spcnode = rec.rnode.spcnode;
     let dbnode = rec.rnode.dbnode;
     let relnode = rec.rnode.relnode;
@@ -567,7 +630,7 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
             relnode,
             forknum: pg_constants::MAIN_FORKNUM,
         };
-        timeline.put_truncation(RelishTag::Relation(rel), lsn, rec.blkno)?;
+        timeline.put_truncation(guard, RelishTag::Relation(rel), lsn, rec.blkno)?;
     }
     if (rec.flags & pg_constants::SMGR_TRUNCATE_FSM) != 0 {
         let rel = RelTag {
@@ -590,7 +653,7 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
             info!("Partial truncation of FSM is not supported");
         }
         let num_fsm_blocks = 0;
-        timeline.put_truncation(RelishTag::Relation(rel), lsn, num_fsm_blocks)?;
+        timeline.put_truncation(guard, RelishTag::Relation(rel), lsn, num_fsm_blocks)?;
     }
     if (rec.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
         let rel = RelTag {
@@ -609,7 +672,7 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
             info!("Partial truncation of VM is not supported");
         }
         let num_vm_blocks = 0;
-        timeline.put_truncation(RelishTag::Relation(rel), lsn, num_vm_blocks)?;
+        timeline.put_truncation(guard, RelishTag::Relation(rel), lsn, num_vm_blocks)?;
     }
     Ok(())
 }
@@ -618,6 +681,7 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
 ///
 fn save_xact_record(
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     lsn: Lsn,
     parsed: &XlXactParsedRecord,
     decoded: &DecodedWALRecord,
@@ -634,6 +698,7 @@ fn save_xact_record(
         main_data_offset: decoded.main_data_offset as u32,
     };
     timeline.put_wal_record(
+        guard,
         RelishTag::Slru {
             slru: SlruKind::Clog,
             segno,
@@ -649,6 +714,7 @@ fn save_xact_record(
             let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
             let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             timeline.put_wal_record(
+                guard,
                 RelishTag::Slru {
                     slru: SlruKind::Clog,
                     segno,
@@ -666,7 +732,7 @@ fn save_xact_record(
                 dbnode: xnode.dbnode,
                 relnode: xnode.relnode,
             };
-            timeline.drop_relish(RelishTag::Relation(rel), lsn)?;
+            timeline.drop_relish(guard, RelishTag::Relation(rel), lsn)?;
         }
     }
     Ok(())
@@ -675,6 +741,7 @@ fn save_xact_record(
 fn save_clog_truncate_record(
     checkpoint: &mut CheckPoint,
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     lsn: Lsn,
     xlrec: &XlClogTruncate,
 ) -> Result<()> {
@@ -722,7 +789,7 @@ fn save_clog_truncate_record(
             if slru == SlruKind::Clog {
                 let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
                 if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
-                    timeline.drop_relish(RelishTag::Slru { slru, segno }, lsn)?;
+                    timeline.drop_relish(guard, RelishTag::Slru { slru, segno }, lsn)?;
                     trace!("Drop CLOG segment {:>04X} at lsn {}", segno, lsn);
                 }
             }
@@ -735,6 +802,7 @@ fn save_clog_truncate_record(
 fn save_multixact_create_record(
     checkpoint: &mut CheckPoint,
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     lsn: Lsn,
     xlrec: &XlMultiXactCreate,
     decoded: &DecodedWALRecord,
@@ -749,6 +817,7 @@ fn save_multixact_create_record(
     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
     timeline.put_wal_record(
+        guard,
         RelishTag::Slru {
             slru: SlruKind::MultiXactOffsets,
             segno,
@@ -768,6 +837,7 @@ fn save_multixact_create_record(
         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         timeline.put_wal_record(
+            guard,
             RelishTag::Slru {
                 slru: SlruKind::MultiXactMembers,
                 segno,
@@ -809,6 +879,7 @@ fn save_multixact_create_record(
 fn save_multixact_truncate_record(
     checkpoint: &mut CheckPoint,
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     lsn: Lsn,
     xlrec: &XlMultiXactTruncate,
 ) -> Result<()> {
@@ -825,6 +896,7 @@ fn save_multixact_truncate_record(
     // contain, possibly partially, valid data.
     while segment != endsegment {
         timeline.drop_relish(
+            guard,
             RelishTag::Slru {
                 slru: SlruKind::MultiXactMembers,
                 segno: segment as u32,
@@ -848,6 +920,7 @@ fn save_multixact_truncate_record(
 
 fn save_relmap_page(
     timeline: &dyn Timeline,
+    guard: &MutexGuard<()>,
     lsn: Lsn,
     xlrec: &XlRelmapUpdate,
     decoded: &DecodedWALRecord,
@@ -862,7 +935,7 @@ fn save_relmap_page(
     // skip xl_relmap_update
     buf.advance(12);
 
-    timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buf[..]))?;
+    timeline.put_page_image(guard, tag, 0, lsn, Bytes::copy_from_slice(&buf[..]))?;
 
     Ok(())
 }

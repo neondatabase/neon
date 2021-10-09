@@ -197,6 +197,7 @@ fn walreceiver_main(
 
                 waldecoder.feed_bytes(data);
 
+                let write_guard = timeline.start_writing();
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                     // Save old checkpoint value to compare with it after decoding WAL record
                     let old_checkpoint_bytes = checkpoint.encode();
@@ -210,6 +211,7 @@ fn walreceiver_main(
                     restore_local_repo::save_decoded_record(
                         &mut checkpoint,
                         &*timeline,
+                        &write_guard,
                         &decoded,
                         recdata,
                         lsn,
@@ -219,6 +221,7 @@ fn walreceiver_main(
                     // Check if checkpoint data was updated by save_decoded_record
                     if new_checkpoint_bytes != old_checkpoint_bytes {
                         timeline.put_page_image(
+                            &write_guard,
                             RelishTag::Checkpoint,
                             0,
                             lsn,
@@ -228,9 +231,10 @@ fn walreceiver_main(
 
                     // Now that this record has been fully handled, including updating the
                     // checkpoint data, let the repository know that it is up-to-date to this LSN
-                    timeline.advance_last_record_lsn(lsn);
+                    timeline.advance_last_record_lsn(&write_guard, lsn);
                     last_rec_lsn = lsn;
                 }
+                drop(write_guard);
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!("caught up at LSN {}", endlsn);

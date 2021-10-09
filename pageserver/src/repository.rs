@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::AddAssign;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::time::Duration;
 use zenith_utils::lsn::{Lsn, RecordLsn};
 use zenith_utils::zid::ZTimelineId;
@@ -123,26 +123,58 @@ pub trait Timeline: Send + Sync {
     // These are called by the WAL receiver to digest WAL records.
     //------------------------------------------------------------------------------
 
+    /// To add new page versions to the repository, you must first call
+    /// 'start_writing', and hold the returned guard until you have finished
+    /// making all the changes related to that WAL record, or records, and
+    /// called advance_last_record_lsn(). To enforce that, all the put_*()
+    /// functions take a MutexGuard as argument.
+    ///
+    /// FIXME: That enforcement is weak, because the compiler will let you pass any
+    /// MutexGuard. Don't do that! This could be refactored by creating a new
+    /// TimelineWriteGuard struct, and moving the put_*() functions to
+    /// TimelineWriteGuard.
+    fn start_writing(&self) -> MutexGuard<()>;
+
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
+    fn put_wal_record(
+        &self,
+        guard: &MutexGuard<()>,
+        tag: RelishTag,
+        blknum: u32,
+        rec: WALRecord,
+    ) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()>;
+    fn put_page_image(
+        &self,
+        guard: &MutexGuard<()>,
+        tag: RelishTag,
+        blknum: u32,
+        lsn: Lsn,
+        img: Bytes,
+    ) -> Result<()>;
 
     /// Truncate relation
-    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
+    fn put_truncation(
+        &self,
+        guard: &MutexGuard<()>,
+        rel: RelishTag,
+        lsn: Lsn,
+        nblocks: u32,
+    ) -> Result<()>;
 
     /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
-    fn drop_relish(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
+    fn drop_relish(&self, guard: &MutexGuard<()>, tag: RelishTag, lsn: Lsn) -> Result<()>;
 
     /// Track end of the latest digested WAL record.
     ///
     /// Advance requires aligned LSN as an argument and would wake wait_lsn() callers.
     /// Previous last record LSN is stored alongside the latest and can be read.
-    fn advance_last_record_lsn(&self, lsn: Lsn);
+    fn advance_last_record_lsn(&self, guard: &MutexGuard<()>, lsn: Lsn);
+
     /// Atomically get both last and prev.
     fn get_last_record_rlsn(&self) -> RecordLsn;
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -307,13 +339,15 @@ mod tests {
         // Create timeline to work on
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
-        tline.put_page_image(TESTREL_A, 1, Lsn(0x40), TEST_IMG("foo blk 1 at 4"))?;
-        tline.put_page_image(TESTREL_A, 2, Lsn(0x50), TEST_IMG("foo blk 2 at 5"))?;
+        let guard = tline.start_writing();
+        tline.put_page_image(&guard, TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(&guard, TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(&guard, TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(&guard, TESTREL_A, 1, Lsn(0x40), TEST_IMG("foo blk 1 at 4"))?;
+        tline.put_page_image(&guard, TESTREL_A, 2, Lsn(0x50), TEST_IMG("foo blk 2 at 5"))?;
 
-        tline.advance_last_record_lsn(Lsn(0x50));
+        tline.advance_last_record_lsn(&guard, Lsn(0x50));
+        drop(guard);
 
         assert_current_logical_size(&tline, Lsn(0x50));
 
@@ -359,8 +393,9 @@ mod tests {
         );
 
         // Truncate last block
-        tline.put_truncation(TESTREL_A, Lsn(0x60), 2)?;
-        tline.advance_last_record_lsn(Lsn(0x60));
+        let guard = tline.start_writing();
+        tline.put_truncation(&guard, TESTREL_A, Lsn(0x60), 2)?;
+        tline.advance_last_record_lsn(&guard, Lsn(0x60));
         assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
@@ -382,13 +417,13 @@ mod tests {
         );
 
         // Truncate to zero length
-        tline.put_truncation(TESTREL_A, Lsn(0x68), 0)?;
-        tline.advance_last_record_lsn(Lsn(0x68));
+        tline.put_truncation(&guard, TESTREL_A, Lsn(0x68), 0)?;
+        tline.advance_last_record_lsn(&guard, Lsn(0x68));
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x68))?.unwrap(), 0);
 
         // Extend from 0 to 2 blocks, leaving a gap
-        tline.put_page_image(TESTREL_A, 1, Lsn(0x70), TEST_IMG("foo blk 1"))?;
-        tline.advance_last_record_lsn(Lsn(0x70));
+        tline.put_page_image(&guard, TESTREL_A, 1, Lsn(0x70), TEST_IMG("foo blk 1"))?;
+        tline.advance_last_record_lsn(&guard, Lsn(0x70));
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x70))?.unwrap(), 2);
         assert_eq!(tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?, ZERO_PAGE);
         assert_eq!(
@@ -399,8 +434,8 @@ mod tests {
         // Extend a lot more, leaving a big gap that spans across segments
         // FIXME: This is currently broken, see https://github.com/zenithdb/zenith/issues/500
         /*
-        tline.put_page_image(TESTREL_A, 1500, Lsn(0x80), TEST_IMG("foo blk 1500"))?;
-        tline.advance_last_record_lsn(Lsn(0x80));
+        tline.put_page_image(&guard, TESTREL_A, 1500, Lsn(0x80), TEST_IMG("foo blk 1500"))?;
+        tline.advance_last_record_lsn(&guard, Lsn(0x80));
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x80))?.unwrap(), 1501);
         for blk in 2..1500 {
             assert_eq!(
@@ -423,25 +458,38 @@ mod tests {
 
         // Create timeline to work on
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let write_guard = tline.start_writing();
 
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.advance_last_record_lsn(Lsn(0x20));
+        tline.put_page_image(
+            &write_guard,
+            TESTREL_A,
+            0,
+            Lsn(0x20),
+            TEST_IMG("foo blk 0 at 2"),
+        )?;
+        tline.advance_last_record_lsn(&write_guard, Lsn(0x20));
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(), 1);
 
         // Drop relish
-        tline.drop_relish(TESTREL_A, Lsn(0x30))?;
-        tline.advance_last_record_lsn(Lsn(0x30));
+        tline.drop_relish(&write_guard, TESTREL_A, Lsn(0x30))?;
+        tline.advance_last_record_lsn(&write_guard, Lsn(0x30));
 
         // Check that rel is not visible anymore
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
         assert!(tline.get_relish_size(TESTREL_A, Lsn(0x30))?.is_none());
 
         // Extend it again
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
-        tline.advance_last_record_lsn(Lsn(0x40));
+        tline.put_page_image(
+            &write_guard,
+            TESTREL_A,
+            0,
+            Lsn(0x40),
+            TEST_IMG("foo blk 0 at 4"),
+        )?;
+        tline.advance_last_record_lsn(&write_guard, Lsn(0x40));
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
@@ -465,13 +513,15 @@ mod tests {
         let relsize = RELISH_SEG_SIZE * 2;
 
         // Create relation with relsize blocks
+        let write_guard = tline.start_writing();
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
-            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+            tline.put_page_image(&write_guard, TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
         }
 
-        tline.advance_last_record_lsn(Lsn(0x20));
+        tline.advance_last_record_lsn(&write_guard, Lsn(0x20));
+        drop(write_guard);
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
@@ -495,8 +545,9 @@ mod tests {
 
         // Truncate relation so that second segment was dropped
         // - only leave one page
-        tline.put_truncation(TESTREL_A, Lsn(0x60), 1)?;
-        tline.advance_last_record_lsn(Lsn(0x60));
+        let write_guard = tline.start_writing();
+        tline.put_truncation(&write_guard, TESTREL_A, Lsn(0x60), 1)?;
+        tline.advance_last_record_lsn(&write_guard, Lsn(0x60));
 
         // Check reported size and contents after truncation
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 1);
@@ -529,9 +580,10 @@ mod tests {
         for blkno in 0..relsize {
             let lsn = Lsn(0x80);
             let data = format!("foo blk {} at {}", blkno, lsn);
-            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+            tline.put_page_image(&write_guard, TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
         }
-        tline.advance_last_record_lsn(Lsn(0x80));
+        tline.advance_last_record_lsn(&write_guard, Lsn(0x80));
+        drop(write_guard);
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
         assert_eq!(
@@ -559,12 +611,13 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
         let mut lsn = 0x10;
+        let write_guard = tline.start_writing();
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 0x10;
-            tline.put_page_image(TESTREL_A, blknum as u32, Lsn(lsn), img)?;
+            tline.put_page_image(&write_guard, TESTREL_A, blknum as u32, Lsn(lsn), img)?;
         }
-        tline.advance_last_record_lsn(Lsn(lsn));
+        tline.advance_last_record_lsn(&write_guard, Lsn(lsn));
 
         assert_current_logical_size(&tline, Lsn(lsn));
 
@@ -575,8 +628,8 @@ mod tests {
 
         // Truncate one block
         lsn += 0x10;
-        tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
-        tline.advance_last_record_lsn(Lsn(lsn));
+        tline.put_truncation(&write_guard, TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
+        tline.advance_last_record_lsn(&write_guard, Lsn(lsn));
         assert_eq!(
             tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE
@@ -585,8 +638,13 @@ mod tests {
 
         // Truncate another block
         lsn += 0x10;
-        tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE - 1)?;
-        tline.advance_last_record_lsn(Lsn(lsn));
+        tline.put_truncation(
+            &write_guard,
+            TESTREL_A,
+            Lsn(lsn),
+            pg_constants::RELSEG_SIZE - 1,
+        )?;
+        tline.advance_last_record_lsn(&write_guard, Lsn(lsn));
         assert_eq!(
             tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE - 1
@@ -598,8 +656,8 @@ mod tests {
         let mut size: i32 = 3000;
         while size >= 0 {
             lsn += 0x10;
-            tline.put_truncation(TESTREL_A, Lsn(lsn), size as u32)?;
-            tline.advance_last_record_lsn(Lsn(lsn));
+            tline.put_truncation(&write_guard, TESTREL_A, Lsn(lsn), size as u32)?;
+            tline.advance_last_record_lsn(&write_guard, Lsn(lsn));
             assert_eq!(
                 tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
                 size as u32
@@ -623,17 +681,32 @@ mod tests {
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
-        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
+        let write_guard = tline.start_writing();
+        tline.put_page_image(
+            &write_guard,
+            RelishTag::Checkpoint,
+            0,
+            Lsn(0x10),
+            ZERO_CHECKPOINT.clone(),
+        )?;
 
         // Create a relation on the timeline
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(
+            &write_guard,
+            TESTREL_A,
+            0,
+            Lsn(0x20),
+            TEST_IMG("foo blk 0 at 2"),
+        )?;
 
-        tline.advance_last_record_lsn(Lsn(0x30));
+        tline.advance_last_record_lsn(&write_guard, Lsn(0x30));
 
         // Check that list_rels() lists it after LSN 2, but no before it
         assert!(!tline.list_rels(0, TESTDB, Lsn(0x10))?.contains(&TESTREL_A));
         assert!(tline.list_rels(0, TESTDB, Lsn(0x20))?.contains(&TESTREL_A));
         assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
+
+        drop(write_guard);
 
         // Create a branch, check that the relation is visible there
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
@@ -644,8 +717,9 @@ mod tests {
             .contains(&TESTREL_A));
 
         // Drop it on the branch
-        newtline.drop_relish(TESTREL_A, Lsn(0x40))?;
-        newtline.advance_last_record_lsn(Lsn(0x40));
+        let write_guard = newtline.start_writing();
+        newtline.drop_relish(&write_guard, TESTREL_A, Lsn(0x40))?;
+        newtline.advance_last_record_lsn(&write_guard, Lsn(0x40));
 
         // Check that it's no longer listed on the branch after the point where it was dropped
         assert!(newtline
@@ -654,6 +728,7 @@ mod tests {
         assert!(!newtline
             .list_rels(0, TESTDB, Lsn(0x40))?
             .contains(&TESTREL_A));
+        drop(write_guard);
 
         // Run checkpoint and garbage collection and check that it's still not visible
         newtline.checkpoint()?;
@@ -676,25 +751,40 @@ mod tests {
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
-        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
+        let guard = tline.start_writing();
+        tline.put_page_image(
+            &guard,
+            RelishTag::Checkpoint,
+            0,
+            Lsn(0x10),
+            ZERO_CHECKPOINT.clone(),
+        )?;
 
         // Create a relation on the timeline
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
+        tline.put_page_image(&guard, TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        tline.put_page_image(&guard, TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
+        tline.put_page_image(&guard, TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
 
         // Create another relation
-        tline.put_page_image(TESTREL_B, 0, Lsn(0x20), TEST_IMG("foobar blk 0 at 2"))?;
+        tline.put_page_image(
+            &guard,
+            TESTREL_B,
+            0,
+            Lsn(0x20),
+            TEST_IMG("foobar blk 0 at 2"),
+        )?;
 
-        tline.advance_last_record_lsn(Lsn(0x40));
+        tline.advance_last_record_lsn(&guard, Lsn(0x40));
         assert_current_logical_size(&tline, Lsn(0x40));
+        drop(guard);
 
         // Branch the history, modify relation differently on the new timeline
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
         let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
 
-        newtline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
-        newtline.advance_last_record_lsn(Lsn(0x40));
+        let guard = newtline.start_writing();
+        newtline.put_page_image(&guard, TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
+        newtline.advance_last_record_lsn(&guard, Lsn(0x40));
 
         // Check page contents on both branches
         assert_eq!(
