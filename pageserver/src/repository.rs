@@ -209,7 +209,7 @@ impl WALRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::LayeredRepository;
+    use crate::layered_repository::{LayeredRepository, METADATA_FILE_NAME};
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
     use hex_literal::hex;
@@ -728,7 +728,7 @@ mod tests {
         repo.create_empty_timeline(TIMELINE_ID)?;
         drop(repo);
 
-        let metadata_path = harness.timeline_path(&TIMELINE_ID).join("metadata");
+        let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
 
         assert!(metadata_path.is_file());
 

@@ -111,6 +111,9 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+/// The name of the metadata file pageserver creates per timeline.
+pub const METADATA_FILE_NAME: &str = "metadata";
+
 ///
 /// Repository consists of multiple timelines. Keep them in a hash table.
 ///
@@ -252,7 +255,16 @@ impl LayeredRepository {
                 )?;
 
                 // List the layers on disk, and load them into the layer map
-                timeline.load_layer_map(disk_consistent_lsn)?;
+                let _loaded_layers = timeline.load_layer_map(disk_consistent_lsn)?;
+                if self.upload_relishes {
+                    schedule_timeline_upload(());
+                    // schedule_timeline_upload(
+                    //     self.tenantid,
+                    //     timelineid,
+                    //     loaded_layers,
+                    //     disk_consistent_lsn,
+                    // );
+                }
 
                 // needs to be after load_layer_map
                 timeline.init_current_logical_size()?;
@@ -351,9 +363,8 @@ impl LayeredRepository {
         tenantid: ZTenantId,
         data: &TimelineMetadata,
         first_save: bool,
-    ) -> Result<PathBuf> {
-        let timeline_path = conf.timeline_path(&timelineid, &tenantid);
-        let path = timeline_path.join("metadata");
+    ) -> Result<()> {
+        let path = metadata_path(conf, timelineid, tenantid);
         // use OpenOptions to ensure file presence is consistent with first_save
         let mut file = OpenOptions::new()
             .write(true)
@@ -377,11 +388,15 @@ impl LayeredRepository {
 
         // fsync the parent directory to ensure the directory entry is durable
         if first_save {
-            let timeline_dir = File::open(&timeline_path)?;
+            let timeline_dir = File::open(
+                &path
+                    .parent()
+                    .expect("Metadata should always have a parent dir"),
+            )?;
             timeline_dir.sync_all()?;
         }
 
-        Ok(path)
+        Ok(())
     }
 
     fn load_metadata(
@@ -389,7 +404,7 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
     ) -> Result<TimelineMetadata> {
-        let path = conf.timeline_path(&timelineid, &tenantid).join("metadata");
+        let path = metadata_path(conf, timelineid, tenantid);
         let metadata_bytes = std::fs::read(&path)?;
         ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
 
@@ -469,7 +484,7 @@ impl LayeredRepository {
             let timeline = self.get_timeline_locked(*timelineid, &mut *timelines)?;
 
             if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
-                // If target_timeline is specified, we only need to know branchpoints of its childs
+                // If target_timeline is specified, we only need to know branchpoints of its children
                 if let Some(timelineid) = target_timelineid {
                     if ancestor_timeline.timelineid == timelineid {
                         all_branchpoints
@@ -1023,9 +1038,10 @@ impl LayeredTimeline {
     }
 
     ///
-    /// Scan the timeline directory to populate the layer map
+    /// Scan the timeline directory to populate the layer map.
+    /// Returns all timeline-related files that were found and loaded.
     ///
-    fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<Vec<PathBuf>> {
         info!(
             "loading layer map for timeline {} into memory",
             self.timelineid
@@ -1035,9 +1051,9 @@ impl LayeredTimeline {
             filename::list_files(self.conf, self.timelineid, self.tenantid)?;
 
         let timeline_path = self.conf.timeline_path(&self.timelineid, &self.tenantid);
-
+        let mut local_layers = Vec::with_capacity(imgfilenames.len() + deltafilenames.len());
         // First create ImageLayer structs for each image file.
-        for filename in imgfilenames.iter() {
+        for filename in &imgfilenames {
             if filename.lsn > disk_consistent_lsn {
                 warn!(
                     "found future image layer {} on timeline {}",
@@ -1056,11 +1072,11 @@ impl LayeredTimeline {
                 layer.get_start_lsn(),
                 self.timelineid
             );
+            local_layers.push(layer.path());
             layers.insert_historic(Arc::new(layer));
         }
 
-        // Then for the Delta files.
-        for filename in deltafilenames.iter() {
+        for filename in &deltafilenames {
             ensure!(filename.start_lsn < filename.end_lsn);
             if filename.end_lsn > disk_consistent_lsn {
                 warn!(
@@ -1079,10 +1095,11 @@ impl LayeredTimeline {
                 layer.filename().display(),
                 self.timelineid,
             );
+            local_layers.push(layer.path());
             layers.insert_historic(Arc::new(layer));
         }
 
-        Ok(())
+        Ok(local_layers)
     }
 
     ///
@@ -1341,7 +1358,7 @@ impl LayeredTimeline {
         let mut disk_consistent_lsn = last_record_lsn;
 
         let mut created_historics = false;
-
+        let mut layer_uploads = Vec::new();
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
 
@@ -1403,8 +1420,13 @@ impl LayeredTimeline {
             layers.remove_historic(frozen.clone());
 
             // Add the historics to the LayerMap
-            for n in new_historics {
-                layers.insert_historic(n);
+            for delta_layer in new_historics.delta_layers {
+                layer_uploads.push(delta_layer.path());
+                layers.insert_historic(Arc::new(delta_layer));
+            }
+            for image_layer in new_historics.image_layers {
+                layer_uploads.push(image_layer.path());
+                layers.insert_historic(Arc::new(image_layer));
             }
         }
 
@@ -1449,7 +1471,7 @@ impl LayeredTimeline {
             ancestor_timeline: ancestor_timelineid,
             ancestor_lsn: self.ancestor_lsn,
         };
-        let _metadata_path = LayeredRepository::save_metadata(
+        LayeredRepository::save_metadata(
             self.conf,
             self.timelineid,
             self.tenantid,
@@ -1458,12 +1480,10 @@ impl LayeredTimeline {
         )?;
         if self.upload_relishes {
             schedule_timeline_upload(())
-            // schedule_timeline_upload(LocalTimeline {
-            //     tenant_id: self.tenantid,
-            //     timeline_id: self.timelineid,
-            //     metadata_path,
-            //     image_layers: image_layer_uploads,
-            //     delta_layers: delta_layer_uploads,
+            // schedule_timeline_upload(
+            //     self.tenantid,
+            //     self.timelineid,
+            //     layer_uploads,
             //     disk_consistent_lsn,
             // });
         }
@@ -1894,6 +1914,15 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn metadata_path(
+    conf: &'static PageServerConf,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
+) -> PathBuf {
+    conf.timeline_path(&timelineid, &tenantid)
+        .join(METADATA_FILE_NAME)
 }
 
 /// Add a suffix to a layer file's name: .{num}.old

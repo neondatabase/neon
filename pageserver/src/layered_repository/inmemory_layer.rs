@@ -124,10 +124,6 @@ impl Layer for InMemoryLayer {
         PathBuf::from(format!("inmem-{}", delta_filename))
     }
 
-    fn path(&self) -> Option<PathBuf> {
-        None
-    }
-
     fn get_timeline_id(&self) -> ZTimelineId {
         self.timelineid
     }
@@ -307,6 +303,18 @@ pub struct FreezeLayers {
     pub frozen: Arc<InMemoryLayer>,
     /// New open layer containing leftover data.
     pub open: Option<Arc<InMemoryLayer>>,
+}
+
+/// A result of an inmemory layer data being written to disk.
+pub struct LayersOnDisk {
+    pub delta_layers: Vec<DeltaLayer>,
+    pub image_layers: Vec<ImageLayer>,
+}
+
+impl LayersOnDisk {
+    pub fn is_empty(&self) -> bool {
+        self.delta_layers.is_empty() && self.image_layers.is_empty()
+    }
 }
 
 impl InMemoryLayer {
@@ -669,7 +677,7 @@ impl InMemoryLayer {
     /// WAL records between start and end LSN. (The delta layer is not needed
     /// when a new relish is created with a single LSN, so that the start and
     /// end LSN are the same.)
-    pub fn write_to_disk(&self, timeline: &LayeredTimeline) -> Result<Vec<Arc<dyn Layer>>> {
+    pub fn write_to_disk(&self, timeline: &LayeredTimeline) -> Result<LayersOnDisk> {
         trace!(
             "write_to_disk {} end_lsn is {} get_end_lsn is {}",
             self.filename().display(),
@@ -678,7 +686,7 @@ impl InMemoryLayer {
         );
 
         // Grab the lock in read-mode. We hold it over the I/O, but because this
-        // layer is not writeable anymore, no one should be trying to aquire the
+        // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
         // though: another thread might have grabbed a reference to this layer
         // in `get_layer_for_write' just before the checkpointer called
@@ -707,15 +715,17 @@ impl InMemoryLayer {
                 self.start_lsn,
                 drop_lsn
             );
-            return Ok(vec![Arc::new(delta_layer)]);
+            return Ok(LayersOnDisk {
+                delta_layers: vec![delta_layer],
+                image_layers: Vec::new(),
+            });
         }
 
         let end_lsn = self.end_lsn.unwrap();
 
         let mut before_page_versions = inner.page_versions.ordered_page_version_iter(Some(end_lsn));
 
-        let mut frozen_layers: Vec<Arc<dyn Layer>> = Vec::new();
-
+        let mut delta_layers = Vec::new();
         if self.start_lsn != end_lsn {
             let (before_segsizes, _after_segsizes) = inner.segsizes.split_at(&Lsn(end_lsn.0 + 1));
 
@@ -731,7 +741,7 @@ impl InMemoryLayer {
                 before_page_versions,
                 before_segsizes,
             )?;
-            frozen_layers.push(Arc::new(delta_layer));
+            delta_layers.push(delta_layer);
             trace!(
                 "freeze: created delta layer {} {}-{}",
                 self.seg,
@@ -746,9 +756,11 @@ impl InMemoryLayer {
 
         // Write a new base image layer at the cutoff point
         let image_layer = ImageLayer::create_from_src(self.conf, timeline, self, end_lsn)?;
-        frozen_layers.push(Arc::new(image_layer));
         trace!("freeze: created image layer {} at {}", self.seg, end_lsn);
 
-        Ok(frozen_layers)
+        Ok(LayersOnDisk {
+            delta_layers,
+            image_layers: vec![image_layer],
+        })
     }
 }

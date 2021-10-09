@@ -5,9 +5,10 @@ use std::path::Path;
 use anyhow::Context;
 use s3::{bucket::Bucket, creds::Credentials, region::Region};
 
-use crate::{relish_storage::strip_workspace_prefix, S3Config};
-
-use super::RelishStorage;
+use crate::{
+    relish_storage::{strip_workspace_prefix, RelishStorage},
+    S3Config,
+};
 
 const S3_FILE_SEPARATOR: char = '/';
 
