@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::RangeBounds, slice};
 
-use zenith_utils::{accum::Accum, lsn::Lsn, vec_map::VecMap};
+use zenith_utils::{lsn::Lsn, vec_map::VecMap};
 
 use super::storage_layer::PageVersion;
 
@@ -10,10 +10,6 @@ const EMPTY_SLICE: &[(Lsn, PageVersion)] = &[];
 pub struct PageVersions(HashMap<u32, VecMap<Lsn, PageVersion>>);
 
 impl PageVersions {
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     pub fn append_or_update_last(
         &mut self,
         blknum: u32,
@@ -42,34 +38,6 @@ impl PageVersions {
             .get(&blknum)
             .map(|vec_map| vec_map.slice_range(range))
             .unwrap_or(EMPTY_SLICE)
-    }
-
-    /// Split the page version map into two.
-    ///
-    /// Left contains everything up to and not including [`cutoff_lsn`].
-    /// Right contains [`cutoff_lsn`] and everything after.
-    pub fn split_at(&self, cutoff_lsn: Lsn, after_oldest_lsn: &mut Accum<Lsn>) -> (Self, Self) {
-        let mut before_blocks = HashMap::new();
-        let mut after_blocks = HashMap::new();
-
-        for (blknum, vec_map) in self.0.iter() {
-            let (before_versions, after_versions) = vec_map.split_at(&cutoff_lsn);
-
-            if !before_versions.is_empty() {
-                let old = before_blocks.insert(*blknum, before_versions);
-                assert!(old.is_none());
-            }
-
-            if !after_versions.is_empty() {
-                let (first_lsn, _first_pv) = &after_versions.as_slice()[0];
-                after_oldest_lsn.accum(std::cmp::min, *first_lsn);
-
-                let old = after_blocks.insert(*blknum, after_versions);
-                assert!(old.is_none());
-            }
-        }
-
-        (Self(before_blocks), Self(after_blocks))
     }
 
     /// Iterate through [`PageVersion`]s in (block, lsn) order.

@@ -33,7 +33,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::layered_repository::inmemory_layer::FreezeLayers;
 use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
@@ -71,8 +70,6 @@ use layer_map::LayerMap;
 use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
 };
-
-use self::inmemory_layer::{NonWriteableError, WriteResult};
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -670,6 +667,13 @@ pub struct LayeredTimeline {
 
     /// If `true`, will backup its timeline files to remote storage after freezing.
     upload_relishes: bool,
+
+    /// Ensures layers aren't frozen by checkpointer between
+    /// [`LayeredTimeline::get_layer_for_write`] and layer reads.
+    /// Locked automatically by [`LayeredTimelineWriter`] and checkpointer.
+    /// Must always be acquired before the layer map/individual layer lock
+    /// to avoid deadlock.
+    write_lock: Mutex<()>,
 }
 
 /// Public interface functions
@@ -903,7 +907,10 @@ impl Timeline for LayeredTimeline {
     }
 
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
-        Box::new(LayeredTimelineWriter(self))
+        Box::new(LayeredTimelineWriter {
+            tl: self,
+            _write_guard: self.write_lock.lock().unwrap(),
+        })
     }
 }
 
@@ -945,6 +952,8 @@ impl LayeredTimeline {
             current_logical_size: AtomicUsize::new(current_logical_size),
             current_logical_size_gauge,
             upload_relishes,
+
+            write_lock: Mutex::new(()),
         };
         Ok(timeline)
     }
@@ -1219,18 +1228,13 @@ impl LayeredTimeline {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
     fn checkpoint_internal(&self, checkpoint_distance: u64, forced: bool) -> Result<()> {
-        // Grab lock on the layer map.
-        //
-        // TODO: We hold it locked throughout the checkpoint operation. That's bad,
-        // the checkpointing could take many seconds, and any incoming get_page_at_lsn()
-        // requests will block.
+        let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
         // Bump the generation number in the layer map, so that we can distinguish
         // entries inserted after the checkpoint started
         let current_generation = layers.increment_generation();
 
-        // Read 'last_record_lsn'. That becomes the cutoff LSN for frozen layers.
         let RecordLsn {
             last: last_record_lsn,
             prev: prev_record_lsn,
@@ -1280,32 +1284,24 @@ impl LayeredTimeline {
                 break;
             }
 
-            // Freeze the layer.
-            //
-            // This is a two-step process. First, we "freeze" the in-memory
-            // layer, to close it for new writes, and replace the original
-            // layer with the new frozen in-memory layer (and possibly a new
-            // open layer to hold changes newer than the cutoff.) Then we write
-            // the frozen layer to disk, and replace the in-memory frozen layer
-            // with the new on-disk layers.
-            let FreezeLayers {
-                frozen,
-                open: maybe_new_open,
-            } = oldest_layer.freeze(last_record_lsn)?;
+            // Mark the layer as no longer accepting writes and record the end_lsn.
+            // This happens in-place, no new layers are created now.
+            // We call `get_last_record_lsn` again, which may be different from the
+            // original load, as we may have released the write lock since then.
+            oldest_layer.freeze(self.get_last_record_lsn());
 
-            // replace this layer with the new layers that 'freeze' returned
+            // The layer is no longer open, update the layer map to reflect this.
+            // We will replace it with on-disk historics below.
             layers.pop_oldest_open();
-            if let Some(new_open) = maybe_new_open.clone() {
-                layers.insert_open(new_open);
-            }
-
-            // We temporarily insert InMemory layer into historic list here.
-            // TODO: check that all possible concurrent users of 'historic' treat it right
-            layers.insert_historic(frozen.clone());
+            layers.insert_historic(oldest_layer.clone());
 
             // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
             drop(layers);
-            let new_historics = frozen.write_to_disk(self)?;
+            drop(write_guard);
+
+            let new_historics = oldest_layer.write_to_disk(self)?;
+
+            write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
 
             if !new_historics.is_empty() {
@@ -1313,7 +1309,7 @@ impl LayeredTimeline {
             }
 
             // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove_historic(frozen.clone());
+            layers.remove_historic(oldest_layer);
 
             // Add the historics to the LayerMap
             for delta_layer in new_historics.delta_layers {
@@ -1334,6 +1330,7 @@ impl LayeredTimeline {
         }
 
         drop(layers);
+        drop(write_guard);
 
         if created_historics {
             // We must fsync the timeline dir to ensure the directory entries for
@@ -1760,46 +1757,18 @@ impl LayeredTimeline {
         self.current_logical_size_gauge
             .set(val as i64 - diff as i64);
     }
-
-    /// If a layer is in the process of being replaced in [`LayerMap`], write
-    /// operations will fail with [`NonWriteableError`]. This may happen due to
-    /// a race: the checkpointer thread freezes a layer just after
-    /// [`Self::get_layer_for_write`] returned it. To handle this error, we try
-    /// again getting the layer and attempt the write.
-    fn perform_write_op<R>(
-        &self,
-        seg: SegmentTag,
-        lsn: Lsn,
-        write_op: impl Fn(&Arc<InMemoryLayer>) -> WriteResult<R>,
-    ) -> anyhow::Result<R> {
-        let mut layer = self.get_layer_for_write(seg, lsn)?;
-        loop {
-            match write_op(&layer) {
-                Ok(r) => return Ok(r),
-                Err(NonWriteableError {}) => {}
-            }
-
-            info!(
-                "attempted to write to non-writeable layer, retrying {} {}",
-                seg, lsn
-            );
-
-            // layer was non-writeable, try again
-            let new_layer = self.get_layer_for_write(seg, lsn)?;
-            // the new layer does not have to be writeable, but it should at least be different
-            assert!(!Arc::ptr_eq(&layer, &new_layer));
-            layer = new_layer;
-        }
-    }
 }
 
-struct LayeredTimelineWriter<'a>(&'a LayeredTimeline);
+struct LayeredTimelineWriter<'a> {
+    tl: &'a LayeredTimeline,
+    _write_guard: MutexGuard<'a, ()>,
+}
 
 impl Deref for LayeredTimelineWriter<'_> {
     type Target = dyn Timeline;
 
     fn deref(&self) -> &Self::Target {
-        self.0
+        self.tl
     }
 }
 
@@ -1815,10 +1784,9 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         ensure!(rec.lsn.is_aligned(), "unaligned record LSN");
 
         let seg = SegmentTag::from_blknum(rel, blknum);
-        let delta_size = self.0.perform_write_op(seg, rec.lsn, |layer| {
-            layer.put_wal_record(blknum, rec.clone())
-        })?;
-        self.0
+        let layer = self.tl.get_layer_for_write(seg, rec.lsn)?;
+        let delta_size = layer.put_wal_record(blknum, rec);
+        self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
     }
@@ -1835,11 +1803,10 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
 
         let seg = SegmentTag::from_blknum(rel, blknum);
 
-        let delta_size = self.0.perform_write_op(seg, lsn, |layer| {
-            layer.put_page_image(blknum, lsn, img.clone())
-        })?;
+        let layer = self.tl.get_layer_for_write(seg, lsn)?;
+        let delta_size = layer.put_page_image(blknum, lsn, img);
 
-        self.0
+        self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
     }
@@ -1853,8 +1820,8 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
 
         let oldsize = self
-            .0
-            .get_relish_size(rel, self.0.get_last_record_lsn())?
+            .tl
+            .get_relish_size(rel, self.tl.get_last_record_lsn())?
             .ok_or_else(|| {
                 anyhow!(
                     "attempted to truncate non-existent relish {} at {}",
@@ -1880,8 +1847,9 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                 rel,
                 segno: remove_segno,
             };
-            self.0
-                .perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
+
+            let layer = self.tl.get_layer_for_write(seg, lsn)?;
+            layer.drop_segment(lsn);
         }
 
         // Truncate the last remaining segment to the specified size
@@ -1890,11 +1858,10 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                 rel,
                 segno: last_remain_seg,
             };
-            self.0.perform_write_op(seg, lsn, |layer| {
-                layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)
-            })?;
+            let layer = self.tl.get_layer_for_write(seg, lsn)?;
+            layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)
         }
-        self.0
+        self.tl
             .decrease_current_logical_size((oldsize - relsize) * BLCKSZ as u32);
         Ok(())
     }
@@ -1903,7 +1870,10 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         trace!("drop_segment: {} at {}", rel, lsn);
 
         if rel.is_blocky() {
-            if let Some(oldsize) = self.0.get_relish_size(rel, self.0.get_last_record_lsn())? {
+            if let Some(oldsize) = self
+                .tl
+                .get_relish_size(rel, self.tl.get_last_record_lsn())?
+            {
                 let old_last_seg = if oldsize == 0 {
                     0
                 } else {
@@ -1916,10 +1886,10 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                         rel,
                         segno: remove_segno,
                     };
-                    self.0
-                        .perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
+                    let layer = self.tl.get_layer_for_write(seg, lsn)?;
+                    layer.drop_segment(lsn);
                 }
-                self.0
+                self.tl
                     .decrease_current_logical_size(oldsize * BLCKSZ as u32);
             } else {
                 warn!(
@@ -1930,8 +1900,8 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         } else {
             // TODO handle TwoPhase relishes
             let seg = SegmentTag::from_blknum(rel, 0);
-            self.0
-                .perform_write_op(seg, lsn, |layer| layer.drop_segment(lsn))?;
+            let layer = self.tl.get_layer_for_write(seg, lsn)?;
+            layer.drop_segment(lsn);
         }
 
         Ok(())
@@ -1943,7 +1913,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
     fn advance_last_record_lsn(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
-        self.0.last_record_lsn.advance(new_lsn);
+        self.tl.last_record_lsn.advance(new_lsn);
     }
 }
 
