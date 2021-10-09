@@ -55,7 +55,7 @@ impl<K: Ord, V> VecMap<K, V> {
     }
 
     /// Add a key value pair to the map.
-    /// If [`key`] is less than or equal to the current maximum key
+    /// If `key` is less than or equal to the current maximum key
     /// the pair will not be added and InvalidKey error will be returned.
     pub fn append(&mut self, key: K, value: V) -> Result<(), InvalidKey> {
         if let Some((last_key, _last_value)) = self.0.last() {
@@ -69,7 +69,7 @@ impl<K: Ord, V> VecMap<K, V> {
     }
 
     /// Update the maximum key value pair or add a new key value pair to the map.
-    /// If [`key`] is less than the current maximum key no updates or additions
+    /// If `key` is less than the current maximum key no updates or additions
     /// will occur and InvalidKey error will be returned.
     pub fn append_or_update_last(&mut self, key: K, mut value: V) -> Result<Option<V>, InvalidKey> {
         if let Some((last_key, last_value)) = self.0.last_mut() {
@@ -89,8 +89,8 @@ impl<K: Ord, V> VecMap<K, V> {
 
     /// Split the map into two.
     ///
-    /// The left map contains everything before [`cutoff`] (exclusive).
-    /// Right map contains [`cutoff`] and everything after (inclusive).
+    /// The left map contains everything before `cutoff` (exclusive).
+    /// Right map contains `cutoff` and everything after (inclusive).
     pub fn split_at(&self, cutoff: &K) -> (Self, Self)
     where
         K: Clone,
@@ -107,9 +107,9 @@ impl<K: Ord, V> VecMap<K, V> {
         )
     }
 
-    /// Move items from [`other`] to the end of [`self`], leaving [`other`] empty.
-    /// If any keys in [`other`] is less than or equal to any key in [`self`],
-    /// [`InvalidKey`] error will be returned and no mutation will occur.
+    /// Move items from `other` to the end of `self`, leaving `other` empty.
+    /// If any keys in `other` is less than or equal to any key in `self`,
+    /// `InvalidKey` error will be returned and no mutation will occur.
     pub fn extend(&mut self, other: &mut Self) -> Result<(), InvalidKey> {
         let self_last_opt = self.0.last().map(extract_key);
         let other_first_opt = other.0.last().map(extract_key);
