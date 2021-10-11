@@ -10,6 +10,7 @@ endif
 # We differentiate between release / debug build types using the BUILD_TYPE
 # environment variable.
 #
+BUILD_TYPE ?= debug
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
