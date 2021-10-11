@@ -481,7 +481,7 @@ impl PushReplicationConn<'_> {
         loop {
             let connection_result = rt.block_on(tokio_postgres::connect(&ps_connstr, NoTls));
 
-            let (client, _connection) = match connection_result {
+            let (client, connection) = match connection_result {
                 Ok(tuple) => tuple,
                 Err(e) => {
                     error!(
@@ -503,6 +503,8 @@ impl PushReplicationConn<'_> {
                     }
                 }
             };
+            // spawn tokio-postgres task doing the actual IO
+            rt.spawn(connection);
 
             connected_at_least_once = true;
 

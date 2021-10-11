@@ -403,7 +403,7 @@ impl<'pg> PushWalReceiver<'pg> {
         end_of_wal: Lsn,
     ) -> Result<()> {
         // Check that we aren't already receiving for this timeline.
-        if WAL_PUSH_RECEVIERS.lock().unwrap().insert(timelineid) {
+        if !WAL_PUSH_RECEVIERS.lock().unwrap().insert(timelineid) {
             bail!("already receiving WAL for timeline")
         }
 

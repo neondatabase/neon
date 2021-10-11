@@ -541,7 +541,7 @@ impl postgres_backend::Handler for PageServerHandler {
             // START_PUSH_REPLICATION <zenith tenant id> <zenith timelineid> <end of WAL LSN>
             // TODO lazy static
             let re = Regex::new(
-                r"^START_PUSH_REPLICATION ([[:xdigit:]]+) ([[:xdigit:]]+) ([[:xdigit:]]+)$",
+                r"^START_PUSH_REPLICATION ([[:xdigit:]]+) ([[:xdigit:]]+) ([[:xdigit:]]+/[[:xdigit:]]+)$",
             )
             .unwrap();
 
