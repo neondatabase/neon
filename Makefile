@@ -12,15 +12,18 @@ endif
 #
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug
-	PG_CFLAGS = -O2 -g3 ${CFLAGS}
-else
+	PG_CFLAGS = -O2 -g3 $(CFLAGS)
+else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --enable-cassert --enable-depend
-	PG_CFLAGS = -O0 -g3 ${CFLAGS}
+	PG_CFLAGS = -O0 -g3 $(CFLAGS)
+else
+$(error Bad build type `$(BUILD_TYPE)', see Makefile for options)
 endif
 
 #
 # Top level Makefile to build Zenith and PostgreSQL
 #
+.PHONY: all
 all: zenith postgres
 
 # We don't want to run 'cargo build' in parallel with the postgres build,
@@ -68,15 +71,18 @@ postgres: postgres-configure
 	+@echo "Compiling contrib/zenith_test_utils"
 	$(MAKE) -C tmp_install/build/contrib/zenith_test_utils install
 
+.PHONY: postgres-clean
 postgres-clean:
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 clean
 
 # This doesn't remove the effects of 'configure'.
+.PHONY: clean
 clean:
-	cd tmp_install/build && ${MAKE} clean
+	cd tmp_install/build && $(MAKE) clean
 	cargo clean
 
 # This removes everything
+.PHONY: distclean
 distclean:
 	rm -rf tmp_install
 	cargo clean
