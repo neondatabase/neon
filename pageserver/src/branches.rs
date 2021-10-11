@@ -14,12 +14,12 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use tracing::*;
 
-use log::*;
 use zenith_utils::crashsafe_dir;
 use zenith_utils::logging;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::tenant_mgr;
 use crate::walredo::WalRedoManager;
@@ -100,7 +100,7 @@ pub struct PointInTime {
 pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str>) -> Result<()> {
     // Initialize logger
     // use true as daemonize parameter because otherwise we pollute zenith cli output with a few pages long output of info messages
-    let (_scope_guard, _log_file) = logging::init(LOG_FILE_NAME, true)?;
+    let _log_file = logging::init(LOG_FILE_NAME, true)?;
 
     // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
     // process during repository initialization.
@@ -176,7 +176,7 @@ fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
 // to get bootstrap data for timeline initialization.
 //
 fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
-    info!("running initdb... ");
+    info!("running initdb in {}... ", initdbpath.display());
 
     let initdb_path = conf.pg_bin_dir().join("initdb");
     let initdb_output = Command::new(initdb_path)
@@ -195,7 +195,6 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
             String::from_utf8_lossy(&initdb_output.stderr)
         );
     }
-    info!("initdb succeeded");
 
     Ok(())
 }
@@ -210,6 +209,8 @@ fn bootstrap_timeline(
     tli: ZTimelineId,
     repo: &dyn Repository,
 ) -> Result<()> {
+    let _enter = info_span!("bootstrapping", timeline = %tli, tenant = %tenantid).entered();
+
     let initdb_path = conf.tenant_path(&tenantid).join("tmp");
 
     // Init temporarily repo to get bootstrap data
@@ -217,8 +218,6 @@ fn bootstrap_timeline(
     let pgdata_path = initdb_path;
 
     let lsn = get_lsn_from_controlfile(&pgdata_path)?.align();
-
-    info!("bootstrap_timeline {:?} at lsn {}", pgdata_path, lsn);
 
     // Import the contents of the data directory at the initial checkpoint
     // LSN, and any WAL after that.

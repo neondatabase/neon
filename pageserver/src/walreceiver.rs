@@ -12,7 +12,6 @@ use crate::waldecoder::*;
 use crate::PageServerConf;
 use anyhow::{bail, Error, Result};
 use lazy_static::lazy_static;
-use log::*;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
@@ -27,6 +26,7 @@ use std::thread;
 use std::thread::sleep;
 use std::thread_local;
 use std::time::{Duration, SystemTime};
+use tracing::*;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantId;
 use zenith_utils::zid::ZTimelineId;
@@ -96,10 +96,8 @@ fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
 // This is the entry point for the WAL receiver thread.
 //
 fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
-    info!(
-        "WAL receiver thread started for timeline : '{}'",
-        timelineid
-    );
+    let _enter = info_span!("WAL receiver", timeline = %timelineid, tenant = %tenantid).entered();
+    info!("WAL receiver thread started");
 
     //
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
@@ -169,8 +167,8 @@ fn walreceiver_main(
     startpoint += startpoint.calc_padding(8u32);
 
     info!(
-        "last_record_lsn {} starting replication from {} for timeline {}, server is at {}...",
-        last_rec_lsn, startpoint, timelineid, end_of_wal
+        "last_record_lsn {} starting replication from {}, server is at {}...",
+        last_rec_lsn, startpoint, end_of_wal
     );
 
     let query = format!("START_REPLICATION PHYSICAL {}", startpoint);
@@ -198,6 +196,8 @@ fn walreceiver_main(
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                    let _enter = info_span!("processing record", lsn = %lsn).entered();
+
                     // Save old checkpoint value to compare with it after decoding WAL record
                     let old_checkpoint_bytes = checkpoint.encode();
                     let decoded = decode_wal_record(recdata.clone());

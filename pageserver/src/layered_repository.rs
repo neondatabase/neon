@@ -15,9 +15,9 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
-use log::*;
 use postgres_ffi::pg_constants::BLCKSZ;
 use serde::{Deserialize, Serialize};
+use tracing::*;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -243,6 +243,10 @@ impl LayeredRepository {
                     None
                 };
 
+                let _enter =
+                    info_span!("loading timeline", timeline = %timelineid, tenant = %self.tenantid)
+                        .entered();
+
                 let mut timeline = LayeredTimeline::new(
                     self.conf,
                     metadata,
@@ -316,7 +320,11 @@ impl LayeredRepository {
             // bytes of WAL since last checkpoint.
             {
                 let timelines = self.timelines.lock().unwrap();
-                for (_timelineid, timeline) in timelines.iter() {
+                for (timelineid, timeline) in timelines.iter() {
+                    let _entered =
+                        info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid)
+                            .entered();
+
                     STORAGE_TIME
                         .with_label_values(&["checkpoint_timed"])
                         .observe_closure_duration(|| {
@@ -364,14 +372,13 @@ impl LayeredRepository {
         data: &TimelineMetadata,
         first_save: bool,
     ) -> Result<()> {
+        let _enter = info_span!("saving metadata").entered();
         let path = metadata_path(conf, timelineid, tenantid);
         // use OpenOptions to ensure file presence is consistent with first_save
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(first_save)
             .open(&path)?;
-
-        info!("saving metadata {}", path.display());
 
         let mut metadata_bytes = TimelineMetadata::ser(data)?;
 
@@ -686,13 +693,7 @@ impl Timeline for LayeredTimeline {
             let segsize;
             if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
                 segsize = layer.get_seg_size(lsn)?;
-                trace!(
-                    "get_seg_size: {} at {}/{} -> {}",
-                    seg,
-                    self.timelineid,
-                    lsn,
-                    segsize
-                );
+                trace!("get_seg_size: {} at {} -> {}", seg, lsn, segsize);
             } else {
                 if segno == 0 {
                     return Ok(None);
@@ -794,7 +795,7 @@ impl Timeline for LayeredTimeline {
                 result.insert(new_relish);
                 trace!("List object {}", new_relish);
             } else {
-                trace!("Filter out droped object {}", new_relish);
+                trace!("Filtered out dropped object {}", new_relish);
             }
         }
 
@@ -972,6 +973,8 @@ impl Timeline for LayeredTimeline {
     fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
         let mut total_blocks: usize = 0;
 
+        let _enter = info_span!("calc logical size", %lsn).entered();
+
         // list of all relations in this timeline, including ancestor timelines
         let all_rels = self.list_rels(0, 0, lsn)?;
 
@@ -1042,11 +1045,8 @@ impl LayeredTimeline {
     /// Returns all timeline-related files that were found and loaded.
     ///
     fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<Vec<PathBuf>> {
-        info!(
-            "loading layer map for timeline {} into memory",
-            self.timelineid
-        );
         let mut layers = self.layers.lock().unwrap();
+        let mut num_layers = 0;
         let (imgfilenames, deltafilenames) =
             filename::list_files(self.conf, self.timelineid, self.tenantid)?;
 
@@ -1066,14 +1066,10 @@ impl LayeredTimeline {
 
             let layer = ImageLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
-            info!(
-                "found layer {} {} on timeline {}",
-                layer.get_seg_tag(),
-                layer.get_start_lsn(),
-                self.timelineid
-            );
+            trace!("found layer {}", layer.filename().display());
             local_layers.push(layer.path());
             layers.insert_historic(Arc::new(layer));
+            num_layers += 1;
         }
 
         for filename in &deltafilenames {
@@ -1090,14 +1086,12 @@ impl LayeredTimeline {
 
             let layer = DeltaLayer::new(self.conf, self.timelineid, self.tenantid, filename);
 
-            info!(
-                "found layer {} on timeline {}",
-                layer.filename().display(),
-                self.timelineid,
-            );
+            trace!("found layer {}", layer.filename().display());
             local_layers.push(layer.path());
             layers.insert_historic(Arc::new(layer));
+            num_layers += 1;
         }
+        info!("loaded layer map with {} layers", num_layers);
 
         Ok(local_layers)
     }
@@ -1148,12 +1142,7 @@ impl LayeredTimeline {
         lsn: Lsn,
         self_layers: &MutexGuard<LayerMap>,
     ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
-        trace!(
-            "get_layer_for_read called for {} at {}/{}",
-            seg,
-            self.timelineid,
-            lsn
-        );
+        trace!("get_layer_for_read called for {} at {}", seg, lsn);
 
         // If you requested a page at an older LSN, before the branch point, dig into
         // the right ancestor timeline. This can only happen if you launch a read-only
@@ -1271,17 +1260,15 @@ impl LayeredTimeline {
                 // First modification on this timeline
                 start_lsn = self.ancestor_lsn + 1;
                 trace!(
-                    "creating layer for write for {} at branch point {}/{}",
+                    "creating layer for write for {} at branch point {}",
                     seg,
-                    self.timelineid,
                     start_lsn
                 );
             } else {
                 start_lsn = prev_layer.get_end_lsn();
                 trace!(
-                    "creating layer for write for {} after previous layer {}/{}",
+                    "creating layer for write for {} after previous layer {}",
                     seg,
-                    self.timelineid,
                     start_lsn
                 );
             }
@@ -1340,11 +1327,7 @@ impl LayeredTimeline {
             prev: prev_record_lsn,
         } = self.last_record_lsn.load();
 
-        trace!(
-            "checkpointing timeline {} at {}",
-            self.timelineid,
-            last_record_lsn
-        );
+        trace!("checkpoint starting at {}", last_record_lsn);
 
         // Take the in-memory layer with the oldest WAL record. If it's older
         // than the threshold, write it out to disk as a new image and delta file.
@@ -1520,11 +1503,11 @@ impl LayeredTimeline {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
 
-        info!(
-            "running GC on timeline {}, cutoff {}",
-            self.timelineid, cutoff
-        );
-        info!("retain_lsns:  {:?}", retain_lsns);
+        let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
+
+        info!("GC starting");
+
+        debug!("retain_lsns: {:?}", retain_lsns);
 
         let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
 
@@ -1786,10 +1769,9 @@ impl LayeredTimeline {
         if data.records.is_empty() {
             if let Some(img) = &data.page_img {
                 trace!(
-                    "found page image for blk {} in {} at {}/{}, no WAL redo required",
+                    "found page image for blk {} in {} at {}, no WAL redo required",
                     blknum,
                     rel,
-                    self.timelineid,
                     request_lsn
                 );
                 Ok(img.clone())
@@ -1815,9 +1797,9 @@ impl LayeredTimeline {
                 Ok(ZERO_PAGE.clone())
             } else {
                 if data.page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}/{}, performing WAL redo", data.records.len(), blknum, rel, self.timelineid, request_lsn);
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}, performing WAL redo", data.records.len(), blknum, rel, request_lsn);
                 } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}/{}, performing WAL redo", data.records.len(), blknum, rel, self.timelineid, request_lsn);
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}, performing WAL redo", data.records.len(), blknum, rel, request_lsn);
                 }
                 let img = self.walredo_mgr.request_redo(
                     rel,

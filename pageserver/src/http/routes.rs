@@ -6,6 +6,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use routerify::{ext::RequestExt, RouterBuilder};
+use tracing::*;
 use zenith_utils::auth::JwtAuth;
 use zenith_utils::http::endpoint::attach_openapi_ui;
 use zenith_utils::http::endpoint::auth_middleware;
@@ -98,6 +99,7 @@ async fn branch_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, Some(request_data.tenant_id))?;
 
     let response_data = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("/branch_create", name = %request_data.name, tenant = %request_data.tenant_id, startpoint=%request_data.start_point).entered();
         branches::create_branch(
             get_config(&request),
             &request_data.name,
@@ -116,6 +118,7 @@ async fn branch_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     check_permission(&request, Some(tenantid))?;
 
     let response_data = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("branch_list", tenant = %tenantid).entered();
         crate::branches::get_branches(get_config(&request), &tenantid)
     })
     .await
@@ -126,11 +129,12 @@ async fn branch_list_handler(request: Request<Body>) -> Result<Response<Body>, A
 // TODO add to swagger
 async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    let branch_name: &str = get_request_param(&request, "branch_name")?;
+    let branch_name: String = get_request_param(&request, "branch_name")?.to_string();
     let conf = get_state(&request).conf;
-    let path = conf.branch_path(branch_name, &tenantid);
+    let path = conf.branch_path(&branch_name, &tenantid);
 
     let response_data = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("branch_detail", tenant = %tenantid, branch=%branch_name).entered();
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
         BranchInfo::from_path(path, conf, &tenantid, &repo)
     })
@@ -144,10 +148,13 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     // check for management permission
     check_permission(&request, None)?;
 
-    let response_data =
-        tokio::task::spawn_blocking(move || crate::branches::get_tenants(get_config(&request)))
-            .await
-            .map_err(ApiError::from_err)??;
+    let response_data = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_list").entered();
+        crate::branches::get_tenants(get_config(&request))
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
     Ok(json_response(StatusCode::OK, response_data)?)
 }
 
@@ -158,6 +165,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
     let response_data = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id).entered();
         tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
     })
     .await

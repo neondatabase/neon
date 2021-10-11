@@ -35,6 +35,7 @@ scopeguard = "1.1.0"
 rust-s3 = { version = "0.27.0-rc4", features = ["no-verify-ssl"] }
 async-trait = "0.1"
 const_format = "0.2.21"
+tracing = "0.1.27"
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }

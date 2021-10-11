@@ -2,7 +2,6 @@
 // Main entry point for the Page Server executable
 //
 
-use log::*;
 use pageserver::defaults::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,6 +11,7 @@ use std::{
     str::FromStr,
     thread,
 };
+use tracing::*;
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
 
 use anyhow::{bail, ensure, Context, Result};
@@ -447,7 +447,7 @@ fn main() -> Result<()> {
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Initialize logger
-    let (_scope_guard, log_file) = logging::init(LOG_FILE_NAME, conf.daemonize)?;
+    let log_file = logging::init(LOG_FILE_NAME, conf.daemonize)?;
 
     // TODO: Check that it looks like a valid repository before going further
 
@@ -480,7 +480,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
         match daemonize.start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(e) => error!("could not daemonize: {:#}", e),
+            Err(err) => error!(%err, "could not daemonize"),
         }
     }
 

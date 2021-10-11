@@ -2,7 +2,6 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! zenith Timeline.
 //!
-use log::*;
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
 use std::cmp::min;
@@ -13,6 +12,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
+use tracing::*;
 
 use crate::relish::*;
 use crate::repository::*;
@@ -139,6 +139,7 @@ fn import_relfile(
     dboid: Oid,
 ) -> Result<()> {
     // Does it look like a relation file?
+    trace!("importing rel file {}", path.display());
 
     let p = parse_relfilename(path.file_name().unwrap().to_str().unwrap());
     if let Err(e) = p {
@@ -166,14 +167,14 @@ fn import_relfile(
             }
 
             // TODO: UnexpectedEof is expected
-            Err(e) => match e.kind() {
+            Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
                     // FIXME: maybe check that we read the full length of the file?
                     break;
                 }
                 _ => {
-                    bail!("error reading file {}: {:#}", path.display(), e);
+                    bail!("error reading file {}: {:#}", path.display(), err);
                 }
             },
         };
@@ -200,7 +201,7 @@ fn import_nonrel_file(
     // read the whole file
     file.read_to_end(&mut buffer)?;
 
-    info!("importing non-rel file {}", path.display());
+    trace!("importing non-rel file {}", path.display());
 
     timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buffer[..]))?;
     Ok(())
@@ -217,7 +218,7 @@ fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result
     // read the whole file
     file.read_to_end(&mut buffer)?;
 
-    info!("importing control file {}", path.display());
+    trace!("importing control file {}", path.display());
 
     // Import it as ControlFile
     timeline.put_page_image(
@@ -244,7 +245,7 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
     let mut buf: [u8; 8192] = [0u8; 8192];
     let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
 
-    info!("importing slru file {}", path.display());
+    trace!("importing slru file {}", path.display());
 
     let mut rpageno = 0;
     loop {
@@ -260,14 +261,14 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
             }
 
             // TODO: UnexpectedEof is expected
-            Err(e) => match e.kind() {
+            Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
                     // FIXME: maybe check that we read the full length of the file?
                     break;
                 }
                 _ => {
-                    bail!("error reading file {}: {:#}", path.display(), e);
+                    bail!("error reading file {}: {:#}", path.display(), err);
                 }
             },
         };

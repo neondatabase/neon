@@ -31,7 +31,7 @@ use zenith_utils::lsn::Lsn;
 pub struct Basebackup<'a> {
     ar: Builder<&'a mut dyn Write>,
     timeline: &'a Arc<dyn Timeline>,
-    lsn: Lsn,
+    pub lsn: Lsn,
     prev_record_lsn: Lsn,
 }
 
@@ -97,7 +97,6 @@ impl<'a> Basebackup<'a> {
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
-            info!("send subdir {:?}", *dir);
             let header = new_tar_header_dir(*dir)?;
             self.ar.append(&header, &mut io::empty())?;
         }

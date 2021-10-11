@@ -579,9 +579,8 @@ impl InMemoryLayer {
     /// After completion, self is non-writeable, but not frozen.
     pub fn freeze(self: Arc<Self>, cutoff_lsn: Lsn) -> Result<FreezeLayers> {
         info!(
-            "freezing in memory layer {} on timeline {} at {} (oldest {})",
+            "freezing in-memory layer {} at {} (oldest {})",
             self.filename().display(),
-            self.timelineid,
             cutoff_lsn,
             self.oldest_pending_lsn
         );
