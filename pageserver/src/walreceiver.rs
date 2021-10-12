@@ -214,26 +214,27 @@ fn walreceiver_main(
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                     let _enter = info_span!("processing record", lsn = %lsn).entered();
 
-                    // Save old checkpoint value to compare with it after decoding WAL record
-                    let old_checkpoint_bytes = checkpoint.encode();
-                    let decoded = decode_wal_record(recdata.clone());
-
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
                     // at risk of hittind a deadlock.
                     assert!(lsn.is_aligned());
 
+                    let mut checkpoint_modified = false;
+
+                    let decoded = decode_wal_record(recdata.clone());
                     restore_local_repo::save_decoded_record(
                         &mut checkpoint,
+                        &mut checkpoint_modified,
                         &*timeline,
                         &decoded,
                         recdata,
                         lsn,
                     )?;
 
-                    let new_checkpoint_bytes = checkpoint.encode();
                     // Check if checkpoint data was updated by save_decoded_record
-                    if new_checkpoint_bytes != old_checkpoint_bytes {
+                    if checkpoint_modified {
+                        let new_checkpoint_bytes = checkpoint.encode();
+
                         timeline.put_page_image(
                             RelishTag::Checkpoint,
                             0,

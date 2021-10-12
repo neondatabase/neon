@@ -286,12 +286,15 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
 ///
 pub fn save_decoded_record(
     checkpoint: &mut CheckPoint,
+    checkpoint_modified: &mut bool,
     timeline: &dyn Timeline,
     decoded: &DecodedWALRecord,
     recdata: Bytes,
     lsn: Lsn,
 ) -> Result<()> {
-    checkpoint.update_next_xid(decoded.xl_xid);
+    if checkpoint.update_next_xid(decoded.xl_xid) {
+        *checkpoint_modified = true;
+    }
 
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
@@ -375,7 +378,7 @@ pub fn save_decoded_record(
         } else {
             assert!(info == pg_constants::CLOG_TRUNCATE);
             let xlrec = XlClogTruncate::decode(&mut buf);
-            save_clog_truncate_record(checkpoint, timeline, lsn, &xlrec)?;
+            save_clog_truncate_record(checkpoint, checkpoint_modified, timeline, lsn, &xlrec)?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
         let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
@@ -444,10 +447,17 @@ pub fn save_decoded_record(
             )?;
         } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
             let xlrec = XlMultiXactCreate::decode(&mut buf);
-            save_multixact_create_record(checkpoint, timeline, lsn, &xlrec, decoded)?;
+            save_multixact_create_record(
+                checkpoint,
+                checkpoint_modified,
+                timeline,
+                lsn,
+                &xlrec,
+                decoded,
+            )?;
         } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
             let xlrec = XlMultiXactTruncate::decode(&mut buf);
-            save_multixact_truncate_record(checkpoint, timeline, lsn, &xlrec)?;
+            save_multixact_truncate_record(checkpoint, checkpoint_modified, timeline, lsn, &xlrec)?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
         let xlrec = XlRelmapUpdate::decode(&mut buf);
@@ -456,7 +466,10 @@ pub fn save_decoded_record(
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_NEXTOID {
             let next_oid = buf.get_u32_le();
-            checkpoint.nextOid = next_oid;
+            if checkpoint.nextOid != next_oid {
+                checkpoint.nextOid = next_oid;
+                *checkpoint_modified = true;
+            }
         } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
             || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
         {
@@ -472,6 +485,7 @@ pub fn save_decoded_record(
             );
             if (checkpoint.oldestXid.wrapping_sub(xlog_checkpoint.oldestXid) as i32) < 0 {
                 checkpoint.oldestXid = xlog_checkpoint.oldestXid;
+                *checkpoint_modified = true;
             }
         }
     }
@@ -675,6 +689,7 @@ fn save_xact_record(
 
 fn save_clog_truncate_record(
     checkpoint: &mut CheckPoint,
+    checkpoint_modified: &mut bool,
     timeline: &dyn Timeline,
     lsn: Lsn,
     xlrec: &XlClogTruncate,
@@ -693,6 +708,7 @@ fn save_clog_truncate_record(
     // TODO Figure out if there will be any issues with replica.
     checkpoint.oldestXid = xlrec.oldest_xid;
     checkpoint.oldestXidDB = xlrec.oldest_xid_db;
+    *checkpoint_modified = true;
 
     // TODO Treat AdvanceOldestClogXid() or write a comment why we don't need it
 
@@ -735,6 +751,7 @@ fn save_clog_truncate_record(
 
 fn save_multixact_create_record(
     checkpoint: &mut CheckPoint,
+    checkpoint_modified: &mut bool,
     timeline: &dyn Timeline,
     lsn: Lsn,
     xlrec: &XlMultiXactCreate,
@@ -791,9 +808,11 @@ fn save_multixact_create_record(
     }
     if xlrec.mid >= checkpoint.nextMulti {
         checkpoint.nextMulti = xlrec.mid + 1;
+        *checkpoint_modified = true;
     }
     if xlrec.moff + xlrec.nmembers > checkpoint.nextMultiOffset {
         checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
+        *checkpoint_modified = true;
     }
     let max_mbr_xid = xlrec.members.iter().fold(0u32, |acc, mbr| {
         if mbr.xid.wrapping_sub(acc) as i32 > 0 {
@@ -803,18 +822,22 @@ fn save_multixact_create_record(
         }
     });
 
-    checkpoint.update_next_xid(max_mbr_xid);
+    if checkpoint.update_next_xid(max_mbr_xid) {
+        *checkpoint_modified = true;
+    }
     Ok(())
 }
 
 fn save_multixact_truncate_record(
     checkpoint: &mut CheckPoint,
+    checkpoint_modified: &mut bool,
     timeline: &dyn Timeline,
     lsn: Lsn,
     xlrec: &XlMultiXactTruncate,
 ) -> Result<()> {
     checkpoint.oldestMulti = xlrec.end_trunc_off;
     checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
+    *checkpoint_modified = true;
 
     // PerformMembersTruncation
     let maxsegment: i32 = mx_offset_to_member_segment(pg_constants::MAX_MULTIXACT_OFFSET);

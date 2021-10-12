@@ -377,10 +377,12 @@ impl CheckPoint {
         Ok(CheckPoint::des(buf)?)
     }
 
-    // Update next XID based on provided new_xid and stored epoch.
-    // Next XID should be greater than new_xid.
-    // Also take in account 32-bit wrap-around.
-    pub fn update_next_xid(&mut self, xid: u32) {
+    /// Update next XID based on provided new_xid and stored epoch.
+    /// Next XID should be greater than new_xid. This handles 32-bit
+    /// XID wraparound correctly.
+    ///
+    /// Returns 'true' if the XID was updated.
+    pub fn update_next_xid(&mut self, xid: u32) -> bool {
         let xid = xid.wrapping_add(XID_CHECKPOINT_INTERVAL - 1) & !(XID_CHECKPOINT_INTERVAL - 1);
         let full_xid = self.nextXid.value;
         let new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
@@ -391,10 +393,14 @@ impl CheckPoint {
                 // wrap-around
                 epoch += 1;
             }
-            self.nextXid = FullTransactionId {
-                value: (epoch << 32) | new_xid as u64,
-            };
+            let nextXid = (epoch << 32) | new_xid as u64;
+
+            if nextXid != self.nextXid.value {
+                self.nextXid = FullTransactionId { value: nextXid };
+                return true;
+            }
         }
+        false
     }
 }
 
