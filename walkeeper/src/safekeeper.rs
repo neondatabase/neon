@@ -21,6 +21,7 @@ use crate::replication::HotStandbyFeedback;
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
 use zenith_metrics::{
     register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,
+    DISK_WRITE_SECONDS_BUCKETS,
 };
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
@@ -304,13 +305,15 @@ lazy_static! {
     static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_bytes",
         "Bytes written to WAL in a single request, grouped by timeline",
-        &["ztli"]
+        &["ztli"],
+        vec![1.0, 10.0, 100.0, 1024.0, 8192.0, 128.0 * 1024.0, 1024.0 * 1024.0, 10.0 * 1024.0 * 1024.0]
     )
     .expect("Failed to register safekeeper_write_wal_bytes histogram vec");
     static ref WRITE_WAL_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_seconds",
         "Seconds spent writing and syncing WAL to a disk in a single request, grouped by timeline",
-        &["ztli"]
+        &["ztli"],
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_write_wal_seconds histogram vec");
 }

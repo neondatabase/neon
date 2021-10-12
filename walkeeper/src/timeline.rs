@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
-use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec};
+use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
@@ -78,13 +78,15 @@ lazy_static! {
     static ref PERSIST_SYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_persist_sync_control_file_seconds",
         "Seconds to persist and sync control file, grouped by timeline",
-        &["ztli"]
+        &["ztli"],
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_sync_control_file_seconds histogram vec");
     static ref PERSIST_NOSYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_persist_nosync_control_file_seconds",
         "Seconds to persist and sync control file, grouped by timeline",
-        &["ztli"]
+        &["ztli"],
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_nosync_control_file_seconds histogram vec");
 }
