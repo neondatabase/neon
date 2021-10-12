@@ -12,13 +12,7 @@ use crate::WalAcceptorConf;
 use zenith_utils::postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
-pub fn thread_main(conf: WalAcceptorConf) -> Result<()> {
-    info!("Starting wal acceptor on {}", conf.listen_pg_addr);
-    let listener = TcpListener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
-        error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
-        e
-    })?;
-
+pub fn thread_main(conf: WalAcceptorConf, listener: TcpListener) -> Result<()> {
     loop {
         match listener.accept() {
             Ok((socket, peer_addr)) => {
