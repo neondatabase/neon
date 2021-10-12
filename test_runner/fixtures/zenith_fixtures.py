@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from cached_property import cached_property
 import asyncpg
 import os
@@ -10,6 +10,7 @@ import jwt
 import json
 import psycopg2
 import pytest
+import re
 import shutil
 import signal
 import subprocess
@@ -1056,6 +1057,12 @@ class SafekeeperTimelineStatus:
     flush_lsn: str
 
 
+@dataclass
+class SafekeeperMetrics:
+    timeline_flush_lsn_inexact: Dict[str, int] = field(default_factory=dict)
+    timeline_commit_lsn_inexact: Dict[str, int] = field(default_factory=dict)
+
+
 class SafekeeperHttpClient(requests.Session):
     def __init__(self, port: int) -> None:
         super().__init__()
@@ -1070,6 +1077,22 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
                                         flush_lsn=resj['flush_lsn'])
+
+    def get_metrics(self) -> SafekeeperMetrics:
+        request_result = self.get(f"http://localhost:{self.port}/metrics")
+        request_result.raise_for_status()
+        all_metrics_text = request_result.text
+
+        metrics = SafekeeperMetrics()
+        for match in re.finditer(r'^safekeeper_flush_lsn{ztli="([0-9a-f]+)"} (\S+)$',
+                                 all_metrics_text,
+                                 re.MULTILINE):
+            metrics.timeline_flush_lsn_inexact[match.group(1)] = int(match.group(2))
+        for match in re.finditer(r'^safekeeper_commit_lsn{ztli="([0-9a-f]+)"} (\S+)$',
+                                 all_metrics_text,
+                                 re.MULTILINE):
+            metrics.timeline_commit_lsn_inexact[match.group(1)] = int(match.group(2))
+        return metrics
 
 
 def get_test_output_dir(request: Any) -> str:
