@@ -23,7 +23,7 @@ pub mod defaults {
 }
 
 #[derive(Debug, Clone)]
-pub struct WalAcceptorConf {
+pub struct SafeKeeperConf {
     pub data_dir: PathBuf,
     pub daemonize: bool,
     pub no_sync: bool,

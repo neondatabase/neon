@@ -21,7 +21,7 @@ use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
     Storage, SK_FORMAT_VERSION, SK_MAGIC,
 };
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 
 const CONTROL_FILE_NAME: &str = "safekeeper.control";
@@ -50,7 +50,7 @@ impl SharedState {
     /// data dir.
     /// If create=false and file doesn't exist, bails out.
     fn create_restore(
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         timelineid: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<Self> {
@@ -92,7 +92,7 @@ impl SharedState {
     /// Fetch and lock control file (prevent running more than one instance of safekeeper)
     /// If create=false and file doesn't exist, bails out.
     fn load_control_file(
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         timelineid: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<(File, SafeKeeperState)> {
@@ -254,7 +254,7 @@ impl Timeline {
 pub trait TimelineTools {
     fn set(
         &mut self,
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
@@ -266,7 +266,7 @@ pub trait TimelineTools {
 impl TimelineTools for Option<Arc<Timeline>> {
     fn set(
         &mut self,
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
@@ -295,7 +295,7 @@ impl GlobalTimelines {
     /// Get a timeline with control file loaded from the global TIMELINES map.
     /// If control file doesn't exist and create=false, bails out.
     pub fn get(
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
@@ -324,7 +324,7 @@ impl GlobalTimelines {
 #[derive(Debug)]
 struct FileStorage {
     control_file: File,
-    conf: WalAcceptorConf,
+    conf: SafeKeeperConf,
 }
 
 impl Storage for FileStorage {

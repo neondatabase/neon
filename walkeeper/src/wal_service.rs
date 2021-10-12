@@ -8,11 +8,11 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use crate::send_wal::SendWalHandler;
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 use zenith_utils::postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
-pub fn thread_main(conf: WalAcceptorConf, listener: TcpListener) -> Result<()> {
+pub fn thread_main(conf: SafeKeeperConf, listener: TcpListener) -> Result<()> {
     loop {
         match listener.accept() {
             Ok((socket, peer_addr)) => {
@@ -31,7 +31,7 @@ pub fn thread_main(conf: WalAcceptorConf, listener: TcpListener) -> Result<()> {
 
 /// This is run by `thread_main` above, inside a background thread.
 ///
-fn handle_socket(socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
+fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<()> {
     socket.set_nodelay(true)?;
 
     let mut conn_handler = SendWalHandler::new(conf);

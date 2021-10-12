@@ -17,7 +17,7 @@ use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
-use walkeeper::WalAcceptorConf;
+use walkeeper::SafeKeeperConf;
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let mut conf = WalAcceptorConf {
+    let mut conf = SafeKeeperConf {
         data_dir: PathBuf::from("./"),
         daemonize: false,
         no_sync: false,
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     start_wal_acceptor(conf)
 }
 
-fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
+fn start_wal_acceptor(conf: SafeKeeperConf) -> Result<()> {
     let log_filename = conf.data_dir.join("safekeeper.log");
     let log_file = logging::init(log_filename, conf.daemonize)?;
 

@@ -10,7 +10,7 @@ use zenith_utils::lsn::Lsn;
 use crate::safekeeper::AcceptorState;
 use crate::timeline::CreateControlFile;
 use crate::timeline::GlobalTimelines;
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 use zenith_utils::http::endpoint;
 use zenith_utils::http::error::ApiError;
 use zenith_utils::http::json::json_response;
@@ -22,9 +22,9 @@ async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     Ok(json_response(StatusCode::OK, "")?)
 }
 
-fn get_conf(request: &Request<Body>) -> &WalAcceptorConf {
+fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
     request
-        .data::<Arc<WalAcceptorConf>>()
+        .data::<Arc<SafeKeeperConf>>()
         .expect("unknown state type")
         .as_ref()
 }
@@ -76,7 +76,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
 }
 
 /// Safekeeper http router.
-pub fn make_router(conf: WalAcceptorConf) -> RouterBuilder<hyper::Body, ApiError> {
+pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
     let router = endpoint::make_router();
     router
         .data(Arc::new(conf))

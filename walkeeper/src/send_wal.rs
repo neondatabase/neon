@@ -6,7 +6,7 @@ use crate::json_ctrl::handle_json_ctrl;
 use crate::receive_wal::ReceiveWalConn;
 use crate::replication::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use std::str::FromStr;
@@ -20,7 +20,7 @@ use crate::timeline::CreateControlFile;
 
 /// Handler for streaming WAL from acceptor
 pub struct SendWalHandler {
-    pub conf: WalAcceptorConf,
+    pub conf: SafeKeeperConf,
     /// assigned application name
     pub appname: Option<String>,
     pub tenantid: Option<ZTenantId>,
@@ -85,7 +85,7 @@ impl postgres_backend::Handler for SendWalHandler {
 }
 
 impl SendWalHandler {
-    pub fn new(conf: WalAcceptorConf) -> Self {
+    pub fn new(conf: SafeKeeperConf) -> Self {
         SendWalHandler {
             conf,
             appname: None,
