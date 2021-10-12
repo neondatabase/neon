@@ -1,5 +1,5 @@
 //
-// Main entry point for the wal_acceptor executable
+// Main entry point for the safekeeper executable
 //
 use anyhow::Result;
 use clap::{App, Arg};
@@ -20,7 +20,7 @@ use walkeeper::WalAcceptorConf;
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
-    let arg_matches = App::new("Zenith wal_acceptor")
+    let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .arg(
             Arg::with_name("datadir")

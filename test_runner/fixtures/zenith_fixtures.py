@@ -64,7 +64,7 @@ def pytest_configure(config):
          raise Exception('Too many workers configured. Cannot distrubute ports for services.')
 
     # does not use -c as it is not supported on macOS
-    cmd = ['pgrep', 'pageserver|postgres|wal_acceptor']
+    cmd = ['pgrep', 'pageserver|postgres|safekeeper']
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
     if result.returncode == 0:
         # returncode of 0 means it found something.
@@ -72,7 +72,7 @@ def pytest_configure(config):
         # result of the test.
         # NOTE this shows as an internal pytest error, there might be a better way
         raise Exception(
-            'Found interfering processes running. Stop all Zenith pageservers, nodes, WALs, as well as stand-alone Postgres.'
+            'Found interfering processes running. Stop all Zenith pageservers, nodes, safekeepers, as well as stand-alone Postgres.'
         )
 
 
@@ -895,7 +895,7 @@ class WalAcceptor:
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """
     def __init__(self, zenith_binpath: Path, data_dir: Path, pageserver_port: int, port_distributor: PortDistributor):
-        self.wa_bin_path = zenith_binpath / 'wal_acceptor'
+        self.wa_bin_path = zenith_binpath / 'safekeeper'
         self.data_dir = data_dir
         self.instances: List[WalAcceptor] = []
         self.port_distributor = port_distributor

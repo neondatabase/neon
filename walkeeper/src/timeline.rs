@@ -112,7 +112,7 @@ impl SharedState {
         }
         match opts.open(&control_file_path) {
             Ok(mut file) => {
-                // Lock file to prevent two or more active wal_acceptors
+                // Lock file to prevent two or more active safekeepers
                 match file.try_lock_exclusive() {
                     Ok(()) => {}
                     Err(e) => {
