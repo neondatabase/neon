@@ -54,7 +54,7 @@ fn main() -> Result<()> {
             Arg::with_name("ttl")
                 .long("ttl")
                 .takes_value(true)
-                .help("interval for keeping WAL as walkeeper node, after which them will be uploaded to S3 and removed locally"),
+                .help("interval for keeping WAL as safekeeper node, after which them will be uploaded to S3 and removed locally"),
         )
         .arg(
             Arg::with_name("recall")
