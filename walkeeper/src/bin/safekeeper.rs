@@ -1,5 +1,5 @@
 //
-// Main entry point for the wal_acceptor executable
+// Main entry point for the safekeeper executable
 //
 use anyhow::Result;
 use clap::{App, Arg};
@@ -20,14 +20,14 @@ use walkeeper::WalAcceptorConf;
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
-    let arg_matches = App::new("Zenith wal_acceptor")
+    let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .arg(
             Arg::with_name("datadir")
                 .short("D")
                 .long("dir")
                 .takes_value(true)
-                .help("Path to the WAL acceptor data directory"),
+                .help("Path to the safekeeper data directory"),
         )
         .arg(
             Arg::with_name("listen-pg")
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
 }
 
 fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
-    let log_filename = conf.data_dir.join("wal_acceptor.log");
+    let log_filename = conf.data_dir.join("safekeeper.log");
     let log_file = logging::init(log_filename, conf.daemonize)?;
 
     let http_listener = TcpListener::bind(conf.listen_http_addr.clone()).map_err(|e| {
@@ -136,7 +136,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         e
     })?;
 
-    info!("Starting wal acceptor on {}", conf.listen_pg_addr);
+    info!("Starting safekeeper on {}", conf.listen_pg_addr);
     let pg_listener = TcpListener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
         e
@@ -151,7 +151,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         let stderr = log_file;
 
         let daemonize = Daemonize::new()
-            .pid_file("wal_acceptor.pid")
+            .pid_file("safekeeper.pid")
             .working_directory(Path::new("."))
             .stdout(stdout)
             .stderr(stderr);

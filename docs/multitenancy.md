@@ -56,4 +56,4 @@ Tenant id is passed to postgres via GUC the same way as the timeline. Tenant id 
 
 ### Safety
 
-For now particular tenant can only appear on a particular pageserver. Set of WAL acceptors are also pinned to particular (tenantid, timeline) pair so there can only be one writer for particular (tenantid, timeline).
+For now particular tenant can only appear on a particular pageserver. Set of safekeepers are also pinned to particular (tenantid, timeline) pair so there can only be one writer for particular (tenantid, timeline).

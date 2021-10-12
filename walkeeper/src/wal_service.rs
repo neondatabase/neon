@@ -36,7 +36,7 @@ fn handle_socket(socket: TcpStream, conf: WalAcceptorConf) -> Result<()> {
 
     let mut conn_handler = SendWalHandler::new(conf);
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, false)?;
-    // libpq replication protocol between wal_acceptor and replicas/pagers
+    // libpq replication protocol between safekeeper and replicas/pagers
     pgbackend.run(&mut conn_handler)?;
 
     Ok(())

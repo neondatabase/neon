@@ -4,7 +4,7 @@
 
 Currently we build two main images:
 
-- [zenithdb/zenith](https://hub.docker.com/repository/docker/zenithdb/zenith) — image with pre-built `pageserver`, `wal_acceptor` and `proxy` binaries and all the required runtime dependencies. Built from [/Dockerfile](/Dockerfile).
+- [zenithdb/zenith](https://hub.docker.com/repository/docker/zenithdb/zenith) — image with pre-built `pageserver`, `safekeeper` and `proxy` binaries and all the required runtime dependencies. Built from [/Dockerfile](/Dockerfile).
 - [zenithdb/compute-node](https://hub.docker.com/repository/docker/zenithdb/compute-node) — compute node image with pre-built Postgres binaries from [zenithdb/postgres](https://github.com/zenithdb/postgres).
 
 And two intermediate images used either to reduce build time or to deliver some additional binary tools from other repos:
