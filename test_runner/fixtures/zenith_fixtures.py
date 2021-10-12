@@ -394,7 +394,7 @@ class ZenithPageserver(PgProtocol):
         if immediate:
             cmd.append('immediate')
 
-        print(cmd)
+        log.info(f"Stopping pageserver with {cmd}")
         if self.running:
             self.zenith_cli.run(cmd)
             self.running = False
