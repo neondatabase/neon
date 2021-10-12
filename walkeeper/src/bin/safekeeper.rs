@@ -27,7 +27,7 @@ fn main() -> Result<()> {
                 .short("D")
                 .long("dir")
                 .takes_value(true)
-                .help("Path to the WAL acceptor data directory"),
+                .help("Path to the safekeeper data directory"),
         )
         .arg(
             Arg::with_name("listen-pg")
