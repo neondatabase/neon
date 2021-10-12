@@ -492,8 +492,14 @@ where
         // do the job
         let mut last_rec_lsn = Lsn(0);
         if !msg.wal_data.is_empty() {
-            self.storage
-                .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data)?;
+            self.metrics
+                .write_wal_bytes
+                .observe(msg.wal_data.len() as f64);
+            {
+                let _timer = self.metrics.write_wal_seconds.start_timer();
+                self.storage
+                    .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data)?;
+            }
 
             // figure out last record's end lsn for reporting (if we got the
             // whole record)
