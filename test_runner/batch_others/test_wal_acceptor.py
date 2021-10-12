@@ -203,6 +203,7 @@ def test_race_conditions(zenith_cli, pageserver: ZenithPageserver, postgres: Pos
     stop_value.value = 1
     proc.join()
 
+
 class ProposerPostgres:
     """Object for running safekeepers sync with walproposer"""
     def __init__(self, pgdata_dir: str, pg_bin: PgBin, timeline_id: str, tenant_id: str):
@@ -291,3 +292,31 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
     print(f"lsn after sync = {lsn_after_sync}")
 
     assert all(lsn_after_sync == lsn for lsn in lsn_after_append)
+
+
+def test_timeline_status(zenith_cli, pageserver, postgres, wa_factory: WalAcceptorFactory):
+    wa_factory.start_n_new(1)
+
+    zenith_cli.run(["branch", "test_timeline_status", "empty"])
+    pg = postgres.create_start('test_timeline_status', wal_acceptors=wa_factory.get_connstrs())
+
+    wa = wa_factory.instances[0]
+    wa_http_cli = wa.http_client()
+    wa_http_cli.check_status()
+
+    # learn zenith timeline from compute
+    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
+    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+
+    # fetch something sensible from status
+    epoch = wa_http_cli.timeline_status(tenant_id, timeline_id).acceptor_epoch
+
+    pg.safe_psql("create table t(i int)")
+
+    # ensure epoch goes up after reboot
+    pg.stop().start()
+    pg.safe_psql("insert into t values(10)")
+
+    epoch_after_reboot = wa_http_cli.timeline_status(tenant_id,
+                                                     timeline_id).acceptor_epoch
+    assert epoch_after_reboot > epoch

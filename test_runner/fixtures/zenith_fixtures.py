@@ -832,14 +832,21 @@ class WalAcceptor:
         env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None
         subprocess.run(cmd, check=True, env=env)
 
-        # wait for wal acceptor start by checkking that pid is readable
-        for _ in range(3):
-            pid = self.get_pid()
-            if pid is not None:
-                return self
-            time.sleep(0.5)
-
-        raise RuntimeError("cannot get wal acceptor pid")
+        # wait for wal acceptor start by checking its status
+        started_at = time.time()
+        while True:
+            try:
+                http_cli = self.http_client()
+                http_cli.check_status()
+            except Exception as e:
+                elapsed = time.time() - started_at
+                if elapsed > 3:
+                    raise RuntimeError(
+                        f"timed out waiting {elapsed:.0f}s for wal acceptor start: {e}")
+                time.sleep(0.5)
+            else:
+                break  # success
+        return self
 
     @property
     def pidfile(self) -> Path:
@@ -891,6 +898,10 @@ class WalAcceptor:
                 all = cur.fetchall()
                 print(f"JSON_CTRL response: {all[0][0]}")
                 return json.loads(all[0][0])
+
+    def http_client(self):
+        return WalAcceptorHttpClient(port=self.port.http)
+
 
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """
@@ -952,6 +963,24 @@ def wa_factory(zenith_binpath: str, repo_dir: str, pageserver_port: PageserverPo
     # After the yield comes any cleanup code we need.
     print('Starting wal acceptors cleanup')
     wafactory.stop_all()
+
+@dataclass
+class PageserverTimelineStatus:
+    acceptor_epoch: int
+
+class WalAcceptorHttpClient(requests.Session):
+    def __init__(self, port: int) -> None:
+        super().__init__()
+        self.port = port
+
+    def check_status(self):
+        self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
+
+    def timeline_status(self, tenant_id: str, timeline_id: str) -> PageserverTimelineStatus:
+        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
+        res.raise_for_status()
+        resj = res.json()
+        return PageserverTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'])
 
 
 @zenfixture

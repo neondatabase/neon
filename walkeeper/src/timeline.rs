@@ -289,7 +289,7 @@ lazy_static! {
 }
 
 /// A zero-sized struct used to manage access to the global timelines map.
-struct GlobalTimelines;
+pub struct GlobalTimelines;
 
 impl GlobalTimelines {
     /// Get a timeline with control file loaded from the global TIMELINES map.
