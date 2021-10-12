@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -16,6 +15,8 @@ use zenith_utils::http::{
     endpoint,
     error::HttpErrorBody,
     json::{json_request, json_response},
+    request::get_request_param,
+    request::parse_request_param,
 };
 
 use super::models::BranchCreateRequest;
@@ -55,33 +56,6 @@ fn get_state(request: &Request<Body>) -> &State {
 #[inline(always)]
 fn get_config(request: &Request<Body>) -> &'static PageServerConf {
     get_state(request).conf
-}
-
-fn get_request_param<'a>(
-    request: &'a Request<Body>,
-    param_name: &str,
-) -> Result<&'a str, ApiError> {
-    match request.param(param_name) {
-        Some(arg) => Ok(arg),
-        None => {
-            return Err(ApiError::BadRequest(format!(
-                "no {} specified in path param",
-                param_name
-            )))
-        }
-    }
-}
-
-fn parse_request_param<T: FromStr>(
-    request: &Request<Body>,
-    param_name: &str,
-) -> Result<T, ApiError> {
-    match get_request_param(request, param_name)?.parse() {
-        Ok(v) => Ok(v),
-        Err(_) => Err(ApiError::BadRequest(
-            "failed to parse tenant id".to_string(),
-        )),
-    }
 }
 
 // healthcheck handler

@@ -14,6 +14,7 @@ use zenith_utils::http::endpoint;
 use zenith_utils::logging;
 
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
+use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
@@ -164,11 +165,12 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
 
     let mut threads = Vec::new();
 
+    let conf_cloned = conf.clone();
     let http_endpoint_thread = thread::Builder::new()
         .name("http_endpoint_thread".into())
         .spawn(|| {
-            // No authentication at all: read-only metrics only, early stage.
-            let router = endpoint::make_router();
+            // TODO authentication
+            let router = http::make_router(conf_cloned);
             endpoint::serve_thread_main(router, http_listener).unwrap();
         })
         .unwrap();
