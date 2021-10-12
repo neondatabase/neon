@@ -14,6 +14,8 @@ BUILD_TYPE ?= debug
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
+	# Unfortunately, `--profile=...` is a nightly feature
+	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
@@ -21,25 +23,30 @@ else
 $(error Bad build type `$(BUILD_TYPE)', see Makefile for options)
 endif
 
+# Choose whether we should be silent or verbose
+CARGO_BUILD_FLAGS += --$(if $(filter s,$(MAKEFLAGS)),quiet,verbose)
+# Fix for a corner case when make doesn't pass a jobserver
+CARGO_BUILD_FLAGS += $(filter -j1,$(MAKEFLAGS))
+
+# This option has a side effect of passing make jobserver to cargo.
+# However, we shouldn't do this if `make -n` (--dry-run) has been asked.
+CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
+# Force cargo not to print progress bar
+CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
+
 #
 # Top level Makefile to build Zenith and PostgreSQL
 #
 .PHONY: all
 all: zenith postgres
 
-# We don't want to run 'cargo build' in parallel with the postgres build,
-# because interleaving cargo build output with postgres build output looks
-# confusing. Also, 'cargo build' is parallel on its own, so it would be too
-# much parallelism. (Recursive invocation of postgres target still gets any
-# '-j' flag from the command line, so 'make -j' is still useful.)
-.NOTPARALLEL:
-
 ### Zenith Rust bits
 #
 # The 'postgres_ffi' depends on the Postgres headers.
 .PHONY: zenith
 zenith: postgres-headers
-	cargo build
+	+@echo "Compiling Zenith"
+	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 
 ### PostgreSQL parts
 tmp_install/build/config.status:
@@ -61,10 +68,10 @@ postgres-headers: postgres-configure
 	+@echo "Installing PostgreSQL headers"
 	$(MAKE) -C tmp_install/build/src/include MAKELEVEL=0 install
 
-
 # Compile and install PostgreSQL and contrib/zenith
 .PHONY: postgres
-postgres: postgres-configure
+postgres: postgres-configure \
+		  postgres-headers # to prevent `make install` conflicts with zenith's `postgres-headers`
 	+@echo "Compiling PostgreSQL"
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 install
 	+@echo "Compiling contrib/zenith"
@@ -80,13 +87,13 @@ postgres-clean:
 .PHONY: clean
 clean:
 	cd tmp_install/build && $(MAKE) clean
-	cargo clean
+	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything
 .PHONY: distclean
 distclean:
 	rm -rf tmp_install
-	cargo clean
+	$(CARGO_CMD_PREFIX) cargo clean
 
 .PHONY: fmt
 fmt:
