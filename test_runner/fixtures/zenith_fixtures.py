@@ -843,7 +843,7 @@ class WalAcceptor:
 
     @property
     def pidfile(self) -> Path:
-        return self.data_dir / "wal_acceptor.pid"
+        return self.data_dir / "safekeeper.pid"
 
     def get_pid(self) -> Optional[int]:
         if not self.pidfile.exists():

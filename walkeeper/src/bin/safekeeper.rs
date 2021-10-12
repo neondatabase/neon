@@ -128,7 +128,7 @@ fn main() -> Result<()> {
 }
 
 fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
-    let log_filename = conf.data_dir.join("wal_acceptor.log");
+    let log_filename = conf.data_dir.join("safekeeper.log");
     let log_file = logging::init(log_filename, conf.daemonize)?;
 
     let http_listener = TcpListener::bind(conf.listen_http_addr.clone()).map_err(|e| {
@@ -151,7 +151,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         let stderr = log_file;
 
         let daemonize = Daemonize::new()
-            .pid_file("wal_acceptor.pid")
+            .pid_file("safekeeper.pid")
             .working_directory(Path::new("."))
             .stdout(stdout)
             .stderr(stderr);
