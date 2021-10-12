@@ -290,13 +290,13 @@ lazy_static! {
         "Current flush_lsn, grouped by timeline",
         &["ztli"]
     )
-    .expect("Failed to register safekeeper_flush_lsn int gauge vec");
+    .expect("Failed to register safekeeper_flush_lsn gauge vec");
     static ref COMMIT_LSN_GAUGE: GaugeVec = register_gauge_vec!(
         "safekeeper_commit_lsn",
         "Current commit_lsn (not necessarily persisted to disk), grouped by timeline",
         &["ztli"]
     )
-    .expect("Failed to register safekeeper_commit_lsn int gauge vec");
+    .expect("Failed to register safekeeper_commit_lsn gauge vec");
 }
 
 struct SafeKeeperMetrics {
