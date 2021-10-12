@@ -20,7 +20,6 @@ use crate::timeline::CreateControlFile;
 
 /// Handler for streaming WAL from acceptor
 pub struct SendWalHandler {
-    /// wal acceptor configuration
     pub conf: WalAcceptorConf,
     /// assigned application name
     pub appname: Option<String>,

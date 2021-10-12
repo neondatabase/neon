@@ -136,7 +136,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         e
     })?;
 
-    info!("Starting wal acceptor on {}", conf.listen_pg_addr);
+    info!("Starting safekeeper on {}", conf.listen_pg_addr);
     let pg_listener = TcpListener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
         e
