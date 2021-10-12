@@ -125,10 +125,10 @@ fn main() -> Result<()> {
         conf.recall_period = Some(humantime::parse_duration(recall)?);
     }
 
-    start_wal_acceptor(conf)
+    start_safekeeper(conf)
 }
 
-fn start_wal_acceptor(conf: SafeKeeperConf) -> Result<()> {
+fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let log_filename = conf.data_dir.join("safekeeper.log");
     let log_file = logging::init(log_filename, conf.daemonize)?;
 
