@@ -12,6 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
@@ -73,6 +74,21 @@ pub enum CreateControlFile {
     False,
 }
 
+lazy_static! {
+    static ref PERSIST_SYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_persist_sync_control_file_seconds",
+        "Seconds to persist and sync control file, grouped by timeline",
+        &["ztli"]
+    )
+    .expect("Failed to register safekeeper_persist_sync_control_file_seconds histogram vec");
+    static ref PERSIST_NOSYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_persist_nosync_control_file_seconds",
+        "Seconds to persist and sync control file, grouped by timeline",
+        &["ztli"]
+    )
+    .expect("Failed to register safekeeper_persist_nosync_control_file_seconds histogram vec");
+}
+
 impl SharedState {
     /// Get combined stateof all alive replicas
     pub fn get_replicas_state(&self) -> ReplicaState {
@@ -109,9 +125,14 @@ impl SharedState {
         create: CreateControlFile,
     ) -> Result<Self> {
         let (cf, state) = SharedState::load_control_file(conf, timelineid, create)?;
+        let timelineid_str = format!("{}", timelineid);
         let storage = FileStorage {
             control_file: cf,
             conf: conf.clone(),
+            persist_sync_control_file_seconds: PERSIST_SYNC_CONTROL_FILE_SECONDS
+                .with_label_values(&[&timelineid_str]),
+            persist_nosync_control_file_seconds: PERSIST_NOSYNC_CONTROL_FILE_SECONDS
+                .with_label_values(&[&timelineid_str]),
         };
         let (flush_lsn, tli) = if state.server.wal_seg_size != 0 {
             let wal_dir = conf.data_dir.join(format!("{}", timelineid));
@@ -376,10 +397,18 @@ impl GlobalTimelines {
 struct FileStorage {
     control_file: File,
     conf: SafeKeeperConf,
+    persist_sync_control_file_seconds: Histogram,
+    persist_nosync_control_file_seconds: Histogram,
 }
 
 impl Storage for FileStorage {
     fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()> {
+        let _timer = if sync {
+            &self.persist_sync_control_file_seconds
+        } else {
+            &self.persist_nosync_control_file_seconds
+        }
+        .start_timer();
         self.control_file.seek(SeekFrom::Start(0))?;
         s.ser_into(&mut self.control_file)?;
         if sync {
