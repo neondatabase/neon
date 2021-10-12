@@ -136,6 +136,12 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         e
     })?;
 
+    info!("Starting wal acceptor on {}", conf.listen_pg_addr);
+    let pg_listener = TcpListener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
+        error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
+        e
+    })?;
+
     if conf.daemonize {
         info!("daemonizing...");
 
@@ -184,7 +190,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         .name("WAL acceptor thread".into())
         .spawn(|| {
             // thread code
-            let thread_result = wal_service::thread_main(conf);
+            let thread_result = wal_service::thread_main(conf, pg_listener);
             if let Err(e) = thread_result {
                 info!("wal_service thread terminated: {}", e);
             }
