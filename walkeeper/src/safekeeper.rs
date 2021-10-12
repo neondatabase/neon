@@ -19,7 +19,9 @@ use lazy_static::lazy_static;
 
 use crate::replication::HotStandbyFeedback;
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
-use zenith_metrics::{register_gauge_vec, Gauge, GaugeVec};
+use zenith_metrics::{
+    register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,
+};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::pq_proto::SystemId;
@@ -299,11 +301,25 @@ lazy_static! {
         &["ztli"]
     )
     .expect("Failed to register safekeeper_commit_lsn gauge vec");
+    static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
+        "safekeeper_write_wal_bytes",
+        "Bytes written to WAL in a single request, grouped by timeline",
+        &["ztli"]
+    )
+    .expect("Failed to register safekeeper_write_wal_bytes histogram vec");
+    static ref WRITE_WAL_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_write_wal_seconds",
+        "Seconds spent writing and syncing WAL to a disk in a single request, grouped by timeline",
+        &["ztli"]
+    )
+    .expect("Failed to register safekeeper_write_wal_seconds histogram vec");
 }
 
 struct SafeKeeperMetrics {
     flush_lsn: Gauge,
     commit_lsn: Gauge,
+    write_wal_bytes: Histogram,
+    write_wal_seconds: Histogram,
 }
 
 impl SafeKeeperMetrics {
@@ -312,6 +328,8 @@ impl SafeKeeperMetrics {
         SafeKeeperMetrics {
             flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&ztli_str]),
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
+            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&ztli_str]),
+            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&ztli_str]),
         }
     }
 
@@ -319,6 +337,8 @@ impl SafeKeeperMetrics {
         SafeKeeperMetrics {
             flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&["n/a"]),
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&["n/a"]),
+            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&["n/a"]),
+            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&["n/a"]),
         }
     }
 }
