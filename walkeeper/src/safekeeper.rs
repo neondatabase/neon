@@ -430,6 +430,8 @@ where
     /// Handle request to append WAL.
     #[allow(clippy::comparison_chain)]
     fn handle_append_request(&mut self, msg: &AppendRequest) -> Result<AcceptorProposerMessage> {
+        let metrics = self.metrics.as_ref().unwrap();
+
         // log first AppendRequest from this proposer
         if self.elected_proposer_term < msg.h.term {
             info!(
@@ -518,11 +520,7 @@ where
         }
         if last_rec_lsn > self.flush_lsn {
             self.flush_lsn = last_rec_lsn;
-            self.metrics
-                .as_ref()
-                .unwrap()
-                .flush_lsn
-                .set(u64::from(self.flush_lsn) as f64);
+            metrics.flush_lsn.set(u64::from(self.flush_lsn) as f64);
         }
 
         // Advance commit_lsn taking into account what we have locally. xxx this
@@ -540,11 +538,7 @@ where
             sync_control_file |=
                 commit_lsn >= msg.h.epoch_start_lsn && self.s.commit_lsn < msg.h.epoch_start_lsn;
             self.commit_lsn = commit_lsn;
-            self.metrics
-                .as_ref()
-                .unwrap()
-                .commit_lsn
-                .set(u64::from(self.commit_lsn) as f64);
+            metrics.commit_lsn.set(u64::from(self.commit_lsn) as f64);
         }
 
         self.truncate_lsn = msg.h.truncate_lsn;
