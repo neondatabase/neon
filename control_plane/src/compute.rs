@@ -177,7 +177,7 @@ impl PostgresNode {
         })
     }
 
-    fn sync_walkeepers(&self) -> Result<Lsn> {
+    fn sync_safekeepers(&self) -> Result<Lsn> {
         let pg_path = self.env.pg_bin_dir().join("postgres");
         let sync_handle = Command::new(pg_path)
             .arg("--sync-safekeepers")
@@ -202,7 +202,7 @@ impl PostgresNode {
         }
 
         let lsn = Lsn::from_str(std::str::from_utf8(&sync_output.stdout)?.trim())?;
-        println!("Walkeepers synced on {}", lsn);
+        println!("Safekeepers synced on {}", lsn);
         Ok(lsn)
     }
 
@@ -319,7 +319,7 @@ impl PostgresNode {
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
             // when things would be more stable (TODO).
-            let lsn = self.sync_walkeepers()?;
+            let lsn = self.sync_safekeepers()?;
             if lsn == Lsn(0) {
                 None
             } else {
