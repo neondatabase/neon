@@ -290,13 +290,13 @@ lazy_static! {
         "Current flush_lsn, grouped by timeline",
         &["ztli"]
     )
-    .expect("Failed to register safekeeper_flush_lsn int gauge vec");
+    .expect("Failed to register safekeeper_flush_lsn gauge vec");
     static ref COMMIT_LSN_GAUGE: GaugeVec = register_gauge_vec!(
         "safekeeper_commit_lsn",
         "Current commit_lsn (not necessarily persisted to disk), grouped by timeline",
         &["ztli"]
     )
-    .expect("Failed to register safekeeper_commit_lsn int gauge vec");
+    .expect("Failed to register safekeeper_commit_lsn gauge vec");
 }
 
 struct SafeKeeperMetrics {
@@ -312,6 +312,13 @@ impl SafeKeeperMetrics {
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
         }
     }
+
+    fn new_noname() -> SafeKeeperMetrics {
+        SafeKeeperMetrics {
+            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&["n/a"]),
+            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&["n/a"]),
+        }
+    }
 }
 
 /// SafeKeeper which consumes events (messages from compute) and provides
@@ -322,7 +329,7 @@ pub struct SafeKeeper<ST: Storage> {
     pub flush_lsn: Lsn,
     pub tli: u32,
     // Cached metrics so we don't have to recompute labels on each update.
-    metrics: Option<SafeKeeperMetrics>,
+    metrics: SafeKeeperMetrics,
     /// not-yet-flushed pairs of same named fields in s.*
     pub commit_lsn: Lsn,
     pub truncate_lsn: Lsn,
@@ -341,7 +348,7 @@ where
         SafeKeeper {
             flush_lsn,
             tli,
-            metrics: None,
+            metrics: SafeKeeperMetrics::new_noname(),
             commit_lsn: state.commit_lsn,
             truncate_lsn: state.truncate_lsn,
             storage,
@@ -393,7 +400,7 @@ where
         self.s.server.wal_seg_size = msg.wal_seg_size;
         self.storage.persist(&self.s, true)?;
 
-        self.metrics = Some(SafeKeeperMetrics::new(self.s.server.ztli));
+        self.metrics = SafeKeeperMetrics::new(self.s.server.ztli);
 
         info!(
             "processed greeting from proposer {:?}, sending term {:?}",
@@ -518,11 +525,7 @@ where
         }
         if last_rec_lsn > self.flush_lsn {
             self.flush_lsn = last_rec_lsn;
-            self.metrics
-                .as_ref()
-                .unwrap()
-                .flush_lsn
-                .set(u64::from(self.flush_lsn) as f64);
+            self.metrics.flush_lsn.set(u64::from(self.flush_lsn) as f64);
         }
 
         // Advance commit_lsn taking into account what we have locally. xxx this
@@ -541,8 +544,6 @@ where
                 commit_lsn >= msg.h.epoch_start_lsn && self.s.commit_lsn < msg.h.epoch_start_lsn;
             self.commit_lsn = commit_lsn;
             self.metrics
-                .as_ref()
-                .unwrap()
                 .commit_lsn
                 .set(u64::from(self.commit_lsn) as f64);
         }
