@@ -3,7 +3,9 @@
 #![allow(non_snake_case)]
 // suppress warnings on rust 1.53 due to bindgen unit tests.
 // https://github.com/rust-lang/rust-bindgen/issues/1651
+#![allow(unknown_lints)] // TODO: CI uses rust 1.52.1, which does not know about deref_nullptr
 #![allow(deref_nullptr)]
+#![warn(unknown_lints)]
 
 use serde::{Deserialize, Serialize};
 
