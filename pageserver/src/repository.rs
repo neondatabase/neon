@@ -162,7 +162,7 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
+    fn put_wal_record(&self, lsn: Lsn, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
     fn put_page_image(&self, tag: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()>;
@@ -182,7 +182,6 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALRecord {
-    pub lsn: Lsn, // LSN at the *end* of the record
     pub will_init: bool,
     pub rec: Bytes,
     // Remember the offset of main_data in rec,
@@ -193,22 +192,19 @@ pub struct WALRecord {
 
 impl WALRecord {
     pub fn pack(&self, buf: &mut BytesMut) {
-        buf.put_u64(self.lsn.0);
         buf.put_u8(self.will_init as u8);
         buf.put_u32(self.main_data_offset);
         buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
     }
     pub fn unpack(buf: &mut Bytes) -> WALRecord {
-        let lsn = Lsn::from(buf.get_u64());
         let will_init = buf.get_u8() != 0;
         let main_data_offset = buf.get_u32();
-        let mut dst = vec![0u8; buf.get_u32() as usize];
-        buf.copy_to_slice(&mut dst);
+        let rec_len = buf.get_u32() as usize;
+        let rec = buf.split_to(rec_len);
         WALRecord {
-            lsn,
             will_init,
-            rec: Bytes::from(dst),
+            rec,
             main_data_offset,
         }
     }
@@ -832,7 +828,7 @@ mod tests {
             blknum: u32,
             lsn: Lsn,
             base_img: Option<Bytes>,
-            records: Vec<WALRecord>,
+            records: Vec<(Lsn, WALRecord)>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
                 "redo for {} blk {} to get to {}, with {} and {} records",

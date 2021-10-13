@@ -1695,7 +1695,7 @@ impl LayeredTimeline {
             //
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
-            if data.page_img.is_none() && !data.records.first().unwrap().will_init {
+            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init {
                 // FIXME: this ought to be an error?
                 warn!(
                     "Base image for page {}/{} at {} not found, but got {} WAL records",
@@ -1773,7 +1773,7 @@ impl Deref for LayeredTimelineWriter<'_> {
 }
 
 impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
-    fn put_wal_record(&self, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
+    fn put_wal_record(&self, lsn: Lsn, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
         if !rel.is_blocky() && blknum != 0 {
             bail!(
                 "invalid request for block {} for non-blocky relish {}",
@@ -1781,11 +1781,11 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                 rel
             );
         }
-        ensure!(rec.lsn.is_aligned(), "unaligned record LSN");
+        ensure!(lsn.is_aligned(), "unaligned record LSN");
 
         let seg = SegmentTag::from_blknum(rel, blknum);
-        let layer = self.tl.get_layer_for_write(seg, rec.lsn)?;
-        let delta_size = layer.put_wal_record(blknum, rec);
+        let layer = self.tl.get_layer_for_write(seg, lsn)?;
+        let delta_size = layer.put_wal_record(lsn, blknum, rec);
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())

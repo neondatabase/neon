@@ -160,13 +160,13 @@ impl Layer for InMemoryLayer {
                 .get_block_lsn_range(blknum, ..=lsn)
                 .iter()
                 .rev();
-            for (_entry_lsn, entry) in iter {
+            for (entry_lsn, entry) in iter {
                 if let Some(img) = &entry.page_image {
                     reconstruct_data.page_img = Some(img.clone());
                     need_image = false;
                     break;
                 } else if let Some(rec) = &entry.record {
-                    reconstruct_data.records.push(rec.clone());
+                    reconstruct_data.records.push((*entry_lsn, rec.clone()));
                     if rec.will_init {
                         // This WAL record initializes the page, so no need to go further back
                         need_image = false;
@@ -337,10 +337,10 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, blknum: u32, rec: WALRecord) -> u32 {
+    pub fn put_wal_record(&self, lsn: Lsn, blknum: u32, rec: WALRecord) -> u32 {
         self.put_page_version(
             blknum,
-            rec.lsn,
+            lsn,
             PageVersion {
                 page_image: None,
                 record: Some(rec),
