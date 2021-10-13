@@ -10,7 +10,7 @@ To see logs for all (even successful) tests, run
 pytest with the following command:
 - `pipenv run pytest -n8 -rA`
 
-More log config can be set in pytest.ini file.
+Other log config can be set in pytest.ini file.
 You can add `log_cli = true` to it to watch
 logs in real time.
 
@@ -18,14 +18,16 @@ To get more info about logging with pytest, see
 https://docs.pytest.org/en/6.2.x/logging.html
 """
 
+# this config is only used for default log levels,
+# log format is specified in pytest.ini file
 LOGGING = {
     "version": 1,
     "loggers": {
         "root": {
-            "level": "DEBUG"
+            "level": "INFO"
         },
-        "root.wal_acceptor_async": { 
-            "level": "INFO" # lot of logs on DEBUG level
+        "root.wal_acceptor_async": {
+            "level": "INFO" # a lot of logs on DEBUG level
         }
     }
 }
