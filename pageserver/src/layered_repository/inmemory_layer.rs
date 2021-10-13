@@ -157,8 +157,7 @@ impl Layer for InMemoryLayer {
             // Scan the page versions backwards, starting from `lsn`.
             let iter = inner
                 .page_versions
-                .get_block_lsn_range(blknum, ..=lsn)
-                .iter()
+                .iter_block_lsn_range(blknum, ..=lsn)
                 .rev();
             for (_entry_lsn, entry) in iter {
                 if let Some(img) = &entry.page_image {

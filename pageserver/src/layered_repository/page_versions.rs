@@ -21,23 +21,25 @@ impl PageVersions {
     }
 
     /// Get all [`PageVersion`]s in a block
-    pub fn get_block_slice(&self, blknum: u32) -> &[(Lsn, PageVersion)] {
+    pub fn iter_block(&self, blknum: u32) -> BlockVersionIter<'_> {
         self.0
             .get(&blknum)
             .map(VecMap::as_slice)
             .unwrap_or(EMPTY_SLICE)
+            .iter()
     }
 
     /// Get a range of [`PageVersions`] in a block
-    pub fn get_block_lsn_range<R: RangeBounds<Lsn>>(
+    pub fn iter_block_lsn_range<R: RangeBounds<Lsn>>(
         &self,
         blknum: u32,
         range: R,
-    ) -> &[(Lsn, PageVersion)] {
+    ) -> BlockVersionIter<'_> {
         self.0
             .get(&blknum)
             .map(|vec_map| vec_map.slice_range(range))
             .unwrap_or(EMPTY_SLICE)
+            .iter()
     }
 
     /// Iterate through [`PageVersion`]s in (block, lsn) order.
@@ -46,20 +48,22 @@ impl PageVersions {
         let mut ordered_blocks: Vec<u32> = self.0.keys().cloned().collect();
         ordered_blocks.sort_unstable();
 
-        let slice = ordered_blocks
+        let iter = ordered_blocks
             .first()
-            .map(|&blknum| self.get_block_slice(blknum))
-            .unwrap_or(EMPTY_SLICE);
+            .map(|&blknum| self.iter_block(blknum))
+            .unwrap_or_else(|| EMPTY_SLICE.iter());
 
         OrderedPageVersionIter {
             page_versions: self,
             ordered_blocks,
             cur_block_idx: 0,
             cutoff_lsn,
-            cur_slice_iter: slice.iter(),
+            cur_slice_iter: iter,
         }
     }
 }
+
+pub type BlockVersionIter<'a> = std::slice::Iter<'a, (Lsn, PageVersion)>;
 
 pub struct OrderedPageVersionIter<'a> {
     page_versions: &'a PageVersions,
@@ -97,7 +101,7 @@ impl<'a> Iterator for OrderedPageVersionIter<'a> {
             let next_block_idx = self.cur_block_idx + 1;
             let blknum: u32 = *self.ordered_blocks.get(next_block_idx)?;
             self.cur_block_idx = next_block_idx;
-            self.cur_slice_iter = self.page_versions.get_block_slice(blknum).iter();
+            self.cur_slice_iter = self.page_versions.iter_block(blknum);
         }
     }
 }
