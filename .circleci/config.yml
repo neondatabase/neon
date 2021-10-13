@@ -325,8 +325,7 @@ jobs:
                 \"inputs\": {
                   \"ci_job_name\": \"zenith-remote-ci\",
                   \"commit_hash\": \"$CIRCLE_SHA1\",
-                  \"remote_repo\": \"$LOCAL_REPO\",
-                  \"zenith_image_branch\": \"$CIRCLE_BRANCH\"
+                  \"remote_repo\": \"$LOCAL_REPO\"
                 }
               }"
 
