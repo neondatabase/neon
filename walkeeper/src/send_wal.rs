@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor};
+use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor, INT4_OID, TEXT_OID};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::timeline::CreateControlFile;
@@ -71,19 +71,16 @@ impl postgres_backend::Handler for SendWalHandler {
         }
         if query_string.starts_with(b"IDENTIFY_SYSTEM") {
             self.handle_identify_system(pgb)?;
-            Ok(())
         } else if query_string.starts_with(b"START_REPLICATION") {
             ReplicationConn::new(pgb).run(self, pgb, &query_string)?;
-            Ok(())
         } else if query_string.starts_with(b"START_WAL_PUSH") {
             ReceiveWalConn::new(pgb)?.run(self)?;
-            Ok(())
         } else if query_string.starts_with(b"JSON_CTRL") {
             handle_json_ctrl(self, pgb, &query_string)?;
-            Ok(())
         } else {
             bail!("Unexpected command {:?}", query_string);
         }
+        Ok(())
     }
 }
 
@@ -113,25 +110,25 @@ impl SendWalHandler {
         pgb.write_message_noflush(&BeMessage::RowDescription(&[
             RowDescriptor {
                 name: b"systemid",
-                typoid: 25,
+                typoid: TEXT_OID,
                 typlen: -1,
                 ..Default::default()
             },
             RowDescriptor {
                 name: b"timeline",
-                typoid: 23,
+                typoid: INT4_OID,
                 typlen: 4,
                 ..Default::default()
             },
             RowDescriptor {
                 name: b"xlogpos",
-                typoid: 25,
+                typoid: TEXT_OID,
                 typlen: -1,
                 ..Default::default()
             },
             RowDescriptor {
                 name: b"dbname",
-                typoid: 25,
+                typoid: TEXT_OID,
                 typlen: -1,
                 ..Default::default()
             },

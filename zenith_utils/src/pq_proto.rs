@@ -15,8 +15,9 @@ use std::str;
 pub type Oid = u32;
 pub type SystemId = u64;
 
-pub const TEXT_OID: Oid = 25;
 pub const INT8_OID: Oid = 20;
+pub const INT4_OID: Oid = 23;
+pub const TEXT_OID: Oid = 25;
 
 #[derive(Debug)]
 pub enum FeMessage {
