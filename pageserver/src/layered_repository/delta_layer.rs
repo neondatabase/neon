@@ -198,7 +198,7 @@ impl Layer for DeltaLayer {
                 .slice_range((Included(&minkey), Included(&maxkey)))
                 .iter()
                 .rev();
-            for ((_blknum, _lsn), blob_range) in iter {
+            for ((_blknum, pv_lsn), blob_range) in iter {
                 let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
 
                 if let Some(img) = pv.page_image {
@@ -208,7 +208,7 @@ impl Layer for DeltaLayer {
                     break;
                 } else if let Some(rec) = pv.record {
                     let will_init = rec.will_init;
-                    reconstruct_data.records.push(rec);
+                    reconstruct_data.records.push((*pv_lsn, rec));
                     if will_init {
                         // This WAL record initializes the page, so no need to go further back
                         need_image = false;

@@ -312,13 +312,12 @@ pub fn save_decoded_record(
         });
 
         let rec = WALRecord {
-            lsn,
             will_init: blk.will_init || blk.apply_image,
             rec: recdata.clone(),
             main_data_offset: decoded.main_data_offset as u32,
         };
 
-        timeline.put_wal_record(tag, blk.blkno, rec)?;
+        timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
     }
 
     let mut buf = decoded.record.clone();
@@ -656,12 +655,12 @@ fn save_xact_record(
     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rec = WALRecord {
-        lsn,
         will_init: false,
         rec: decoded.record.clone(),
         main_data_offset: decoded.main_data_offset as u32,
     };
     timeline.put_wal_record(
+        lsn,
         RelishTag::Slru {
             slru: SlruKind::Clog,
             segno,
@@ -677,6 +676,7 @@ fn save_xact_record(
             let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
             let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             timeline.put_wal_record(
+                lsn,
                 RelishTag::Slru {
                     slru: SlruKind::Clog,
                     segno,
@@ -771,7 +771,6 @@ fn save_multixact_create_record(
     decoded: &DecodedWALRecord,
 ) -> Result<()> {
     let rec = WALRecord {
-        lsn,
         will_init: false,
         rec: decoded.record.clone(),
         main_data_offset: decoded.main_data_offset as u32,
@@ -780,6 +779,7 @@ fn save_multixact_create_record(
     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
     timeline.put_wal_record(
+        lsn,
         RelishTag::Slru {
             slru: SlruKind::MultiXactOffsets,
             segno,
@@ -799,6 +799,7 @@ fn save_multixact_create_record(
         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         timeline.put_wal_record(
+            lsn,
             RelishTag::Slru {
                 slru: SlruKind::MultiXactMembers,
                 segno,

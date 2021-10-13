@@ -82,7 +82,7 @@ pub trait WalRedoManager: Send + Sync {
         blknum: u32,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: Vec<WALRecord>,
+        records: Vec<(Lsn, WALRecord)>,
     ) -> Result<Bytes, WalRedoError>;
 }
 
@@ -99,7 +99,7 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
         _blknum: u32,
         _lsn: Lsn,
         _base_img: Option<Bytes>,
-        _records: Vec<WALRecord>,
+        _records: Vec<(Lsn, WALRecord)>,
     ) -> Result<Bytes, WalRedoError> {
         Err(WalRedoError::InvalidState)
     }
@@ -150,7 +150,7 @@ struct WalRedoRequest {
     lsn: Lsn,
 
     base_img: Option<Bytes>,
-    records: Vec<WALRecord>,
+    records: Vec<(Lsn, WALRecord)>,
 }
 
 /// An error happened in WAL redo
@@ -179,7 +179,7 @@ impl WalRedoManager for PostgresRedoManager {
         blknum: u32,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: Vec<WALRecord>,
+        records: Vec<(Lsn, WALRecord)>,
     ) -> Result<Bytes, WalRedoError> {
         let start_time;
         let lock_time;
@@ -277,7 +277,7 @@ impl PostgresRedoManager {
                 page.extend_from_slice(&ZERO_PAGE);
             }
             // Apply all collected WAL records
-            for record in records {
+            for (_lsn, record) in records {
                 let mut buf = record.rec.clone();
 
                 WAL_REDO_RECORD_COUNTER.inc();
@@ -544,7 +544,7 @@ impl PostgresRedoProcess {
         &mut self,
         tag: BufferTag,
         base_img: Option<Bytes>,
-        records: &[WALRecord],
+        records: &[(Lsn, WALRecord)],
     ) -> Result<Bytes, std::io::Error> {
         let stdout = &mut self.stdout;
         // Buffer the writes to avoid a lot of small syscalls.
@@ -570,11 +570,11 @@ impl PostgresRedoProcess {
             }
 
             // Send WAL records.
-            for rec in records.iter() {
+            for (lsn, rec) in records.iter() {
                 WAL_REDO_RECORD_COUNTER.inc();
 
                 stdin
-                    .write_all(&build_apply_record_msg(rec.lsn, &rec.rec))
+                    .write_all(&build_apply_record_msg(*lsn, &rec.rec))
                     .await?;
 
                 //debug!("sent WAL record to wal redo postgres process ({:X}/{:X}",

@@ -78,7 +78,7 @@ pub struct PageVersion {
 /// 'records' contains the records to apply over the base image.
 ///
 pub struct PageReconstructData {
-    pub records: Vec<WALRecord>,
+    pub records: Vec<(Lsn, WALRecord)>,
     pub page_img: Option<Bytes>,
 }
 
