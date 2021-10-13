@@ -183,6 +183,9 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         .args(&["-D", initdbpath.to_str().unwrap()])
         .args(&["-U", &conf.superuser])
         .arg("--no-instructions")
+        // This is only used for a temporary installation that is deleted shortly after,
+        // so no need to fsync it
+        .arg("--no-sync")
         .env_clear()
         .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
         .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
