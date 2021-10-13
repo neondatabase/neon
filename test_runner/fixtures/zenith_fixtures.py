@@ -1141,6 +1141,7 @@ class TenantFactory:
         res.check_returncode()
         return tenant_id
 
+
 @zenfixture
 def tenant_factory(zenith_cli: ZenithCli):
     return TenantFactory(zenith_cli)
