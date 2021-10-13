@@ -59,6 +59,13 @@ fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId, tenantid: ZT
             Ok(mut client) => {
                 if let Err(e) = client.simple_query(&callme) {
                     error!("Failed to send callme request to pageserver: {}", e);
+                    if e.to_string().contains("Repository is not valid for tenant")
+                        || e.to_string().contains("Tenant is not active")
+                        || e.to_string().contains("connection closed")
+                    {
+                        info!("Don't try to recall for non existing tenant");
+                        break;
+                    }
                 }
             }
             Err(e) => error!("Failed to connect to pageserver {}: {}", &ps_connstr, e),

@@ -39,6 +39,8 @@ pub trait Repository: Send + Sync {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
+
+    fn list_timelineids(&self) -> Vec<ZTimelineId>;
 }
 
 ///
@@ -848,5 +850,7 @@ mod tests {
             println!("{}", s);
             Ok(TEST_IMG(&s))
         }
+
+        fn shutdown(&self) {}
     }
 }

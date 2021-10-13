@@ -4,11 +4,12 @@
 use crate::branches;
 use crate::layered_repository::LayeredRepository;
 use crate::repository::{Repository, Timeline};
+use crate::walreceiver;
 use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
 use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
-use log::{debug, info};
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -16,6 +17,7 @@ use std::fs;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 use std::thread::JoinHandle;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -28,7 +30,13 @@ struct Tenant {
     repo: Option<Arc<dyn Repository>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+impl Drop for Tenant {
+    fn drop(&mut self) {
+        info!("drop Tenant for tenant {}", self.state);
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy)]
 pub enum TenantState {
     // This tenant only exists in cloud storage. It cannot be accessed.
     CloudOnly,
@@ -44,7 +52,7 @@ pub enum TenantState {
     // This tenant exists on local disk, and the layer map has been loaded into memory.
     // The local disk might have some newer files that don't exist in cloud storage yet.
     // The tenant cannot be accessed anymore for any reason, but graceful shutdown.
-    //Stopping,
+    Stopping,
 }
 
 impl fmt::Display for TenantState {
@@ -53,6 +61,7 @@ impl fmt::Display for TenantState {
             TenantState::CloudOnly => f.write_str("CloudOnly"),
             TenantState::Downloading => f.write_str("Downloading"),
             TenantState::Active => f.write_str("Active"),
+            TenantState::Stopping => f.write_str("Stopping"),
         }
     }
 }
@@ -138,7 +147,7 @@ pub fn register_relish_download(
 
     {
         let mut m = access_tenants();
-        let mut tenant = m.get_mut(&tenant_id).unwrap();
+        let tenant = m.get_mut(&tenant_id).unwrap();
         tenant.state = TenantState::Downloading;
         match &tenant.repo {
             Some(repo) => init_timeline(repo.as_ref(), timeline_id),
@@ -162,31 +171,41 @@ fn init_timeline(repo: &dyn Repository, timeline_id: ZTimelineId) {
 }
 
 // Check this flag in the thread loops to know when to exit
-pub fn shutdown_requested() -> bool {
+pub fn pageserver_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }
 
-pub fn stop_tenant_threads(tenantid: ZTenantId) {
+pub fn wait_for_tenant_threads_to_stop(tenantid: ZTenantId) {
     let mut handles = TENANT_HANDLES.lock().unwrap();
     if let Some(h) = handles.get_mut(&tenantid) {
         h.checkpointer_handle.take().map(JoinHandle::join);
-        debug!("checkpointer for tenant {} has stopped", tenantid);
+        info!("checkpointer for tenant {} has stopped", tenantid);
         h.gc_handle.take().map(JoinHandle::join);
-        debug!("gc for tenant {} has stopped", tenantid);
+        info!("gc for tenant {} has stopped", tenantid);
     }
 }
 
-pub fn shutdown_all_tenants() -> Result<()> {
+pub fn shutdown_all_tenants(conf: &'static PageServerConf) -> Result<()> {
     SHUTDOWN_REQUESTED.swap(true, Ordering::Relaxed);
 
     let tenantids = list_tenantids()?;
+    let mut join_handles = Vec::new();
+
     for tenantid in tenantids {
-        stop_tenant_threads(tenantid);
-        let repo = get_repository_for_tenant(tenantid)?;
-        debug!("shutdown tenant {}", tenantid);
-        repo.shutdown()?;
+        set_tenant_state(tenantid, TenantState::Stopping)?;
+
+        let h = thread::Builder::new()
+            .name("tenant_drop waiter thread".into())
+            .spawn(move || wait_tenant_drop(conf, tenantid, false))?;
+        join_handles.push(h);
     }
 
+    for handle in join_handles.into_iter() {
+        handle
+            .join()
+            .expect("thread panicked")
+            .expect("thread exited with an error");
+    }
     Ok(())
 }
 
@@ -218,15 +237,39 @@ pub fn create_repository_for_tenant(
     Ok(())
 }
 
+pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
+    let m = access_tenants();
+    m.get(&tenantid).map(|t| t.state)
+}
+
+pub fn set_tenant_state(tenantid: ZTenantId, state: TenantState) -> Result<()> {
+    let mut m = access_tenants();
+    let tenant = m.get_mut(&tenantid);
+
+    match tenant {
+        Some(tenant) => tenant.state = state,
+        None => bail!("Tenant not found for tenant {}", tenantid),
+    }
+
+    Ok(())
+}
+
+pub fn tenant_shutdown_requested(tenantid: ZTenantId) -> bool {
+    match get_tenant_state(tenantid) {
+        Some(state) => state == TenantState::Stopping || state == TenantState::CloudOnly,
+        None => true,
+    }
+}
+
 pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
     let m = access_tenants();
     let tenant = m
         .get(&tenantid)
         .ok_or_else(|| anyhow!("Tenant not found for tenant {}", tenantid));
 
-    match &tenant.unwrap().repo {
+    match &tenant?.repo {
         Some(repo) => Ok(Arc::clone(repo)),
-        None => anyhow::bail!("Repository for tenant {} is not yet valid", tenantid),
+        None => anyhow::bail!("Repository is not valid for tenant {}", tenantid),
     }
 }
 
@@ -267,4 +310,75 @@ pub fn list_tenants() -> Result<Vec<TenantInfo>> {
             })
         })
         .collect()
+}
+
+pub fn list_timelineids(tenantid: ZTenantId) -> Result<Vec<ZTimelineId>> {
+    let repo = get_repository_for_tenant(tenantid)?;
+    Ok(repo.list_timelineids())
+}
+
+// Perform graceful tenant shutdown.
+// Wait for all tenant workers to complete their job, free resources
+// and update the state to "CloudOnly", which represents complete tenant shutdown.
+pub fn wait_tenant_drop(
+    conf: &'static PageServerConf,
+    tenantid: ZTenantId,
+    remove_ondisk_files: bool,
+) -> Result<()> {
+    // Shutdown walreceiver threads for each tenant's timeline.
+    let timelines = list_timelineids(tenantid)?;
+    for timelineid in timelines {
+        walreceiver::stop_walreceiver(timelineid);
+    }
+
+    // Wait for checkpointer and GC to finish their job
+    wait_for_tenant_threads_to_stop(tenantid);
+
+    // Remove tenant's on-disk data
+    // TODO: We can add an option to skip this step if we only want to stop tenant,
+    // not remove it completely.
+    if remove_ondisk_files {
+        let repo_dir = conf.tenant_path(&tenantid);
+        if let Err(e) = fs::remove_dir_all(&repo_dir) {
+            log::error!("could not remove tenant repo-dir: {:#}", e);
+        }
+    }
+
+    // Now stop the wal-redo process.
+    // Note that it is important to stop it after checkpointer.
+    let repo = get_repository_for_tenant(tenantid)?;
+    repo.shutdown()?;
+
+    // And finally remove tenant repository from memory
+    // and update it's state
+    // TODO: Should drop command remove tenant from
+    // pageserver TENANTS or we need a separate command/option for that?
+    // Something like 'tenant detach'/ 'tenant drop --detach'.
+    let mut m = access_tenants();
+    let tenant = m.get_mut(&tenantid);
+    match tenant {
+        Some(tenant) => {
+            info!("reset tenant state for {}", tenantid);
+            tenant.repo.take();
+            tenant.state = TenantState::CloudOnly;
+        }
+        None => bail!("Tenant not found for tenant {}", tenantid),
+    }
+
+    info!("drop_tenant({}) is DONE", tenantid);
+    Ok(())
+}
+
+// Serve tenant drop request.
+// This function only updates the tenant state to "Stopping" and returns.
+// Separate thread waits for all tenant processes to complete, frees resources
+// and updates the state to "CloudOnly", which represents complete tenant shutdown.
+pub fn drop_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
+    set_tenant_state(tenantid, TenantState::Stopping)?;
+
+    thread::Builder::new()
+        .name("tenant_drop waiter thread".into())
+        .spawn(move || wait_tenant_drop(conf, tenantid, true))?;
+
+    Ok(())
 }

@@ -37,7 +37,6 @@ use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
 use crate::tenant_mgr;
-use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
@@ -216,21 +215,34 @@ impl Repository for LayeredRepository {
             })
     }
 
-    // Wait for all threads to complete and persist repository data before pageserver shutdown.
+    // Wait for all threads to complete before shutdown.
     fn shutdown(&self) -> Result<()> {
-        trace!("LayeredRepository shutdown for tenant {}", self.tenantid);
-
         let timelines = self.timelines.lock().unwrap();
-        for (timelineid, timeline) in timelines.iter() {
-            walreceiver::stop_wal_receiver(*timelineid);
-            // Wait for syncing data to disk
-            trace!("repo shutdown. checkpoint timeline {}", timelineid);
-            timeline.checkpoint()?;
 
-            //TODO Wait for walredo process to shutdown too
+        // Wake up all connections that wait for lsn..
+        // Otherwise, if walreceiver was shut down before requested LSN arrived,
+        // they will hang till wait_lsn_timeout
+        for (_, t) in timelines.iter() {
+            t.last_record_lsn.shutdown();
         }
 
+        // Shutdown walredo process.
+        info!("call shutdown the wal-redo process");
+        self.walredo_mgr.shutdown();
+
         Ok(())
+    }
+
+    fn list_timelineids(&self) -> Vec<ZTimelineId> {
+        let timelines = self.timelines.lock().unwrap();
+        let timelineids = timelines
+            .iter()
+            .map(|v| {
+                let (timelineid, _) = v;
+                *timelineid
+            })
+            .collect();
+        timelineids
     }
 }
 
@@ -332,9 +344,9 @@ impl LayeredRepository {
     /// Checkpointer thread's main loop
     ///
     fn checkpoint_loop(&self, conf: &'static PageServerConf) -> Result<()> {
-        while !tenant_mgr::shutdown_requested() {
+        while !tenant_mgr::tenant_shutdown_requested(self.tenantid) {
             std::thread::sleep(conf.checkpoint_period);
-            info!("checkpointer thread for tenant {} waking up", self.tenantid);
+            trace!("checkpointer thread for tenant {} waking up", self.tenantid);
 
             // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
             // bytes of WAL since last checkpoint.
@@ -348,7 +360,7 @@ impl LayeredRepository {
                     STORAGE_TIME
                         .with_label_values(&["checkpoint_timed"])
                         .observe_closure_duration(|| {
-                            timeline.checkpoint_internal(conf.checkpoint_distance, false)
+                            timeline.checkpoint_internal(conf.checkpoint_distance)
                         })?
                 }
                 // release lock on 'timelines'
@@ -378,7 +390,9 @@ impl LayeredRepository {
     /// GC thread's main loop
     ///
     fn gc_loop(&self, conf: &'static PageServerConf) -> Result<()> {
-        while !tenant_mgr::shutdown_requested() {
+        while !tenant_mgr::tenant_shutdown_requested(self.tenantid) {
+            info!("gc thread for tenant {} waking up", self.tenantid);
+
             // Garbage collect old files that are not needed for PITR anymore
             if conf.gc_horizon > 0 {
                 self.gc_iteration(None, conf.gc_horizon, false).unwrap();
@@ -387,7 +401,7 @@ impl LayeredRepository {
             // TODO Write it in more adequate way using
             // condvar.wait_timeout() or something
             let mut sleep_time = conf.gc_period.as_secs();
-            while sleep_time > 0 && !tenant_mgr::shutdown_requested() {
+            while sleep_time > 0 && !tenant_mgr::tenant_shutdown_requested(self.tenantid) {
                 sleep_time -= 1;
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -540,7 +554,7 @@ impl LayeredRepository {
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
         for timelineid in timelineids {
-            if tenant_mgr::shutdown_requested() {
+            if tenant_mgr::tenant_shutdown_requested(self.tenantid) {
                 return Ok(totals);
             }
 
@@ -856,7 +870,7 @@ impl Timeline for LayeredTimeline {
         STORAGE_TIME
             .with_label_values(&["checkpoint_force"])
             //pass checkpoint_distance=0 to force checkpoint
-            .observe_closure_duration(|| self.checkpoint_internal(0, true))
+            .observe_closure_duration(|| self.checkpoint_internal(0))
     }
 
     fn get_last_record_lsn(&self) -> Lsn {
@@ -1231,7 +1245,7 @@ impl LayeredTimeline {
     /// Flush to disk all data that was written with the put_* functions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    fn checkpoint_internal(&self, checkpoint_distance: u64, forced: bool) -> Result<()> {
+    fn checkpoint_internal(&self, checkpoint_distance: u64) -> Result<()> {
         let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
@@ -1261,10 +1275,6 @@ impl LayeredTimeline {
         let mut layer_uploads = Vec::new();
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
-
-            if tenant_mgr::shutdown_requested() && !forced {
-                return Ok(());
-            }
 
             // Does this layer need freezing?
             //

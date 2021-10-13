@@ -289,6 +289,20 @@ impl PageServerNode {
             .json()?)
     }
 
+    pub fn tenant_drop(&self, tenantid: ZTenantId) -> Result<()> {
+        Ok(self
+            .http_request(
+                Method::DELETE,
+                format!("{}/{}", self.http_base_url, "tenant"),
+            )
+            .json(&TenantCreateRequest {
+                tenant_id: tenantid,
+            })
+            .send()?
+            .error_from_body()?
+            .json()?)
+    }
+
     pub fn branch_list(&self, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
         Ok(self
             .http_request(

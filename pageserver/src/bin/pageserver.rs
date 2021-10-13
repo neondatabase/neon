@@ -560,7 +560,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
                 // Terminate postgres backends
                 postgres_backend::set_pgbackend_shutdown_requested();
                 // Stop all tenants and flush their data
-                tenant_mgr::shutdown_all_tenants()?;
+                tenant_mgr::shutdown_all_tenants(conf)?;
                 // Wait for pageservice thread to complete the job
                 page_service_thread
                     .join()

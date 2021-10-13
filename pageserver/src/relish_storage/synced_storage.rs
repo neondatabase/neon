@@ -33,7 +33,7 @@ pub fn run_storage_sync_thread<
     let handle = thread::Builder::new()
         .name("Queue based relish storage sync".to_string())
         .spawn(move || {
-            while !tenant_mgr::shutdown_requested() {
+            while !tenant_mgr::pageserver_shutdown_requested() {
                 let mut queue_accessor = UPLOAD_QUEUE.lock().unwrap();
                 log::debug!("Upload queue length: {}", queue_accessor.len());
                 let next_task = queue_accessor.pop();

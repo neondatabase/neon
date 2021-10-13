@@ -44,6 +44,14 @@ pub trait Handler {
     fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
         bail!("JWT auth failed")
     }
+
+    fn tenant_shutdown_requested(&mut self) -> bool {
+        false
+    }
+
+    fn shutdown_requested(&mut self) -> bool {
+        PGBACKEND_SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
+    }
 }
 
 /// PostgresBackend protocol state.
@@ -252,7 +260,7 @@ impl PostgresBackend {
 
         let mut unnamed_query_string = Bytes::new();
 
-        while !PGBACKEND_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        while !handler.shutdown_requested() && !handler.tenant_shutdown_requested() {
             match self.read_message() {
                 Ok(message) => {
                     if let Some(msg) = message {
@@ -275,7 +283,7 @@ impl PostgresBackend {
             }
         }
 
-        trace!("postgres backend to {:?} exited", self.peer_addr);
+        info!("postgres backend to {:?} exited", self.peer_addr);
         Ok(())
     }
 

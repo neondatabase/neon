@@ -1136,6 +1136,10 @@ class TenantFactory:
         res.check_returncode()
         return tenant_id
 
+    def drop(self, tenant_id: str):
+        res = self.cli.run(['tenant', 'drop', tenant_id])
+        res.check_returncode()
+        return tenant_id
 
 @zenfixture
 def tenant_factory(zenith_cli: ZenithCli):

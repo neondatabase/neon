@@ -8,6 +8,7 @@
 use crate::relish::*;
 use crate::restore_local_repo;
 use crate::tenant_mgr;
+use crate::tenant_mgr::TenantState;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use anyhow::{bail, Error, Result};
@@ -53,11 +54,8 @@ thread_local! {
 }
 
 // Wait for walreceiver to stop
-// Now it stops when pageserver shutdown is requested.
-// In future we can make this more granular and send shutdown signals
-// per tenant/timeline to cancel inactive walreceivers.
-// TODO deal with blocking pg connections
-pub fn stop_wal_receiver(timelineid: ZTimelineId) {
+// TODO deal with blocking pg connections hanging out at drop.
+pub fn stop_walreceiver(timelineid: ZTimelineId) {
     let mut receivers = WAL_RECEIVERS.lock().unwrap();
     if let Some(r) = receivers.get_mut(&timelineid) {
         r.wal_receiver_handle.take();
@@ -118,7 +116,7 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it. If the connection is lost, keep retrying.
     //
-    while !tenant_mgr::shutdown_requested() {
+    while !tenant_mgr::tenant_shutdown_requested(tenantid) {
         // Look up the current WAL producer address
         let wal_producer_connstr = get_wal_producer_connstr(timelineid);
 
@@ -126,13 +124,24 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
 
         if let Err(e) = res {
             info!(
-                "WAL streaming connection failed ({}), retrying in 1 second",
-                e
+                "WAL streaming connection failed ({}), retrying in 1 second. tenantid {}",
+                e, tenantid
             );
+
+            if tenant_mgr::get_tenant_state(tenantid).unwrap_or(TenantState::CloudOnly)
+                != TenantState::Active
+            {
+                info!(
+                    "Don't reconnect walreceiver because tenant {} is inactive",
+                    tenantid
+                );
+                break;
+            }
+
             sleep(Duration::from_secs(1));
         }
     }
-    debug!("WAL streaming shut down");
+    info!("WAL streaming shut down");
 }
 
 fn walreceiver_main(
@@ -212,6 +221,13 @@ fn walreceiver_main(
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                    if tenant_mgr::get_tenant_state(tenantid).unwrap_or(TenantState::CloudOnly)
+                        != TenantState::Active
+                    {
+                        info!("stop walreceiver because tenant {} is inactive", tenantid);
+                        break;
+                    }
+
                     let _enter = info_span!("processing record", lsn = %lsn).entered();
 
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
@@ -293,8 +309,11 @@ fn walreceiver_main(
             physical_stream.standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)?;
         }
 
-        if tenant_mgr::shutdown_requested() {
-            debug!("stop walreceiver because pageserver shutdown is requested");
+        if tenant_mgr::tenant_shutdown_requested(tenantid) {
+            info!(
+                "stop walreceiver because shutdown requested. tenant {}",
+                tenantid
+            );
             break;
         }
     }

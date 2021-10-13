@@ -38,6 +38,7 @@ use crate::branches;
 use crate::relish::*;
 use crate::repository::Timeline;
 use crate::tenant_mgr;
+use crate::tenant_mgr::TenantState;
 use crate::walreceiver;
 use crate::PageServerConf;
 
@@ -190,9 +191,9 @@ pub fn thread_main(
 ) -> anyhow::Result<()> {
     let mut join_handles = Vec::new();
 
-    while !tenant_mgr::shutdown_requested() {
+    while !tenant_mgr::pageserver_shutdown_requested() {
         let (socket, peer_addr) = listener.accept()?;
-        debug!("accepted connection from {}", peer_addr);
+        info!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
         let local_auth = auth.clone();
 
@@ -208,7 +209,7 @@ pub fn thread_main(
         join_handles.push(handle);
     }
 
-    debug!("page_service loop terminated. wait for connections to cancel");
+    info!("page_service loop terminated. wait for connections to cancel");
     for handle in join_handles.into_iter() {
         handle.join().unwrap();
     }
@@ -241,6 +242,7 @@ struct PageServerHandler {
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
+    tenantid: Option<ZTenantId>,
 }
 
 const TIME_BUCKETS: &[f64] = &[
@@ -267,6 +269,7 @@ impl PageServerHandler {
             conf,
             auth,
             claims: None,
+            tenantid: None,
         }
     }
 
@@ -284,7 +287,7 @@ impl PageServerHandler {
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
-        while !tenant_mgr::shutdown_requested() {
+        while !tenant_mgr::tenant_shutdown_requested(tenantid) {
             match pgb.read_message() {
                 Ok(message) => {
                     if let Some(message) = message {
@@ -336,6 +339,8 @@ impl PageServerHandler {
                 }
             }
         }
+
+        info!(" handle pagerequests cycle is done. tenantid {}", tenantid);
         Ok(())
     }
 
@@ -473,6 +478,18 @@ impl PageServerHandler {
         Ok(())
     }
 
+    fn check_tenant_is_active(&mut self, tenantid: ZTenantId) -> Result<()> {
+        let state = tenant_mgr::get_tenant_state(tenantid).unwrap();
+
+        if state != TenantState::Active {
+            bail!("Tenant is not active for tenant id {}", tenantid);
+        }
+
+        // Save the id of the tenant this handler serves
+        self.tenantid = Some(tenantid);
+        Ok(())
+    }
+
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
     fn check_permission(&self, tenantid: Option<ZTenantId>) -> Result<()> {
@@ -522,6 +539,13 @@ impl postgres_backend::Handler for PageServerHandler {
         Ok(())
     }
 
+    fn tenant_shutdown_requested(&mut self) -> bool {
+        if let Some(tenantid) = self.tenantid {
+            return tenant_mgr::tenant_shutdown_requested(tenantid);
+        }
+        false
+    }
+
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
@@ -547,6 +571,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let timelineid = ZTimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenantid))?;
+            self.check_tenant_is_active(tenantid)?;
 
             self.handle_pagerequests(pgb, timelineid, tenantid)?;
         } else if query_string.starts_with("basebackup ") {
@@ -562,6 +587,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let timelineid = ZTimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenantid))?;
+            self.check_tenant_is_active(tenantid)?;
 
             let lsn = if params.len() == 3 {
                 Some(Lsn::from_str(params[2])?)
@@ -585,6 +611,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let connstr = caps.get(3).unwrap().as_str().to_owned();
 
             self.check_permission(Some(tenantid))?;
+            self.check_tenant_is_active(tenantid)?;
 
             let _enter =
                 info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
@@ -610,6 +637,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let startpoint_str = caps.get(3).ok_or_else(err)?.as_str().to_owned();
 
             self.check_permission(Some(tenantid))?;
+            self.check_tenant_is_active(tenantid)?;
 
             let _enter =
                 info_span!("branch_create", name = %branchname, tenant = %tenantid).entered();
@@ -629,6 +657,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 .ok_or_else(|| anyhow!("invalid branch_list: '{}'", query_string))?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+
+            self.check_permission(Some(tenantid))?;
+            self.check_tenant_is_active(tenantid)?;
 
             let branches = crate::branches::get_branches(self.conf, &tenantid)?;
             let branches_buf = serde_json::to_vec(&branches)?;

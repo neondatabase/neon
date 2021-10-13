@@ -84,6 +84,8 @@ pub trait WalRedoManager: Send + Sync {
         base_img: Option<Bytes>,
         records: Vec<(Lsn, WALRecord)>,
     ) -> Result<Bytes, WalRedoError>;
+
+    fn shutdown(&self);
 }
 
 ///
@@ -103,9 +105,11 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
     ) -> Result<Bytes, WalRedoError> {
         Err(WalRedoError::InvalidState)
     }
+
+    fn shutdown(&self) {}
 }
 
-static TIMEOUT: Duration = Duration::from_secs(20);
+static TIMEOUT: Duration = Duration::from_secs(120);
 
 // Metrics collected on WAL redo operations
 //
@@ -210,12 +214,29 @@ impl WalRedoManager for PostgresRedoManager {
             self.runtime
                 .block_on(self.handle_apply_request(process, &request))
         };
+
         end_time = Instant::now();
 
         WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
         WAL_REDO_TIME.observe(end_time.duration_since(lock_time).as_secs_f64());
 
         result
+    }
+
+    // Shutdown the wal-redo process
+    fn shutdown(&self) {
+        self.process.lock().unwrap().take();
+
+        let datadir = self
+            .conf
+            .tenant_path(&self.tenantid)
+            .join("wal-redo-datadir");
+
+        if let Err(e) = fs::remove_dir_all(&datadir) {
+            info!("could not remove wal-redo-datadir: {:#}", e);
+        }
+
+        info!("shut down the wal-redo process {:?}", datadir);
     }
 }
 

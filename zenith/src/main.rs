@@ -89,6 +89,7 @@ fn main() -> Result<()> {
             .about("Manage tenants")
             .subcommand(SubCommand::with_name("list"))
             .subcommand(SubCommand::with_name("create").arg(Arg::with_name("tenantid").required(false).index(1)))
+            .subcommand(SubCommand::with_name("drop").arg(Arg::with_name("tenantid").required(true).index(1)))
         )
         .subcommand(SubCommand::with_name("status"))
         .subcommand(SubCommand::with_name("start").about("Start local pageserver"))
@@ -396,6 +397,15 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
             println!("using tenant id {}", tenantid);
             pageserver.tenant_create(tenantid)?;
             println!("tenant successfully created on the pageserver");
+        }
+        ("drop", Some(drop_match)) => {
+            let tenantid_str = drop_match
+                .value_of("tenantid")
+                .ok_or_else(|| anyhow!("Missing tenant-id"))?;
+            let tenantid = ZTenantId::from_str(tenantid_str)?;
+            println!("drop tenant with tenant id {}", tenantid);
+            pageserver.tenant_drop(tenantid)?;
+            println!("tenant successfully deleted from the pageserver");
         }
         _ => {}
     }

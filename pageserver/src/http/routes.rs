@@ -147,6 +147,21 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     Ok(json_response(StatusCode::CREATED, response_data)?)
 }
 
+async fn tenant_drop_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    // check for management permission
+    check_permission(&request, None)?;
+
+    let request_data: TenantCreateRequest = json_request(&mut request).await?;
+
+    let response_data = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_drop", tenant = %request_data.tenant_id).entered();
+        tenant_mgr::drop_tenant(get_config(&request), request_data.tenant_id)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+    Ok(json_response(StatusCode::OK, response_data)?)
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -179,5 +194,6 @@ pub fn make_router(
         .post("/v1/branch", branch_create_handler)
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
+        .delete("/v1/tenant", tenant_drop_handler)
         .any(handler_404)
 }
