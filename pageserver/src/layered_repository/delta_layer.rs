@@ -350,7 +350,7 @@ impl DeltaLayer {
     /// data structure with two btreemaps as we do, so passing the btreemaps is currently
     /// expedient.
     #[allow(clippy::too_many_arguments)]
-    pub fn create<'a>(
+    pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
@@ -358,7 +358,7 @@ impl DeltaLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
+        page_versions: impl Iterator<Item = (u32, Lsn, PageVersion)>,
         relsizes: VecMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
@@ -393,7 +393,8 @@ impl DeltaLayer {
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
         for (blknum, lsn, page_version) in page_versions {
-            let buf = PageVersion::ser(page_version)?;
+            // TODO avoid deserializing and then reserializing
+            let buf = PageVersion::ser(&page_version)?;
             let blob_range = page_version_writer.write_blob(&buf)?;
 
             inner
