@@ -9,11 +9,13 @@
 
 use std::{
     future::Future,
+    io::Write,
     path::{Path, PathBuf},
     pin::Pin,
 };
 
 use anyhow::{bail, Context};
+use tokio::{fs, io};
 
 use super::{strip_workspace_prefix, RelishStorage};
 
@@ -64,16 +66,33 @@ impl RelishStorage for LocalFs {
         Ok(get_all_files(&self.root).await?.into_iter().collect())
     }
 
-    async fn download_relish(
+    async fn download_relish<W: 'static + std::io::Write + Send>(
         &self,
         from: &Self::RelishStoragePath,
-        to: &Path,
-    ) -> anyhow::Result<()> {
+        mut to: std::io::BufWriter<W>,
+    ) -> anyhow::Result<std::io::BufWriter<W>> {
         let file_path = self.resolve_in_storage(from)?;
         if file_path.exists() && file_path.is_file() {
-            create_target_directory(to).await?;
-            tokio::fs::copy(file_path, to).await?;
-            Ok(())
+            let updated_buffer = tokio::task::spawn_blocking(move || {
+                let mut source = std::io::BufReader::new(
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .open(&file_path)
+                        .with_context(|| {
+                            format!(
+                                "Failed to open source file '{}' to use in the download",
+                                file_path.display()
+                            )
+                        })?,
+                );
+                std::io::copy(&mut source, &mut to)
+                    .context("Failed to download the relish file")?;
+                to.flush().context("Failed to flush the download buffer")?;
+                Ok::<_, anyhow::Error>(to)
+            })
+            .await
+            .context("Failed to spawn a blocking task")??;
+            Ok(updated_buffer)
         } else {
             bail!(
                 "File '{}' either does not exist or is not a file",
@@ -94,18 +113,30 @@ impl RelishStorage for LocalFs {
         }
     }
 
-    async fn upload_relish(&self, from: &Path, to: &Self::RelishStoragePath) -> anyhow::Result<()> {
+    async fn upload_relish<R: io::AsyncRead + std::marker::Unpin + Send>(
+        &self,
+        from: &mut io::BufReader<R>,
+        to: &Self::RelishStoragePath,
+    ) -> anyhow::Result<()> {
         let target_file_path = self.resolve_in_storage(to)?;
         create_target_directory(&target_file_path).await?;
+        let mut destination = io::BufWriter::new(
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&target_file_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to open target fs destination at '{}'",
+                        target_file_path.display()
+                    )
+                })?,
+        );
 
-        tokio::fs::copy(&from, &target_file_path)
+        io::copy_buf(from, &mut destination)
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to upload relish '{}' to local storage",
-                    from.display(),
-                )
-            })?;
+            .context("Failed to upload relish to local storage")?;
         Ok(())
     }
 }
