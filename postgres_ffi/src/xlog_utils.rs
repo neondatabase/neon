@@ -329,7 +329,12 @@ pub fn main() {
 }
 
 impl XLogRecord {
-    pub fn from_bytes(buf: &mut Bytes) -> XLogRecord {
+    pub fn from_slice(buf: &[u8]) -> XLogRecord {
+        use zenith_utils::bin_ser::LeSer;
+        XLogRecord::des(buf).unwrap()
+    }
+
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogRecord {
         use zenith_utils::bin_ser::LeSer;
         XLogRecord::des_from(&mut buf.reader()).unwrap()
     }
