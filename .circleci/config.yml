@@ -7,7 +7,7 @@ executors:
   zenith-build-executor:
     resource_class: xlarge
     docker:
-      - image: cimg/rust:1.52.1
+      - image: cimg/rust:1.55.0
 
 jobs:
   check-codestyle:
@@ -110,7 +110,7 @@ jobs:
             # Require an exact match. While an out of date cache might speed up the build,
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
-            - v03-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+            - v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
 
         # Build the rust code, including test binaries
       - run:
@@ -128,7 +128,7 @@ jobs:
 
       - save_cache:
           name: Save rust cache
-          key: v03-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+          key: v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
           paths:
             - ~/.cargo/registry
             - ~/.cargo/git

@@ -28,7 +28,7 @@ apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libsec
 libssl-dev clang pkg-config libpq-dev
 ```
 
-[Rust] 1.52 or later is also required.
+[Rust] 1.55 or later is also required.
 
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
