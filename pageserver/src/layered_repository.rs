@@ -855,6 +855,10 @@ impl Timeline for LayeredTimeline {
             .observe_closure_duration(|| self.checkpoint_internal(0, true))
     }
 
+    fn get_disk_consistent_lsn(&self) -> Lsn {
+        self.disk_consistent_lsn.load()
+    }
+
     fn get_last_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().last
     }

@@ -256,6 +256,8 @@ fn walreceiver_main(
                     caught_up = true;
                 }
 
+                // TODO shouldn't we use 'last_rec_lsn' instead?
+                // In any case, this line deserves a comment, explaining its correctness.
                 Some(endlsn)
             }
 
@@ -281,12 +283,21 @@ fn walreceiver_main(
             _ => None,
         };
 
-        if let Some(last_lsn) = status_update {
-            // TODO: More thought should go into what values are sent here.
-            let last_lsn = PgLsn::from(u64::from(last_lsn));
-            let write_lsn = last_lsn;
-            let flush_lsn = last_lsn;
-            let apply_lsn = PgLsn::from(0);
+        if status_update.is_some() {
+            let disk_consistent_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
+            // TODO Can we use last_lsn here?
+            // The data between 'disk_consistent_lsn' and 'last_lsn' only exists
+            // in pageserver's memory and won't survive the restart.
+            let write_lsn = disk_consistent_lsn;
+            // Pageserver can guarantee durability only up to disk_consistent_lsn.
+            // On restart, the WAL after the 'disk_consistent_lsn'
+            // should be requested from safekeepers and processed again.
+            let flush_lsn = disk_consistent_lsn;
+            // We don't really apply anything on pageserver in terms of standby WAL replay,
+            // so the meaning of 'apply_lsn' differs from the vanilla PostgreSQL standby setup.
+            // Probably we don't ever use this value in zenith setup.
+            // Still let's maintain the invariant that 'apply_lsn' is no larger than 'flush_lsn'.
+            let apply_lsn = disk_consistent_lsn;
             let ts = SystemTime::now();
             const NO_REPLY: u8 = 0;
 
