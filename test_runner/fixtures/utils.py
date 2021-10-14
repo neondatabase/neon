@@ -2,7 +2,7 @@ import os
 import subprocess
 
 from typing import Any, List
-
+from fixtures.log_helper import log
 
 def get_self_dir() -> str:
     """ Get the path to the directory where this script lives. """
@@ -39,7 +39,7 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
 
     with open(stdout_filename, 'w') as stdout_f:
         with open(stderr_filename, 'w') as stderr_f:
-            print('(capturing output to "{}.stdout")'.format(base))
+            log.info('(capturing output to "{}.stdout")'.format(base))
             subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
 
     return basepath
@@ -57,14 +57,6 @@ def global_counter() -> int:
     global _global_counter
     _global_counter += 1
     return _global_counter
-
-def debug_print(*args, **kwargs) -> None:
-    """ Print to the console if TEST_DEBUG_PRINT is set in env.
-    
-    All parameters are passed to print().
-    """
-    if os.environ.get('TEST_DEBUG_PRINT') is not None:
-        print(*args, **kwargs)
 
 def lsn_to_hex(num: int) -> str:
     """ Convert lsn from int to standard hex notation. """

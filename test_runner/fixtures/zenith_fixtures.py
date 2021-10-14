@@ -27,6 +27,8 @@ from typing_extensions import Literal
 import requests
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
+from fixtures.log_helper import log
+
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
@@ -188,13 +190,13 @@ class ZenithCli:
 
         >>> result = zenith_cli.run(...)
         >>> assert result.stderr == ""
-        >>> print(result.stdout)
+        >>> log.info(result.stdout)
         """
 
         assert type(arguments) == list
 
         args = [self.bin_zenith] + arguments
-        print('Running command "{}"'.format(' '.join(args)))
+        log.info('Running command "{}"'.format(' '.join(args)))
 
         # Interceipt CalledProcessError and print more info
         try:
@@ -211,7 +213,7 @@ class ZenithCli:
               stdout: {exc.stdout}
               stderr: {exc.stderr}
             """
-            print(msg)
+            log.info(msg)
 
             raise Exception(msg) from exc
 
@@ -392,7 +394,7 @@ class ZenithPageserver(PgProtocol):
         if immediate:
             cmd.append('immediate')
 
-        print(cmd)
+        log.info(f"Stopping pageserver with {cmd}")
         if self.running:
             self.zenith_cli.run(cmd)
             self.running = False
@@ -424,7 +426,7 @@ class ZenithPageserver(PgProtocol):
 def pageserver_port(port_distributor: PortDistributor) -> PageserverPort:
     pg = port_distributor.get_port()
     http = port_distributor.get_port()
-    print(f"pageserver_port: pg={pg} http={http}")
+    log.info(f"pageserver_port: pg={pg} http={http}")
     return PageserverPort(pg=pg, http=http)
 
 
@@ -448,7 +450,7 @@ def pageserver(zenith_cli: ZenithCli, repo_dir: str, pageserver_port: Pageserver
     yield ps
 
     # After the yield comes any cleanup code we need.
-    print('Starting pageserver cleanup')
+    log.info('Starting pageserver cleanup')
     ps.stop(True)
 
 class PgBin:
@@ -486,7 +488,7 @@ class PgBin:
         """
 
         self._fixpath(command)
-        print('Running command "{}"'.format(' '.join(command)))
+        log.info('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
         subprocess.run(command, env=env, cwd=cwd, check=True)
 
@@ -503,7 +505,7 @@ class PgBin:
         """
 
         self._fixpath(command)
-        print('Running command "{}"'.format(' '.join(command)))
+        log.info('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
         return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
 
@@ -571,12 +573,12 @@ class Postgres(PgProtocol):
 
         assert self.branch is not None
 
-        print(f"Starting postgres on branch {self.branch}")
+        log.info(f"Starting postgres on branch {self.branch}")
 
         run_result = self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}', f'--port={self.port}'])
         self.running = True
 
-        print(f"stdout: {run_result.stdout}")
+        log.info(f"stdout: {run_result.stdout}")
 
         return self
 
@@ -791,7 +793,7 @@ def postgres(zenith_cli: ZenithCli, initial_tenant: str, repo_dir: str, pg_bin: 
     yield pgfactory
 
     # After the yield comes any cleanup code we need.
-    print('Starting postgres cleanup')
+    log.info('Starting postgres cleanup')
     pgfactory.stop_all()
 
 def read_pid(path: Path):
@@ -828,7 +830,7 @@ class WalAcceptor:
         # Tell page server it can receive WAL from this WAL safekeeper
         cmd.extend(["--pageserver", f"localhost:{self.pageserver_port}"])
         cmd.extend(["--recall", "1 second"])
-        print('Running command "{}"'.format(' '.join(cmd)))
+        log.info('Running command "{}"'.format(' '.join(cmd)))
         env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None
         subprocess.run(cmd, check=True, env=env)
 
@@ -857,10 +859,10 @@ class WalAcceptor:
         return pid
 
     def stop(self) -> 'WalAcceptor':
-        print('Stopping wal acceptor {}'.format(self.num))
+        log.info('Stopping wal acceptor {}'.format(self.num))
         pid = self.get_pid()
         if pid is None:
-            print("Wal acceptor {} is not running".format(self.num))
+            log.info("Wal acceptor {} is not running".format(self.num))
             return self
 
         try:
@@ -886,10 +888,10 @@ class WalAcceptor:
             conn.autocommit = True
             with conn.cursor() as cur:
                 request_json = json.dumps(request)
-                print(f"JSON_CTRL request on port {self.port.pg}: {request_json}")
+                log.info(f"JSON_CTRL request on port {self.port.pg}: {request_json}")
                 cur.execute("JSON_CTRL " + request_json)
                 all = cur.fetchall()
-                print(f"JSON_CTRL response: {all[0][0]}")
+                log.info(f"JSON_CTRL response: {all[0][0]}")
                 return json.loads(all[0][0])
 
 class WalAcceptorFactory:
@@ -950,7 +952,7 @@ def wa_factory(zenith_binpath: str, repo_dir: str, pageserver_port: PageserverPo
     )
     yield wafactory
     # After the yield comes any cleanup code we need.
-    print('Starting wal acceptors cleanup')
+    log.info('Starting wal acceptors cleanup')
     wafactory.stop_all()
 
 
@@ -959,7 +961,7 @@ def base_dir() -> str:
     """ find the base directory (currently this is the git root) """
 
     base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
-    print('\nbase_dir is', base_dir)
+    log.info(f'base_dir is {base_dir}')
     return base_dir
 
 
@@ -988,7 +990,7 @@ def test_output_dir(request: Any, top_output_dir: str) -> str:
         test_name = 'shared'
 
     test_output_dir = os.path.join(top_output_dir, test_name)
-    print('test_output_dir is', test_output_dir)
+    log.info(f'test_output_dir is {test_output_dir}')
     shutil.rmtree(test_output_dir, ignore_errors=True)
     mkdir_if_needed(test_output_dir)
     return test_output_dir
@@ -1030,7 +1032,7 @@ def pg_distrib_dir(base_dir: str) -> str:
         pg_dir = env_postgres_bin
     else:
         pg_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
-    print('postgres dir is', pg_dir)
+    log.info(f'postgres dir is {pg_dir}')
     if not os.path.exists(os.path.join(pg_dir, 'bin/postgres')):
         raise Exception('postgres not found at "{}"'.format(pg_dir))
     return pg_dir
@@ -1069,7 +1071,7 @@ def list_files_to_compare(pgdata_dir: str):
                 pgdata_files.append(rel_file)
 
     pgdata_files.sort()
-    print(pgdata_files)
+    log.info(pgdata_files)
     return pgdata_files
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
@@ -1115,9 +1117,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli, test_output_dir: str, 
                                                 restored_dir_path,
                                                 pgdata_files,
                                                 shallow=False)
-    print('filecmp result mismatch and error lists:')
-    print(mismatch)
-    print(error)
+    log.info(f'filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}')
 
     for f in mismatch:
 

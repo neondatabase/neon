@@ -13,6 +13,7 @@
 import os
 from contextlib import closing
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
@@ -21,7 +22,7 @@ def test_write_amplification(postgres: PostgresFactory, pageserver: ZenithPagese
     zenith_cli.run(["branch", "test_write_amplification", "empty"])
 
     pg = postgres.create_start('test_write_amplification')
-    print("postgres is running on 'test_write_amplification' branch")
+    log.info("postgres is running on 'test_write_amplification' branch")
 
     # Open a connection directly to the page server that we'll use to force
     # flushing the layers to disk

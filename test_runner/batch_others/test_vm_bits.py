@@ -1,4 +1,5 @@
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -11,7 +12,7 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     zenith_cli.run(["branch", "test_vm_bit_clear", "empty"])
     pg = postgres.create_start('test_vm_bit_clear')
 
-    print("postgres is running on 'test_vm_bit_clear' branch")
+    log.info("postgres is running on 'test_vm_bit_clear' branch")
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
@@ -63,7 +64,7 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     # server at the right point-in-time avoids that full-page image.
     pg_new = postgres.create_start('test_vm_bit_clear_new')
 
-    print("postgres is running on 'test_vm_bit_clear_new' branch")
+    log.info("postgres is running on 'test_vm_bit_clear_new' branch")
     pg_new_conn = pg_new.connect()
     cur_new = pg_new_conn.cursor()
 

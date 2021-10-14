@@ -245,13 +245,13 @@ jobs:
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
             # in its "Tests" tab in the results page.
-            # -s prevents pytest from capturing output, which helps to see
-            # what's going on if the test hangs
             # --verbose prints name of each test (helpful when there are
             # multiple tests in one file)
             # -rA prints summary in the end
             # -n4 uses four processes to run tests via pytest-xdist
-            pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short -s --verbose -rA $TEST_SELECTION $EXTRA_PARAMS
+            # -s is not used to prevent pytest from capturing output, because tests are running
+            # in parallel and logs are mixed between different tests
+            pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short --verbose -rA $TEST_SELECTION $EXTRA_PARAMS
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the

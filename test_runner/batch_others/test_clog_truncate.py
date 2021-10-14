@@ -4,6 +4,7 @@ import os
 from contextlib import closing
 
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -24,7 +25,7 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     ]
 
     pg = postgres.create_start('test_clog_truncate', config_lines=config)
-    print('postgres is running on test_clog_truncate branch')
+    log.info('postgres is running on test_clog_truncate branch')
 
     # Install extension containing function needed for test
     pg.safe_psql('CREATE EXTENSION zenith_test_utils')
@@ -33,22 +34,22 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute('select test_consume_xids(1000*1000*10);')
-            print('xids consumed')
+            log.info('xids consumed')
 
             # call a checkpoint to trigger TruncateSubtrans
             cur.execute('CHECKPOINT;')
 
             # ensure WAL flush
             cur.execute('select txid_current()')
-            print(cur.fetchone())
+            log.info(cur.fetchone())
 
     # wait for autovacuum to truncate the pg_xact
     # XXX Is it worth to add a timeout here?
     pg_xact_0000_path = os.path.join(pg.pg_xact_dir_path(), '0000')
-    print("pg_xact_0000_path = " + pg_xact_0000_path)
+    log.info(f"pg_xact_0000_path = {pg_xact_0000_path}")
 
     while os.path.isfile(pg_xact_0000_path):
-        print("file exists. wait for truncation. " "pg_xact_0000_path = " + pg_xact_0000_path)
+        log.info(f"file exists. wait for truncation. " "pg_xact_0000_path = {pg_xact_0000_path}")
         time.sleep(5)
 
     # checkpoint to advance latest lsn
@@ -59,14 +60,14 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
             lsn_after_truncation = cur.fetchone()[0]
 
     # create new branch after clog truncation and start a compute node on it
-    print('create branch at lsn_after_truncation ' + lsn_after_truncation)
+    log.info(f'create branch at lsn_after_truncation {lsn_after_truncation}')
     zenith_cli.run(
         ["branch", "test_clog_truncate_new", "test_clog_truncate@" + lsn_after_truncation])
 
     pg2 = postgres.create_start('test_clog_truncate_new')
-    print('postgres is running on test_clog_truncate_new branch')
+    log.info('postgres is running on test_clog_truncate_new branch')
 
     # check that new node doesn't contain truncated segment
     pg_xact_0000_path_new = os.path.join(pg2.pg_xact_dir_path(), '0000')
-    print("pg_xact_0000_path_new = " + pg_xact_0000_path_new)
+    log.info(f"pg_xact_0000_path_new = {pg_xact_0000_path_new}")
     assert os.path.isfile(pg_xact_0000_path_new) is False

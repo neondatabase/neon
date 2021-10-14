@@ -1,6 +1,8 @@
 import pytest
 import os
 
+from fixtures.log_helper import log
+
 pytest_plugins = ("fixtures.zenith_fixtures")
 """
 Use this test to see what happens when tests fail.
@@ -22,7 +24,7 @@ def test_broken(zenith_cli, pageserver, postgres, pg_bin):
     zenith_cli.run(["branch", "test_broken", "empty"])
 
     postgres.create_start("test_broken")
-    print('postgres is running')
+    log.info('postgres is running')
 
-    print('THIS NEXT COMMAND WILL FAIL:')
+    log.info('THIS NEXT COMMAND WILL FAIL:')
     pg_bin.run('pgbench -i_am_a_broken_test'.split())

@@ -1,6 +1,7 @@
 import os
 from contextlib import closing
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
@@ -19,7 +20,7 @@ def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg
     zenith_cli.run(["branch", "test_bulk_insert", "empty"])
 
     pg = postgres.create_start('test_bulk_insert')
-    print("postgres is running on 'test_bulk_insert' branch")
+    log.info("postgres is running on 'test_bulk_insert' branch")
 
     # Open a connection directly to the page server that we'll use to force
     # flushing the layers to disk

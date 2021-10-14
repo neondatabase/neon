@@ -3,9 +3,10 @@ import asyncpg
 import random
 
 from fixtures.zenith_fixtures import WalAcceptor, WalAcceptorFactory, ZenithPageserver, PostgresFactory, Postgres
+from fixtures.log_helper import getLogger
 from typing import List
-from fixtures.utils import debug_print
 
+log = getLogger('root.wal_acceptor_async')
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
@@ -63,18 +64,18 @@ class WorkerStats(object):
         self.counters[worker_id] += 1
 
     def check_progress(self):
-        debug_print("Workers progress: {}".format(self.counters))
+        log.debug("Workers progress: {}".format(self.counters))
 
         # every worker should finish at least one tx
         assert all(cnt > 0 for cnt in self.counters)
 
         progress = sum(self.counters)
-        print('All workers made {} transactions'.format(progress))
+        log.info('All workers made {} transactions'.format(progress))
 
 
 async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accounts, max_transfer):
     pg_conn = await pg.connect_async()
-    debug_print('Started worker {}'.format(worker_id))
+    log.debug('Started worker {}'.format(worker_id))
 
     while stats.running:
         from_uid = random.randint(0, n_accounts - 1)
@@ -84,9 +85,9 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accou
         await bank_transfer(pg_conn, from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
-        debug_print('Executed transfer({}) {} => {}'.format(amount, from_uid, to_uid))
+        log.debug('Executed transfer({}) {} => {}'.format(amount, from_uid, to_uid))
 
-    debug_print('Finished worker {}'.format(worker_id))
+    log.debug('Finished worker {}'.format(worker_id))
 
     await pg_conn.close()
 
@@ -134,7 +135,7 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
 
         victim.start()
 
-    print('Iterations are finished, exiting coroutines...')
+    log.info('Iterations are finished, exiting coroutines...')
     stats.running = False
     # await all workers
     await asyncio.gather(*workers)

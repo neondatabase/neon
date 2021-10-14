@@ -1,5 +1,3 @@
-from pprint import pprint
-
 import os
 import re
 import timeit

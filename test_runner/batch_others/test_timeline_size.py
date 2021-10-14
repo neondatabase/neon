@@ -2,7 +2,7 @@ from contextlib import closing
 from uuid import UUID
 import psycopg2.extras
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
-
+from fixtures.log_helper import log
 
 def test_timeline_size(
     zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin
@@ -15,7 +15,7 @@ def test_timeline_size(
     assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
     pgmain = postgres.create_start("test_timeline_size")
-    print("postgres is running on 'test_timeline_size' branch")
+    log.info("postgres is running on 'test_timeline_size' branch")
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
