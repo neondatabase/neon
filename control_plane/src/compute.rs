@@ -190,7 +190,7 @@ impl PostgresNode {
         let port: u16 = conf.parse_field("port", &context)?;
         let timelineid: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
         let tenantid: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
-        let uses_wal_proposer = conf.get("wal_acceptors").is_some();
+        let uses_wal_proposer = conf.get("zenith.wal_acceptors").is_some();
 
         // parse recovery_target_lsn, if any
         let recovery_target_lsn: Option<Lsn> =

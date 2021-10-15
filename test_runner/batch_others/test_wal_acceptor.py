@@ -243,7 +243,7 @@ class ProposerPostgres:
                 "synchronous_standby_names = 'walproposer'\n",
                 f"zenith.zenith_timeline = '{self.timeline_id}'\n",
                 f"zenith.zenith_tenant = '{self.tenant_id}'\n",
-                f"wal_acceptors = '{wal_acceptors}'\n",
+                f"zenith.wal_acceptors = '{wal_acceptors}'\n",
             ])
 
     def sync_safekeepers(self) -> str:

@@ -656,7 +656,7 @@ class Postgres(PgProtocol):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
+            f.write("zenith.wal_acceptors = '{}'\n".format(wal_acceptors))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
