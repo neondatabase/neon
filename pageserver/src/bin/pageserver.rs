@@ -552,7 +552,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
                 info!("Got SIGQUIT. Terminate pageserver in immediate shutdown mode");
                 exit(111);
             }
-            SIGTERM => {
+            SIGINT | SIGTERM => {
                 info!("Got SIGINT/SIGTERM. Terminate gracefully in fast shutdown mode");
                 // Terminate postgres backends
                 postgres_backend::set_pgbackend_shutdown_requested();
@@ -577,8 +577,8 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
                 info!("Pageserver shut down successfully completed");
                 exit(0);
             }
-            _ => {
-                debug!("Unknown signal.");
+            unknown_signal => {
+                debug!("Unknown signal {}", unknown_signal);
             }
         }
     }
