@@ -2,7 +2,6 @@
 // Main entry point for the Page Server executable
 //
 
-use pageserver::defaults::*;
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -28,13 +27,8 @@ use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches,
-    defaults::{
-        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR,
-        DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
-    },
-    http, page_service, relish_storage, tenant_mgr, PageServerConf, RelishStorageConfig,
-    RelishStorageKind, S3Config, LOG_FILE_NAME,
+    branches, defaults::*, http, page_service, relish_storage, tenant_mgr, PageServerConf,
+    RelishStorageConfig, RelishStorageKind, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
@@ -42,7 +36,7 @@ use zenith_utils::postgres_backend;
 use const_format::formatcp;
 
 /// String arguments that can be declared via CLI or config file
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 struct CfgFileParams {
     listen_pg_addr: Option<String>,
     listen_http_addr: Option<String>,
@@ -53,12 +47,21 @@ struct CfgFileParams {
     pg_distrib_dir: Option<String>,
     auth_validation_public_key_path: Option<String>,
     auth_type: Option<String>,
-    // see https://github.com/alexcrichton/toml-rs/blob/6c162e6562c3e432bf04c82a3d1d789d80761a86/examples/enum_external.rs for enum deserialisation examples
-    relish_storage: Option<RelishStorage>,
     relish_storage_max_concurrent_sync: Option<String>,
+    /////////////////////////////////
+    //// Don't put `Option<String>` and other "simple" values below.
+    ////
+    /// `Option<RelishStorage>` is a <a href='https://toml.io/en/v1.0.0#table'>table</a> in TOML.
+    /// Values in TOML cannot be defined after tables (other tables can),
+    /// and [`toml`] crate serializes all fields in the order of their appearance.
+    ////////////////////////////////
+    relish_storage: Option<RelishStorage>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+// Without this attribute, enums with values won't be serialized by the `toml` library (but can be deserialized nonetheless!).
+// See https://github.com/alexcrichton/toml-rs/blob/6c162e6562c3e432bf04c82a3d1d789d80761a86/examples/enum_external.rs for the examples
+#[serde(untagged)]
 enum RelishStorage {
     Local {
         local_path: String,
@@ -584,4 +587,135 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_server_conf_toml_serde() {
+        let params = CfgFileParams {
+            listen_pg_addr: Some("listen_pg_addr_VALUE".to_string()),
+            listen_http_addr: Some("listen_http_addr_VALUE".to_string()),
+            checkpoint_distance: Some("checkpoint_distance_VALUE".to_string()),
+            checkpoint_period: Some("checkpoint_period_VALUE".to_string()),
+            gc_horizon: Some("gc_horizon_VALUE".to_string()),
+            gc_period: Some("gc_period_VALUE".to_string()),
+            pg_distrib_dir: Some("pg_distrib_dir_VALUE".to_string()),
+            auth_validation_public_key_path: Some(
+                "auth_validation_public_key_path_VALUE".to_string(),
+            ),
+            auth_type: Some("auth_type_VALUE".to_string()),
+            relish_storage: Some(RelishStorage::Local {
+                local_path: "relish_storage_local_VALUE".to_string(),
+            }),
+            relish_storage_max_concurrent_sync: Some(
+                "relish_storage_max_concurrent_sync_VALUE".to_string(),
+            ),
+        };
+
+        let toml_string = toml::to_string(&params).expect("Failed to serialize correct config");
+        let toml_pretty_string =
+            toml::to_string_pretty(&params).expect("Failed to serialize correct config");
+        assert_eq!(
+            r#"listen_pg_addr = 'listen_pg_addr_VALUE'
+listen_http_addr = 'listen_http_addr_VALUE'
+checkpoint_distance = 'checkpoint_distance_VALUE'
+checkpoint_period = 'checkpoint_period_VALUE'
+gc_horizon = 'gc_horizon_VALUE'
+gc_period = 'gc_period_VALUE'
+pg_distrib_dir = 'pg_distrib_dir_VALUE'
+auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
+auth_type = 'auth_type_VALUE'
+relish_storage_max_concurrent_sync = 'relish_storage_max_concurrent_sync_VALUE'
+
+[relish_storage]
+local_path = 'relish_storage_local_VALUE'
+"#,
+            toml_pretty_string
+        );
+
+        let params_from_serialized: CfgFileParams = toml::from_str(&toml_string)
+            .expect("Failed to deserialize the serialization result of the config");
+        let params_from_serialized_pretty: CfgFileParams = toml::from_str(&toml_pretty_string)
+            .expect("Failed to deserialize the prettified serialization result of the config");
+        assert!(
+            params_from_serialized == params,
+            "Expected the same config in the end of config -> serialize -> deserialize chain"
+        );
+        assert!(
+            params_from_serialized_pretty == params,
+            "Expected the same config in the end of config -> serialize pretty -> deserialize chain"
+        );
+    }
+
+    #[test]
+    fn credentials_omitted_during_serialization() {
+        let params = CfgFileParams {
+            listen_pg_addr: Some("listen_pg_addr_VALUE".to_string()),
+            listen_http_addr: Some("listen_http_addr_VALUE".to_string()),
+            checkpoint_distance: Some("checkpoint_distance_VALUE".to_string()),
+            checkpoint_period: Some("checkpoint_period_VALUE".to_string()),
+            gc_horizon: Some("gc_horizon_VALUE".to_string()),
+            gc_period: Some("gc_period_VALUE".to_string()),
+            pg_distrib_dir: Some("pg_distrib_dir_VALUE".to_string()),
+            auth_validation_public_key_path: Some(
+                "auth_validation_public_key_path_VALUE".to_string(),
+            ),
+            auth_type: Some("auth_type_VALUE".to_string()),
+            relish_storage: Some(RelishStorage::AwsS3 {
+                bucket_name: "bucket_name_VALUE".to_string(),
+                bucket_region: "bucket_region_VALUE".to_string(),
+                access_key_id: Some("access_key_id_VALUE".to_string()),
+                secret_access_key: Some("secret_access_key_VALUE".to_string()),
+            }),
+            relish_storage_max_concurrent_sync: Some(
+                "relish_storage_max_concurrent_sync_VALUE".to_string(),
+            ),
+        };
+
+        let toml_string = toml::to_string(&params).expect("Failed to serialize correct config");
+        let toml_pretty_string =
+            toml::to_string_pretty(&params).expect("Failed to serialize correct config");
+        assert_eq!(
+            r#"listen_pg_addr = 'listen_pg_addr_VALUE'
+listen_http_addr = 'listen_http_addr_VALUE'
+checkpoint_distance = 'checkpoint_distance_VALUE'
+checkpoint_period = 'checkpoint_period_VALUE'
+gc_horizon = 'gc_horizon_VALUE'
+gc_period = 'gc_period_VALUE'
+pg_distrib_dir = 'pg_distrib_dir_VALUE'
+auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
+auth_type = 'auth_type_VALUE'
+relish_storage_max_concurrent_sync = 'relish_storage_max_concurrent_sync_VALUE'
+
+[relish_storage]
+bucket_name = 'bucket_name_VALUE'
+bucket_region = 'bucket_region_VALUE'
+"#,
+            toml_pretty_string
+        );
+
+        let params_from_serialized: CfgFileParams = toml::from_str(&toml_string)
+            .expect("Failed to deserialize the serialization result of the config");
+        let params_from_serialized_pretty: CfgFileParams = toml::from_str(&toml_pretty_string)
+            .expect("Failed to deserialize the prettified serialization result of the config");
+
+        let mut expected_params = params;
+        expected_params.relish_storage = Some(RelishStorage::AwsS3 {
+            bucket_name: "bucket_name_VALUE".to_string(),
+            bucket_region: "bucket_region_VALUE".to_string(),
+            access_key_id: None,
+            secret_access_key: None,
+        });
+        assert!(
+            params_from_serialized == expected_params,
+            "Expected the config without credentials in the end of a 'config -> serialize -> deserialize' chain"
+        );
+        assert!(
+            params_from_serialized_pretty == expected_params,
+            "Expected the config without credentials in the end of a 'config -> serialize pretty -> deserialize' chain"
+        );
+    }
 }
