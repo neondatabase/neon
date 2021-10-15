@@ -241,6 +241,8 @@ jobs:
             if << parameters.run_in_parallel >>; then
               EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
             fi;
+            ./netstat-script.sh &
+            NS_PID=$!
             # Run the tests.
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
@@ -252,6 +254,8 @@ jobs:
             # -s is not used to prevent pytest from capturing output, because tests are running
             # in parallel and logs are mixed between different tests
             pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short --verbose -rA $TEST_SELECTION $EXTRA_PARAMS
+            kill $NS_PID
+            awk '/===/ {if (count) print count; print; count=0; next} {count++} END {print count}' $TEST_OUTPUT/netstat.stdout > $TEST_OUTPUT/netstat_stats.stdout
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
