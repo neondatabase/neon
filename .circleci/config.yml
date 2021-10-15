@@ -280,6 +280,9 @@ jobs:
 
             export GITHUB_SHA=$CIRCLE_SHA1
 
+            ./netstat-script.sh &
+            NS_PID=$!
+
             # Run the tests.
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
@@ -296,6 +299,9 @@ jobs:
               --verbose \
               -m "not remote_cluster" \
               -rA $TEST_SELECTION $EXTRA_PARAMS
+
+            kill $NS_PID
+            awk '/===/ {if (count) print count; print; count=0; next} {count++} END {print count}' $TEST_OUTPUT/netstat.stdout > $TEST_OUTPUT/netstat_stats.stdout
 
             if << parameters.save_perf_report >>; then
               if [[ $CIRCLE_BRANCH == "main" ]]; then
