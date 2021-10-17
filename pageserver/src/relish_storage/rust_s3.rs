@@ -115,9 +115,9 @@ impl RelishStorage for RustS3 {
             .delete_object(path.key())
             .await
             .with_context(|| format!("Failed to delete s3 object with key {}", path.key()))?;
-        if code != 200 {
+        if code != 204 {
             Err(anyhow::format_err!(
-                "Received non-200 exit code during deleting object with key '{}', code: {}",
+                "Received non-204 exit code during deleting object with key '{}', code: {}",
                 path.key(),
                 code
             ))
