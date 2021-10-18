@@ -1,4 +1,4 @@
-//! Part of WAL acceptor pretending to be Postgres, streaming xlog to
+//! Part of Safekeeper pretending to be Postgres, streaming xlog to
 //! pageserver/any other consumer.
 //!
 
