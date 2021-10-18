@@ -85,20 +85,20 @@ impl PageServerNode {
             ),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: format!("http://localhost:{}/v1", env.pageserver_http_port),
+            http_base_url: format!("http://127.0.0.1:{}/v1", env.pageserver_http_port),
         }
     }
 
     fn pageserver_connection_config(password: &str, port: u16) -> Config {
-        format!("postgresql://no_user:{}@localhost:{}/no_db", password, port)
+        format!("postgresql://no_user:{}@127.0.0.1:{}/no_db", password, port)
             .parse()
             .unwrap()
     }
 
     pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        let listen_pg = format!("localhost:{}", self.env.pageserver_pg_port);
-        let listen_http = format!("localhost:{}", self.env.pageserver_http_port);
+        let listen_pg = format!("127.0.0.1:{}", self.env.pageserver_pg_port);
+        let listen_http = format!("127.0.0.1:{}", self.env.pageserver_http_port);
         let mut args = vec![
             "--init",
             "-D",

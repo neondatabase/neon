@@ -29,24 +29,24 @@ mod tests {
 
     #[test]
     fn test_connection_host_port() {
-        let config: Config = "postgresql://no_user@localhost:64000/no_db"
+        let config: Config = "postgresql://no_user@127.0.0.1:64000/no_db"
             .parse()
             .unwrap();
         assert_eq!(
             connection_host_port(&config),
-            ("localhost".to_owned(), 64000)
+            ("127.0.0.1".to_owned(), 64000)
         );
     }
 
     #[test]
     #[should_panic(expected = "only one pair of host and port is supported in connection string")]
     fn test_connection_host_port_multiple_ports() {
-        let config: Config = "postgresql://no_user@localhost:64000,localhost:64001/no_db"
+        let config: Config = "postgresql://no_user@127.0.0.1:64000,127.0.0.1:64001/no_db"
             .parse()
             .unwrap();
         assert_eq!(
             connection_host_port(&config),
-            ("localhost".to_owned(), 64000)
+            ("127.0.0.1".to_owned(), 64000)
         );
     }
 }

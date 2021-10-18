@@ -235,16 +235,16 @@ class ZenithPageserverHttpClient(requests.Session):
             self.headers['Authorization'] = f'Bearer {auth_token}'
 
     def check_status(self):
-        self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
+        self.get(f"http://127.0.0.1:{self.port}/v1/status").raise_for_status()
 
     def branch_list(self, tenant_id: uuid.UUID) -> List[Dict]:
-        res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
+        res = self.get(f"http://127.0.0.1:{self.port}/v1/branch/{tenant_id.hex}")
         res.raise_for_status()
         return res.json()
 
     def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict:
         res = self.post(
-            f"http://localhost:{self.port}/v1/branch",
+            f"http://127.0.0.1:{self.port}/v1/branch",
             json={
                 'tenant_id': tenant_id.hex,
                 'name': name,
@@ -256,19 +256,19 @@ class ZenithPageserverHttpClient(requests.Session):
 
     def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict:
         res = self.get(
-            f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}",
+            f"http://127.0.0.1:{self.port}/v1/branch/{tenant_id.hex}/{name}",
         )
         res.raise_for_status()
         return res.json()
 
     def tenant_list(self) -> List[str]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant")
+        res = self.get(f"http://127.0.0.1:{self.port}/v1/tenant")
         res.raise_for_status()
         return res.json()
 
     def tenant_create(self, tenant_id: uuid.UUID):
         res = self.post(
-            f"http://localhost:{self.port}/v1/tenant",
+            f"http://127.0.0.1:{self.port}/v1/tenant",
             json={
                 'tenant_id': tenant_id.hex,
             },
@@ -277,7 +277,7 @@ class ZenithPageserverHttpClient(requests.Session):
         return res.json()
 
     def get_metrics(self) -> str:
-        res = self.get(f"http://localhost:{self.port}/metrics")
+        res = self.get(f"http://127.0.0.1:{self.port}/metrics")
         res.raise_for_status()
         return res.text
 
@@ -348,7 +348,7 @@ class PageserverPort:
 class ZenithPageserver(PgProtocol):
     """ An object representing a running pageserver. """
     def __init__(self, zenith_cli: ZenithCli, repo_dir: str, port: PageserverPort):
-        super().__init__(host='localhost', port=port.pg)
+        super().__init__(host='127.0.0.1', port=port.pg)
         self.zenith_cli = zenith_cli
         self.running = False
         self.initial_tenant = None
@@ -525,7 +525,7 @@ def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str, pageserver_por
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, tenant_id: str, port: int):
-        super().__init__(host='localhost', port=port)
+        super().__init__(host='127.0.0.1', port=port)
 
         self.zenith_cli = zenith_cli
         self.running = False
@@ -823,12 +823,12 @@ class WalAcceptor:
 
         cmd = [str(self.wa_bin_path)]
         cmd.extend(["-D", str(self.data_dir)])
-        cmd.extend(["--listen-pg", f"localhost:{self.port.pg}"])
-        cmd.extend(["--listen-http", f"localhost:{self.port.http}"])
+        cmd.extend(["--listen-pg", f"127.0.0.1:{self.port.pg}"])
+        cmd.extend(["--listen-http", f"127.0.0.1:{self.port.http}"])
         cmd.append("--daemonize")
         cmd.append("--no-sync")
         # Tell page server it can receive WAL from this WAL safekeeper
-        cmd.extend(["--pageserver", f"localhost:{self.pageserver_port}"])
+        cmd.extend(["--pageserver", f"127.0.0.1:{self.pageserver_port}"])
         cmd.extend(["--recall", "1 second"])
         log.info('Running command "{}"'.format(' '.join(cmd)))
         env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None
@@ -888,7 +888,7 @@ class WalAcceptor:
 
         # "replication=0" hacks psycopg not to send additional queries
         # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
+        connstr = f"host=127.0.0.1 port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
 
         with closing(psycopg2.connect(connstr)) as conn:
             # server doesn't support transactions
@@ -949,7 +949,7 @@ class WalAcceptorFactory:
 
     def get_connstrs(self) -> str:
         """ Get list of wal acceptor endpoints suitable for wal_acceptors GUC  """
-        return ','.join(["localhost:{}".format(wa.port.pg) for wa in self.instances])
+        return ','.join(["127.0.0.1:{}".format(wa.port.pg) for wa in self.instances])
 
 
 @zenfixture
@@ -976,10 +976,10 @@ class WalAcceptorHttpClient(requests.Session):
         self.port = port
 
     def check_status(self):
-        self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
+        self.get(f"http://127.0.0.1:{self.port}/v1/status").raise_for_status()
 
     def timeline_status(self, tenant_id: str, timeline_id: str) -> PageserverTimelineStatus:
-        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
+        res = self.get(f"http://127.0.0.1:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
         res.raise_for_status()
         resj = res.json()
         return PageserverTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'])
@@ -1124,7 +1124,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli, test_output_dir: str, 
     cmd = rf"""
         {psql_path}                                    \
             --no-psqlrc                                \
-            postgres://localhost:{pageserver_pg_port}  \
+            postgres://127.0.0.1:{pageserver_pg_port}  \
             -c 'basebackup {pg.tenant_id} {timeline}'  \
          | tar -x -C {restored_dir_path}
     """

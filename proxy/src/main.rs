@@ -99,7 +99,7 @@ fn main() -> anyhow::Result<()> {
                 .long("uri")
                 .takes_value(true)
                 .help("redirect unauthenticated users to given uri")
-                .default_value("http://localhost:3000/psql_session/"),
+                .default_value("http://127.0.0.1:3000/psql_session/"),
         )
         .arg(
             Arg::with_name("auth-endpoint")
@@ -107,7 +107,7 @@ fn main() -> anyhow::Result<()> {
                 .long("auth-endpoint")
                 .takes_value(true)
                 .help("redirect unauthenticated users to given uri")
-                .default_value("http://localhost:3000/authenticate_proxy_request/"),
+                .default_value("http://127.0.0.1:3000/authenticate_proxy_request/"),
         )
         .arg(
             Arg::with_name("ssl-key")
