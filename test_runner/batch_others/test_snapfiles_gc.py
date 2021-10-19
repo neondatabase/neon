@@ -61,8 +61,8 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     row = pscur.fetchone()
                     print_gc_result(row)
                     # remember the number of files
-                    layer_relfiles_remain = row['layer_relfiles_total'] - row[
-                        'layer_relfiles_removed']
+                    layer_relfiles_remain = (row['layer_relfiles_total'] -
+                                             row['layer_relfiles_removed'])
                     assert layer_relfiles_remain > 0
 
                     # Insert a row and run GC. Checkpoint should freeze the layer

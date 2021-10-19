@@ -45,8 +45,13 @@ def test_createdb(
 #
 # Test DROP DATABASE
 #
-def test_dropdb(zenith_cli: ZenithCli, pageserver: ZenithPageserver, postgres: PostgresFactory,
-                pg_bin, test_output_dir):
+def test_dropdb(
+    zenith_cli: ZenithCli,
+    pageserver: ZenithPageserver,
+    postgres: PostgresFactory,
+    pg_bin,
+    test_output_dir,
+):
     zenith_cli.run(["branch", "test_dropdb", "empty"])
 
     pg = postgres.create_start('test_dropdb')
