@@ -19,13 +19,16 @@ class BankClient(object):
     async def initdb(self):
         await self.conn.execute('DROP TABLE IF EXISTS bank_accs')
         await self.conn.execute('CREATE TABLE bank_accs(uid int primary key, amount int)')
-        await self.conn.execute('''
+        await self.conn.execute(
+            '''
             INSERT INTO bank_accs
             SELECT *, $1 FROM generate_series(0, $2)
-        ''', self.init_amount, self.n_accounts - 1)
+        ''',
+            self.init_amount,
+            self.n_accounts - 1)
         await self.conn.execute('DROP TABLE IF EXISTS bank_log')
         await self.conn.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
-        
+
         # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
         await self.conn.execute('ALTER TABLE bank_accs SET (autovacuum_enabled = false)')
         await self.conn.execute('ALTER TABLE bank_log SET (autovacuum_enabled = false)')
@@ -33,6 +36,7 @@ class BankClient(object):
     async def check_invariant(self):
         row = await self.conn.fetchrow('SELECT sum(amount) AS sum FROM bank_accs')
         assert row['sum'] == self.n_accounts * self.init_amount
+
 
 async def bank_transfer(conn: asyncpg.Connection, from_uid, to_uid, amount):
     # avoid deadlocks by sorting uids
@@ -42,15 +46,21 @@ async def bank_transfer(conn: asyncpg.Connection, from_uid, to_uid, amount):
     async with conn.transaction():
         await conn.execute(
             'UPDATE bank_accs SET amount = amount + ($1) WHERE uid = $2',
-            amount, to_uid,
+            amount,
+            to_uid,
         )
         await conn.execute(
             'UPDATE bank_accs SET amount = amount - ($1) WHERE uid = $2',
-            amount, from_uid,
+            amount,
+            from_uid,
         )
-        await conn.execute('INSERT INTO bank_log VALUES ($1, $2, $3)',
-            from_uid, to_uid, amount,
+        await conn.execute(
+            'INSERT INTO bank_log VALUES ($1, $2, $3)',
+            from_uid,
+            to_uid,
+            amount,
         )
+
 
 class WorkerStats(object):
     def __init__(self, n_workers):
@@ -114,7 +124,6 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
         worker = run_random_worker(stats, pg, worker_id, bank.n_accounts, max_transfer)
         workers.append(asyncio.create_task(worker))
 
-
     for it in range(iterations):
         victim = acceptors[it % len(acceptors)]
         victim.stop()
@@ -122,10 +131,7 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
         # Wait till previous victim recovers so it is ready for the next
         # iteration by making any writing xact.
         conn = await pg.connect_async()
-        await conn.execute(
-            'UPDATE bank_accs SET amount = amount WHERE uid = 1',
-            timeout=120
-        )
+        await conn.execute('UPDATE bank_accs SET amount = amount WHERE uid = 1', timeout=120)
         await conn.close()
 
         stats.reset()
@@ -145,7 +151,9 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
 
 
 # restart acceptors one by one, while executing and validating bank transactions
-def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_restarts_under_load(zenith_cli,
+                             pageserver: ZenithPageserver,
+                             postgres: PostgresFactory,
                              wa_factory: WalAcceptorFactory):
 
     wa_factory.start_n_new(3)

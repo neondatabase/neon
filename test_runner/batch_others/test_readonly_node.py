@@ -3,6 +3,7 @@ from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
+
 #
 # Create read-only compute nodes, anchored at historical points in time.
 #
@@ -51,7 +52,8 @@ def test_readonly_node(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     print('LSN after 400100 rows: ' + lsn_c)
 
     # Create first read-only node at the point where only 100 rows were inserted
-    pg_hundred = postgres.create_start("test_readonly_node_hundred", branch=f'test_readonly_node@{lsn_a}')
+    pg_hundred = postgres.create_start("test_readonly_node_hundred",
+                                       branch=f'test_readonly_node@{lsn_a}')
 
     # And another at the point where 200100 rows were inserted
     pg_more = postgres.create_start("test_readonly_node_more", branch=f'test_readonly_node@{lsn_b}')
@@ -73,7 +75,8 @@ def test_readonly_node(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     assert main_cur.fetchone() == (400100, )
 
     # Check creating a node at segment boundary
-    pg = postgres.create_start("test_branch_segment_boundary", branch="test_readonly_node@0/3000000")
+    pg = postgres.create_start("test_branch_segment_boundary",
+                               branch="test_readonly_node@0/3000000")
     cur = pg.connect().cursor()
     cur.execute('SELECT 1')
     assert cur.fetchone() == (1, )

@@ -4,6 +4,7 @@ import subprocess
 from typing import Any, List
 from fixtures.log_helper import log
 
+
 def get_self_dir() -> str:
     """ Get the path to the directory where this script lives. """
     return os.path.dirname(os.path.abspath(__file__))
@@ -57,6 +58,7 @@ def global_counter() -> int:
     global _global_counter
     _global_counter += 1
     return _global_counter
+
 
 def lsn_to_hex(num: int) -> str:
     """ Convert lsn from int to standard hex notation. """
