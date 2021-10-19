@@ -145,18 +145,18 @@ fn main() -> anyhow::Result<()> {
     println!("Starting mgmt on {}", state.conf.mgmt_address);
     let mgmt_listener = TcpListener::bind(state.conf.mgmt_address)?;
 
-    let threads = vec![
+    let threads = [
         // Spawn a thread to listen for connections. It will spawn further threads
         // for each connection.
         thread::Builder::new()
-            .name("Proxy thread".into())
+            .name("Listener thread".into())
             .spawn(move || proxy::thread_main(state, pageserver_listener))?,
         thread::Builder::new()
             .name("Mgmt thread".into())
             .spawn(move || mgmt::thread_main(state, mgmt_listener))?,
     ];
 
-    for t in threads.into_iter() {
+    for t in threads {
         t.join().unwrap()?;
     }
 
