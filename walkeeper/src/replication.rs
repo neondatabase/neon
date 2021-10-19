@@ -114,16 +114,16 @@ impl ReplicationConn {
         Ok(())
     }
 
-    /// Helper function that parses a pair of LSNs.
-    fn parse_start_stop(cmd: &[u8]) -> Result<(Lsn, Lsn)> {
+    /// Helper function that parses a single LSN.
+    fn parse_start(cmd: &[u8]) -> Result<Lsn> {
         let re = Regex::new(r"([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
         let caps = re.captures_iter(str::from_utf8(cmd)?);
         let mut lsns = caps.map(|cap| cap[1].parse::<Lsn>());
         let start_pos = lsns
             .next()
             .ok_or_else(|| anyhow!("Failed to parse start LSN from command"))??;
-        let stop_pos = lsns.next().transpose()?.unwrap_or(Lsn(0));
-        Ok((start_pos, stop_pos))
+        assert!(lsns.next().is_none());
+        Ok(start_pos)
     }
 
     /// Helper function for opening a wal file.
@@ -163,7 +163,7 @@ impl ReplicationConn {
             }
         });
 
-        let (mut start_pos, mut stop_pos) = Self::parse_start_stop(cmd)?;
+        let mut start_pos = Self::parse_start(cmd)?;
 
         let mut wal_seg_size: usize;
         loop {
@@ -179,9 +179,11 @@ impl ReplicationConn {
         if start_pos == Lsn(0) {
             start_pos = wal_end;
         }
-        if stop_pos == Lsn(0) && swh.appname == Some("wal_proposer_recovery".to_string()) {
-            stop_pos = wal_end;
-        }
+        let stop_pos = if swh.appname == Some("wal_proposer_recovery".to_string()) {
+            wal_end
+        } else {
+            Lsn(0)
+        };
         info!("Start replication from {} till {}", start_pos, stop_pos);
 
         // switch to copy
