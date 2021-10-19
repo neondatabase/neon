@@ -63,3 +63,8 @@ def global_counter() -> int:
 def lsn_to_hex(num: int) -> str:
     """ Convert lsn from int to standard hex notation. """
     return "{:X}/{:X}".format(num >> 32, num & 0xffffffff)
+
+def lsn_from_hex(lsn_hex: str) -> int:
+    """ Convert lsn from hex notation to int. """
+    l, r = lsn_hex.split('/')
+    return (int(l, 16) << 32) + int(r, 16)

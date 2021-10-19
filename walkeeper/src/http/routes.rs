@@ -49,6 +49,8 @@ struct TimelineStatus {
     commit_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
     truncate_lsn: Lsn,
+    #[serde(serialize_with = "display_serialize")]
+    flush_lsn: Lsn,
 }
 
 /// Report info about timeline.
@@ -64,6 +66,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     )
     .map_err(ApiError::from_err)?;
     let sk_state = tli.get_info();
+    let (flush_lsn, _) = tli.get_end_of_wal();
 
     let status = TimelineStatus {
         tenant_id,
@@ -71,6 +74,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         acceptor_state: sk_state.acceptor_state,
         commit_lsn: sk_state.commit_lsn,
         truncate_lsn: sk_state.truncate_lsn,
+        flush_lsn: flush_lsn,
     };
     Ok(json_response(StatusCode::OK, status)?)
 }
