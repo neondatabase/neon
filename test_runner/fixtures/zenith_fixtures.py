@@ -369,20 +369,23 @@ class PageserverPort:
 
 
 class ZenithPageserver(PgProtocol):
-    """ An object representing a running pageserver. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, port: PageserverPort):
+    """
+    An object representing a running pageserver.
+
+    Initializes the repository via `zenith init` and starts page server.
+    """
+    def __init__(self,
+                 zenith_cli: ZenithCli,
+                 repo_dir: str,
+                 port: PageserverPort,
+                 enable_auth=False):
         super().__init__(host='localhost', port=port.pg)
         self.zenith_cli = zenith_cli
         self.running = False
-        self.initial_tenant = None
+        self.initial_tenant: str = cast(str, None)  # Will be fixed by self.start() below
         self.repo_dir = repo_dir
         self.service_port = port  # do not shadow PgProtocol.port which is just int
 
-    def init(self, enable_auth: bool = False) -> 'ZenithPageserver':
-        """
-        Initialize the repository, i.e. run "zenith init".
-        Returns self.
-        """
         cmd = [
             'init',
             f'--pageserver-pg-port={self.service_port.pg}',
@@ -391,7 +394,8 @@ class ZenithPageserver(PgProtocol):
         if enable_auth:
             cmd.append('--enable-auth')
         self.zenith_cli.run(cmd)
-        return self
+
+        self.start()
 
     def start(self) -> 'ZenithPageserver':
         """
@@ -403,7 +407,11 @@ class ZenithPageserver(PgProtocol):
         self.zenith_cli.run(['start'])
         self.running = True
         # get newly created tenant id
-        self.initial_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.strip()
+        current_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.strip()
+        if self.initial_tenant is None:
+            self.initial_tenant = current_tenant
+        else:
+            assert self.initial_tenant == current_tenant
         return self
 
     def stop(self, immediate=False) -> 'ZenithPageserver':
@@ -463,8 +471,7 @@ def pageserver(zenith_cli: ZenithCli, repo_dir: str,
     By convention, the test branches are named after the tests. For example,
     test called 'test_foo' would create and use branches with the 'test_foo' prefix.
     """
-    ps = ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir,
-                          port=pageserver_port).init().start()
+    ps = ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir, port=pageserver_port)
     # For convenience in tests, create a branch from the freshly-initialized cluster.
     zenith_cli.run(["branch", "empty", "main"])
 
@@ -539,8 +546,10 @@ def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
 
 @pytest.fixture
 def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str, pageserver_port: PageserverPort):
-    with ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir,
-                          port=pageserver_port).init(enable_auth=True).start() as ps:
+    with ZenithPageserver(zenith_cli=zenith_cli,
+                          repo_dir=repo_dir,
+                          port=pageserver_port,
+                          enable_auth=True) as ps:
         # For convenience in tests, create a branch from the freshly-initialized cluster.
         zenith_cli.run(["branch", "empty", "main"])
         yield ps
