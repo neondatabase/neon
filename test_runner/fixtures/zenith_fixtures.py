@@ -269,7 +269,7 @@ class ZenithPageserverHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
-    def tenant_list(self) -> List[str]:
+    def tenant_list(self) -> List[Dict]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         res.raise_for_status()
         return res.json()
@@ -401,7 +401,7 @@ class ZenithPageserver(PgProtocol):
         self.zenith_cli.run(['start'])
         self.running = True
         # get newly created tenant id
-        self.initial_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.strip()
+        self.initial_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.split()[0]
         return self
 
     def stop(self, immediate=False) -> 'ZenithPageserver':

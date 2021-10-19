@@ -384,8 +384,8 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
     let pageserver = PageServerNode::from_env(env);
     match tenant_match.subcommand() {
         ("list", Some(_)) => {
-            for tenant in pageserver.tenant_list()? {
-                println!("{}", tenant);
+            for t in pageserver.tenant_list()? {
+                println!("{} {}", t.id, t.state);
             }
         }
         ("create", Some(create_match)) => {

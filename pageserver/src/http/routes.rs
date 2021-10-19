@@ -124,7 +124,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_list").entered();
-        crate::branches::get_tenants(get_config(&request))
+        crate::tenant_mgr::list_tenants()
     })
     .await
     .map_err(ApiError::from_err)??;
