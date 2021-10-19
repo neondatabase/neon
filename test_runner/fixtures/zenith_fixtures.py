@@ -634,6 +634,7 @@ class Postgres(PgProtocol):
 
     def pg_data_dir_path(self) -> str:
         """ Path to data directory """
+        assert self.node_name
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
         return os.path.join(self.repo_dir, path)
 
@@ -704,9 +705,9 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        assert self.tenant_id is not None
         self.zenith_cli.run(
             ['pg', 'stop', '--destroy', self.node_name, f'--tenantid={self.tenant_id}'])
+        self.node_name = None
 
         return self
 
@@ -1199,6 +1200,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli,
     subprocess.check_call(cmd, shell=True)
 
     # list files we're going to compare
+    assert pg.pgdata_dir
     pgdata_files = list_files_to_compare(pg.pgdata_dir)
     restored_files = list_files_to_compare(restored_dir_path)
 
