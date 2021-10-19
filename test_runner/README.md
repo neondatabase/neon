@@ -4,9 +4,12 @@ This directory contains integration tests.
 
 Prerequisites:
 - Python 3.7 or later
+    - Development headers may also be needed to build `psycopg2` from source.
+    - Python 3.7 is recommended if you want to update tests.
 - Dependencies: install them via `pipenv install`. Note that Debian/Ubuntu
   packages are stale, as it commonly happens, so manual installation is not
   recommended.
+  Exact version of `pipenv` is not important unless you change dependencies.
   Run `pipenv shell` to activate the venv or use `pipenv run` to run a single
   command in the venv, e.g. `pipenv run pytest`.
 - Zenith and Postgres binaries
@@ -93,18 +96,48 @@ Cleanup will happen even if the test fails (raises an unhandled exception).
 Python destructors, e.g. `__del__()` aren't recommended for cleanup.
 
 
-### Code quality
+### Before submitting a patch
+#### Obligatory checks
+Install dev dependencies via `pipenv --python 3.7 install --dev` (better)
+or `pipenv install --dev` (if you don't have Python 3.7 and don't need to change dependencies).
 
-We force code formatting via yapf and type hints via mypy:
+We force code formatting via yapf and type hints via mypy.
+Run the following commands in the `test_runner/` directory:
 
-1. Install `yapf` and other tools (`flake8`, `mypy`) with `pipenv install --dev`.
-1. Reformat all your code by running `pipenv run yapf -ri .` in the `test_runner/` directory.
-1. Ensure there are no type errors by running `pipenv run mypy .` in the `test_runner/` directory.
+```bash
+pipenv run yapf -ri .  # All code is reformatted
+pipenv run mypy .  # Ensure there are no typing errors
+```
 
-Before submitting a patch, please consider:
-
+#### Advisable actions
 * Writing a couple of docstrings to clarify the reasoning behind a new test.
 * Running `flake8` (or a linter of your choice, e.g. `pycodestyle`) and fixing possible defects, if any.
 * Adding more type hints to your code to avoid `Any`, especially:
   * For fixture parameters, they are not automatically deduced.
   * For function arguments and return values.
+
+#### Changing dependencies
+You have to update `Pipfile.lock` if you have changed `Pipfile`:
+
+```bash
+pipenv --python 3.7 install --dev  # Re-create venv for Python 3.7 and install recent pipenv inside
+pipenv run pipenv --version  # Should be at least 2021.5.29
+pipenv run pipenv lock  # Regenerate Pipfile.lock
+```
+
+As the minimal supported version is Python 3.7 and we use it in CI,
+you have to use a Python 3.7 environment when updating `Pipfile.lock`.
+Otherwise some back-compatibility packages will be missing.
+
+It is also important to run recent `pipenv`.
+Older versions remove markers from `Pipfile.lock`.
+
+If you don't have Python 3.7, you should install it and its headers (for `psycopg2`)
+separately, e.g.:
+
+```bash
+# In Ubuntu
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install python3.7 python3.7-dev
+```
