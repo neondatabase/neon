@@ -182,6 +182,21 @@ jobs:
           paths:
             - "*"
 
+  check-python:
+    executor: python/default
+    steps:
+      - checkout
+      - run:
+          name: Install pipenv & deps
+          working_directory: test_runner
+          command: |
+            pip install pipenv
+            pipenv install --dev
+      - run:
+          name: Run yapf to ensure code format
+          working_directory: test_runner
+          command: pipenv run yapf --recursive --diff .
+
   run-pytest:
     #description: "Run pytest"
     executor: python/default
@@ -333,6 +348,7 @@ workflows:
   build_and_test:
     jobs:
       - check-codestyle
+      - check-python
       - build-postgres:
           name: build-postgres-<< matrix.build_type >>
           matrix:
