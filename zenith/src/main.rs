@@ -32,11 +32,15 @@ struct BranchTreeEl {
 //   * Providing CLI api to the pageserver
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
-    let timeline_arg = Arg::with_name("timeline")
-        .short("n")
+    let node_arg = Arg::with_name("node")
         .index(1)
-        .help("Timeline name")
+        .help("Node name")
         .required(true);
+
+    let timeline_arg = Arg::with_name("timeline")
+        .index(2)
+        .help("Branch name or a point-in time specification")
+        .required(false);
 
     let tenantid_arg = Arg::with_name("tenantid")
         .long("tenantid")
@@ -102,7 +106,10 @@ fn main() -> Result<()> {
                 .subcommand(SubCommand::with_name("list").arg(tenantid_arg.clone()))
                 .subcommand(SubCommand::with_name("create")
                     .about("Create a postgres compute node")
-                    .arg(timeline_arg.clone()).arg(tenantid_arg.clone()).arg(port_arg.clone())
+                    .arg(node_arg.clone())
+                    .arg(timeline_arg.clone())
+                    .arg(tenantid_arg.clone())
+                    .arg(port_arg.clone())
                     .arg(
                         Arg::with_name("config-only")
                             .help("Don't do basebackup, create compute node with only config files")
@@ -111,13 +118,13 @@ fn main() -> Result<()> {
                     ))
                 .subcommand(SubCommand::with_name("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
-                    .arg(
-                        timeline_arg.clone()
-                    ).arg(
-                        tenantid_arg.clone()
-                    ).arg(port_arg.clone()))
+                    .arg(node_arg.clone())
+                    .arg(timeline_arg.clone())
+                    .arg(tenantid_arg.clone())
+                    .arg(port_arg.clone()))
                 .subcommand(
                     SubCommand::with_name("stop")
+                        .arg(node_arg.clone())
                         .arg(timeline_arg.clone())
                         .arg(tenantid_arg.clone())
                         .arg(
@@ -430,25 +437,32 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let tenantid: ZTenantId = list_match
                 .value_of("tenantid")
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
+
             let branch_infos = get_branch_infos(env, &tenantid).unwrap_or_else(|e| {
                 eprintln!("Failed to load branch info: {}", e);
                 HashMap::new()
             });
 
-            println!("BRANCH\tADDRESS\t\tLSN\t\tSTATUS");
-            for ((_, timeline_name), node) in cplane
+            println!("NODE\tADDRESS\t\tBRANCH\tLSN\t\tSTATUS");
+            for ((_, node_name), node) in cplane
                 .nodes
                 .iter()
                 .filter(|((node_tenantid, _), _)| node_tenantid == &tenantid)
             {
+                // FIXME: This shows the LSN at the end of the timeline. It's not the
+                // right thing to do for read-only nodes that might be anchored at an
+                // older point in time, or following but lagging behind the primary.
+                let lsn_str = branch_infos
+                    .get(&node.timelineid)
+                    .map(|bi| bi.latest_valid_lsn.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+
                 println!(
-                    "{}\t{}\t{}\t{}",
-                    timeline_name,
+                    "{}\t{}\t{}\t{}\t{}",
+                    node_name,
                     node.address,
-                    branch_infos
-                        .get(&node.timelineid)
-                        .map(|bi| bi.latest_valid_lsn.to_string())
-                        .unwrap_or_else(|| "?".to_string()),
+                    node.timelineid, // FIXME: resolve human-friendly branch name
+                    lsn_str,
                     node.status(),
                 );
             }
@@ -457,8 +471,8 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let tenantid: ZTenantId = create_match
                 .value_of("tenantid")
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
-            let node_name = start_match.value_of("node").unwrap_or("main");
-            let timeline_name = start_match.value_of("timeline");
+            let node_name = create_match.value_of("node").unwrap_or("main");
+            let timeline_name = create_match.value_of("timeline").unwrap_or(node_name);
 
             let port: Option<u16> = match create_match.value_of("port") {
                 Some(p) => Some(p.parse()?),
@@ -487,12 +501,11 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 None
             };
 
-            println!(
-                "Starting {} postgres on timeline {}...",
-                if node.is_some() { "existing" } else { "new" },
-                timeline_name
-            );
             if let Some(node) = node {
+                if timeline_name.is_some() {
+                    println!("timeline name ignored because node exists already");
+                }
+                println!("Starting existing postgres {}...", node_name);
                 node.start(&auth_token)?;
             } else {
                 // when used with custom port this results in non obvious behaviour
@@ -500,12 +513,17 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 // start --port X
                 // stop
                 // start <-- will also use port X even without explicit port argument
+                let timeline_name = timeline_name.unwrap_or(node_name);
+                println!(
+                    "Starting new postgres {} on {}...",
+                    node_name, timeline_name
+                );
                 let node = cplane.new_node(tenantid, node_name, timeline_name, port)?;
                 node.start(&auth_token)?;
             }
         }
         ("stop", Some(stop_match)) => {
-            let timeline_name = stop_match.value_of("timeline").unwrap_or("main");
+            let node_name = stop_match.value_of("node").unwrap_or("main");
             let destroy = stop_match.is_present("destroy");
             let tenantid: ZTenantId = stop_match
                 .value_of("tenantid")
@@ -513,8 +531,8 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
             let node = cplane
                 .nodes
-                .get(&(tenantid, timeline_name.to_owned()))
-                .ok_or_else(|| anyhow!("postgres {} is not found", timeline_name))?;
+                .get(&(tenantid, node_name.to_owned()))
+                .ok_or_else(|| anyhow!("postgres {} is not found", node_name))?;
             node.stop(destroy)?;
         }
 

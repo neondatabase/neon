@@ -84,18 +84,43 @@ impl ComputeControlPlane {
         }
     }
 
+    // FIXME: see also parse_point_in_time in branches.rs.
+    fn parse_point_in_time(
+        &self,
+        tenantid: ZTenantId,
+        s: &str,
+    ) -> Result<(ZTimelineId, Option<Lsn>)> {
+        let mut strings = s.split('@');
+        let name = strings.next().unwrap();
+
+        let lsn: Option<Lsn>;
+        if let Some(lsnstr) = strings.next() {
+            lsn = Some(
+                Lsn::from_str(lsnstr)
+                    .with_context(|| "invalid LSN in point-in-time specification")?,
+            );
+        } else {
+            lsn = None
+        }
+
+        // Resolve the timeline ID, given the human-readable branch name
+        let timeline_id = self
+            .pageserver
+            .branch_get_by_name(&tenantid, name)?
+            .timeline_id;
+
+        Ok((timeline_id, lsn))
+    }
+
     pub fn new_node(
         &mut self,
         tenantid: ZTenantId,
         name: &str,
-        branch_name: &str,
+        timeline_spec: &str,
         port: Option<u16>,
     ) -> Result<Arc<PostgresNode>> {
-        // Resolve the timeline ID, given the human-readable branch name
-        let timeline_id = self
-            .pageserver
-            .branch_get_by_name(&tenantid, branch_name)?
-            .timeline_id;
+        // Resolve the human-readable timeline spec into timeline ID and LSN
+        let (timelineid, lsn) = self.parse_point_in_time(tenantid, timeline_spec)?;
 
         let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {
@@ -104,7 +129,8 @@ impl ComputeControlPlane {
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
             is_test: false,
-            timelineid: timeline_id,
+            timelineid,
+            lsn,
             tenantid,
             uses_wal_proposer: false,
         });
@@ -129,6 +155,7 @@ pub struct PostgresNode {
     pageserver: Arc<PageServerNode>,
     is_test: bool,
     pub timelineid: ZTimelineId,
+    pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
     pub tenantid: ZTenantId,
     uses_wal_proposer: bool,
 }
@@ -163,8 +190,11 @@ impl PostgresNode {
         let port: u16 = conf.parse_field("port", &context)?;
         let timelineid: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
         let tenantid: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
-
         let uses_wal_proposer = conf.get("wal_acceptors").is_some();
+
+        // parse recovery_target_lsn, if any
+        let recovery_target_lsn: Option<Lsn> =
+            conf.parse_field_optional("recovery_target_lsn", &context)?;
 
         // ok now
         Ok(PostgresNode {
@@ -174,6 +204,7 @@ impl PostgresNode {
             pageserver: Arc::clone(pageserver),
             is_test: false,
             timelineid,
+            lsn: recovery_target_lsn,
             tenantid,
             uses_wal_proposer,
         })
@@ -235,7 +266,7 @@ impl PostgresNode {
         // Read the archive directly from the `CopyOutReader`
         tar::Archive::new(copyreader)
             .unpack(&self.pgdata())
-            .with_context(|| "extracting page backup failed")?;
+            .with_context(|| "extracting base backup failed")?;
 
         Ok(())
     }
@@ -303,6 +334,9 @@ impl PostgresNode {
         conf.append("zenith.page_server_connstring", &pageserver_connstr);
         conf.append("zenith.zenith_tenant", &self.tenantid.to_string());
         conf.append("zenith.zenith_timeline", &self.timelineid.to_string());
+        if let Some(lsn) = self.lsn {
+            conf.append("recovery_target_lsn", &lsn.to_string());
+        }
         conf.append_line("");
 
         // Configure the node to stream WAL directly to the pageserver
@@ -316,7 +350,9 @@ impl PostgresNode {
     }
 
     fn load_basebackup(&self) -> Result<()> {
-        let lsn = if self.uses_wal_proposer {
+        let backup_lsn = if let Some(lsn) = self.lsn {
+            Some(lsn)
+        } else if self.uses_wal_proposer {
             // LSN 0 means that it is bootstrap and we need to download just
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
@@ -331,7 +367,7 @@ impl PostgresNode {
             None
         };
 
-        self.do_basebackup(lsn)?;
+        self.do_basebackup(backup_lsn)?;
 
         Ok(())
     }
@@ -407,6 +443,10 @@ impl PostgresNode {
 
         // 3. Load basebackup
         self.load_basebackup()?;
+
+        if self.lsn.is_some() {
+            File::create(self.pgdata().join("standby.signal"))?;
+        }
 
         // 4. Finally start the compute node postgres
         println!("Starting postgres node at '{}'", self.connstr());

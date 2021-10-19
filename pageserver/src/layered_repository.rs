@@ -678,6 +678,10 @@ pub struct LayeredTimeline {
 
 /// Public interface functions
 impl Timeline for LayeredTimeline {
+    fn get_ancestor_lsn(&self) -> Lsn {
+        self.ancestor_lsn
+    }
+
     /// Wait until WAL has been received up to the given LSN.
     fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
