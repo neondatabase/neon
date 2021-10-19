@@ -179,11 +179,7 @@ impl ReplicationConn {
         if start_pos == Lsn(0) {
             start_pos = wal_end;
         }
-        let stop_pos = if swh.appname == Some("wal_proposer_recovery".to_string()) {
-            wal_end
-        } else {
-            Lsn(0)
-        };
+        let stop_pos = Lsn(0);
         info!("Start replication from {} till {}", start_pos, stop_pos);
 
         // switch to copy
