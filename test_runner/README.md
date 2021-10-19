@@ -3,7 +3,7 @@
 This directory contains integration tests.
 
 Prerequisites:
-- Python 3.6 or later
+- Python 3.7 or later
 - Dependencies: install them via `pipenv install`. Note that Debian/Ubuntu
   packages are stale, as it commonly happens, so manual installation is not
   recommended.
