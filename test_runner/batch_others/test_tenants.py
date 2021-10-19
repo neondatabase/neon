@@ -22,11 +22,15 @@ def test_tenants_normal_work(
     tenant_2 = tenant_factory.create()
 
     zenith_cli.run([
-        "branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main",
+        "branch",
+        f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        "main",
         f"--tenantid={tenant_1}"
     ])
     zenith_cli.run([
-        "branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main",
+        "branch",
+        f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        "main",
         f"--tenantid={tenant_2}"
     ])
     if with_wal_acceptors:

@@ -16,7 +16,9 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 # basic test, write something in setup with wal acceptors, ensure that commits
 # succeed and data is written
-def test_normal_work(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_normal_work(zenith_cli,
+                     pageserver: ZenithPageserver,
+                     postgres: PostgresFactory,
                      wa_factory):
     zenith_cli.run(["branch", "test_wal_acceptors_normal_work", "empty"])
     wa_factory.start_n_new(3)
@@ -35,7 +37,9 @@ def test_normal_work(zenith_cli, pageserver: ZenithPageserver, postgres: Postgre
 
 # Run page server and multiple acceptors, and multiple compute nodes running
 # against different timelines.
-def test_many_timelines(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_many_timelines(zenith_cli,
+                        pageserver: ZenithPageserver,
+                        postgres: PostgresFactory,
                         wa_factory):
     n_timelines = 2
 
@@ -68,7 +72,9 @@ def test_many_timelines(zenith_cli, pageserver: ZenithPageserver, postgres: Post
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up
 # along the way. 2 of 3 are always alive, so the work keeps going.
-def test_restarts(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_restarts(zenith_cli,
+                  pageserver: ZenithPageserver,
+                  postgres: PostgresFactory,
                   wa_factory: WalAcceptorFactory):
     fault_probability = 0.01
     n_inserts = 1000
@@ -180,8 +186,11 @@ def stop_value():
 
 
 # do inserts while concurrently getting up/down subsets of acceptors
-def test_race_conditions(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
-                         wa_factory, stop_value):
+def test_race_conditions(zenith_cli,
+                         pageserver: ZenithPageserver,
+                         postgres: PostgresFactory,
+                         wa_factory,
+                         stop_value):
 
     wa_factory.start_n_new(3)
 

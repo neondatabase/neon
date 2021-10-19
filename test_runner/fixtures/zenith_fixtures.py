@@ -308,8 +308,7 @@ class AuthKeys:
 
     def generate_tenant_token(self, tenant_id):
         token = jwt.encode({
-            "scope": "tenant",
-            "tenant_id": tenant_id
+            "scope": "tenant", "tenant_id": tenant_id
         },
                            self.priv,
                            algorithm="RS256")
@@ -377,7 +376,8 @@ class ZenithPageserver(PgProtocol):
         Returns self.
         """
         cmd = [
-            'init', f'--pageserver-pg-port={self.service_port.pg}',
+            'init',
+            f'--pageserver-pg-port={self.service_port.pg}',
             f'--pageserver-http-port={self.service_port.http}'
         ]
         if enable_auth:
@@ -546,7 +546,11 @@ def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str, pageserver_por
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, tenant_id: str,
+    def __init__(self,
+                 zenith_cli: ZenithCli,
+                 repo_dir: str,
+                 pg_bin: PgBin,
+                 tenant_id: str,
                  port: int):
         super().__init__(host='localhost', port=port)
 
@@ -580,7 +584,12 @@ class Postgres(PgProtocol):
             branch = node_name
 
         self.zenith_cli.run([
-            'pg', 'create', f'--tenantid={self.tenant_id}', f'--port={self.port}', node_name, branch
+            'pg',
+            'create',
+            f'--tenantid={self.tenant_id}',
+            f'--port={self.port}',
+            node_name,
+            branch
         ])
         self.node_name = node_name
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
@@ -721,7 +730,11 @@ class Postgres(PgProtocol):
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, pg_bin: PgBin, initial_tenant: str,
+    def __init__(self,
+                 zenith_cli: ZenithCli,
+                 repo_dir: str,
+                 pg_bin: PgBin,
+                 initial_tenant: str,
                  port_distributor: PortDistributor):
         self.zenith_cli = zenith_cli
         self.repo_dir = repo_dir
@@ -816,7 +829,10 @@ def initial_tenant(pageserver: ZenithPageserver):
 
 
 @zenfixture
-def postgres(zenith_cli: ZenithCli, initial_tenant: str, repo_dir: str, pg_bin: PgBin,
+def postgres(zenith_cli: ZenithCli,
+             initial_tenant: str,
+             repo_dir: str,
+             pg_bin: PgBin,
              port_distributor: PortDistributor) -> Iterator[PostgresFactory]:
     pgfactory = PostgresFactory(
         zenith_cli=zenith_cli,
@@ -947,7 +963,10 @@ class WalAcceptor:
 
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """
-    def __init__(self, zenith_binpath: Path, data_dir: Path, pageserver_port: int,
+    def __init__(self,
+                 zenith_binpath: Path,
+                 data_dir: Path,
+                 pageserver_port: int,
                  port_distributor: PortDistributor):
         self.wa_bin_path = zenith_binpath / 'safekeeper'
         self.data_dir = data_dir
@@ -994,7 +1013,9 @@ class WalAcceptorFactory:
 
 
 @zenfixture
-def wa_factory(zenith_binpath: str, repo_dir: str, pageserver_port: PageserverPort,
+def wa_factory(zenith_binpath: str,
+               repo_dir: str,
+               pageserver_port: PageserverPort,
                port_distributor: PortDistributor) -> Iterator[WalAcceptorFactory]:
     """ Gives WalAcceptorFactory providing wal acceptors. """
     wafactory = WalAcceptorFactory(
@@ -1139,8 +1160,13 @@ def list_files_to_compare(pgdata_dir: str):
             # Skip some dirs and files we don't want to compare
             skip_dirs = ['pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical']
             skip_files = [
-                'pg_internal.init', 'pg.log', 'zenith.signal', 'postgresql.conf', 'postmaster.opts',
-                'postmaster.pid', 'pg_control'
+                'pg_internal.init',
+                'pg.log',
+                'zenith.signal',
+                'postgresql.conf',
+                'postmaster.opts',
+                'postmaster.pid',
+                'pg_control'
             ]
             if rel_dir not in skip_dirs and filename not in skip_files:
                 rel_file = os.path.join(rel_dir, filename)
@@ -1152,7 +1178,9 @@ def list_files_to_compare(pgdata_dir: str):
 
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(zenith_cli: ZenithCli, test_output_dir: str, pg: Postgres,
+def check_restored_datadir_content(zenith_cli: ZenithCli,
+                                   test_output_dir: str,
+                                   pg: Postgres,
                                    pageserver_pg_port: int):
 
     # Get the timeline ID of our branch. We need it for the 'basebackup' command

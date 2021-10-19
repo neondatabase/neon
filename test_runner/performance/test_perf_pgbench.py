@@ -15,8 +15,12 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 # 2. Time to run 5000 pgbench transactions
 # 3. Disk space used
 #
-def test_pgbench(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin, zenith_cli,
-                 zenbenchmark, repo_dir: str):
+def test_pgbench(postgres: PostgresFactory,
+                 pageserver: ZenithPageserver,
+                 pg_bin,
+                 zenith_cli,
+                 zenbenchmark,
+                 repo_dir: str):
     # Create a branch for us
     zenith_cli.run(["branch", "test_pgbench_perf", "empty"])
 

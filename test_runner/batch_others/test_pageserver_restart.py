@@ -13,7 +13,9 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up
 # along the way. 2 of 3 are always alive, so the work keeps going.
-def test_pageserver_restart(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_pageserver_restart(zenith_cli,
+                            pageserver: ZenithPageserver,
+                            postgres: PostgresFactory,
                             wa_factory: WalAcceptorFactory):
 
     # One safekeeper is enough for this test.

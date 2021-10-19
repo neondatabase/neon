@@ -9,7 +9,9 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test branching, when a transaction is in prepared state
 #
-def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_twophase(zenith_cli,
+                  pageserver: ZenithPageserver,
+                  postgres: PostgresFactory,
                   pg_bin: PgBin):
     zenith_cli.run(["branch", "test_twophase", "empty"])
 

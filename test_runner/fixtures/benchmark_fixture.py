@@ -134,7 +134,8 @@ class ZenithBenchmarker:
         # The metric should be an integer, as it's a number of bytes. But in general
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
-        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$', all_metrics,
+        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$',
+                            all_metrics,
                             re.MULTILINE)
         return int(round(float(matches.group(1))))
 
@@ -170,8 +171,10 @@ class ZenithBenchmarker:
         yield
         after = self.get_io_writes(pageserver)
 
-        self.results.record(self.request.node.name, metric_name,
-                            round((after - before) / (1024 * 1024)), 'MB')
+        self.results.record(self.request.node.name,
+                            metric_name,
+                            round((after - before) / (1024 * 1024)),
+                            'MB')
 
 
 @pytest.fixture(scope='function')

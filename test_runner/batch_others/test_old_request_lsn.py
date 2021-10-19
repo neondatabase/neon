@@ -16,7 +16,9 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # just a hint that the page hasn't been modified since that LSN, and the page
 # server should return the latest page version regardless of the LSN.
 #
-def test_old_request_lsn(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_old_request_lsn(zenith_cli,
+                         pageserver: ZenithPageserver,
+                         postgres: PostgresFactory,
                          pg_bin):
     # Create a branch for us
     zenith_cli.run(["branch", "test_old_request_lsn", "empty"])

@@ -16,8 +16,12 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 # 3. Disk space used
 # 4. Peak memory usage
 #
-def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin, zenith_cli,
-                     zenbenchmark, repo_dir: str):
+def test_bulk_insert(postgres: PostgresFactory,
+                     pageserver: ZenithPageserver,
+                     pg_bin,
+                     zenith_cli,
+                     zenbenchmark,
+                     repo_dir: str):
     # Create a branch for us
     zenith_cli.run(["branch", "test_bulk_insert", "empty"])
 
@@ -50,6 +54,7 @@ def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg
             zenbenchmark.record("peak_mem", zenbenchmark.get_peak_mem(pageserver) / 1024, 'MB')
 
             # Report disk space used by the repository
-            timeline_size = zenbenchmark.get_timeline_size(repo_dir, pageserver.initial_tenant,
+            timeline_size = zenbenchmark.get_timeline_size(repo_dir,
+                                                           pageserver.initial_tenant,
                                                            timeline)
             zenbenchmark.record('size', timeline_size / (1024 * 1024), 'MB')

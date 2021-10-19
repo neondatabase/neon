@@ -6,8 +6,14 @@ from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_isolation(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli,
-                   test_output_dir, pg_distrib_dir, base_dir, capsys):
+def test_isolation(pageserver: ZenithPageserver,
+                   postgres: PostgresFactory,
+                   pg_bin,
+                   zenith_cli,
+                   test_output_dir,
+                   pg_distrib_dir,
+                   base_dir,
+                   capsys):
 
     # Create a branch for us
     zenith_cli.run(["branch", "test_isolation", "empty"])

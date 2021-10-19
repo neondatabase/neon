@@ -8,7 +8,10 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # Test that the VM bit is cleared correctly at a HEAP_DELETE and
 # HEAP_UPDATE record.
 #
-def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli,
+def test_vm_bit_clear(pageserver: ZenithPageserver,
+                      postgres: PostgresFactory,
+                      pg_bin,
+                      zenith_cli,
                       base_dir):
     # Create a branch for us
     zenith_cli.run(["branch", "test_vm_bit_clear", "empty"])

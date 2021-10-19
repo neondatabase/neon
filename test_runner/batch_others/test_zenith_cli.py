@@ -24,8 +24,7 @@ def helper_compare_branch_list(page_server_cur, zenith_cli, initial_tenant: str)
     res = zenith_cli.run(["branch", f"--tenantid={initial_tenant}"])
     res.check_returncode()
     branches_cli_with_tenant_arg = sorted(
-        map(lambda b: b.split(':')[-1].strip(),
-            res.stdout.strip().split("\n")))
+        map(lambda b: b.split(':')[-1].strip(), res.stdout.strip().split("\n")))
     branches_cli_with_tenant_arg = [
         b for b in branches_cli if b.startswith('test_cli_') or b in ('empty', 'main')
     ]

@@ -23,7 +23,9 @@ class BankClient(object):
             '''
             INSERT INTO bank_accs
             SELECT *, $1 FROM generate_series(0, $2)
-        ''', self.init_amount, self.n_accounts - 1)
+        ''',
+            self.init_amount,
+            self.n_accounts - 1)
         await self.conn.execute('DROP TABLE IF EXISTS bank_log')
         await self.conn.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
 
@@ -149,7 +151,9 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
 
 
 # restart acceptors one by one, while executing and validating bank transactions
-def test_restarts_under_load(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+def test_restarts_under_load(zenith_cli,
+                             pageserver: ZenithPageserver,
+                             postgres: PostgresFactory,
                              wa_factory: WalAcceptorFactory):
 
     wa_factory.start_n_new(3)
