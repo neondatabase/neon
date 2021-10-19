@@ -19,6 +19,7 @@ mypy = "*"
 # Behavior may change slightly between versions. These are run continuously,
 # so we pin exact versions to avoid suprising breaks. Update if comfortable.
 yapf = "==0.31.0"
+types-requests = "*"
 
 [requires]
 # we need at least 3.6, but pipenv doesn't allow to say this directly
