@@ -46,6 +46,7 @@ def test_bulk_tenant_create(
 
         pg_tenant = postgres.create_start(
             f"test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}",
+            None,  # branch name, None means same as node name
             tenant,
             wal_acceptors=wa_factory.get_connstrs() if use_wal_acceptors == 'with_wa' else None,
         )

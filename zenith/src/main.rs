@@ -457,26 +457,28 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let tenantid: ZTenantId = create_match
                 .value_of("tenantid")
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
-            let timeline_name = create_match.value_of("timeline").unwrap_or("main");
+            let node_name = start_match.value_of("node").unwrap_or("main");
+            let timeline_name = start_match.value_of("timeline");
 
             let port: Option<u16> = match create_match.value_of("port") {
                 Some(p) => Some(p.parse()?),
                 None => None,
             };
-            cplane.new_node(tenantid, timeline_name, port)?;
+            cplane.new_node(tenantid, node_name, timeline_name, port)?;
         }
         ("start", Some(start_match)) => {
             let tenantid: ZTenantId = start_match
                 .value_of("tenantid")
                 .map_or(Ok(env.tenantid), |value| value.parse())?;
-            let timeline_name = start_match.value_of("timeline").unwrap_or("main");
+            let node_name = start_match.value_of("node").unwrap_or("main");
+            let timeline_name = start_match.value_of("timeline");
 
             let port: Option<u16> = match start_match.value_of("port") {
                 Some(p) => Some(p.parse()?),
                 None => None,
             };
 
-            let node = cplane.nodes.get(&(tenantid, timeline_name.to_owned()));
+            let node = cplane.nodes.get(&(tenantid, node_name.to_owned()));
 
             let auth_token = if matches!(env.auth_type, AuthType::ZenithJWT) {
                 let claims = Claims::new(Some(tenantid), Scope::Tenant);
@@ -498,7 +500,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 // start --port X
                 // stop
                 // start <-- will also use port X even without explicit port argument
-                let node = cplane.new_node(tenantid, timeline_name, port)?;
+                let node = cplane.new_node(tenantid, node_name, timeline_name, port)?;
                 node.start(&auth_token)?;
             }
         }

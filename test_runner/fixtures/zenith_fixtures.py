@@ -530,15 +530,16 @@ class Postgres(PgProtocol):
         self.zenith_cli = zenith_cli
         self.running = False
         self.repo_dir = repo_dir
-        self.branch: Optional[str] = None  # dubious, see asserts below
+        self.node_name: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.pg_bin = pg_bin
-        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<branch_name>/postgresql.conf
+        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
 
     def create(
         self,
-        branch: str,
+        node_name: str,
+        branch: Optional[str] = None,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
@@ -552,9 +553,12 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        self.zenith_cli.run(['pg', 'create', branch, f'--tenantid={self.tenant_id}', f'--port={self.port}'])
-        self.branch = branch
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch
+        if branch is None:
+            branch = node_name
+
+        self.zenith_cli.run(['pg', 'create', f'--tenantid={self.tenant_id}', f'--port={self.port}', node_name, branch])
+        self.node_name = node_name
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
         self.pgdata_dir = os.path.join(self.repo_dir, path)
 
         if wal_acceptors is not None:
@@ -571,11 +575,11 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
-        assert self.branch is not None
+        assert self.node_name is not None
 
-        log.info(f"Starting postgres on branch {self.branch}")
+        log.info(f"Starting postgres node {self.node_name}")
 
-        run_result = self.zenith_cli.run(['pg', 'start', self.branch, f'--tenantid={self.tenant_id}', f'--port={self.port}'])
+        run_result = self.zenith_cli.run(['pg', 'start', f'--tenantid={self.tenant_id}', f'--port={self.port}', self.node_name])
         self.running = True
 
         log.info(f"stdout: {run_result.stdout}")
@@ -584,7 +588,7 @@ class Postgres(PgProtocol):
 
     def pg_data_dir_path(self) -> str:
         """ Path to data directory """
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.branch
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
         return os.path.join(self.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
@@ -641,8 +645,8 @@ class Postgres(PgProtocol):
         """
 
         if self.running:
-            assert self.branch is not None
-            self.zenith_cli.run(['pg', 'stop', self.branch, f'--tenantid={self.tenant_id}'])
+            assert self.node_name is not None
+            self.zenith_cli.run(['pg', 'stop', self.node_name, f'--tenantid={self.tenant_id}'])
             self.running = False
 
         return self
@@ -653,15 +657,16 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
-        assert self.branch is not None
+        assert self.node_name is not None
         assert self.tenant_id is not None
-        self.zenith_cli.run(['pg', 'stop', '--destroy', self.branch, f'--tenantid={self.tenant_id}'])
+        self.zenith_cli.run(['pg', 'stop', '--destroy', self.node_name, f'--tenantid={self.tenant_id}'])
 
         return self
 
     def create_start(
         self,
-        branch: str,
+        node_name: str,
+        branch: Optional[str] = None,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
@@ -672,6 +677,7 @@ class Postgres(PgProtocol):
         """
 
         self.create(
+            node_name=node_name,
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
@@ -698,11 +704,13 @@ class PostgresFactory:
 
     def create_start(
         self,
-        branch: str = "main",
+        node_name: str = "main",
+        branch: Optional[str] = None,
         tenant_id: Optional[str] = None,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None
     ) -> Postgres:
+
         pg = Postgres(
             zenith_cli=self.zenith_cli,
             repo_dir=self.repo_dir,
@@ -714,6 +722,7 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create_start(
+            node_name=node_name,
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
@@ -721,7 +730,8 @@ class PostgresFactory:
 
     def create(
         self,
-        branch: str = "main",
+        node_name: str = "main",
+        branch: Optional[str] = None,
         tenant_id: Optional[str] = None,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None
@@ -739,6 +749,7 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create(
+            node_name=node_name,
             branch=branch,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
@@ -746,7 +757,7 @@ class PostgresFactory:
 
     def config(
         self,
-        branch: str = "main",
+        node_name: str = "main",
         tenant_id: Optional[str] = None,
         wal_acceptors: Optional[str] = None,
         config_lines: Optional[List[str]] = None
@@ -764,7 +775,7 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.config(
-            branch=branch,
+            node_name=node_name,
             wal_acceptors=wal_acceptors,
             config_lines=config_lines,
         )
@@ -1116,7 +1127,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli, test_output_dir: str, 
     pg.stop()
 
     # Take a basebackup from pageserver
-    restored_dir_path = os.path.join(test_output_dir, f"{pg.branch}_restored_datadir")
+    restored_dir_path = os.path.join(test_output_dir, f"{pg.node_name}_restored_datadir")
     mkdir_if_needed(restored_dir_path)
 
     psql_path = os.path.join(pg.pg_bin.pg_bin_path, 'psql')

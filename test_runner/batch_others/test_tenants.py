@@ -28,11 +28,13 @@ def test_tenants_normal_work(
 
     pg_tenant1 = postgres.create_start(
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        None,  # branch name, None means same as node name
         tenant_1,
         wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
     )
     pg_tenant2 = postgres.create_start(
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        None,  # branch name, None means same as node name
         tenant_2,
         wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
     )
