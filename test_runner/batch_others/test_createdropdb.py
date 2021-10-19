@@ -41,16 +41,12 @@ def test_createdb(
     for db in (pg, pg2):
         db.connect(dbname='foodb').close()
 
+
 #
 # Test DROP DATABASE
 #
-def test_dropdb(
-    zenith_cli: ZenithCli,
-    pageserver: ZenithPageserver,
-    postgres: PostgresFactory,
-    pg_bin,
-    test_output_dir
-):
+def test_dropdb(zenith_cli: ZenithCli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+                pg_bin, test_output_dir):
     zenith_cli.run(["branch", "test_dropdb", "empty"])
 
     pg = postgres.create_start('test_dropdb')
@@ -66,7 +62,6 @@ def test_dropdb(
             cur.execute("SELECT oid FROM pg_database WHERE datname='foodb';")
             dboid = cur.fetchone()[0]
 
-
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute('DROP DATABASE foodb')
@@ -75,7 +70,6 @@ def test_dropdb(
 
             cur.execute('SELECT pg_current_wal_insert_lsn()')
             lsn_after_drop = cur.fetchone()[0]
-
 
     # Create two branches before and after database drop.
     zenith_cli.run(["branch", "test_before_dropdb", "test_dropdb@" + lsn_before_drop])

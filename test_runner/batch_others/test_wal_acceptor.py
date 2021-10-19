@@ -16,7 +16,8 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 # basic test, write something in setup with wal acceptors, ensure that commits
 # succeed and data is written
-def test_normal_work(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory):
+def test_normal_work(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+                     wa_factory):
     zenith_cli.run(["branch", "test_wal_acceptors_normal_work", "empty"])
     wa_factory.start_n_new(3)
     pg = postgres.create_start('test_wal_acceptors_normal_work',
@@ -34,7 +35,8 @@ def test_normal_work(zenith_cli, pageserver: ZenithPageserver, postgres: Postgre
 
 # Run page server and multiple acceptors, and multiple compute nodes running
 # against different timelines.
-def test_many_timelines(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory):
+def test_many_timelines(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+                        wa_factory):
     n_timelines = 2
 
     wa_factory.start_n_new(3)
@@ -66,7 +68,8 @@ def test_many_timelines(zenith_cli, pageserver: ZenithPageserver, postgres: Post
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up
 # along the way. 2 of 3 are always alive, so the work keeps going.
-def test_restarts(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory: WalAcceptorFactory):
+def test_restarts(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+                  wa_factory: WalAcceptorFactory):
     fault_probability = 0.01
     n_inserts = 1000
     n_acceptors = 3
@@ -177,7 +180,8 @@ def stop_value():
 
 
 # do inserts while concurrently getting up/down subsets of acceptors
-def test_race_conditions(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, wa_factory, stop_value):
+def test_race_conditions(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory,
+                         wa_factory, stop_value):
 
     wa_factory.start_n_new(3)
 
@@ -318,6 +322,5 @@ def test_timeline_status(zenith_cli, pageserver, postgres, wa_factory: WalAccept
     pg.stop().start()
     pg.safe_psql("insert into t values(10)")
 
-    epoch_after_reboot = wa_http_cli.timeline_status(tenant_id,
-                                                     timeline_id).acceptor_epoch
+    epoch_after_reboot = wa_http_cli.timeline_status(tenant_id, timeline_id).acceptor_epoch
     assert epoch_after_reboot > epoch

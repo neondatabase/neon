@@ -1,11 +1,9 @@
-
 from contextlib import closing
 from typing import Iterator
 from uuid import uuid4
 import psycopg2
 from fixtures.zenith_fixtures import PortDistributor, Postgres, ZenithCli, ZenithPageserver, PgBin
 import pytest
-
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -35,7 +33,9 @@ def test_pageserver_auth(pageserver_auth_enabled: ZenithPageserver):
     ps.safe_psql(f"tenant_create {uuid4().hex}", password=management_token)
 
     # fail to create tenant using tenant token
-    with pytest.raises(psycopg2.DatabaseError, match='Attempt to access management api with tenant scope. Permission denied'):
+    with pytest.raises(
+            psycopg2.DatabaseError,
+            match='Attempt to access management api with tenant scope. Permission denied'):
         ps.safe_psql(f"tenant_create {uuid4().hex}", password=tenant_token)
 
 
@@ -60,14 +60,14 @@ def test_compute_auth_to_pageserver(
         wa_factory.start_n_new(3, management_token)
 
     with Postgres(
-        zenith_cli=zenith_cli,
-        repo_dir=repo_dir,
-        pg_bin=pg_bin,
-        tenant_id=ps.initial_tenant,
-        port=port_distributor.get_port(),
+            zenith_cli=zenith_cli,
+            repo_dir=repo_dir,
+            pg_bin=pg_bin,
+            tenant_id=ps.initial_tenant,
+            port=port_distributor.get_port(),
     ).create_start(
-        branch,
-        wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
+            branch,
+            wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
     ) as pg:
         with closing(pg.connect()) as conn:
             with conn.cursor() as cur:

@@ -5,6 +5,7 @@ from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
+
 #
 # Run bulk INSERT test.
 #
@@ -15,7 +16,8 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 # 3. Disk space used
 # 4. Peak memory usage
 #
-def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin, zenith_cli, zenbenchmark, repo_dir: str):
+def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin, zenith_cli,
+                     zenbenchmark, repo_dir: str):
     # Create a branch for us
     zenith_cli.run(["branch", "test_bulk_insert", "empty"])
 
@@ -24,7 +26,7 @@ def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg
 
     # Open a connection directly to the page server that we'll use to force
     # flushing the layers to disk
-    psconn = pageserver.connect();
+    psconn = pageserver.connect()
     pscur = psconn.cursor()
 
     # Get the timeline ID of our branch. We need it for the 'do_gc' command
@@ -48,5 +50,6 @@ def test_bulk_insert(postgres: PostgresFactory, pageserver: ZenithPageserver, pg
             zenbenchmark.record("peak_mem", zenbenchmark.get_peak_mem(pageserver) / 1024, 'MB')
 
             # Report disk space used by the repository
-            timeline_size = zenbenchmark.get_timeline_size(repo_dir, pageserver.initial_tenant, timeline)
-            zenbenchmark.record('size', timeline_size / (1024*1024), 'MB')
+            timeline_size = zenbenchmark.get_timeline_size(repo_dir, pageserver.initial_tenant,
+                                                           timeline)
+            zenbenchmark.record('size', timeline_size / (1024 * 1024), 'MB')

@@ -3,11 +3,13 @@ from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
+
 #
 # Test that the VM bit is cleared correctly at a HEAP_DELETE and
 # HEAP_UPDATE record.
 #
-def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli, base_dir):
+def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli,
+                      base_dir):
     # Create a branch for us
     zenith_cli.run(["branch", "test_vm_bit_clear", "empty"])
     pg = postgres.create_start('test_vm_bit_clear')
@@ -49,12 +51,11 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     ''')
 
     cur.execute('SELECT * FROM vmtest_delete WHERE id = 1')
-    assert(cur.fetchall() == []);
+    assert (cur.fetchall() == [])
     cur.execute('SELECT * FROM vmtest_update WHERE id = 1')
-    assert(cur.fetchall() == []);
+    assert (cur.fetchall() == [])
 
     cur.close()
-
 
     # Check the same thing on the branch that we created right after the DELETE
     #
@@ -75,6 +76,6 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     ''')
 
     cur_new.execute('SELECT * FROM vmtest_delete WHERE id = 1')
-    assert(cur_new.fetchall() == []);
+    assert (cur_new.fetchall() == [])
     cur_new.execute('SELECT * FROM vmtest_update WHERE id = 1')
-    assert(cur_new.fetchall() == []);
+    assert (cur_new.fetchall() == [])

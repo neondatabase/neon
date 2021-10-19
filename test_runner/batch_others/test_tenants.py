@@ -21,8 +21,14 @@ def test_tenants_normal_work(
     tenant_1 = tenant_factory.create()
     tenant_2 = tenant_factory.create()
 
-    zenith_cli.run(["branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main", f"--tenantid={tenant_1}"])
-    zenith_cli.run(["branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main", f"--tenantid={tenant_2}"])
+    zenith_cli.run([
+        "branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main",
+        f"--tenantid={tenant_1}"
+    ])
+    zenith_cli.run([
+        "branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main",
+        f"--tenantid={tenant_2}"
+    ])
     if with_wal_acceptors:
         wa_factory.start_n_new(3)
 
@@ -47,4 +53,4 @@ def test_tenants_normal_work(
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
-                assert cur.fetchone() == (5000050000,)
+                assert cur.fetchone() == (5000050000, )

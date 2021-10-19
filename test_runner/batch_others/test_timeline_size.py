@@ -4,9 +4,8 @@ import psycopg2.extras
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
 from fixtures.log_helper import log
 
-def test_timeline_size(
-    zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin
-):
+
+def test_timeline_size(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
     # Branch at the point where only 100 rows were inserted
     zenith_cli.run(["branch", "test_timeline_size", "empty"])
 
@@ -23,13 +22,11 @@ def test_timeline_size(
 
             # Create table, and insert the first 100 rows
             cur.execute("CREATE TABLE foo (t text)")
-            cur.execute(
-                """
+            cur.execute("""
                 INSERT INTO foo
                     SELECT 'long string to consume some space' || g
                     FROM generate_series(1, 10) g
-            """
-            )
+            """)
 
             res = client.branch_detail(UUID(pageserver.initial_tenant), "test_timeline_size")
             assert res["current_logical_size"] == res["current_logical_size_non_incremental"]

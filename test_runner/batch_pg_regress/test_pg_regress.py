@@ -6,8 +6,8 @@ from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver, check_re
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_pg_regress(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir,
-                    base_dir, capsys):
+def test_pg_regress(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli,
+                    test_output_dir, pg_distrib_dir, base_dir, capsys):
 
     # Create a branch for us
     zenith_cli.run(["branch", "test_pg_regress", "empty"])

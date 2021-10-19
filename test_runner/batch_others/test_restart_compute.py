@@ -12,13 +12,13 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 @pytest.mark.parametrize('with_wal_acceptors', [False, True])
 def test_restart_compute(
-        zenith_cli,
-        pageserver: ZenithPageserver,
-        postgres: PostgresFactory,
-        pg_bin,
-        wa_factory,
-        with_wal_acceptors: bool,
-    ):
+    zenith_cli,
+    pageserver: ZenithPageserver,
+    postgres: PostgresFactory,
+    pg_bin,
+    wa_factory,
+    with_wal_acceptors: bool,
+):
     wal_acceptor_connstrs = None
     zenith_cli.run(["branch", "test_restart_compute", "empty"])
 
@@ -26,8 +26,7 @@ def test_restart_compute(
         wa_factory.start_n_new(3)
         wal_acceptor_connstrs = wa_factory.get_connstrs()
 
-    pg = postgres.create_start('test_restart_compute',
-                               wal_acceptors=wal_acceptor_connstrs)
+    pg = postgres.create_start('test_restart_compute', wal_acceptors=wal_acceptor_connstrs)
     log.info("postgres is running on 'test_restart_compute' branch")
 
     with closing(pg.connect()) as conn:
@@ -40,9 +39,7 @@ def test_restart_compute(
             log.info(f"res = {r}")
 
     # Remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute',
-                                       wal_acceptors=wal_acceptor_connstrs)
-
+    pg.stop_and_destroy().create_start('test_restart_compute', wal_acceptors=wal_acceptor_connstrs)
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -61,8 +58,7 @@ def test_restart_compute(
             log.info(f"res = {r}")
 
     # Again remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute',
-                                       wal_acceptors=wal_acceptor_connstrs)
+    pg.stop_and_destroy().create_start('test_restart_compute', wal_acceptors=wal_acceptor_connstrs)
 
     # That select causes lots of FPI's and increases probability of wakeepers
     # lagging behind after query completion
@@ -76,8 +72,7 @@ def test_restart_compute(
             log.info(f"res = {r}")
 
     # And again remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute',
-                                       wal_acceptors=wal_acceptor_connstrs)
+    pg.stop_and_destroy().create_start('test_restart_compute', wal_acceptors=wal_acceptor_connstrs)
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:

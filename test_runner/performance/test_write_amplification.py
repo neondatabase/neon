@@ -17,7 +17,9 @@ from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
-def test_write_amplification(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin, zenith_cli, zenbenchmark, repo_dir: str):
+
+def test_write_amplification(postgres: PostgresFactory, pageserver: ZenithPageserver, pg_bin,
+                             zenith_cli, zenbenchmark, repo_dir: str):
     # Create a branch for us
     zenith_cli.run(["branch", "test_write_amplification", "empty"])
 
@@ -26,7 +28,7 @@ def test_write_amplification(postgres: PostgresFactory, pageserver: ZenithPagese
 
     # Open a connection directly to the page server that we'll use to force
     # flushing the layers to disk
-    psconn = pageserver.connect();
+    psconn = pageserver.connect()
     pscur = psconn.cursor()
 
     with closing(pg.connect()) as conn:
@@ -71,5 +73,6 @@ def test_write_amplification(postgres: PostgresFactory, pageserver: ZenithPagese
                         pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
 
             # Report disk space used by the repository
-            timeline_size = zenbenchmark.get_timeline_size(repo_dir, pageserver.initial_tenant, timeline)
-            zenbenchmark.record('size', timeline_size / (1024*1024), 'MB')
+            timeline_size = zenbenchmark.get_timeline_size(repo_dir, pageserver.initial_tenant,
+                                                           timeline)
+            zenbenchmark.record('size', timeline_size / (1024 * 1024), 'MB')
