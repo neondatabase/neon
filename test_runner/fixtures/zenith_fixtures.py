@@ -192,7 +192,7 @@ class ZenithCli:
         self.env['ZENITH_REPO_DIR'] = repo_dir
         self.env['POSTGRES_DISTRIB_DIR'] = pg_distrib_dir
 
-    def run(self, arguments: List[str]) -> Any:
+    def run(self, arguments: List[str]) -> 'subprocess.CompletedProcess[str]':
         """
         Run "zenith" with the specified arguments.
 
@@ -249,12 +249,14 @@ class ZenithPageserverHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def branch_list(self, tenant_id: uuid.UUID) -> List[Dict]:
+    def branch_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
 
-    def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict:
+    def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict[Any, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/branch",
                         json={
                             'tenant_id': tenant_id.hex,
@@ -262,17 +264,23 @@ class ZenithPageserverHttpClient(requests.Session):
                             'start_point': start_point,
                         })
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
 
-    def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict:
+    def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict[Any, Any]:
         res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}", )
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
 
     def tenant_list(self) -> List[str]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
 
     def tenant_create(self, tenant_id: uuid.UUID):
         res = self.post(
@@ -510,7 +518,7 @@ class PgBin:
                     command: List[str],
                     env: Optional[Env] = None,
                     cwd: Optional[str] = None,
-                    **kwargs: Any) -> None:
+                    **kwargs: Any) -> str:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
 
@@ -843,7 +851,7 @@ def postgres(zenith_cli: ZenithCli,
     pgfactory.stop_all()
 
 
-def read_pid(path: Path):
+def read_pid(path: Path) -> int:
     """ Read content of file into number """
     return int(path.read_text())
 
@@ -949,7 +957,9 @@ class WalAcceptor:
                 cur.execute("JSON_CTRL " + request_json)
                 all = cur.fetchall()
                 log.info(f"JSON_CTRL response: {all[0][0]}")
-                return json.loads(all[0][0])
+                res = json.loads(all[0][0])
+                assert isinstance(res, dict)
+                return res
 
     def http_client(self):
         return WalAcceptorHttpClient(port=self.port.http)
@@ -1229,7 +1239,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli,
             subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)
             subprocess.run("xxd -b {} > {}.hex ".format(f2, f2), shell=True)
 
-            cmd = ['diff {}.hex {}.hex'.format(f1, f2)]
-            subprocess.run(cmd, stdout=stdout_f, shell=True)
+            cmd = 'diff {}.hex {}.hex'.format(f1, f2)
+            subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])

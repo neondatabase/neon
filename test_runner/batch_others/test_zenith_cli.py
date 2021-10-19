@@ -2,18 +2,20 @@ import json
 import uuid
 
 from fixtures.zenith_fixtures import ZenithCli, ZenithPageserver
+from typing import cast
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def helper_compare_branch_list(page_server_cur, zenith_cli, initial_tenant: str):
+def helper_compare_branch_list(page_server_cur, zenith_cli: ZenithCli, initial_tenant: str):
     """
     Compare branches list returned by CLI and directly via API.
     Filters out branches created by other tests.
     """
 
     page_server_cur.execute(f'branch_list {initial_tenant}')
-    branches_api = sorted(map(lambda b: b['name'], json.loads(page_server_cur.fetchone()[0])))
+    branches_api = sorted(
+        map(lambda b: cast(str, b['name']), json.loads(page_server_cur.fetchone()[0])))
     branches_api = [b for b in branches_api if b.startswith('test_cli_') or b in ('empty', 'main')]
 
     res = zenith_cli.run(["branch"])
@@ -32,7 +34,7 @@ def helper_compare_branch_list(page_server_cur, zenith_cli, initial_tenant: str)
     assert branches_api == branches_cli == branches_cli_with_tenant_arg
 
 
-def test_cli_branch_list(pageserver: ZenithPageserver, zenith_cli):
+def test_cli_branch_list(pageserver: ZenithPageserver, zenith_cli: ZenithCli):
     page_server_conn = pageserver.connect()
     page_server_cur = page_server_conn.cursor()
 
