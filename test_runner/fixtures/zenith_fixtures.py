@@ -804,29 +804,6 @@ class PostgresFactory:
             config_lines=config_lines,
         )
 
-    def config(self,
-               node_name: str = "main",
-               tenant_id: Optional[str] = None,
-               wal_acceptors: Optional[str] = None,
-               config_lines: Optional[List[str]] = None) -> Postgres:
-
-        pg = Postgres(
-            zenith_cli=self.zenith_cli,
-            repo_dir=self.repo_dir,
-            pg_bin=self.pg_bin,
-            tenant_id=tenant_id or self.initial_tenant,
-            port=self.port_distributor.get_port(),
-        )
-
-        self.num_instances += 1
-        self.instances.append(pg)
-
-        return pg.config(
-            node_name=node_name,
-            wal_acceptors=wal_acceptors,
-            config_lines=config_lines,
-        )
-
     def stop_all(self) -> 'PostgresFactory':
         for pg in self.instances:
             pg.stop()
