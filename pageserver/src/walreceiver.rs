@@ -265,6 +265,9 @@ fn walreceiver_main(
         if let Some(last_lsn) = status_update {
             // TODO: More thought should go into what values are sent here.
             let last_lsn = PgLsn::from(u64::from(last_lsn));
+            // We are using disk consistent LSN as  `write_lsn`, i.e. LSN at which age server
+            // may guarantee persistence of all received data. Safekeeper is not free to remove
+            // WAL preceding `write_lsn`: it should not be requested by this page server.
             let write_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
             let flush_lsn = last_lsn;
             let apply_lsn = PgLsn::from(0);

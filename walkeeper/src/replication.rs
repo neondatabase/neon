@@ -90,7 +90,7 @@ impl ReplicationConn {
     /// This is spawned into the background by `handle_start_replication`.
     fn background_thread(mut stream_in: impl Read, timeline: Arc<Timeline>) -> Result<()> {
         let mut state = ReplicaState::new();
-        let replica = timeline.add_replica();
+        let replica = timeline.add_replica(state);
         let _guard = ReplicationConnGuard {
             replica,
             timeline: timeline.clone(),
@@ -100,8 +100,7 @@ impl ReplicationConn {
             match &msg {
                 FeMessage::CopyData(m) => {
                     // There's two possible data messages that the client is supposed to send here:
-                    // `HotStandbyFeedback` and `StandbyStatusUpdate`. We only handle hot standby
-                    // feedback.
+                    // `HotStandbyFeedback` and `StandbyStatusUpdate`.
 
                     match m.first().cloned() {
                         Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {

@@ -89,15 +89,14 @@ impl SharedState {
 
     /// Assign new replica ID. We choose first empty cell in the replicas vector
     /// or extend the vector if there are not free items.
-    pub fn add_replica(&mut self) -> usize {
-        let len = self.replicas.len();
-        for i in 0..len {
-            if self.replicas[i].is_none() {
-                return i;
-            }
+    pub fn add_replica(&mut self, state: ReplicaState) -> usize {
+        if let Some(pos) = self.replicas.iter().position(|r| r.is_none()) {
+            self.replicas[pos] = Some(state);
+            return pos;
         }
-        self.replicas.push(None);
-        len
+        let pos = self.replicas.len();
+        self.replicas.push(Some(state));
+        pos
     }
 
     /// Restore SharedState from control file. Locks the control file along the
@@ -286,9 +285,9 @@ impl Timeline {
         self.mutex.lock().unwrap().sk.s.clone()
     }
 
-    pub fn add_replica(&self) -> usize {
+    pub fn add_replica(&self, state: ReplicaState) -> usize {
         let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.add_replica()
+        shared_state.add_replica(state)
     }
 
     pub fn update_replica_state(&self, id: usize, state: Option<ReplicaState>) {
