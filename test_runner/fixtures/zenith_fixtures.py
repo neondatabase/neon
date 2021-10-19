@@ -385,12 +385,6 @@ class ZenithPageserver(PgProtocol):
         self.zenith_cli.run(cmd)
         return self
 
-    def repo_dir(self) -> str:
-        """
-        Return path to repository dir
-        """
-        return self.zenith_cli.repo_dir
-
     def start(self) -> 'ZenithPageserver':
         """
         Start the page server.
