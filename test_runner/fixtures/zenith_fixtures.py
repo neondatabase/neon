@@ -14,7 +14,7 @@ import subprocess
 import time
 import filecmp
 
-from contextlib import closing
+from contextlib import closing, suppress
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -829,7 +829,8 @@ class WalAcceptor:
     def start(self) -> 'WalAcceptor':
         # create data directory if not exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.pidfile.unlink(missing_ok=True)
+        with suppress(FileNotFoundError):
+            self.pidfile.unlink()
 
         cmd = [str(self.wa_bin_path)]
         cmd.extend(["-D", str(self.data_dir)])
