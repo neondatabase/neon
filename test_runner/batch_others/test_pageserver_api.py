@@ -56,7 +56,7 @@ def test_branch_list_psql(pageserver: ZenithPageserver, zenith_cli):
 def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli):
     res = zenith_cli.run(["tenant", "list"])
     res.check_returncode()
-    tenants = res.stdout.splitlines()
+    tenants = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
     assert tenants == [pageserver.initial_tenant]
 
     conn = pageserver.connect()
@@ -74,7 +74,7 @@ def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli):
     cur.execute('tenant_list')
 
     # compare tenants list
-    new_tenants = sorted(json.loads(cur.fetchone()[0]))
+    new_tenants = sorted(map(lambda t: t['id'], json.loads(cur.fetchone()[0])))
     assert sorted([pageserver.initial_tenant, tenant1]) == new_tenants
 
 
@@ -82,12 +82,12 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: str):
     client.check_status()
 
     # check initial tenant is there
-    assert initial_tenant in set(client.tenant_list())
+    assert initial_tenant in {t['id'] for t in client.tenant_list()}
 
     # create new tenant and check it is also there
     tenant_id = uuid4()
     client.tenant_create(tenant_id)
-    assert tenant_id.hex in set(client.tenant_list())
+    assert tenant_id.hex in {t['id'] for t in client.tenant_list()}
 
     # create branch
     branch_name = uuid4().hex

@@ -60,11 +60,11 @@ def test_cli_branch_list(pageserver: ZenithPageserver, zenith_cli):
 
 def helper_compare_tenant_list(page_server_cur, zenith_cli: ZenithCli):
     page_server_cur.execute(f'tenant_list')
-    tenants_api = sorted(json.loads(page_server_cur.fetchone()[0]))
+    tenants_api = sorted(map(lambda t: t['id'], json.loads(page_server_cur.fetchone()[0])))
 
     res = zenith_cli.run(["tenant", "list"])
     assert res.stderr == ''
-    tenants_cli = sorted(res.stdout.splitlines())
+    tenants_cli = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
     assert tenants_api == tenants_cli
 
@@ -94,7 +94,7 @@ def test_cli_tenant_list(pageserver: ZenithPageserver, zenith_cli: ZenithCli):
 
     res = zenith_cli.run(["tenant", "list"])
     res.check_returncode()
-    tenants = sorted(res.stdout.splitlines())
+    tenants = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
     assert pageserver.initial_tenant in tenants
     assert tenant1 in tenants

@@ -20,6 +20,7 @@ use zenith_utils::zid::ZTenantId;
 use crate::local_env::LocalEnv;
 use crate::read_pidfile;
 use pageserver::branches::BranchInfo;
+use pageserver::tenant_mgr::TenantInfo;
 use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
@@ -269,7 +270,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    pub fn tenant_list(&self) -> Result<Vec<String>> {
+    pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
             .http_request(Method::GET, format!("{}/{}", self.http_base_url, "tenant"))
             .send()?

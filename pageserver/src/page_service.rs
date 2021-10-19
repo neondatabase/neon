@@ -637,7 +637,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .write_message_noflush(&BeMessage::DataRow(&[Some(&branches_buf)]))?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("tenant_list") {
-            let tenants = crate::branches::get_tenants(self.conf)?;
+            let tenants = crate::tenant_mgr::list_tenants()?;
             let tenants_buf = serde_json::to_vec(&tenants)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?

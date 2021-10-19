@@ -9,6 +9,7 @@ use crate::PageServerConf;
 use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
 use log::{debug, info};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -27,8 +28,8 @@ struct Tenant {
     repo: Option<Arc<dyn Repository>>,
 }
 
-#[derive(Debug)]
-enum TenantState {
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum TenantState {
     // This tenant only exists in cloud storage. It cannot be accessed.
     CloudOnly,
     // This tenant exists in cloud storage, and we are currently downloading it to local disk.
@@ -244,6 +245,26 @@ fn list_tenantids() -> Result<Vec<ZTenantId>> {
         .map(|v| {
             let (tenantid, _) = v;
             Ok(*tenantid)
+        })
+        .collect()
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TenantInfo {
+    #[serde(with = "hex")]
+    pub id: ZTenantId,
+    pub state: TenantState,
+}
+
+pub fn list_tenants() -> Result<Vec<TenantInfo>> {
+    let m = access_tenants();
+    m.iter()
+        .map(|v| {
+            let (id, tenant) = v;
+            Ok(TenantInfo {
+                id: *id,
+                state: tenant.state,
+            })
         })
         .collect()
 }
