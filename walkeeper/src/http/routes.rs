@@ -74,7 +74,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         acceptor_state: sk_state.acceptor_state,
         commit_lsn: sk_state.commit_lsn,
         truncate_lsn: sk_state.truncate_lsn,
-        flush_lsn: flush_lsn,
+        flush_lsn,
     };
     Ok(json_response(StatusCode::OK, status)?)
 }

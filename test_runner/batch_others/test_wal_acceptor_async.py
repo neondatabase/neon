@@ -103,27 +103,38 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accou
 
     await pg_conn.close()
 
-async def wait_for_lsn(safekeeper: WalAcceptor, tenant_id: str, timeline_id: str, wait_lsn: str, polling_interval=1, timeout=120):
+
+async def wait_for_lsn(safekeeper: WalAcceptor,
+                       tenant_id: str,
+                       timeline_id: str,
+                       wait_lsn: str,
+                       polling_interval=1,
+                       timeout=120):
     """
     Poll flush_lsn from safekeeper until it's greater or equal than
     provided wait_lsn. To do that, timeline_status is fetched from
     safekeeper every polling_interval seconds.
     """
-    
+
     started_at = time.time()
     client = safekeeper.http_client()
 
     flush_lsn = client.timeline_status(tenant_id, timeline_id).flush_lsn
-    log.info(f'Safekeeper at port {safekeeper.port.pg} has flush_lsn {flush_lsn}, waiting for lsn {wait_lsn}')
+    log.info(
+        f'Safekeeper at port {safekeeper.port.pg} has flush_lsn {flush_lsn}, waiting for lsn {wait_lsn}'
+    )
 
     while lsn_from_hex(wait_lsn) > lsn_from_hex(flush_lsn):
         elapsed = time.time() - started_at
         if elapsed > timeout:
-            raise RuntimeError(f"timed out waiting for safekeeper at port {safekeeper.port.pg} to reach {wait_lsn}, current lsn is {flush_lsn}")
+            raise RuntimeError(
+                f"timed out waiting for safekeeper at port {safekeeper.port.pg} to reach {wait_lsn}, current lsn is {flush_lsn}"
+            )
 
         await asyncio.sleep(polling_interval)
         flush_lsn = client.timeline_status(tenant_id, timeline_id).flush_lsn
         log.debug(f'safekeeper port={safekeeper.port.pg} flush_lsn={flush_lsn} wait_lsn={wait_lsn}')
+
 
 # This test will run several iterations and check progress in each of them.
 # On each iteration 1 acceptor is stopped, and 2 others should allow

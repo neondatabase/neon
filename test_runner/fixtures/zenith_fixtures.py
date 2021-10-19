@@ -1048,10 +1048,8 @@ class WalAcceptorHttpClient(requests.Session):
         res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
         res.raise_for_status()
         resj = res.json()
-        return SafekeeperTimelineStatus(
-            acceptor_epoch=resj['acceptor_state']['epoch'],
-            flush_lsn=resj['flush_lsn']
-        )
+        return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
+                                        flush_lsn=resj['flush_lsn'])
 
 
 @zenfixture
