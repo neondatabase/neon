@@ -53,8 +53,8 @@ Useful environment variables:
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 
-Let stdout and stderr go to the terminal instead of capturing them:
-`pytest -s ...`
+Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
+`pytest -s --log-cli-level=INFO ...`
 (Note many tests capture subprocess outputs separately, so this may not
 show much.)
 
