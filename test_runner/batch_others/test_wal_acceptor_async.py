@@ -109,7 +109,7 @@ async def wait_for_lsn(safekeeper: WalAcceptor,
                        timeline_id: str,
                        wait_lsn: str,
                        polling_interval=1,
-                       timeout=120):
+                       timeout=600):
     """
     Poll flush_lsn from safekeeper until it's greater or equal than
     provided wait_lsn. To do that, timeline_status is fetched from
