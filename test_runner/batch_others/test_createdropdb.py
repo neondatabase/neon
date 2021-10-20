@@ -3,6 +3,7 @@ import pathlib
 
 from contextlib import closing
 from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory, ZenithCli, check_restored_datadir_content
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -19,7 +20,7 @@ def test_createdb(
     zenith_cli.run(["branch", "test_createdb", "empty"])
 
     pg = postgres.create_start('test_createdb')
-    print("postgres is running on 'test_createdb' branch")
+    log.info("postgres is running on 'test_createdb' branch")
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -40,6 +41,7 @@ def test_createdb(
     for db in (pg, pg2):
         db.connect(dbname='foodb').close()
 
+
 #
 # Test DROP DATABASE
 #
@@ -48,12 +50,12 @@ def test_dropdb(
     pageserver: ZenithPageserver,
     postgres: PostgresFactory,
     pg_bin,
-    test_output_dir
+    test_output_dir,
 ):
     zenith_cli.run(["branch", "test_dropdb", "empty"])
 
     pg = postgres.create_start('test_dropdb')
-    print("postgres is running on 'test_dropdb' branch")
+    log.info("postgres is running on 'test_dropdb' branch")
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -65,7 +67,6 @@ def test_dropdb(
             cur.execute("SELECT oid FROM pg_database WHERE datname='foodb';")
             dboid = cur.fetchone()[0]
 
-
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute('DROP DATABASE foodb')
@@ -74,7 +75,6 @@ def test_dropdb(
 
             cur.execute('SELECT pg_current_wal_insert_lsn()')
             lsn_after_drop = cur.fetchone()[0]
-
 
     # Create two branches before and after database drop.
     zenith_cli.run(["branch", "test_before_dropdb", "test_dropdb@" + lsn_before_drop])
@@ -88,13 +88,13 @@ def test_dropdb(
 
     # Test that database subdir exists on the branch before drop
     dbpath = pathlib.Path(pg_before.pgdata_dir) / 'base' / str(dboid)
-    print(dbpath)
+    log.info(dbpath)
 
     assert os.path.isdir(dbpath) == True
 
     # Test that database subdir doesn't exist on the branch after drop
     dbpath = pathlib.Path(pg_after.pgdata_dir) / 'base' / str(dboid)
-    print(dbpath)
+    log.info(dbpath)
 
     assert os.path.isdir(dbpath) == False
 

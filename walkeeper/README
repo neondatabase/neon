@@ -89,12 +89,12 @@ A: Page Server is a single server which can be lost. As our primary
 
 Q: What if the compute node evicts a page, needs it back, but the page is yet
    to reach the Page Server?
-A: If the compute node has evicted a page, all changes from that page are
-   already committed, i.e. they are saved on majority of WAL safekeepers. These
-   WAL records will eventually reach the Page Server. The Page Server notes
-   that the compute note requests pages with a very recent LSN and will not
-   respond to the compute node until it a corresponding WAL is received from WAL
-   safekeepers.
+A: If the compute node has evicted a page, changes to it have been WAL-logged
+   (that's why it is called Write Ahead logging; there are some exceptions like
+   index builds, but these are exceptions). These WAL records will eventually
+   reach the Page Server. The Page Server notes that the compute note requests
+   pages with a very recent LSN and will not respond to the compute node until a
+   corresponding WAL is received from WAL safekeepers.
 
 Q: How long may Page Server wait for?
 A: Not too long, hopefully. If a page is evicted, it probably was not used for

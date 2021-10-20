@@ -12,7 +12,6 @@ use crate::waldecoder::*;
 use crate::PageServerConf;
 use anyhow::{bail, Error, Result};
 use lazy_static::lazy_static;
-use log::*;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
@@ -25,8 +24,10 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
 use std::thread::sleep;
+use std::thread::JoinHandle;
 use std::thread_local;
 use std::time::{Duration, SystemTime};
+use tracing::*;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantId;
 use zenith_utils::zid::ZTimelineId;
@@ -36,6 +37,7 @@ use zenith_utils::zid::ZTimelineId;
 //
 struct WalReceiverEntry {
     wal_producer_connstr: String,
+    wal_receiver_handle: Option<JoinHandle<()>>,
 }
 
 lazy_static! {
@@ -48,6 +50,19 @@ thread_local! {
     //
     // This is used in `wait_lsn` to guard against usage that might lead to a deadlock.
     pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
+}
+
+// Wait for walreceiver to stop
+// Now it stops when pageserver shutdown is requested.
+// In future we can make this more granular and send shutdown signals
+// per tenant/timeline to cancel inactive walreceivers.
+// TODO deal with blocking pg connections
+pub fn stop_wal_receiver(timelineid: ZTimelineId) {
+    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    if let Some(r) = receivers.get_mut(&timelineid) {
+        r.wal_receiver_handle.take();
+        // r.wal_receiver_handle.take().map(JoinHandle::join);
+    }
 }
 
 // Launch a new WAL receiver, or tell one that's running about change in connection string
@@ -64,19 +79,19 @@ pub fn launch_wal_receiver(
             receiver.wal_producer_connstr = wal_producer_connstr.into();
         }
         None => {
-            let receiver = WalReceiverEntry {
-                wal_producer_connstr: wal_producer_connstr.into(),
-            };
-            receivers.insert(timelineid, receiver);
-
-            // Also launch a new thread to handle this connection
-            let _walreceiver_thread = thread::Builder::new()
+            let wal_receiver_handle = thread::Builder::new()
                 .name("WAL receiver thread".into())
                 .spawn(move || {
                     IS_WAL_RECEIVER.with(|c| c.set(true));
                     thread_main(conf, timelineid, tenantid);
                 })
                 .unwrap();
+
+            let receiver = WalReceiverEntry {
+                wal_producer_connstr: wal_producer_connstr.into(),
+                wal_receiver_handle: Some(wal_receiver_handle),
+            };
+            receivers.insert(timelineid, receiver);
         }
     };
 }
@@ -96,16 +111,14 @@ fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
 // This is the entry point for the WAL receiver thread.
 //
 fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
-    info!(
-        "WAL receiver thread started for timeline : '{}'",
-        timelineid
-    );
+    let _enter = info_span!("WAL receiver", timeline = %timelineid, tenant = %tenantid).entered();
+    info!("WAL receiver thread started");
 
     //
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it. If the connection is lost, keep retrying.
     //
-    loop {
+    while !tenant_mgr::shutdown_requested() {
         // Look up the current WAL producer address
         let wal_producer_connstr = get_wal_producer_connstr(timelineid);
 
@@ -119,6 +132,7 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
             sleep(Duration::from_secs(1));
         }
     }
+    debug!("WAL streaming shut down");
 }
 
 fn walreceiver_main(
@@ -169,8 +183,8 @@ fn walreceiver_main(
     startpoint += startpoint.calc_padding(8u32);
 
     info!(
-        "last_record_lsn {} starting replication from {} for timeline {}, server is at {}...",
-        last_rec_lsn, startpoint, timelineid, end_of_wal
+        "last_record_lsn {} starting replication from {}, server is at {}...",
+        last_rec_lsn, startpoint, end_of_wal
     );
 
     let query = format!("START_REPLICATION PHYSICAL {}", startpoint);
@@ -198,27 +212,32 @@ fn walreceiver_main(
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    // Save old checkpoint value to compare with it after decoding WAL record
-                    let old_checkpoint_bytes = checkpoint.encode();
-                    let decoded = decode_wal_record(recdata.clone());
+                    let _enter = info_span!("processing record", lsn = %lsn).entered();
 
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
                     // at risk of hittind a deadlock.
                     assert!(lsn.is_aligned());
 
+                    let writer = timeline.writer();
+
+                    let mut checkpoint_modified = false;
+
+                    let decoded = decode_wal_record(recdata.clone());
                     restore_local_repo::save_decoded_record(
                         &mut checkpoint,
-                        &*timeline,
+                        &mut checkpoint_modified,
+                        writer.as_ref(),
                         &decoded,
                         recdata,
                         lsn,
                     )?;
 
-                    let new_checkpoint_bytes = checkpoint.encode();
                     // Check if checkpoint data was updated by save_decoded_record
-                    if new_checkpoint_bytes != old_checkpoint_bytes {
-                        timeline.put_page_image(
+                    if checkpoint_modified {
+                        let new_checkpoint_bytes = checkpoint.encode();
+
+                        writer.put_page_image(
                             RelishTag::Checkpoint,
                             0,
                             lsn,
@@ -228,7 +247,7 @@ fn walreceiver_main(
 
                     // Now that this record has been fully handled, including updating the
                     // checkpoint data, let the repository know that it is up-to-date to this LSN
-                    timeline.advance_last_record_lsn(lsn);
+                    writer.advance_last_record_lsn(lsn);
                     last_rec_lsn = lsn;
                 }
 
@@ -274,6 +293,11 @@ fn walreceiver_main(
             let ts = SystemTime::now();
             const NO_REPLY: u8 = 0;
             physical_stream.standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)?;
+        }
+
+        if tenant_mgr::shutdown_requested() {
+            debug!("stop walreceiver because pageserver shutdown is requested");
+            break;
         }
     }
     Ok(())

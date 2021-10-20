@@ -3,7 +3,7 @@ use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::ops::AddAssign;
+use std::ops::{AddAssign, Deref};
 use std::sync::Arc;
 use std::time::Duration;
 use zenith_utils::lsn::{Lsn, RecordLsn};
@@ -13,6 +13,8 @@ use zenith_utils::zid::ZTimelineId;
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
+    fn shutdown(&self) -> Result<()>;
+
     /// Get Timeline handle for given zenith timeline ID.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
@@ -117,32 +119,15 @@ pub trait Timeline: Send + Sync {
     /// Get a list of all existing non-relational objects
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
+    /// Get the LSN where this branch was created
+    fn get_ancestor_lsn(&self) -> Lsn;
+
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
     //
     // These are called by the WAL receiver to digest WAL records.
     //------------------------------------------------------------------------------
 
-    /// Put a new page version that can be constructed from a WAL record
-    ///
-    /// This will implicitly extend the relation, if the page is beyond the
-    /// current end-of-file.
-    fn put_wal_record(&self, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
-
-    /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()>;
-
-    /// Truncate relation
-    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
-
-    /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
-    fn drop_relish(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
-
-    /// Track end of the latest digested WAL record.
-    ///
-    /// Advance requires aligned LSN as an argument and would wake wait_lsn() callers.
-    /// Previous last record LSN is stored alongside the latest and can be read.
-    fn advance_last_record_lsn(&self, lsn: Lsn);
     /// Atomically get both last and prev.
     fn get_last_record_rlsn(&self) -> RecordLsn;
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -150,6 +135,9 @@ pub trait Timeline: Send + Sync {
     fn get_prev_record_lsn(&self) -> Lsn;
     fn get_start_lsn(&self) -> Lsn;
     fn get_disk_consistent_lsn(&self) -> Lsn;
+
+    /// Mutate the timeline with a [`TimelineWriter`].
+    fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a>;
 
     ///
     /// Flush to disk all data that was written with the put_* functions
@@ -169,9 +157,35 @@ pub trait Timeline: Send + Sync {
     fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize>;
 }
 
+/// Various functions to mutate the timeline.
+// TODO Currently, Deref is used to allow easy access to read methods from this trait.
+// This is probably considered a bad practice in Rust and should be fixed eventually,
+// but will cause large code changes.
+pub trait TimelineWriter: Deref<Target = dyn Timeline> {
+    /// Put a new page version that can be constructed from a WAL record
+    ///
+    /// This will implicitly extend the relation, if the page is beyond the
+    /// current end-of-file.
+    fn put_wal_record(&self, lsn: Lsn, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
+
+    /// Like put_wal_record, but with ready-made image of the page.
+    fn put_page_image(&self, tag: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()>;
+
+    /// Truncate relation
+    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
+
+    /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
+    fn drop_relish(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
+
+    /// Track end of the latest digested WAL record.
+    ///
+    /// Advance requires aligned LSN as an argument and would wake wait_lsn() callers.
+    /// Previous last record LSN is stored alongside the latest and can be read.
+    fn advance_last_record_lsn(&self, lsn: Lsn);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALRecord {
-    pub lsn: Lsn, // LSN at the *end* of the record
     pub will_init: bool,
     pub rec: Bytes,
     // Remember the offset of main_data in rec,
@@ -182,22 +196,19 @@ pub struct WALRecord {
 
 impl WALRecord {
     pub fn pack(&self, buf: &mut BytesMut) {
-        buf.put_u64(self.lsn.0);
         buf.put_u8(self.will_init as u8);
         buf.put_u32(self.main_data_offset);
         buf.put_u32(self.rec.len() as u32);
         buf.put_slice(&self.rec[..]);
     }
     pub fn unpack(buf: &mut Bytes) -> WALRecord {
-        let lsn = Lsn::from(buf.get_u64());
         let will_init = buf.get_u8() != 0;
         let main_data_offset = buf.get_u32();
-        let mut dst = vec![0u8; buf.get_u32() as usize];
-        buf.copy_to_slice(&mut dst);
+        let rec_len = buf.get_u32() as usize;
+        let rec = buf.split_to(rec_len);
         WALRecord {
-            lsn,
             will_init,
-            rec: Bytes::from(dst),
+            rec,
             main_data_offset,
         }
     }
@@ -210,7 +221,7 @@ impl WALRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::LayeredRepository;
+    use crate::layered_repository::{LayeredRepository, METADATA_FILE_NAME};
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
     use hex_literal::hex;
@@ -307,14 +318,15 @@ mod tests {
 
         // Create timeline to work on
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let writer = tline.writer();
 
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
-        tline.put_page_image(TESTREL_A, 1, Lsn(0x40), TEST_IMG("foo blk 1 at 4"))?;
-        tline.put_page_image(TESTREL_A, 2, Lsn(0x50), TEST_IMG("foo blk 2 at 5"))?;
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
+        writer.put_page_image(TESTREL_A, 1, Lsn(0x40), TEST_IMG("foo blk 1 at 4"))?;
+        writer.put_page_image(TESTREL_A, 2, Lsn(0x50), TEST_IMG("foo blk 2 at 5"))?;
 
-        tline.advance_last_record_lsn(Lsn(0x50));
+        writer.advance_last_record_lsn(Lsn(0x50));
 
         assert_current_logical_size(&tline, Lsn(0x50));
 
@@ -360,8 +372,8 @@ mod tests {
         );
 
         // Truncate last block
-        tline.put_truncation(TESTREL_A, Lsn(0x60), 2)?;
-        tline.advance_last_record_lsn(Lsn(0x60));
+        writer.put_truncation(TESTREL_A, Lsn(0x60), 2)?;
+        writer.advance_last_record_lsn(Lsn(0x60));
         assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
@@ -383,13 +395,13 @@ mod tests {
         );
 
         // Truncate to zero length
-        tline.put_truncation(TESTREL_A, Lsn(0x68), 0)?;
-        tline.advance_last_record_lsn(Lsn(0x68));
+        writer.put_truncation(TESTREL_A, Lsn(0x68), 0)?;
+        writer.advance_last_record_lsn(Lsn(0x68));
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x68))?.unwrap(), 0);
 
         // Extend from 0 to 2 blocks, leaving a gap
-        tline.put_page_image(TESTREL_A, 1, Lsn(0x70), TEST_IMG("foo blk 1"))?;
-        tline.advance_last_record_lsn(Lsn(0x70));
+        writer.put_page_image(TESTREL_A, 1, Lsn(0x70), TEST_IMG("foo blk 1"))?;
+        writer.advance_last_record_lsn(Lsn(0x70));
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x70))?.unwrap(), 2);
         assert_eq!(tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?, ZERO_PAGE);
         assert_eq!(
@@ -424,25 +436,26 @@ mod tests {
 
         // Create timeline to work on
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let writer = tline.writer();
 
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.advance_last_record_lsn(Lsn(0x20));
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        writer.advance_last_record_lsn(Lsn(0x20));
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(), 1);
 
         // Drop relish
-        tline.drop_relish(TESTREL_A, Lsn(0x30))?;
-        tline.advance_last_record_lsn(Lsn(0x30));
+        writer.drop_relish(TESTREL_A, Lsn(0x30))?;
+        writer.advance_last_record_lsn(Lsn(0x30));
 
         // Check that rel is not visible anymore
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
         assert!(tline.get_relish_size(TESTREL_A, Lsn(0x30))?.is_none());
 
         // Extend it again
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
-        tline.advance_last_record_lsn(Lsn(0x40));
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
+        writer.advance_last_record_lsn(Lsn(0x40));
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
@@ -460,6 +473,7 @@ mod tests {
 
         // Create timeline to work on
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let writer = tline.writer();
 
         //from storage_layer.rs
         const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
@@ -469,10 +483,10 @@ mod tests {
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
-            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+            writer.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
         }
 
-        tline.advance_last_record_lsn(Lsn(0x20));
+        writer.advance_last_record_lsn(Lsn(0x20));
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
@@ -496,8 +510,8 @@ mod tests {
 
         // Truncate relation so that second segment was dropped
         // - only leave one page
-        tline.put_truncation(TESTREL_A, Lsn(0x60), 1)?;
-        tline.advance_last_record_lsn(Lsn(0x60));
+        writer.put_truncation(TESTREL_A, Lsn(0x60), 1)?;
+        writer.advance_last_record_lsn(Lsn(0x60));
 
         // Check reported size and contents after truncation
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 1);
@@ -530,9 +544,9 @@ mod tests {
         for blkno in 0..relsize {
             let lsn = Lsn(0x80);
             let data = format!("foo blk {} at {}", blkno, lsn);
-            tline.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
+            writer.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
         }
-        tline.advance_last_record_lsn(Lsn(0x80));
+        writer.advance_last_record_lsn(Lsn(0x80));
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
         assert_eq!(
@@ -558,14 +572,15 @@ mod tests {
     fn test_large_rel() -> Result<()> {
         let repo = RepoHarness::create("test_large_rel")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let writer = tline.writer();
 
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 0x10;
-            tline.put_page_image(TESTREL_A, blknum as u32, Lsn(lsn), img)?;
+            writer.put_page_image(TESTREL_A, blknum as u32, Lsn(lsn), img)?;
         }
-        tline.advance_last_record_lsn(Lsn(lsn));
+        writer.advance_last_record_lsn(Lsn(lsn));
 
         assert_current_logical_size(&tline, Lsn(lsn));
 
@@ -576,8 +591,8 @@ mod tests {
 
         // Truncate one block
         lsn += 0x10;
-        tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
-        tline.advance_last_record_lsn(Lsn(lsn));
+        writer.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
+        writer.advance_last_record_lsn(Lsn(lsn));
         assert_eq!(
             tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE
@@ -586,8 +601,8 @@ mod tests {
 
         // Truncate another block
         lsn += 0x10;
-        tline.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE - 1)?;
-        tline.advance_last_record_lsn(Lsn(lsn));
+        writer.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE - 1)?;
+        writer.advance_last_record_lsn(Lsn(lsn));
         assert_eq!(
             tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
             pg_constants::RELSEG_SIZE - 1
@@ -599,8 +614,8 @@ mod tests {
         let mut size: i32 = 3000;
         while size >= 0 {
             lsn += 0x10;
-            tline.put_truncation(TESTREL_A, Lsn(lsn), size as u32)?;
-            tline.advance_last_record_lsn(Lsn(lsn));
+            writer.put_truncation(TESTREL_A, Lsn(lsn), size as u32)?;
+            writer.advance_last_record_lsn(Lsn(lsn));
             assert_eq!(
                 tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
                 size as u32
@@ -620,16 +635,17 @@ mod tests {
     fn test_list_rels_drop() -> Result<()> {
         let repo = RepoHarness::create("test_list_rels_drop")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let writer = tline.writer();
         const TESTDB: u32 = 111;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
-        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
+        writer.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
 
         // Create a relation on the timeline
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
 
-        tline.advance_last_record_lsn(Lsn(0x30));
+        writer.advance_last_record_lsn(Lsn(0x30));
 
         // Check that list_rels() lists it after LSN 2, but no before it
         assert!(!tline.list_rels(0, TESTDB, Lsn(0x10))?.contains(&TESTREL_A));
@@ -639,14 +655,17 @@ mod tests {
         // Create a branch, check that the relation is visible there
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
         let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
+        let new_writer = newtline.writer();
 
         assert!(newtline
             .list_rels(0, TESTDB, Lsn(0x30))?
             .contains(&TESTREL_A));
 
         // Drop it on the branch
-        newtline.drop_relish(TESTREL_A, Lsn(0x40))?;
-        newtline.advance_last_record_lsn(Lsn(0x40));
+        new_writer.drop_relish(TESTREL_A, Lsn(0x40))?;
+        new_writer.advance_last_record_lsn(Lsn(0x40));
+
+        drop(new_writer);
 
         // Check that it's no longer listed on the branch after the point where it was dropped
         assert!(newtline
@@ -674,28 +693,30 @@ mod tests {
     fn test_branch() -> Result<()> {
         let repo = RepoHarness::create("test_branch")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let writer = tline.writer();
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
-        tline.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
+        writer.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
 
         // Create a relation on the timeline
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
-        tline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
+        writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
 
         // Create another relation
-        tline.put_page_image(TESTREL_B, 0, Lsn(0x20), TEST_IMG("foobar blk 0 at 2"))?;
+        writer.put_page_image(TESTREL_B, 0, Lsn(0x20), TEST_IMG("foobar blk 0 at 2"))?;
 
-        tline.advance_last_record_lsn(Lsn(0x40));
+        writer.advance_last_record_lsn(Lsn(0x40));
         assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
         let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
+        let new_writer = newtline.writer();
 
-        newtline.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
-        newtline.advance_last_record_lsn(Lsn(0x40));
+        new_writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
+        new_writer.advance_last_record_lsn(Lsn(0x40));
 
         // Check page contents on both branches
         assert_eq!(
@@ -729,7 +750,7 @@ mod tests {
         repo.create_empty_timeline(TIMELINE_ID)?;
         drop(repo);
 
-        let metadata_path = harness.timeline_path(&TIMELINE_ID).join("metadata");
+        let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
 
         assert!(metadata_path.is_file());
 
@@ -811,7 +832,7 @@ mod tests {
             blknum: u32,
             lsn: Lsn,
             base_img: Option<Bytes>,
-            records: Vec<WALRecord>,
+            records: Vec<(Lsn, WALRecord)>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
                 "redo for {} blk {} to get to {}, with {} and {} records",

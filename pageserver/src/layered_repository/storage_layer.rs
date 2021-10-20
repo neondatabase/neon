@@ -78,7 +78,7 @@ pub struct PageVersion {
 /// 'records' contains the records to apply over the base image.
 ///
 pub struct PageReconstructData {
-    pub records: Vec<WALRecord>,
+    pub records: Vec<(Lsn, WALRecord)>,
     pub page_img: Option<Bytes>,
 }
 
@@ -122,10 +122,6 @@ pub trait Layer: Send + Sync {
 
     /// Is the segment represented by this layer dropped by PostgreSQL?
     fn is_dropped(&self) -> bool;
-
-    /// Gets the physical location of the layer on disk.
-    /// Some layers, such as in-memory, might not have the location.
-    fn path(&self) -> Option<PathBuf>;
 
     /// Filename used to store this layer on disk. (Even in-memory layers
     /// implement this, to print a handy unique identifier for the layer for

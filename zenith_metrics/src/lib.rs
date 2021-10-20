@@ -5,6 +5,8 @@
 use lazy_static::lazy_static;
 use once_cell::race::OnceBox;
 pub use prometheus::{exponential_buckets, linear_buckets};
+pub use prometheus::{register_gauge, Gauge};
+pub use prometheus::{register_gauge_vec, GaugeVec};
 pub use prometheus::{register_histogram, Histogram};
 pub use prometheus::{register_histogram_vec, HistogramVec};
 pub use prometheus::{register_int_counter, IntCounter};
@@ -44,7 +46,7 @@ pub fn set_common_metrics_prefix(prefix: &'static str) {
 }
 
 /// Prepends a prefix to a common metric name so they are distinguished between
-/// different services, see https://github.com/zenithdb/zenith/pull/681
+/// different services, see <https://github.com/zenithdb/zenith/pull/681>
 /// A call to set_common_metrics_prefix() is necessary prior to calling this.
 pub fn new_common_metric_name(unprefixed_metric_name: &str) -> String {
     // Not unwrap() because metrics may be initialized after multiple threads have been started.

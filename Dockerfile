@@ -37,7 +37,7 @@ RUN apt-get update && apt-get -yq install libreadline-dev libseccomp-dev openssl
     mkdir zenith_install
 
 COPY --from=build /zenith/target/release/pageserver /usr/local/bin
-COPY --from=build /zenith/target/release/wal_acceptor /usr/local/bin
+COPY --from=build /zenith/target/release/safekeeper /usr/local/bin
 COPY --from=build /zenith/target/release/proxy /usr/local/bin
 COPY --from=pg-build /zenith/tmp_install postgres_install
 COPY docker-entrypoint.sh /docker-entrypoint.sh

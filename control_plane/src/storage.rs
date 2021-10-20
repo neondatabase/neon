@@ -199,23 +199,45 @@ impl PageServerNode {
         bail!("pageserver failed to start in {} seconds", RETRIES);
     }
 
-    pub fn stop(&self) -> anyhow::Result<()> {
+    pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         let pid = read_pidfile(&self.pid_file())?;
         let pid = Pid::from_raw(pid);
-        if kill(pid, Signal::SIGTERM).is_err() {
-            bail!("Failed to kill pageserver with pid {}", pid);
+        if immediate {
+            println!("Stop pageserver immediately");
+            if kill(pid, Signal::SIGQUIT).is_err() {
+                bail!("Failed to kill pageserver with pid {}", pid);
+            }
+        } else {
+            println!("Stop pageserver gracefully");
+            if kill(pid, Signal::SIGTERM).is_err() {
+                bail!("Failed to stop pageserver with pid {}", pid);
+            }
         }
 
-        // wait for pageserver stop
         let address = connection_address(&self.pg_connection_config);
-        for _ in 0..5 {
-            let stream = TcpStream::connect(&address);
-            thread::sleep(Duration::from_secs(1));
-            if let Err(_e) = stream {
-                println!("Pageserver stopped");
-                return Ok(());
+
+        // TODO Remove this "timeout" and handle it on caller side instead.
+        // Shutting down may take a long time,
+        // if pageserver checkpoints a lot of data
+        for _ in 0..100 {
+            if let Err(_e) = TcpStream::connect(&address) {
+                println!("Pageserver stopped receiving connections");
+
+                //Now check status
+                match self.check_status() {
+                    Ok(_) => {
+                        println!("Pageserver status is OK. Wait a bit.");
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                    Err(err) => {
+                        println!("Pageserver status is: {}", err);
+                        return Ok(());
+                    }
+                }
+            } else {
+                println!("Pageserver still receives connections");
+                thread::sleep(Duration::from_secs(1));
             }
-            println!("Stopping pageserver on {}", address);
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
@@ -313,8 +335,9 @@ impl PageServerNode {
 
 impl Drop for PageServerNode {
     fn drop(&mut self) {
+        // TODO Looks like this flag is never set
         if self.kill_on_exit {
-            let _ = self.stop();
+            let _ = self.stop(true);
         }
     }
 }

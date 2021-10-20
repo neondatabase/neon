@@ -53,8 +53,8 @@ Useful environment variables:
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 
-Let stdout and stderr go to the terminal instead of capturing them:
-`pytest -s ...`
+Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
+`pytest -s --log-cli-level=INFO ...`
 (Note many tests capture subprocess outputs separately, so this may not
 show much.)
 
@@ -95,11 +95,13 @@ Python destructors, e.g. `__del__()` aren't recommended for cleanup.
 
 ### Code quality
 
+We force code formatting via yapf:
+
+1. Install `yapf` and other tools (`flake8`, `mypy`) with `pipenv install --dev`.
+1. Reformat all your code by running `pipenv run yapf -ri .` in the `test_runner/` directory.
+
 Before submitting a patch, please consider:
 
 * Writing a couple of docstrings to clarify the reasoning behind a new test.
 * Running `flake8` (or a linter of your choice, e.g. `pycodestyle`) and fixing possible defects, if any.
-* Formatting the code with `yapf -r -i .` (TODO: implement an opt-in pre-commit hook for that).
 * (Optional) Typechecking the code with `mypy .`. Currently this mostly affects `fixtures/zenith_fixtures.py`.
-
-The tools can be installed with `pipenv install --dev`.

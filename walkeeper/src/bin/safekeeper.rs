@@ -1,35 +1,48 @@
 //
-// Main entry point for the wal_acceptor executable
+// Main entry point for the safekeeper executable
 //
 use anyhow::Result;
 use clap::{App, Arg};
+use const_format::formatcp;
 use daemonize::Daemonize;
 use log::*;
 use std::env;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::thread;
+use zenith_utils::http::endpoint;
 use zenith_utils::logging;
 
+use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
+use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::WalAcceptorConf;
 
 fn main() -> Result<()> {
-    let arg_matches = App::new("Zenith wal_acceptor")
+    zenith_metrics::set_common_metrics_prefix("safekeeper");
+    let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .arg(
             Arg::with_name("datadir")
                 .short("D")
                 .long("dir")
                 .takes_value(true)
-                .help("Path to the WAL acceptor data directory"),
+                .help("Path to the safekeeper data directory"),
         )
         .arg(
-            Arg::with_name("listen")
+            Arg::with_name("listen-pg")
                 .short("l")
-                .long("listen")
+                .long("listen-pg")
+                .alias("listen") // for compatibility
                 .takes_value(true)
-                .help("listen for incoming connections on ip:port (default: 127.0.0.1:5454)"),
+                .help(formatcp!("listen for incoming WAL data connections on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
+        )
+        .arg(
+            Arg::with_name("listen-http")
+                .long("listen-http")
+                .takes_value(true)
+                .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
         .arg(
             Arg::with_name("pageserver")
@@ -70,7 +83,8 @@ fn main() -> Result<()> {
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
-        listen_addr: "localhost:5454".to_string(),
+        listen_pg_addr: DEFAULT_PG_LISTEN_ADDR.to_string(),
+        listen_http_addr: DEFAULT_HTTP_LISTEN_ADDR.to_string(),
         ttl: None,
         recall_period: None,
         pageserver_auth_token: env::var("PAGESERVER_AUTH_TOKEN").ok(),
@@ -91,8 +105,12 @@ fn main() -> Result<()> {
         conf.daemonize = true;
     }
 
-    if let Some(addr) = arg_matches.value_of("listen") {
-        conf.listen_addr = addr.to_owned();
+    if let Some(addr) = arg_matches.value_of("listen-pg") {
+        conf.listen_pg_addr = addr.to_owned();
+    }
+
+    if let Some(addr) = arg_matches.value_of("listen-http") {
+        conf.listen_http_addr = addr.to_owned();
     }
 
     if let Some(addr) = arg_matches.value_of("pageserver") {
@@ -111,8 +129,19 @@ fn main() -> Result<()> {
 }
 
 fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
-    let log_filename = conf.data_dir.join("wal_acceptor.log");
-    let (_scope_guard, log_file) = logging::init(log_filename, conf.daemonize)?;
+    let log_filename = conf.data_dir.join("safekeeper.log");
+    let log_file = logging::init(log_filename, conf.daemonize)?;
+
+    let http_listener = TcpListener::bind(conf.listen_http_addr.clone()).map_err(|e| {
+        error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
+        e
+    })?;
+
+    info!("Starting safekeeper on {}", conf.listen_pg_addr);
+    let pg_listener = TcpListener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
+        error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
+        e
+    })?;
 
     if conf.daemonize {
         info!("daemonizing...");
@@ -123,7 +152,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         let stderr = log_file;
 
         let daemonize = Daemonize::new()
-            .pid_file("wal_acceptor.pid")
+            .pid_file("safekeeper.pid")
             .working_directory(Path::new("."))
             .stdout(stdout)
             .stderr(stderr);
@@ -135,6 +164,17 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
     }
 
     let mut threads = Vec::new();
+
+    let conf_cloned = conf.clone();
+    let http_endpoint_thread = thread::Builder::new()
+        .name("http_endpoint_thread".into())
+        .spawn(|| {
+            // TODO authentication
+            let router = http::make_router(conf_cloned);
+            endpoint::serve_thread_main(router, http_listener).unwrap();
+        })
+        .unwrap();
+    threads.push(http_endpoint_thread);
 
     if conf.ttl.is_some() {
         let s3_conf = conf.clone();
@@ -152,7 +192,7 @@ fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
         .name("WAL acceptor thread".into())
         .spawn(|| {
             // thread code
-            let thread_result = wal_service::thread_main(conf);
+            let thread_result = wal_service::thread_main(conf, pg_listener);
             if let Err(e) = thread_result {
                 info!("wal_service thread terminated: {}", e);
             }

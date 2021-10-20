@@ -48,7 +48,7 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use zenith_utils::vec_map::VecMap;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
@@ -141,10 +141,10 @@ pub struct DeltaLayerInner {
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
-    page_version_metas: BTreeMap<(u32, Lsn), BlobRange>,
+    page_version_metas: VecMap<(u32, Lsn), BlobRange>,
 
     /// `relsizes` tracks the size of the relation at different points in time.
-    relsizes: BTreeMap<Lsn, u32>,
+    relsizes: VecMap<Lsn, u32>,
 }
 
 impl Layer for DeltaLayer {
@@ -169,29 +169,7 @@ impl Layer for DeltaLayer {
     }
 
     fn filename(&self) -> PathBuf {
-        PathBuf::from(
-            DeltaFileName {
-                seg: self.seg,
-                start_lsn: self.start_lsn,
-                end_lsn: self.end_lsn,
-                dropped: self.dropped,
-            }
-            .to_string(),
-        )
-    }
-
-    fn path(&self) -> Option<PathBuf> {
-        Some(Self::path_for(
-            &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
-            &DeltaFileName {
-                seg: self.seg,
-                start_lsn: self.start_lsn,
-                end_lsn: self.end_lsn,
-                dropped: self.dropped,
-            },
-        ))
+        PathBuf::from(self.layer_name().to_string())
     }
 
     /// Look up given page in the cache.
@@ -215,10 +193,12 @@ impl Layer for DeltaLayer {
             // Scan the metadata BTreeMap backwards, starting from the given entry.
             let minkey = (blknum, Lsn(0));
             let maxkey = (blknum, lsn);
-            let mut iter = inner
+            let iter = inner
                 .page_version_metas
-                .range((Included(&minkey), Included(&maxkey)));
-            while let Some(((_blknum, _entry_lsn), blob_range)) = iter.next_back() {
+                .slice_range((Included(&minkey), Included(&maxkey)))
+                .iter()
+                .rev();
+            for ((_blknum, pv_lsn), blob_range) in iter {
                 let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
 
                 if let Some(img) = pv.page_image {
@@ -228,7 +208,7 @@ impl Layer for DeltaLayer {
                     break;
                 } else if let Some(rec) = pv.record {
                     let will_init = rec.will_init;
-                    reconstruct_data.records.push(rec);
+                    reconstruct_data.records.push((*pv_lsn, rec));
                     if will_init {
                         // This WAL record initializes the page, so no need to go further back
                         need_image = false;
@@ -262,15 +242,15 @@ impl Layer for DeltaLayer {
 
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
-        let mut iter = inner.relsizes.range((Included(&Lsn(0)), Included(&lsn)));
+        let slice = inner
+            .relsizes
+            .slice_range((Included(&Lsn(0)), Included(&lsn)));
 
-        let result;
-        if let Some((_entry_lsn, entry)) = iter.next_back() {
-            result = *entry;
+        if let Some((_entry_lsn, entry)) = slice.last() {
+            Ok(*entry)
         } else {
-            bail!("could not find seg size in delta layer");
+            Err(anyhow::anyhow!("could not find seg size in delta layer"))
         }
-        Ok(result)
     }
 
     /// Does this segment exist at given LSN?
@@ -290,17 +270,15 @@ impl Layer for DeltaLayer {
     ///
     fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.page_version_metas = BTreeMap::new();
-        inner.relsizes = BTreeMap::new();
+        inner.page_version_metas = VecMap::default();
+        inner.relsizes = VecMap::default();
         inner.loaded = false;
         Ok(())
     }
 
     fn delete(&self) -> Result<()> {
         // delete underlying file
-        if let Some(path) = self.path() {
-            fs::remove_file(path)?;
-        }
+        fs::remove_file(self.path())?;
         Ok(())
     }
 
@@ -317,13 +295,13 @@ impl Layer for DeltaLayer {
 
         println!("--- relsizes ---");
         let inner = self.load()?;
-        for (k, v) in inner.relsizes.iter() {
+        for (k, v) in inner.relsizes.as_slice() {
             println!("  {}: {}", k, v);
         }
         println!("--- page versions ---");
         let (_path, book) = self.open_book()?;
         let chapter = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
-        for ((blk, lsn), blob_range) in inner.page_version_metas.iter() {
+        for ((blk, lsn), blob_range) in inner.page_version_metas.as_slice() {
             let mut desc = String::new();
 
             let buf = read_blob(&chapter, blob_range)?;
@@ -380,8 +358,8 @@ impl DeltaLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        page_versions: impl Iterator<Item = (&'a (u32, Lsn), &'a PageVersion)>,
-        relsizes: BTreeMap<Lsn, u32>,
+        page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
+        relsizes: VecMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
             assert!(!relsizes.is_empty());
@@ -397,16 +375,14 @@ impl DeltaLayer {
             dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: true,
-                page_version_metas: BTreeMap::new(),
+                page_version_metas: VecMap::default(),
                 relsizes,
             }),
         };
         let mut inner = delta_layer.inner.lock().unwrap();
 
         // Write the in-memory btreemaps into a file
-        let path = delta_layer
-            .path()
-            .expect("DeltaLayer is supposed to have a layer path on disk");
+        let path = delta_layer.path();
 
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
@@ -416,26 +392,27 @@ impl DeltaLayer {
 
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
-        for (key, page_version) in page_versions {
+        for (blknum, lsn, page_version) in page_versions {
             let buf = PageVersion::ser(page_version)?;
             let blob_range = page_version_writer.write_blob(&buf)?;
 
-            let old = inner.page_version_metas.insert(*key, blob_range);
-
-            assert!(old.is_none());
+            inner
+                .page_version_metas
+                .append((blknum, lsn), blob_range)
+                .unwrap();
         }
 
         let book = page_version_writer.close()?;
 
         // Write out page versions
         let mut chapter = book.new_chapter(PAGE_VERSION_METAS_CHAPTER);
-        let buf = BTreeMap::ser(&inner.page_version_metas)?;
+        let buf = VecMap::ser(&inner.page_version_metas)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
         // and relsizes to separate chapter
         let mut chapter = book.new_chapter(REL_SIZES_CHAPTER);
-        let buf = BTreeMap::ser(&inner.relsizes)?;
+        let buf = VecMap::ser(&inner.relsizes)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
@@ -469,12 +446,7 @@ impl DeltaLayer {
             &self.path_or_conf,
             self.timelineid,
             self.tenantid,
-            &DeltaFileName {
-                seg: self.seg,
-                start_lsn: self.start_lsn,
-                end_lsn: self.end_lsn,
-                dropped: self.dropped,
-            },
+            &self.layer_name(),
         );
 
         let file = File::open(&path)?;
@@ -522,10 +494,10 @@ impl DeltaLayer {
         }
 
         let chapter = book.read_chapter(PAGE_VERSION_METAS_CHAPTER)?;
-        let page_version_metas = BTreeMap::des(&chapter)?;
+        let page_version_metas = VecMap::des(&chapter)?;
 
         let chapter = book.read_chapter(REL_SIZES_CHAPTER)?;
-        let relsizes = BTreeMap::des(&chapter)?;
+        let relsizes = VecMap::des(&chapter)?;
 
         debug!("loaded from {}", &path.display());
 
@@ -555,8 +527,8 @@ impl DeltaLayer {
             dropped: filename.dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
-                page_version_metas: BTreeMap::new(),
-                relsizes: BTreeMap::new(),
+                page_version_metas: VecMap::default(),
+                relsizes: VecMap::default(),
             }),
         }
     }
@@ -578,9 +550,28 @@ impl DeltaLayer {
             dropped: summary.dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
-                page_version_metas: BTreeMap::new(),
-                relsizes: BTreeMap::new(),
+                page_version_metas: VecMap::default(),
+                relsizes: VecMap::default(),
             }),
         })
+    }
+
+    fn layer_name(&self) -> DeltaFileName {
+        DeltaFileName {
+            seg: self.seg,
+            start_lsn: self.start_lsn,
+            end_lsn: self.end_lsn,
+            dropped: self.dropped,
+        }
+    }
+
+    /// Path to the layer file in pageserver workdir.
+    pub fn path(&self) -> PathBuf {
+        Self::path_for(
+            &self.path_or_conf,
+            self.timelineid,
+            self.tenantid,
+            &self.layer_name(),
+        )
     }
 }

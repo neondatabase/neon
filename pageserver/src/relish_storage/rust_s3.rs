@@ -1,13 +1,15 @@
 //! A wrapper around AWS S3 client library `rust_s3` to be used a relish storage.
 
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::Context;
 use s3::{bucket::Bucket, creds::Credentials, region::Region};
 
-use crate::{relish_storage::strip_workspace_prefix, S3Config};
-
-use super::RelishStorage;
+use crate::{
+    relish_storage::{strip_workspace_prefix, RelishStorage},
+    S3Config,
+};
 
 const S3_FILE_SEPARATOR: char = '/';
 
@@ -82,18 +84,14 @@ impl RelishStorage for RustS3 {
             .collect())
     }
 
-    async fn download_relish(
+    async fn download_relish<W: 'static + std::io::Write + Send>(
         &self,
         from: &Self::RelishStoragePath,
-        to: &Path,
-    ) -> anyhow::Result<()> {
-        let mut target_file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(to)
-            .with_context(|| format!("Failed to open target s3 destination at {}", to.display()))?;
+        mut to: std::io::BufWriter<W>,
+    ) -> anyhow::Result<std::io::BufWriter<W>> {
         let code = self
             .bucket
-            .get_object_stream(from.key(), &mut target_file)
+            .get_object_stream(from.key(), &mut to)
             .await
             .with_context(|| format!("Failed to download s3 object with key {}", from.key()))?;
         if code != 200 {
@@ -102,7 +100,12 @@ impl RelishStorage for RustS3 {
                 code
             ))
         } else {
-            Ok(())
+            tokio::task::spawn_blocking(move || {
+                to.flush().context("Failed to fluch the downoad buffer")?;
+                Ok::<_, anyhow::Error>(to)
+            })
+            .await
+            .context("Failed to joim the download buffer flush task")?
         }
     }
 
@@ -112,9 +115,9 @@ impl RelishStorage for RustS3 {
             .delete_object(path.key())
             .await
             .with_context(|| format!("Failed to delete s3 object with key {}", path.key()))?;
-        if code != 200 {
+        if code != 204 {
             Err(anyhow::format_err!(
-                "Received non-200 exit code during deleting object with key '{}', code: {}",
+                "Received non-204 exit code during deleting object with key '{}', code: {}",
                 path.key(),
                 code
             ))
@@ -123,12 +126,14 @@ impl RelishStorage for RustS3 {
         }
     }
 
-    async fn upload_relish(&self, from: &Path, to: &Self::RelishStoragePath) -> anyhow::Result<()> {
-        let mut local_file = tokio::fs::OpenOptions::new().read(true).open(from).await?;
-
+    async fn upload_relish<R: tokio::io::AsyncRead + std::marker::Unpin + Send>(
+        &self,
+        from: &mut tokio::io::BufReader<R>,
+        to: &Self::RelishStoragePath,
+    ) -> anyhow::Result<()> {
         let code = self
             .bucket
-            .put_object_stream(&mut local_file, to.key())
+            .put_object_stream(from, to.key())
             .await
             .with_context(|| format!("Failed to create s3 object with key {}", to.key()))?;
         if code != 200 {

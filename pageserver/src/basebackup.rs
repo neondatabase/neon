@@ -13,6 +13,7 @@
 use anyhow::Result;
 use bytes::{BufMut, BytesMut};
 use log::*;
+use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
@@ -31,7 +32,7 @@ use zenith_utils::lsn::Lsn;
 pub struct Basebackup<'a> {
     ar: Builder<&'a mut dyn Write>,
     timeline: &'a Arc<dyn Timeline>,
-    lsn: Lsn,
+    pub lsn: Lsn,
     prev_record_lsn: Lsn,
 }
 
@@ -83,7 +84,7 @@ impl<'a> Basebackup<'a> {
 
         info!(
             "taking basebackup lsn={}, prev_lsn={}",
-            backup_prev, backup_lsn
+            backup_lsn, backup_prev
         );
 
         Ok(Basebackup {
@@ -97,7 +98,6 @@ impl<'a> Basebackup<'a> {
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
-            info!("send subdir {:?}", *dir);
             let header = new_tar_header_dir(*dir)?;
             self.ar.append(&header, &mut io::empty())?;
         }
@@ -249,13 +249,7 @@ impl<'a> Basebackup<'a> {
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
-        // Generate new pg_control and WAL needed for bootstrap
-        let checkpoint_segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-        let checkpoint_lsn = XLogSegNoOffsetToRecPtr(
-            checkpoint_segno,
-            XLOG_SIZE_OF_XLOG_LONG_PHD as u32,
-            pg_constants::WAL_SEGMENT_SIZE,
-        );
+        // Generate new pg_control needed for bootstrap
         checkpoint.redo = normalize_lsn(self.lsn, pg_constants::WAL_SEGMENT_SIZE).0;
 
         //reset some fields we don't want to preserve
@@ -264,19 +258,24 @@ impl<'a> Basebackup<'a> {
         checkpoint.oldestActiveXid = 0;
 
         //save new values in pg_control
-        pg_control.checkPoint = checkpoint_lsn;
+        pg_control.checkPoint = 0;
         pg_control.checkPointCopy = checkpoint;
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
         // add zenith.signal file
-        let xl_prev = if self.prev_record_lsn == Lsn(0) {
-            0xBAD0 // magic value to indicate that we don't know prev_lsn
+        let mut zenith_signal = String::new();
+        if self.prev_record_lsn == Lsn(0) {
+            if self.lsn == self.timeline.get_ancestor_lsn() {
+                write!(zenith_signal, "PREV LSN: none")?;
+            } else {
+                write!(zenith_signal, "PREV LSN: invalid")?;
+            }
         } else {
-            self.prev_record_lsn.0
-        };
+            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
+        }
         self.ar.append(
-            &new_tar_header("zenith.signal", 8)?,
-            &xl_prev.to_le_bytes()[..],
+            &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
+            zenith_signal.as_bytes(),
         )?;
 
         //send pg_control
@@ -285,14 +284,15 @@ impl<'a> Basebackup<'a> {
         self.ar.append(&header, &pg_control_bytes[..])?;
 
         //send wal segment
+        let segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
         let wal_file_name = XLogFileName(
             1, // FIXME: always use Postgres timeline 1
-            checkpoint_segno,
+            segno,
             pg_constants::WAL_SEGMENT_SIZE,
         );
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
-        let wal_seg = generate_wal_segment(&pg_control);
+        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier);
         assert!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())

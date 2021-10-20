@@ -7,26 +7,21 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
 
 #
-# Run bulk INSERT test.
+# Test buffering GisT build. It WAL-logs the whole relation, in 32-page chunks.
+# As of this writing, we're duplicate those giant WAL records for each page,
+# which makes the delta layer about 32x larger than it needs to be.
 #
-# Collects metrics:
-#
-# 1. Time to INSERT 5 million rows
-# 2. Disk writes
-# 3. Disk space used
-# 4. Peak memory usage
-#
-def test_bulk_insert(postgres: PostgresFactory,
-                     pageserver: ZenithPageserver,
-                     pg_bin,
-                     zenith_cli,
-                     zenbenchmark,
-                     repo_dir: str):
+def test_gist_buffering_build(postgres: PostgresFactory,
+                              pageserver: ZenithPageserver,
+                              pg_bin,
+                              zenith_cli,
+                              zenbenchmark,
+                              repo_dir: str):
     # Create a branch for us
-    zenith_cli.run(["branch", "test_bulk_insert", "empty"])
+    zenith_cli.run(["branch", "test_gist_buffering_build", "empty"])
 
-    pg = postgres.create_start('test_bulk_insert')
-    log.info("postgres is running on 'test_bulk_insert' branch")
+    pg = postgres.create_start('test_gist_buffering_build')
+    log.info("postgres is running on 'test_gist_buffering_build' branch")
 
     # Open a connection directly to the page server that we'll use to force
     # flushing the layers to disk
@@ -39,16 +34,22 @@ def test_bulk_insert(postgres: PostgresFactory,
             cur.execute("SHOW zenith.zenith_timeline")
             timeline = cur.fetchone()[0]
 
-            cur.execute("create table huge (i int, j int);")
+            # Create test table.
+            cur.execute("create table gist_point_tbl(id int4, p point)")
+            cur.execute(
+                "insert into gist_point_tbl select g, point(g, g) from generate_series(1, 1000000) g;"
+            )
 
-            # Run INSERT, recording the time and I/O it takes
+            # Build the index.
             with zenbenchmark.record_pageserver_writes(pageserver, 'pageserver_writes'):
-                with zenbenchmark.record_duration('insert'):
-                    cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
+                with zenbenchmark.record_duration('build'):
+                    cur.execute(
+                        "create index gist_pointidx2 on gist_point_tbl using gist(p) with (buffering = on)"
+                    )
 
                     # Flush the layers from memory to disk. This is included in the reported
                     # time and I/O
-                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 1000000")
 
             # Record peak memory usage
             zenbenchmark.record("peak_mem", zenbenchmark.get_peak_mem(pageserver) / 1024, 'MB')

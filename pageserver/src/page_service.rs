@@ -13,7 +13,6 @@
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use log::*;
 use regex::Regex;
 use std::net::TcpListener;
 use std::str;
@@ -21,10 +20,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::{io, net::TcpStream};
+use tracing::*;
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::lsn::Lsn;
+use zenith_utils::postgres_backend::is_socket_read_timed_out;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
 use zenith_utils::pq_proto::{
@@ -187,17 +188,32 @@ pub fn thread_main(
     listener: TcpListener,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
-    loop {
+    let mut join_handles = Vec::new();
+
+    while !tenant_mgr::shutdown_requested() {
         let (socket, peer_addr) = listener.accept()?;
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
         let local_auth = auth.clone();
-        thread::spawn(move || {
-            if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
-                error!("page server thread exiting with error: {:#}", err);
-            }
-        });
+
+        let handle = thread::Builder::new()
+            .name("serving Page Service thread".into())
+            .spawn(move || {
+                if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
+                    error!(%err, "page server thread exited with error");
+                }
+            })
+            .unwrap();
+
+        join_handles.push(handle);
     }
+
+    debug!("page_service loop terminated. wait for connections to cancel");
+    for handle in join_handles.into_iter() {
+        handle.join().unwrap();
+    }
+
+    Ok(())
 }
 
 fn page_service_conn_main(
@@ -216,7 +232,7 @@ fn page_service_conn_main(
     }
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
-    let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
+    let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
     pgbackend.run(&mut conn_handler)
 }
 
@@ -260,50 +276,66 @@ impl PageServerHandler {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
+        let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
+
         // Check that the timeline exists
         let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
-        while let Some(message) = pgb.read_message()? {
-            trace!("query({:?}): {:?}", timelineid, message);
+        while !tenant_mgr::shutdown_requested() {
+            match pgb.read_message() {
+                Ok(message) => {
+                    if let Some(message) = message {
+                        trace!("query: {:?}", message);
 
-            let copy_data_bytes = match message {
-                FeMessage::CopyData(bytes) => bytes,
-                _ => continue,
-            };
+                        let copy_data_bytes = match message {
+                            FeMessage::CopyData(bytes) => bytes,
+                            _ => continue,
+                        };
 
-            let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+                        let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
 
-            let response = match zenith_fe_msg {
-                PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
-                    .with_label_values(&["get_rel_exists"])
-                    .observe_closure_duration(|| {
-                        self.handle_get_rel_exists_request(&*timeline, &req)
-                    }),
-                PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
-                    .with_label_values(&["get_rel_size"])
-                    .observe_closure_duration(|| self.handle_get_nblocks_request(&*timeline, &req)),
-                PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
-                    .with_label_values(&["get_page_at_lsn"])
-                    .observe_closure_duration(|| {
-                        self.handle_get_page_at_lsn_request(&*timeline, &req)
-                    }),
-            };
+                        let response = match zenith_fe_msg {
+                            PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_rel_exists"])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_rel_exists_request(&*timeline, &req)
+                                }),
+                            PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_rel_size"])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_nblocks_request(&*timeline, &req)
+                                }),
+                            PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_page_at_lsn"])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_page_at_lsn_request(&*timeline, &req)
+                                }),
+                        };
 
-            let response = response.unwrap_or_else(|e| {
-                // print the all details to the log with {:#}, but for the client the
-                // error message is enough
-                error!("error reading relation or page version: {:#}", e);
-                PagestreamBeMessage::Error(PagestreamErrorResponse {
-                    message: e.to_string(),
-                })
-            });
+                        let response = response.unwrap_or_else(|e| {
+                            // print the all details to the log with {:#}, but for the client the
+                            // error message is enough
+                            error!("error reading relation or page version: {:#}", e);
+                            PagestreamBeMessage::Error(PagestreamErrorResponse {
+                                message: e.to_string(),
+                            })
+                        });
 
-            pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
+                        pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if !is_socket_read_timed_out(&e) {
+                        return Err(e);
+                    }
+                }
+            }
         }
-
         Ok(())
     }
 
@@ -363,6 +395,8 @@ impl PageServerHandler {
         timeline: &dyn Timeline,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
+        let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
+
         let tag = RelishTag::Relation(req.rel);
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
 
@@ -378,6 +412,7 @@ impl PageServerHandler {
         timeline: &dyn Timeline,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
+        let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
         let tag = RelishTag::Relation(req.rel);
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
 
@@ -397,6 +432,8 @@ impl PageServerHandler {
         timeline: &dyn Timeline,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
+        let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
+            .entered();
         let tag = RelishTag::Relation(req.rel);
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
 
@@ -414,17 +451,20 @@ impl PageServerHandler {
         lsn: Option<Lsn>,
         tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
+        let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
+        let _enter = span.enter();
+
         // check that the timeline exists
         let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
 
-        /* switch client to COPYOUT */
+        // switch client to COPYOUT
         pgb.write_message(&BeMessage::CopyOutResponse)?;
-        info!("sent CopyOut");
 
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
             let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+            span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
         pgb.write_message(&BeMessage::CopyDone)?;
@@ -529,11 +569,6 @@ impl postgres_backend::Handler for PageServerHandler {
                 None
             };
 
-            info!(
-                "got basebackup command. tenantid=\"{}\" timelineid=\"{}\" lsn=\"{:#?}\"",
-                tenantid, timelineid, lsn
-            );
-
             // Check that the timeline exists
             self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -550,6 +585,9 @@ impl postgres_backend::Handler for PageServerHandler {
             let connstr = caps.get(3).unwrap().as_str().to_owned();
 
             self.check_permission(Some(tenantid))?;
+
+            let _enter =
+                info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
 
             // Check that the timeline exists
             tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
@@ -572,6 +610,9 @@ impl postgres_backend::Handler for PageServerHandler {
             let startpoint_str = caps.get(3).ok_or_else(err)?.as_str().to_owned();
 
             self.check_permission(Some(tenantid))?;
+
+            let _enter =
+                info_span!("branch_create", name = %branchname, tenant = %tenantid).entered();
 
             let branch =
                 branches::create_branch(self.conf, &branchname, &startpoint_str, &tenantid)?;

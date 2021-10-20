@@ -21,18 +21,30 @@ def test_tenants_normal_work(
     tenant_1 = tenant_factory.create()
     tenant_2 = tenant_factory.create()
 
-    zenith_cli.run(["branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main", f"--tenantid={tenant_1}"])
-    zenith_cli.run(["branch", f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}", "main", f"--tenantid={tenant_2}"])
+    zenith_cli.run([
+        "branch",
+        f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        "main",
+        f"--tenantid={tenant_1}"
+    ])
+    zenith_cli.run([
+        "branch",
+        f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        "main",
+        f"--tenantid={tenant_2}"
+    ])
     if with_wal_acceptors:
         wa_factory.start_n_new(3)
 
     pg_tenant1 = postgres.create_start(
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        None,  # branch name, None means same as node name
         tenant_1,
         wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
     )
     pg_tenant2 = postgres.create_start(
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
+        None,  # branch name, None means same as node name
         tenant_2,
         wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
     )
@@ -45,4 +57,4 @@ def test_tenants_normal_work(
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
-                assert cur.fetchone() == (5000050000,)
+                assert cur.fetchone() == (5000050000, )

@@ -83,6 +83,22 @@ impl PostgresConf {
             .with_context(|| format!("could not parse '{}' option {}", field_name, context))
     }
 
+    pub fn parse_field_optional<T>(&self, field_name: &str, context: &str) -> Result<Option<T>>
+    where
+        T: FromStr,
+        <T as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+    {
+        if let Some(val) = self.get(field_name) {
+            let result = val
+                .parse::<T>()
+                .with_context(|| format!("could not parse '{}' option {}", field_name, context))?;
+
+            Ok(Some(result))
+        } else {
+            Ok(None)
+        }
+    }
+
     ///
     /// Note: if you call this multiple times for the same option, the config
     /// file will a line for each call. It would be nice to have a function

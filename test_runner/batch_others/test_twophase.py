@@ -1,7 +1,7 @@
 import os
 
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver, PgBin
-
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -9,11 +9,14 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test branching, when a transaction is in prepared state
 #
-def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin: PgBin):
+def test_twophase(zenith_cli,
+                  pageserver: ZenithPageserver,
+                  postgres: PostgresFactory,
+                  pg_bin: PgBin):
     zenith_cli.run(["branch", "test_twophase", "empty"])
 
     pg = postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
-    print("postgres is running on 'test_twophase' branch")
+    log.info("postgres is running on 'test_twophase' branch")
 
     conn = pg.connect()
     cur = conn.cursor()
@@ -45,7 +48,7 @@ def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFa
     cur.execute('CHECKPOINT')
 
     twophase_files = os.listdir(pg.pg_twophase_dir_path())
-    print(twophase_files)
+    log.info(twophase_files)
     assert len(twophase_files) == 4
 
     cur.execute("COMMIT PREPARED 'insert_three'")
@@ -53,7 +56,7 @@ def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFa
     cur.execute('CHECKPOINT')
 
     twophase_files = os.listdir(pg.pg_twophase_dir_path())
-    print(twophase_files)
+    log.info(twophase_files)
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
@@ -67,7 +70,7 @@ def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFa
 
     # Check that we restored only needed twophase files
     twophase_files2 = os.listdir(pg2.pg_twophase_dir_path())
-    print(twophase_files2)
+    log.info(twophase_files2)
     assert twophase_files2.sort() == twophase_files.sort()
 
     conn2 = pg2.connect()
@@ -79,8 +82,8 @@ def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFa
     cur2.execute("ROLLBACK PREPARED 'insert_two'")
 
     cur2.execute('SELECT * FROM foo')
-    assert cur2.fetchall() == [('one',), ('three',)]
+    assert cur2.fetchall() == [('one', ), ('three', )]
 
     # Only one committed insert is visible on the original branch
     cur.execute('SELECT * FROM foo')
-    assert cur.fetchall() == [('three',)]
+    assert cur.fetchall() == [('three', )]

@@ -2,12 +2,19 @@ import os
 
 from fixtures.utils import mkdir_if_needed
 from fixtures.zenith_fixtures import PageserverPort, PostgresFactory, check_restored_datadir_content
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_zenith_regress(postgres: PostgresFactory, pg_bin, zenith_cli, test_output_dir, pg_distrib_dir,
-                        base_dir, capsys, pageserver_port: PageserverPort):
+def test_zenith_regress(postgres: PostgresFactory,
+                        pg_bin,
+                        zenith_cli,
+                        test_output_dir,
+                        pg_distrib_dir,
+                        base_dir,
+                        capsys,
+                        pageserver_port: PageserverPort):
 
     # Create a branch for us
     zenith_cli.run(["branch", "test_zenith_regress", "empty"])
@@ -38,7 +45,7 @@ def test_zenith_regress(postgres: PostgresFactory, pg_bin, zenith_cli, test_outp
         '--inputdir={}'.format(src_path),
     ]
 
-    print(pg_regress_command)
+    log.info(pg_regress_command)
     env = {
         'PGPORT': str(pg.port),
         'PGUSER': pg.username,

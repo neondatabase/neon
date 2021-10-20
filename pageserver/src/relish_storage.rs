@@ -12,14 +12,12 @@ mod rust_s3;
 /// local page server layer files with external storage.
 mod synced_storage;
 
-use std::path::Path;
-use std::thread;
+use std::{path::Path, thread};
 
 use anyhow::Context;
 
-use self::local_fs::LocalFs;
 pub use self::synced_storage::schedule_timeline_upload;
-use crate::relish_storage::rust_s3::RustS3;
+use self::{local_fs::LocalFs, rust_s3::RustS3};
 use crate::{PageServerConf, RelishStorageKind};
 
 pub fn run_storage_sync_thread(
@@ -57,15 +55,21 @@ pub trait RelishStorage: Send + Sync {
 
     async fn list_relishes(&self) -> anyhow::Result<Vec<Self::RelishStoragePath>>;
 
-    async fn download_relish(
+    async fn download_relish<W: 'static + std::io::Write + Send>(
         &self,
         from: &Self::RelishStoragePath,
-        to: &Path,
-    ) -> anyhow::Result<()>;
+        // rust_s3 `get_object_stream` method requires `std::io::BufWriter` for some reason, not the async counterpart
+        // that forces us to consume and return the writer to satisfy the blocking operation async wrapper requirements
+        to: std::io::BufWriter<W>,
+    ) -> anyhow::Result<std::io::BufWriter<W>>;
 
     async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()>;
 
-    async fn upload_relish(&self, from: &Path, to: &Self::RelishStoragePath) -> anyhow::Result<()>;
+    async fn upload_relish<R: tokio::io::AsyncRead + std::marker::Unpin + Send>(
+        &self,
+        from: &mut tokio::io::BufReader<R>,
+        to: &Self::RelishStoragePath,
+    ) -> anyhow::Result<()>;
 }
 
 fn strip_workspace_prefix<'a>(

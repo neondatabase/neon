@@ -1,8 +1,10 @@
 from contextlib import closing
 
 from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
+
 
 #
 # Test where Postgres generates a lot of WAL, and it's garbage collected away, but
@@ -14,11 +16,14 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # just a hint that the page hasn't been modified since that LSN, and the page
 # server should return the latest page version regardless of the LSN.
 #
-def test_old_request_lsn(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
+def test_old_request_lsn(zenith_cli,
+                         pageserver: ZenithPageserver,
+                         postgres: PostgresFactory,
+                         pg_bin):
     # Create a branch for us
     zenith_cli.run(["branch", "test_old_request_lsn", "empty"])
     pg = postgres.create_start('test_old_request_lsn')
-    print('postgres is running on test_old_request_lsn branch')
+    log.info('postgres is running on test_old_request_lsn branch')
 
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
@@ -46,20 +51,20 @@ def test_old_request_lsn(zenith_cli, pageserver: ZenithPageserver, postgres: Pos
         from pg_settings where name = 'shared_buffers'
     ''')
     row = cur.fetchone()
-    print(f'shared_buffers is {row[0]}, table size {row[1]}');
+    log.info(f'shared_buffers is {row[0]}, table size {row[1]}')
     assert int(row[0]) < int(row[1])
 
-    cur.execute('VACUUM foo');
+    cur.execute('VACUUM foo')
 
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
     for i in range(10):
         pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
         for j in range(100):
-            cur.execute('UPDATE foo SET val = val + 1 WHERE id = 1;');
+            cur.execute('UPDATE foo SET val = val + 1 WHERE id = 1;')
 
     # All (or at least most of) the updates should've been on the same page, so
     # that we haven't had to evict any dirty pages for a long time. Now run
     # a query that sends GetPage@LSN requests with the old LSN.
-    cur.execute("SELECT COUNT(*), SUM(val) FROM foo");
+    cur.execute("SELECT COUNT(*), SUM(val) FROM foo")
     assert cur.fetchone() == (100000, 101000)

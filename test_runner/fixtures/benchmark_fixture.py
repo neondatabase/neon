@@ -1,5 +1,3 @@
-from pprint import pprint
-
 import os
 import re
 import timeit
@@ -26,7 +24,6 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast
 from typing_extensions import Literal
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
-
 """
 This file contains fixtures for micro-benchmarks.
 
@@ -57,7 +54,6 @@ in the test initialization, or measure disk usage after the test query.
 
 """
 
-
 # All the results are collected in this list, as a tuple:
 # (test_name: str, metric_name: str, metric_value: float, unit: str)
 #
@@ -66,6 +62,7 @@ in the test initialization, or measure disk usage after the test query.
 # other pytest tools.
 global zenbenchmark_results
 zenbenchmark_results = []
+
 
 class ZenithBenchmarkResults:
     """ An object for recording benchmark results. """
@@ -79,6 +76,7 @@ class ZenithBenchmarkResults:
 
         self.results.append((test_name, metric_name, metric_value, unit))
 
+
 # Session scope fixture that initializes the results object
 @pytest.fixture(autouse=True, scope='session')
 def zenbenchmark_global(request) -> Iterator[ZenithBenchmarkResults]:
@@ -89,6 +87,7 @@ def zenbenchmark_global(request) -> Iterator[ZenithBenchmarkResults]:
     zenbenchmark_results = ZenithBenchmarkResults()
 
     yield zenbenchmark_results
+
 
 class ZenithBenchmarker:
     """
@@ -104,7 +103,6 @@ class ZenithBenchmarker:
         Record a benchmark result.
         """
         self.results.record(self.request.node.name, metric_name, metric_value, unit)
-
 
     @contextmanager
     def record_duration(self, metric_name):
@@ -136,7 +134,8 @@ class ZenithBenchmarker:
         # The metric should be an integer, as it's a number of bytes. But in general
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
-        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$', all_metrics,
+        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$',
+                            all_metrics,
                             re.MULTILINE)
         return int(round(float(matches.group(1))))
 
@@ -147,8 +146,7 @@ class ZenithBenchmarker:
         # Fetch all the exposed prometheus metrics from page server
         all_metrics = pageserver.http_client().get_metrics()
         # See comment in get_io_writes()
-        matches = re.search(r'^pageserver_maxrss_kb (\S+)$', all_metrics,
-                            re.MULTILINE)
+        matches = re.search(r'^pageserver_maxrss_kb (\S+)$', all_metrics, re.MULTILINE)
         return int(round(float(matches.group(1))))
 
     def get_timeline_size(self, repo_dir: str, tenantid: str, timelineid: str):
@@ -173,7 +171,11 @@ class ZenithBenchmarker:
         yield
         after = self.get_io_writes(pageserver)
 
-        self.results.record(self.request.node.name, metric_name, round((after - before) / (1024 * 1024)), 'MB')
+        self.results.record(self.request.node.name,
+                            metric_name,
+                            round((after - before) / (1024 * 1024)),
+                            'MB')
+
 
 @pytest.fixture(scope='function')
 def zenbenchmark(zenbenchmark_global, request) -> Iterator[ZenithBenchmarker]:
@@ -187,9 +189,7 @@ def zenbenchmark(zenbenchmark_global, request) -> Iterator[ZenithBenchmarker]:
 
 # Hook to print the results at the end
 @pytest.hookimpl(hookwrapper=True)
-def pytest_terminal_summary(
-    terminalreporter: TerminalReporter, exitstatus: int, config: Config
-):
+def pytest_terminal_summary(terminalreporter: TerminalReporter, exitstatus: int, config: Config):
     yield
 
     global zenbenchmark_results

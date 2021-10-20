@@ -2,17 +2,17 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! zenith Timeline.
 //!
-use log::*;
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
 use std::cmp::min;
 use std::fs;
 use std::fs::File;
-use std::io::Read;
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use bytes::{Buf, Bytes};
+use tracing::*;
 
 use crate::relish::*;
 use crate::repository::*;
@@ -34,9 +34,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 ///
 pub fn import_timeline_from_postgres_datadir(
     path: &Path,
-    timeline: &dyn Timeline,
+    writer: &dyn TimelineWriter,
     lsn: Lsn,
 ) -> Result<()> {
+    let mut pg_control: Option<ControlFileData> = None;
+
     // Scan 'global'
     for direntry in fs::read_dir(path.join("global"))? {
         let direntry = direntry?;
@@ -44,10 +46,10 @@ pub fn import_timeline_from_postgres_datadir(
             None => continue,
 
             Some("pg_control") => {
-                import_control_file(timeline, lsn, &direntry.path())?;
+                pg_control = Some(import_control_file(writer, lsn, &direntry.path())?);
             }
             Some("pg_filenode.map") => import_nonrel_file(
-                timeline,
+                writer,
                 lsn,
                 RelishTag::FileNodeMap {
                     spcnode: pg_constants::GLOBALTABLESPACE_OID,
@@ -59,7 +61,7 @@ pub fn import_timeline_from_postgres_datadir(
             // Load any relation files into the page server
             _ => import_relfile(
                 &direntry.path(),
-                timeline,
+                writer,
                 lsn,
                 pg_constants::GLOBALTABLESPACE_OID,
                 0,
@@ -86,7 +88,7 @@ pub fn import_timeline_from_postgres_datadir(
 
                 Some("PG_VERSION") => continue,
                 Some("pg_filenode.map") => import_nonrel_file(
-                    timeline,
+                    writer,
                     lsn,
                     RelishTag::FileNodeMap {
                         spcnode: pg_constants::DEFAULTTABLESPACE_OID,
@@ -98,7 +100,7 @@ pub fn import_timeline_from_postgres_datadir(
                 // Load any relation files into the page server
                 _ => import_relfile(
                     &direntry.path(),
-                    timeline,
+                    writer,
                     lsn,
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
@@ -108,24 +110,36 @@ pub fn import_timeline_from_postgres_datadir(
     }
     for entry in fs::read_dir(path.join("pg_xact"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::Clog, &entry.path())?;
+        import_slru_file(writer, lsn, SlruKind::Clog, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("members"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::MultiXactMembers, &entry.path())?;
+        import_slru_file(writer, lsn, SlruKind::MultiXactMembers, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("offsets"))? {
         let entry = entry?;
-        import_slru_file(timeline, lsn, SlruKind::MultiXactOffsets, &entry.path())?;
+        import_slru_file(writer, lsn, SlruKind::MultiXactOffsets, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_twophase"))? {
         let entry = entry?;
         let xid = u32::from_str_radix(entry.path().to_str().unwrap(), 16)?;
-        import_nonrel_file(timeline, lsn, RelishTag::TwoPhase { xid }, &entry.path())?;
+        import_nonrel_file(writer, lsn, RelishTag::TwoPhase { xid }, &entry.path())?;
     }
     // TODO: Scan pg_tblspc
 
-    timeline.advance_last_record_lsn(lsn);
+    writer.advance_last_record_lsn(lsn);
+
+    // Import WAL. This is needed even when starting from a shutdown checkpoint, because
+    // this reads the checkpoint record itself, advancing the tip of the timeline to
+    // *after* the checkpoint record. And crucially, it initializes the 'prev_lsn'
+    let pg_control = pg_control.ok_or_else(|| anyhow!("pg_control file not found"))?;
+    import_wal(
+        &path.join("pg_wal"),
+        writer,
+        Lsn(pg_control.checkPointCopy.redo),
+        lsn,
+        &mut pg_control.checkPointCopy.clone(),
+    )?;
 
     Ok(())
 }
@@ -133,12 +147,13 @@ pub fn import_timeline_from_postgres_datadir(
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
 fn import_relfile(
     path: &Path,
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     spcoid: Oid,
     dboid: Oid,
 ) -> Result<()> {
     // Does it look like a relation file?
+    trace!("importing rel file {}", path.display());
 
     let p = parse_relfilename(path.file_name().unwrap().to_str().unwrap());
     if let Err(e) = p {
@@ -166,14 +181,14 @@ fn import_relfile(
             }
 
             // TODO: UnexpectedEof is expected
-            Err(e) => match e.kind() {
+            Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
                     // FIXME: maybe check that we read the full length of the file?
                     break;
                 }
                 _ => {
-                    bail!("error reading file {}: {:#}", path.display(), e);
+                    bail!("error reading file {}: {:#}", path.display(), err);
                 }
             },
         };
@@ -190,7 +205,7 @@ fn import_relfile(
 /// are just slurped into the repository as one blob.
 ///
 fn import_nonrel_file(
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     tag: RelishTag,
     path: &Path,
@@ -200,7 +215,7 @@ fn import_nonrel_file(
     // read the whole file
     file.read_to_end(&mut buffer)?;
 
-    info!("importing non-rel file {}", path.display());
+    trace!("importing non-rel file {}", path.display());
 
     timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buffer[..]))?;
     Ok(())
@@ -211,13 +226,17 @@ fn import_nonrel_file(
 ///
 /// The control file is imported as is, but we also extract the checkpoint record
 /// from it and store it separated.
-fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result<()> {
+fn import_control_file(
+    timeline: &dyn TimelineWriter,
+    lsn: Lsn,
+    path: &Path,
+) -> Result<ControlFileData> {
     let mut file = File::open(path)?;
     let mut buffer = Vec::new();
     // read the whole file
     file.read_to_end(&mut buffer)?;
 
-    info!("importing control file {}", path.display());
+    trace!("importing control file {}", path.display());
 
     // Import it as ControlFile
     timeline.put_page_image(
@@ -232,19 +251,24 @@ fn import_control_file(timeline: &dyn Timeline, lsn: Lsn, path: &Path) -> Result
     let checkpoint_bytes = pg_control.checkPointCopy.encode();
     timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, checkpoint_bytes)?;
 
-    Ok(())
+    Ok(pg_control)
 }
 
 ///
 /// Import an SLRU segment file
 ///
-fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Path) -> Result<()> {
+fn import_slru_file(
+    timeline: &dyn TimelineWriter,
+    lsn: Lsn,
+    slru: SlruKind,
+    path: &Path,
+) -> Result<()> {
     // Does it look like an SLRU file?
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
     let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
 
-    info!("importing slru file {}", path.display());
+    trace!("importing slru file {}", path.display());
 
     let mut rpageno = 0;
     loop {
@@ -260,14 +284,14 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
             }
 
             // TODO: UnexpectedEof is expected
-            Err(e) => match e.kind() {
+            Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
                     // FIXME: maybe check that we read the full length of the file?
                     break;
                 }
                 _ => {
-                    bail!("error reading file {}: {:#}", path.display(), e);
+                    bail!("error reading file {}: {:#}", path.display(), err);
                 }
             },
         };
@@ -279,18 +303,119 @@ fn import_slru_file(timeline: &dyn Timeline, lsn: Lsn, slru: SlruKind, path: &Pa
     Ok(())
 }
 
+/// Scan PostgreSQL WAL files in given directory and load all records between
+/// 'startpoint' and 'endpoint' into the repository.
+fn import_wal(
+    walpath: &Path,
+    timeline: &dyn TimelineWriter,
+    startpoint: Lsn,
+    endpoint: Lsn,
+    checkpoint: &mut CheckPoint,
+) -> Result<()> {
+    let mut waldecoder = WalStreamDecoder::new(startpoint);
+
+    let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
+    let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
+    let mut last_lsn = startpoint;
+
+    while last_lsn <= endpoint {
+        // FIXME: assume postgresql tli 1 for now
+        let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
+        let mut buf = Vec::new();
+
+        // Read local file
+        let mut path = walpath.join(&filename);
+
+        // It could be as .partial
+        if !PathBuf::from(&path).exists() {
+            path = walpath.join(filename + ".partial");
+        }
+
+        // Slurp the WAL file
+        let mut file = File::open(&path)?;
+
+        if offset > 0 {
+            file.seek(SeekFrom::Start(offset as u64))?;
+        }
+
+        let nread = file.read_to_end(&mut buf)?;
+        if nread != pg_constants::WAL_SEGMENT_SIZE - offset as usize {
+            // Maybe allow this for .partial files?
+            error!("read only {} bytes from WAL file", nread);
+        }
+
+        waldecoder.feed_bytes(&buf);
+
+        let mut nrecords = 0;
+        while last_lsn <= endpoint {
+            if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                let mut checkpoint_modified = false;
+
+                let decoded = decode_wal_record(recdata.clone());
+                save_decoded_record(
+                    checkpoint,
+                    &mut checkpoint_modified,
+                    timeline,
+                    &decoded,
+                    recdata,
+                    lsn,
+                )?;
+                last_lsn = lsn;
+
+                if checkpoint_modified {
+                    let checkpoint_bytes = checkpoint.encode();
+                    timeline.put_page_image(
+                        RelishTag::Checkpoint,
+                        0,
+                        last_lsn,
+                        checkpoint_bytes,
+                    )?;
+                }
+
+                // Now that this record has been fully handled, including updating the
+                // checkpoint data, let the repository know that it is up-to-date to this LSN
+                timeline.advance_last_record_lsn(last_lsn);
+                nrecords += 1;
+
+                trace!("imported record at {} (end {})", lsn, endpoint);
+            }
+        }
+
+        debug!("imported {} records up to {}", nrecords, last_lsn);
+
+        segno += 1;
+        offset = 0;
+    }
+
+    if last_lsn != startpoint {
+        debug!(
+            "reached end of WAL at {}, updating checkpoint info",
+            last_lsn
+        );
+
+        timeline.advance_last_record_lsn(last_lsn);
+    } else {
+        info!("no WAL to import at {}", last_lsn);
+    }
+
+    Ok(())
+}
+
 ///
 /// Helper function to parse a WAL record and call the Timeline's PUT functions for all the
 /// relations/pages that the record affects.
 ///
 pub fn save_decoded_record(
     checkpoint: &mut CheckPoint,
-    timeline: &dyn Timeline,
+    checkpoint_modified: &mut bool,
+    timeline: &dyn TimelineWriter,
     decoded: &DecodedWALRecord,
     recdata: Bytes,
     lsn: Lsn,
 ) -> Result<()> {
-    checkpoint.update_next_xid(decoded.xl_xid);
+    if checkpoint.update_next_xid(decoded.xl_xid) {
+        *checkpoint_modified = true;
+    }
 
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
@@ -303,13 +428,12 @@ pub fn save_decoded_record(
         });
 
         let rec = WALRecord {
-            lsn,
             will_init: blk.will_init || blk.apply_image,
             rec: recdata.clone(),
             main_data_offset: decoded.main_data_offset as u32,
         };
 
-        timeline.put_wal_record(tag, blk.blkno, rec)?;
+        timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
     }
 
     let mut buf = decoded.record.clone();
@@ -374,7 +498,7 @@ pub fn save_decoded_record(
         } else {
             assert!(info == pg_constants::CLOG_TRUNCATE);
             let xlrec = XlClogTruncate::decode(&mut buf);
-            save_clog_truncate_record(checkpoint, timeline, lsn, &xlrec)?;
+            save_clog_truncate_record(checkpoint, checkpoint_modified, timeline, lsn, &xlrec)?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
         let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
@@ -443,10 +567,17 @@ pub fn save_decoded_record(
             )?;
         } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
             let xlrec = XlMultiXactCreate::decode(&mut buf);
-            save_multixact_create_record(checkpoint, timeline, lsn, &xlrec, decoded)?;
+            save_multixact_create_record(
+                checkpoint,
+                checkpoint_modified,
+                timeline,
+                lsn,
+                &xlrec,
+                decoded,
+            )?;
         } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
             let xlrec = XlMultiXactTruncate::decode(&mut buf);
-            save_multixact_truncate_record(checkpoint, timeline, lsn, &xlrec)?;
+            save_multixact_truncate_record(checkpoint, checkpoint_modified, timeline, lsn, &xlrec)?;
         }
     } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
         let xlrec = XlRelmapUpdate::decode(&mut buf);
@@ -455,7 +586,10 @@ pub fn save_decoded_record(
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_NEXTOID {
             let next_oid = buf.get_u32_le();
-            checkpoint.nextOid = next_oid;
+            if checkpoint.nextOid != next_oid {
+                checkpoint.nextOid = next_oid;
+                *checkpoint_modified = true;
+            }
         } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
             || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
         {
@@ -471,6 +605,7 @@ pub fn save_decoded_record(
             );
             if (checkpoint.oldestXid.wrapping_sub(xlog_checkpoint.oldestXid) as i32) < 0 {
                 checkpoint.oldestXid = xlog_checkpoint.oldestXid;
+                *checkpoint_modified = true;
             }
         }
     }
@@ -478,7 +613,11 @@ pub fn save_decoded_record(
 }
 
 /// Subroutine of save_decoded_record(), to handle an XLOG_DBASE_CREATE record.
-fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatabase) -> Result<()> {
+fn save_xlog_dbase_create(
+    timeline: &dyn TimelineWriter,
+    lsn: Lsn,
+    rec: &XlCreateDatabase,
+) -> Result<()> {
     let db_id = rec.db_id;
     let tablespace_id = rec.tablespace_id;
     let src_db_id = rec.src_db_id;
@@ -555,7 +694,11 @@ fn save_xlog_dbase_create(timeline: &dyn Timeline, lsn: Lsn, rec: &XlCreateDatab
 /// Subroutine of save_decoded_record(), to handle an XLOG_SMGR_TRUNCATE record.
 ///
 /// This is the same logic as in PostgreSQL's smgr_redo() function.
-fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTruncate) -> Result<()> {
+fn save_xlog_smgr_truncate(
+    timeline: &dyn TimelineWriter,
+    lsn: Lsn,
+    rec: &XlSmgrTruncate,
+) -> Result<()> {
     let spcnode = rec.rnode.spcnode;
     let dbnode = rec.rnode.dbnode;
     let relnode = rec.rnode.relnode;
@@ -617,7 +760,7 @@ fn save_xlog_smgr_truncate(timeline: &dyn Timeline, lsn: Lsn, rec: &XlSmgrTrunca
 /// Subroutine of save_decoded_record(), to handle an XLOG_XACT_* records.
 ///
 fn save_xact_record(
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     parsed: &XlXactParsedRecord,
     decoded: &DecodedWALRecord,
@@ -628,12 +771,12 @@ fn save_xact_record(
     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rec = WALRecord {
-        lsn,
         will_init: false,
         rec: decoded.record.clone(),
         main_data_offset: decoded.main_data_offset as u32,
     };
     timeline.put_wal_record(
+        lsn,
         RelishTag::Slru {
             slru: SlruKind::Clog,
             segno,
@@ -649,6 +792,7 @@ fn save_xact_record(
             let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
             let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             timeline.put_wal_record(
+                lsn,
                 RelishTag::Slru {
                     slru: SlruKind::Clog,
                     segno,
@@ -674,7 +818,8 @@ fn save_xact_record(
 
 fn save_clog_truncate_record(
     checkpoint: &mut CheckPoint,
-    timeline: &dyn Timeline,
+    checkpoint_modified: &mut bool,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlClogTruncate,
 ) -> Result<()> {
@@ -692,6 +837,7 @@ fn save_clog_truncate_record(
     // TODO Figure out if there will be any issues with replica.
     checkpoint.oldestXid = xlrec.oldest_xid;
     checkpoint.oldestXidDB = xlrec.oldest_xid_db;
+    *checkpoint_modified = true;
 
     // TODO Treat AdvanceOldestClogXid() or write a comment why we don't need it
 
@@ -734,13 +880,13 @@ fn save_clog_truncate_record(
 
 fn save_multixact_create_record(
     checkpoint: &mut CheckPoint,
-    timeline: &dyn Timeline,
+    checkpoint_modified: &mut bool,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlMultiXactCreate,
     decoded: &DecodedWALRecord,
 ) -> Result<()> {
     let rec = WALRecord {
-        lsn,
         will_init: false,
         rec: decoded.record.clone(),
         main_data_offset: decoded.main_data_offset as u32,
@@ -749,6 +895,7 @@ fn save_multixact_create_record(
     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
     timeline.put_wal_record(
+        lsn,
         RelishTag::Slru {
             slru: SlruKind::MultiXactOffsets,
             segno,
@@ -768,6 +915,7 @@ fn save_multixact_create_record(
         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         timeline.put_wal_record(
+            lsn,
             RelishTag::Slru {
                 slru: SlruKind::MultiXactMembers,
                 segno,
@@ -790,9 +938,11 @@ fn save_multixact_create_record(
     }
     if xlrec.mid >= checkpoint.nextMulti {
         checkpoint.nextMulti = xlrec.mid + 1;
+        *checkpoint_modified = true;
     }
     if xlrec.moff + xlrec.nmembers > checkpoint.nextMultiOffset {
         checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
+        *checkpoint_modified = true;
     }
     let max_mbr_xid = xlrec.members.iter().fold(0u32, |acc, mbr| {
         if mbr.xid.wrapping_sub(acc) as i32 > 0 {
@@ -802,18 +952,22 @@ fn save_multixact_create_record(
         }
     });
 
-    checkpoint.update_next_xid(max_mbr_xid);
+    if checkpoint.update_next_xid(max_mbr_xid) {
+        *checkpoint_modified = true;
+    }
     Ok(())
 }
 
 fn save_multixact_truncate_record(
     checkpoint: &mut CheckPoint,
-    timeline: &dyn Timeline,
+    checkpoint_modified: &mut bool,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlMultiXactTruncate,
 ) -> Result<()> {
     checkpoint.oldestMulti = xlrec.end_trunc_off;
     checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
+    *checkpoint_modified = true;
 
     // PerformMembersTruncation
     let maxsegment: i32 = mx_offset_to_member_segment(pg_constants::MAX_MULTIXACT_OFFSET);
@@ -847,7 +1001,7 @@ fn save_multixact_truncate_record(
 }
 
 fn save_relmap_page(
-    timeline: &dyn Timeline,
+    timeline: &dyn TimelineWriter,
     lsn: Lsn,
     xlrec: &XlRelmapUpdate,
     decoded: &DecodedWALRecord,

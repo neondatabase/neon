@@ -110,7 +110,7 @@ fn ssl() {
         .unwrap();
     let tls_config = Some(Arc::new(cfg));
 
-    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config).unwrap();
+    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config, true).unwrap();
     pgb.run(&mut handler).unwrap();
     assert!(handler.got_query);
 
@@ -150,7 +150,7 @@ fn no_ssl() {
 
     let mut handler = TestHandler;
 
-    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, None).unwrap();
+    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, None, true).unwrap();
     pgb.run(&mut handler).unwrap();
 
     client_jh.join().unwrap();
@@ -214,7 +214,7 @@ fn server_forces_ssl() {
         .unwrap();
     let tls_config = Some(Arc::new(cfg));
 
-    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config).unwrap();
+    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config, true).unwrap();
     let res = pgb.run(&mut handler).unwrap_err();
     assert_eq!("client did not connect with TLS", format!("{}", res));
 

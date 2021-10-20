@@ -7,7 +7,7 @@ if [ "$1" = 'pageserver' ]; then
         pageserver --init -D /data --postgres-distrib /usr/local
     fi
     echo "Staring pageserver at 0.0.0.0:6400"
-    pageserver -l 0.0.0.0:6400 -D /data
+    pageserver -l 0.0.0.0:6400 --listen-http 0.0.0.0:9898 -D /data
 else
     "$@"
 fi
