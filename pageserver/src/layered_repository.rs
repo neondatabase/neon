@@ -678,6 +678,10 @@ pub struct LayeredTimeline {
 
 /// Public interface functions
 impl Timeline for LayeredTimeline {
+    fn get_ancestor_lsn(&self) -> Lsn {
+        self.ancestor_lsn
+    }
+
     /// Wait until WAL has been received up to the given LSN.
     fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
@@ -1340,49 +1344,53 @@ impl LayeredTimeline {
             timeline_dir.sync_all()?;
         }
 
-        // Save the metadata, with updated 'disk_consistent_lsn', to a
-        // file in the timeline dir. After crash, we will restart WAL
-        // streaming and processing from that point.
+        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
+        // After crash, we will restart WAL streaming and processing from that point.
+        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
+        if disk_consistent_lsn != old_disk_consistent_lsn {
+            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
 
-        // We can only save a valid 'prev_record_lsn' value on disk if we
-        // flushed *all* in-memory changes to disk. We only track
-        // 'prev_record_lsn' in memory for the latest processed record, so we
-        // don't remember what the correct value that corresponds to some old
-        // LSN is. But if we flush everything, then the value corresponding
-        // current 'last_record_lsn' is correct and we can store it on disk.
-        let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
-            Some(prev_record_lsn)
-        } else {
-            None
-        };
+            // We can only save a valid 'prev_record_lsn' value on disk if we
+            // flushed *all* in-memory changes to disk. We only track
+            // 'prev_record_lsn' in memory for the latest processed record, so we
+            // don't remember what the correct value that corresponds to some old
+            // LSN is. But if we flush everything, then the value corresponding
+            // current 'last_record_lsn' is correct and we can store it on disk.
+            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+                Some(prev_record_lsn)
+            } else {
+                None
+            };
 
-        let ancestor_timelineid = self.ancestor_timeline.as_ref().map(|x| x.timelineid);
+            let ancestor_timelineid = self.ancestor_timeline.as_ref().map(|x| x.timelineid);
 
-        let metadata = TimelineMetadata {
-            disk_consistent_lsn,
-            prev_record_lsn: ondisk_prev_record_lsn,
-            ancestor_timeline: ancestor_timelineid,
-            ancestor_lsn: self.ancestor_lsn,
-        };
-        LayeredRepository::save_metadata(
-            self.conf,
-            self.timelineid,
-            self.tenantid,
-            &metadata,
-            false,
-        )?;
-        if self.upload_relishes {
-            schedule_timeline_upload(())
-            // schedule_timeline_upload(
-            //     self.tenantid,
-            //     self.timelineid,
-            //     layer_uploads,
-            //     disk_consistent_lsn,
-            // });
+            let metadata = TimelineMetadata {
+                disk_consistent_lsn,
+                prev_record_lsn: ondisk_prev_record_lsn,
+                ancestor_timeline: ancestor_timelineid,
+                ancestor_lsn: self.ancestor_lsn,
+            };
+            LayeredRepository::save_metadata(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                &metadata,
+                false,
+            )?;
+
+            // Also update the in-memory copy
+            self.disk_consistent_lsn.store(disk_consistent_lsn);
+
+            if self.upload_relishes {
+                schedule_timeline_upload(())
+                // schedule_timeline_upload(
+                //     self.tenantid,
+                //     self.timelineid,
+                //     layer_uploads,
+                //     disk_consistent_lsn,
+                // });
+            }
         }
-
-        // Also update the in-memory copy
-        self.disk_consistent_lsn.store(disk_consistent_lsn);
 
         Ok(())
     }

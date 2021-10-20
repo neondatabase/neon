@@ -1,6 +1,5 @@
 import logging
 import logging.config
-
 """
 This file configures logging to use in python tests.
 Logs are automatically captured and shown in their
@@ -27,16 +26,18 @@ LOGGING = {
             "level": "INFO"
         },
         "root.wal_acceptor_async": {
-            "level": "INFO" # a lot of logs on DEBUG level
+            "level": "INFO"  # a lot of logs on DEBUG level
         }
     }
 }
+
 
 def getLogger(name='root') -> logging.Logger:
     """Method to get logger for tests.
     
     Should be used to get correctly initialized logger. """
     return logging.getLogger(name)
+
 
 # default logger for tests
 log = getLogger()

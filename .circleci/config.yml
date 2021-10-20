@@ -7,7 +7,7 @@ executors:
   zenith-build-executor:
     resource_class: xlarge
     docker:
-      - image: cimg/rust:1.52.1
+      - image: cimg/rust:1.55.0
 
 jobs:
   check-codestyle:
@@ -110,7 +110,7 @@ jobs:
             # Require an exact match. While an out of date cache might speed up the build,
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
-            - v03-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+            - v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
 
         # Build the rust code, including test binaries
       - run:
@@ -128,7 +128,7 @@ jobs:
 
       - save_cache:
           name: Save rust cache
-          key: v03-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+          key: v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
           paths:
             - ~/.cargo/registry
             - ~/.cargo/git
@@ -181,6 +181,21 @@ jobs:
           root: /tmp/zenith
           paths:
             - "*"
+
+  check-python:
+    executor: python/default
+    steps:
+      - checkout
+      - run:
+          name: Install pipenv & deps
+          working_directory: test_runner
+          command: |
+            pip install pipenv
+            pipenv install --dev
+      - run:
+          name: Run yapf to ensure code format
+          working_directory: test_runner
+          command: pipenv run yapf --recursive --diff .
 
   run-pytest:
     #description: "Run pytest"
@@ -337,6 +352,7 @@ workflows:
   build_and_test:
     jobs:
       - check-codestyle
+      - check-python
       - build-postgres:
           name: build-postgres-<< matrix.build_type >>
           matrix:

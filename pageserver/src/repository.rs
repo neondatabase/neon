@@ -119,6 +119,9 @@ pub trait Timeline: Send + Sync {
     /// Get a list of all existing non-relational objects
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
+    /// Get the LSN where this branch was created
+    fn get_ancestor_lsn(&self) -> Lsn;
+
     //------------------------------------------------------------------------------
     // Public PUT functions, to update the repository with new page versions.
     //

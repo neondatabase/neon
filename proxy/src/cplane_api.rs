@@ -12,7 +12,7 @@ pub struct DatabaseInfo {
     pub port: u16,
     pub dbname: String,
     pub user: String,
-    pub password: String,
+    pub password: Option<String>,
 }
 
 impl DatabaseInfo {
@@ -24,12 +24,23 @@ impl DatabaseInfo {
             .next()
             .ok_or_else(|| anyhow::Error::msg("cannot resolve at least one SocketAddr"))
     }
+}
 
-    pub fn conn_string(&self) -> String {
-        format!(
-            "dbname={} user={} password={}",
-            self.dbname, self.user, self.password
-        )
+impl From<DatabaseInfo> for tokio_postgres::Config {
+    fn from(db_info: DatabaseInfo) -> Self {
+        let mut config = tokio_postgres::Config::new();
+
+        config
+            .host(&db_info.host)
+            .port(db_info.port)
+            .dbname(&db_info.dbname)
+            .user(&db_info.user);
+
+        if let Some(password) = db_info.password {
+            config.password(password);
+        }
+
+        config
     }
 }
 

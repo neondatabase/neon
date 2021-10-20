@@ -63,7 +63,8 @@ def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli):
     cur = conn.cursor()
 
     # check same tenant cannot be created twice
-    with pytest.raises(psycopg2.DatabaseError, match=f'tenant {pageserver.initial_tenant} already exists'):
+    with pytest.raises(psycopg2.DatabaseError,
+                       match=f'tenant {pageserver.initial_tenant} already exists'):
         cur.execute(f'tenant_create {pageserver.initial_tenant}')
 
     # create one more tenant
@@ -102,5 +103,6 @@ def test_pageserver_http_api_client(pageserver: ZenithPageserver):
 
 
 def test_pageserver_http_api_client_auth_enabled(pageserver_auth_enabled: ZenithPageserver):
-    client = pageserver_auth_enabled.http_client(auth_token=pageserver_auth_enabled.auth_keys.generate_management_token())
+    client = pageserver_auth_enabled.http_client(
+        auth_token=pageserver_auth_enabled.auth_keys.generate_management_token())
     check_client(client, pageserver_auth_enabled.initial_tenant)

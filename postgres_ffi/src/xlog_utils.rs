@@ -9,7 +9,6 @@
 
 use crate::pg_constants;
 use crate::CheckPoint;
-use crate::ControlFileData;
 use crate::FullTransactionId;
 use crate::XLogLongPageHeaderData;
 use crate::XLogPageHeaderData;
@@ -18,8 +17,8 @@ use crate::XLOG_PAGE_MAGIC;
 
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, LittleEndian};
+use bytes::BytesMut;
 use bytes::{Buf, Bytes};
-use bytes::{BufMut, BytesMut};
 use crc32c::*;
 use log::*;
 use std::cmp::max;
@@ -410,63 +409,31 @@ impl CheckPoint {
 }
 
 //
-// Generate new WAL segment with single XLOG_CHECKPOINT_SHUTDOWN record.
+// Generate new, empty WAL segment.
 // We need this segment to start compute node.
-// In order to minimize changes in Postgres core, we prefer to
-// provide WAL segment from which is can extract checkpoint record in standard way,
-// rather then implement some alternative mechanism.
 //
-pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
+pub fn generate_wal_segment(segno: u64, system_id: u64) -> Bytes {
     let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
 
+    let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, pg_constants::WAL_SEGMENT_SIZE);
     let hdr = XLogLongPageHeaderData {
         std: {
             XLogPageHeaderData {
                 xlp_magic: XLOG_PAGE_MAGIC as u16,
                 xlp_info: pg_constants::XLP_LONG_HEADER,
                 xlp_tli: 1, // FIXME: always use Postgres timeline 1
-                xlp_pageaddr: pg_control.checkPoint - XLOG_SIZE_OF_XLOG_LONG_PHD as u64,
+                xlp_pageaddr: pageaddr,
                 xlp_rem_len: 0,
                 ..Default::default() // Put 0 in padding fields.
             }
         },
-        xlp_sysid: pg_control.system_identifier,
+        xlp_sysid: system_id,
         xlp_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32,
         xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
     };
 
     let hdr_bytes = hdr.encode();
     seg_buf.extend_from_slice(&hdr_bytes);
-
-    let rec_hdr = XLogRecord {
-        xl_tot_len: (XLOG_SIZE_OF_XLOG_RECORD
-            + SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT
-            + SIZEOF_CHECKPOINT) as u32,
-        xl_xid: 0, //0 is for InvalidTransactionId
-        xl_prev: 0,
-        xl_info: pg_constants::XLOG_CHECKPOINT_SHUTDOWN,
-        xl_rmid: pg_constants::RM_XLOG_ID,
-        xl_crc: 0,
-        ..Default::default() // Put 0 in padding fields.
-    };
-
-    let mut rec_shord_hdr_bytes = BytesMut::new();
-    rec_shord_hdr_bytes.put_u8(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
-    rec_shord_hdr_bytes.put_u8(SIZEOF_CHECKPOINT as u8);
-
-    let rec_bytes = rec_hdr.encode();
-    let checkpoint_bytes = pg_control.checkPointCopy.encode();
-
-    //calculate record checksum
-    let mut crc = 0;
-    crc = crc32c_append(crc, &rec_shord_hdr_bytes[..]);
-    crc = crc32c_append(crc, &checkpoint_bytes[..]);
-    crc = crc32c_append(crc, &rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
-
-    seg_buf.extend_from_slice(&rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
-    seg_buf.put_u32_le(crc);
-    seg_buf.extend_from_slice(&rec_shord_hdr_bytes);
-    seg_buf.extend_from_slice(&checkpoint_bytes);
 
     //zero out the rest of the file
     seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);

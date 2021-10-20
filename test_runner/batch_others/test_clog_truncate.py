@@ -18,9 +18,12 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
 
     # set agressive autovacuum to make sure that truncation will happen
     config = [
-        'autovacuum_max_workers=10', 'autovacuum_vacuum_threshold=0',
-        'autovacuum_vacuum_insert_threshold=0', 'autovacuum_vacuum_cost_delay=0',
-        'autovacuum_vacuum_cost_limit=10000', 'autovacuum_naptime =1s',
+        'autovacuum_max_workers=10',
+        'autovacuum_vacuum_threshold=0',
+        'autovacuum_vacuum_insert_threshold=0',
+        'autovacuum_vacuum_cost_delay=0',
+        'autovacuum_vacuum_cost_limit=10000',
+        'autovacuum_naptime =1s',
         'autovacuum_freeze_max_age=100000'
     ]
 

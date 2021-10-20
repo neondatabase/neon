@@ -9,7 +9,10 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test branching, when a transaction is in prepared state
 #
-def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin: PgBin):
+def test_twophase(zenith_cli,
+                  pageserver: ZenithPageserver,
+                  postgres: PostgresFactory,
+                  pg_bin: PgBin):
     zenith_cli.run(["branch", "test_twophase", "empty"])
 
     pg = postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
@@ -79,8 +82,8 @@ def test_twophase(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFa
     cur2.execute("ROLLBACK PREPARED 'insert_two'")
 
     cur2.execute('SELECT * FROM foo')
-    assert cur2.fetchall() == [('one',), ('three',)]
+    assert cur2.fetchall() == [('one', ), ('three', )]
 
     # Only one committed insert is visible on the original branch
     cur.execute('SELECT * FROM foo')
-    assert cur.fetchall() == [('three',)]
+    assert cur.fetchall() == [('three', )]
