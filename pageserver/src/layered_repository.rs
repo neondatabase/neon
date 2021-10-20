@@ -912,7 +912,7 @@ impl Timeline for LayeredTimeline {
 
     fn get_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn.load()
-	}
+    }
 
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
         Box::new(LayeredTimelineWriter {
