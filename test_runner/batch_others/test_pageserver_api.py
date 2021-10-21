@@ -3,7 +3,8 @@ from uuid import uuid4
 import pytest
 import psycopg2
 import requests
-from fixtures.zenith_fixtures import ZenithPageserver, ZenithPageserverHttpClient
+from fixtures.zenith_fixtures import ZenithCli, ZenithPageserver, ZenithPageserverHttpClient
+from typing import cast
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -53,7 +54,7 @@ def test_branch_list_psql(pageserver: ZenithPageserver, zenith_cli):
     conn.close()
 
 
-def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli):
+def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli: ZenithCli):
     res = zenith_cli.run(["tenant", "list"])
     res.check_returncode()
     tenants = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
@@ -74,7 +75,7 @@ def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli):
     cur.execute('tenant_list')
 
     # compare tenants list
-    new_tenants = sorted(map(lambda t: t['id'], json.loads(cur.fetchone()[0])))
+    new_tenants = sorted(map(lambda t: cast(str, t['id']), json.loads(cur.fetchone()[0])))
     assert sorted([pageserver.initial_tenant, tenant1]) == new_tenants
 
 

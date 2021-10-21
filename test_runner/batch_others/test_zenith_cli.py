@@ -62,7 +62,8 @@ def test_cli_branch_list(pageserver: ZenithPageserver, zenith_cli: ZenithCli):
 
 def helper_compare_tenant_list(page_server_cur, zenith_cli: ZenithCli):
     page_server_cur.execute(f'tenant_list')
-    tenants_api = sorted(map(lambda t: t['id'], json.loads(page_server_cur.fetchone()[0])))
+    tenants_api = sorted(
+        map(lambda t: cast(str, t['id']), json.loads(page_server_cur.fetchone()[0])))
 
     res = zenith_cli.run(["tenant", "list"])
     assert res.stderr == ''

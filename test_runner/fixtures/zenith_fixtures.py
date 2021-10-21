@@ -275,7 +275,7 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def tenant_list(self) -> List[Dict]:
+    def tenant_list(self) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         res.raise_for_status()
         res_json = res.json()
