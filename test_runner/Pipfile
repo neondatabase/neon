@@ -14,12 +14,12 @@ asyncpg = "*"
 cached-property = "*"
 
 [dev-packages]
-flake8 = "*"
 # Behavior may change slightly between versions. These are run continuously,
 # so we pin exact versions to avoid suprising breaks. Update if comfortable.
 yapf = "==0.31.0"
 mypy = "==0.910"
 # Non-pinned packages follow.
+flake8 = "*"
 types-requests = "*"
 types-psycopg2 = "*"
 
