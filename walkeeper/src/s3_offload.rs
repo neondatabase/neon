@@ -18,9 +18,9 @@ use tokio::runtime;
 use tokio::time::sleep;
 use walkdir::WalkDir;
 
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 
-pub fn thread_main(conf: WalAcceptorConf) {
+pub fn thread_main(conf: SafeKeeperConf) {
     // Create a new thread pool
     //
     // FIXME: keep it single-threaded for now, make it easier to debug with gdb,
@@ -42,7 +42,7 @@ async fn offload_files(
     bucket: &Bucket,
     listing: &HashSet<String>,
     dir_path: &Path,
-    conf: &WalAcceptorConf,
+    conf: &SafeKeeperConf,
 ) -> Result<u64> {
     let horizon = SystemTime::now() - conf.ttl.unwrap();
     let mut n: u64 = 0;
@@ -70,7 +70,7 @@ async fn offload_files(
     Ok(n)
 }
 
-async fn main_loop(conf: &WalAcceptorConf) -> Result<()> {
+async fn main_loop(conf: &SafeKeeperConf) -> Result<()> {
     let region = Region::Custom {
         region: env::var("S3_REGION").unwrap(),
         endpoint: env::var("S3_ENDPOINT").unwrap(),

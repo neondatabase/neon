@@ -16,7 +16,7 @@ use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::send_wal::SendWalHandler;
 use crate::timeline::TimelineTools;
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 use zenith_utils::connstring::connection_host_port;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage};
@@ -33,7 +33,7 @@ pub struct ReceiveWalConn<'pg> {
 /// Periodically request pageserver to call back.
 /// If pageserver already has replication channel, it will just ignore this request
 ///
-fn request_callback(conf: WalAcceptorConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
+fn request_callback(conf: SafeKeeperConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
     let ps_addr = conf.pageserver_addr.unwrap();
     let ps_connstr = format!(
         "postgresql://no_user:{}@{}/no_db",
