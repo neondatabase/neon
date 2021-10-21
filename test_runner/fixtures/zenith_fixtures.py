@@ -275,7 +275,7 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def tenant_list(self) -> List[str]:
+    def tenant_list(self) -> List[Dict]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         res.raise_for_status()
         res_json = res.json()
@@ -407,7 +407,7 @@ class ZenithPageserver(PgProtocol):
         self.zenith_cli.run(['start'])
         self.running = True
         # get newly created tenant id
-        current_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.strip()
+        current_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.split()[0]
         if self.initial_tenant is None:
             self.initial_tenant = current_tenant
         else:
@@ -1022,8 +1022,9 @@ def wa_factory(zenith_binpath: str,
 
 
 @dataclass
-class PageserverTimelineStatus:
+class SafekeeperTimelineStatus:
     acceptor_epoch: int
+    flush_lsn: str
 
 
 class WalAcceptorHttpClient(requests.Session):
@@ -1034,11 +1035,12 @@ class WalAcceptorHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def timeline_status(self, tenant_id: str, timeline_id: str) -> PageserverTimelineStatus:
+    def timeline_status(self, tenant_id: str, timeline_id: str) -> SafekeeperTimelineStatus:
         res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
         res.raise_for_status()
         resj = res.json()
-        return PageserverTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'])
+        return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
+                                        flush_lsn=resj['flush_lsn'])
 
 
 @zenfixture

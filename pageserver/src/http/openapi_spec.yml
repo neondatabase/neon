@@ -164,13 +164,13 @@ paths:
       description: Get tenants list
       responses:
         "200":
-          description: OK
+          description: TenantInfo
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  type: string
+                  $ref: "#/components/schemas/TenantInfo"
         "401":
           description: Unauthorized Error
           content:
@@ -243,6 +243,16 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    TenantInfo:
+      type: object
+      required:
+        - id
+        - state
+      properties:
+        id:
+          type: string
+        state:
+          type: string
     BranchInfo:
       type: object
       required:

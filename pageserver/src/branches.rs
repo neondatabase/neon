@@ -4,7 +4,7 @@
 // TODO: move all paths construction to conf impl
 //
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -246,18 +246,6 @@ fn bootstrap_timeline(
     fs::remove_dir_all(pgdata_path)?;
 
     Ok(())
-}
-
-pub(crate) fn get_tenants(conf: &PageServerConf) -> Result<Vec<String>> {
-    let tenants_dir = conf.tenants_path();
-
-    std::fs::read_dir(&tenants_dir)?
-        .map(|dir_entry_res| {
-            let dir_entry = dir_entry_res?;
-            ensure!(dir_entry.file_type()?.is_dir());
-            Ok(dir_entry.file_name().to_str().unwrap().to_owned())
-        })
-        .collect()
 }
 
 pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
