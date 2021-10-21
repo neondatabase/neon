@@ -395,7 +395,7 @@ class ZenithPageserver(PgProtocol):
             cmd.append('--enable-auth')
         self.zenith_cli.run(cmd)
 
-        self.start()
+        self.start()  # Required, otherwise self.initial_tenant is of wrong type
 
     def start(self) -> 'ZenithPageserver':
         """
