@@ -300,7 +300,7 @@ impl PostgresNode {
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
-        conf.append("wal_sender_timeout", "0");
+        conf.append("wal_sender_timeout", "10s");
         conf.append("wal_level", "replica");
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());

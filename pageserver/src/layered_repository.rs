@@ -695,8 +695,8 @@ impl Timeline for LayeredTimeline {
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
                 format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive",
-                    lsn
+                    "Timed out while waiting for WAL record at LSN {} to arrive, disk consistent LSN={}",
+                    lsn, self.get_disk_consistent_lsn()
                 )
             })?;
 
@@ -908,6 +908,10 @@ impl Timeline for LayeredTimeline {
         }
 
         Ok(total_blocks * BLCKSZ as usize)
+    }
+
+    fn get_disk_consistent_lsn(&self) -> Lsn {
+        self.disk_consistent_lsn.load()
     }
 
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
