@@ -1,5 +1,6 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
+use anyhow::Context;
 use anyhow::{anyhow, bail, Result};
 use byteorder::LittleEndian;
 use byteorder::ReadBytesExt;
@@ -423,7 +424,9 @@ where
         self.s.server.ztli = msg.ztli;
         self.s.server.tli = msg.tli;
         self.s.server.wal_seg_size = msg.wal_seg_size;
-        self.storage.persist(&self.s, true)?;
+        self.storage
+            .persist(&self.s, true)
+            .with_context(|| "failed to persist shared state")?;
 
         self.metrics = SafeKeeperMetrics::new(self.s.server.ztli);
 

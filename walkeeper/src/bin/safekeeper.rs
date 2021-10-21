@@ -6,7 +6,6 @@ use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use log::*;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::thread;
 use zenith_utils::http::endpoint;
@@ -78,20 +77,7 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let mut conf = SafeKeeperConf {
-        // Always set to './'. We will chdir into the directory specified on the
-        // command line, so that when the server is running, all paths are relative
-        // to that.
-        workdir: PathBuf::from("./"),
-        daemonize: false,
-        no_sync: false,
-        pageserver_addr: None,
-        listen_pg_addr: DEFAULT_PG_LISTEN_ADDR.to_string(),
-        listen_http_addr: DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-        ttl: None,
-        recall_period: None,
-        pageserver_auth_token: env::var("PAGESERVER_AUTH_TOKEN").ok(),
-    };
+    let mut conf: SafeKeeperConf = Default::default();
 
     if let Some(dir) = arg_matches.value_of("datadir") {
         // change into the data directory.

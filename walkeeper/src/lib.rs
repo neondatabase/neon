@@ -2,6 +2,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use std::env;
+use zenith_utils::zid::ZTimelineId;
+
 pub mod http;
 pub mod json_ctrl;
 pub mod receive_wal;
@@ -41,4 +44,29 @@ pub struct SafeKeeperConf {
     pub pageserver_auth_token: Option<String>,
     pub ttl: Option<Duration>,
     pub recall_period: Option<Duration>,
+}
+
+impl SafeKeeperConf {
+    pub fn timeline_dir(&self, timelineid: &ZTimelineId) -> PathBuf {
+        self.workdir.join(timelineid.to_string())
+    }
+}
+
+impl Default for SafeKeeperConf {
+    fn default() -> Self {
+        SafeKeeperConf {
+            // Always set to './'. We will chdir into the directory specified on the
+            // command line, so that when the server is running, all paths are relative
+            // to that.
+            workdir: PathBuf::from("./"),
+            daemonize: false,
+            no_sync: false,
+            pageserver_addr: None,
+            listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
+            listen_http_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
+            ttl: None,
+            recall_period: None,
+            pageserver_auth_token: env::var("PAGESERVER_AUTH_TOKEN").ok(),
+        }
+    }
 }

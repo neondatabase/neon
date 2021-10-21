@@ -2360,6 +2360,7 @@ dependencies = [
  "rust-s3",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "walkdir",
