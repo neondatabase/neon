@@ -7,7 +7,7 @@ use crate::receive_wal::ReceiveWalConn;
 use crate::replication::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::SafeKeeperConf;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -74,7 +74,9 @@ impl postgres_backend::Handler for SendWalHandler {
         } else if query_string.starts_with(b"START_REPLICATION") {
             ReplicationConn::new(pgb).run(self, pgb, &query_string)?;
         } else if query_string.starts_with(b"START_WAL_PUSH") {
-            ReceiveWalConn::new(pgb)?.run(self)?;
+            ReceiveWalConn::new(pgb)
+                .run(self)
+                .with_context(|| "failed to run ReceiveWalConn")?;
         } else if query_string.starts_with(b"JSON_CTRL") {
             handle_json_ctrl(self, pgb, &query_string)?;
         } else {

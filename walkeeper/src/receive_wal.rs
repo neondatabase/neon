@@ -73,12 +73,12 @@ fn request_callback(conf: SafeKeeperConf, timelineid: ZTimelineId, tenantid: ZTe
 }
 
 impl<'pg> ReceiveWalConn<'pg> {
-    pub fn new(pg: &'pg mut PostgresBackend) -> Result<ReceiveWalConn<'pg>> {
+    pub fn new(pg: &'pg mut PostgresBackend) -> ReceiveWalConn<'pg> {
         let peer_addr = *pg.get_peer_addr();
-        Ok(ReceiveWalConn {
+        ReceiveWalConn {
             pg_backend: pg,
             peer_addr,
-        })
+        }
     }
 
     // Read and extract the bytes of a `CopyData` message from the postgres instance
@@ -142,7 +142,11 @@ impl<'pg> ReceiveWalConn<'pg> {
         }
 
         loop {
-            let reply = swh.timeline.get().process_msg(&msg)?;
+            let reply = swh
+                .timeline
+                .get()
+                .process_msg(&msg)
+                .with_context(|| "failed to process ProposerAcceptorMessage")?;
             self.write_msg(&reply)?;
             msg = self.read_msg()?;
         }
