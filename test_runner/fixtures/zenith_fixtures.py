@@ -192,7 +192,7 @@ class ZenithCli:
         self.env['ZENITH_REPO_DIR'] = repo_dir
         self.env['POSTGRES_DISTRIB_DIR'] = pg_distrib_dir
 
-    def run(self, arguments: List[str]) -> Any:
+    def run(self, arguments: List[str]) -> 'subprocess.CompletedProcess[str]':
         """
         Run "zenith" with the specified arguments.
 
@@ -249,12 +249,14 @@ class ZenithPageserverHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def branch_list(self, tenant_id: uuid.UUID) -> List[Dict]:
+    def branch_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
 
-    def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict:
+    def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict[Any, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/branch",
                         json={
                             'tenant_id': tenant_id.hex,
@@ -262,17 +264,23 @@ class ZenithPageserverHttpClient(requests.Session):
                             'start_point': start_point,
                         })
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
 
-    def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict:
+    def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict[Any, Any]:
         res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}", )
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
 
-    def tenant_list(self) -> List[Dict]:
+    def tenant_list(self) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         res.raise_for_status()
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
 
     def tenant_create(self, tenant_id: uuid.UUID):
         res = self.post(
@@ -361,20 +369,23 @@ class PageserverPort:
 
 
 class ZenithPageserver(PgProtocol):
-    """ An object representing a running pageserver. """
-    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, port: PageserverPort):
+    """
+    An object representing a running pageserver.
+
+    Initializes the repository via `zenith init` and starts page server.
+    """
+    def __init__(self,
+                 zenith_cli: ZenithCli,
+                 repo_dir: str,
+                 port: PageserverPort,
+                 enable_auth=False):
         super().__init__(host='localhost', port=port.pg)
         self.zenith_cli = zenith_cli
         self.running = False
-        self.initial_tenant = None
+        self.initial_tenant: str = cast(str, None)  # Will be fixed by self.start() below
         self.repo_dir = repo_dir
         self.service_port = port  # do not shadow PgProtocol.port which is just int
 
-    def init(self, enable_auth: bool = False) -> 'ZenithPageserver':
-        """
-        Initialize the repository, i.e. run "zenith init".
-        Returns self.
-        """
         cmd = [
             'init',
             f'--pageserver-pg-port={self.service_port.pg}',
@@ -383,13 +394,8 @@ class ZenithPageserver(PgProtocol):
         if enable_auth:
             cmd.append('--enable-auth')
         self.zenith_cli.run(cmd)
-        return self
 
-    def repo_dir(self) -> str:
-        """
-        Return path to repository dir
-        """
-        return self.zenith_cli.repo_dir
+        self.start()  # Required, otherwise self.initial_tenant is of wrong type
 
     def start(self) -> 'ZenithPageserver':
         """
@@ -401,7 +407,11 @@ class ZenithPageserver(PgProtocol):
         self.zenith_cli.run(['start'])
         self.running = True
         # get newly created tenant id
-        self.initial_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.split()[0]
+        current_tenant = self.zenith_cli.run(['tenant', 'list']).stdout.split()[0]
+        if self.initial_tenant is None:
+            self.initial_tenant = current_tenant
+        else:
+            assert self.initial_tenant == current_tenant
         return self
 
     def stop(self, immediate=False) -> 'ZenithPageserver':
@@ -461,8 +471,7 @@ def pageserver(zenith_cli: ZenithCli, repo_dir: str,
     By convention, the test branches are named after the tests. For example,
     test called 'test_foo' would create and use branches with the 'test_foo' prefix.
     """
-    ps = ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir,
-                          port=pageserver_port).init().start()
+    ps = ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir, port=pageserver_port)
     # For convenience in tests, create a branch from the freshly-initialized cluster.
     zenith_cli.run(["branch", "empty", "main"])
 
@@ -516,7 +525,7 @@ class PgBin:
                     command: List[str],
                     env: Optional[Env] = None,
                     cwd: Optional[str] = None,
-                    **kwargs: Any) -> None:
+                    **kwargs: Any) -> str:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
 
@@ -537,8 +546,10 @@ def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
 
 @pytest.fixture
 def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str, pageserver_port: PageserverPort):
-    with ZenithPageserver(zenith_cli=zenith_cli, repo_dir=repo_dir,
-                          port=pageserver_port).init(enable_auth=True).start() as ps:
+    with ZenithPageserver(zenith_cli=zenith_cli,
+                          repo_dir=repo_dir,
+                          port=pageserver_port,
+                          enable_auth=True) as ps:
         # For convenience in tests, create a branch from the freshly-initialized cluster.
         zenith_cli.run(["branch", "empty", "main"])
         yield ps
@@ -623,6 +634,7 @@ class Postgres(PgProtocol):
 
     def pg_data_dir_path(self) -> str:
         """ Path to data directory """
+        assert self.node_name
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
         return os.path.join(self.repo_dir, path)
 
@@ -693,9 +705,9 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        assert self.tenant_id is not None
         self.zenith_cli.run(
             ['pg', 'stop', '--destroy', self.node_name, f'--tenantid={self.tenant_id}'])
+        self.node_name = None
 
         return self
 
@@ -793,29 +805,6 @@ class PostgresFactory:
             config_lines=config_lines,
         )
 
-    def config(self,
-               node_name: str = "main",
-               tenant_id: Optional[str] = None,
-               wal_acceptors: Optional[str] = None,
-               config_lines: Optional[List[str]] = None) -> Postgres:
-
-        pg = Postgres(
-            zenith_cli=self.zenith_cli,
-            repo_dir=self.repo_dir,
-            pg_bin=self.pg_bin,
-            tenant_id=tenant_id or self.initial_tenant,
-            port=self.port_distributor.get_port(),
-        )
-
-        self.num_instances += 1
-        self.instances.append(pg)
-
-        return pg.config(
-            node_name=node_name,
-            wal_acceptors=wal_acceptors,
-            config_lines=config_lines,
-        )
-
     def stop_all(self) -> 'PostgresFactory':
         for pg in self.instances:
             pg.stop()
@@ -849,7 +838,7 @@ def postgres(zenith_cli: ZenithCli,
     pgfactory.stop_all()
 
 
-def read_pid(path: Path):
+def read_pid(path: Path) -> int:
     """ Read content of file into number """
     return int(path.read_text())
 
@@ -955,7 +944,9 @@ class WalAcceptor:
                 cur.execute("JSON_CTRL " + request_json)
                 all = cur.fetchall()
                 log.info(f"JSON_CTRL response: {all[0][0]}")
-                return json.loads(all[0][0])
+                res = json.loads(all[0][0])
+                assert isinstance(res, dict)
+                return res
 
     def http_client(self):
         return WalAcceptorHttpClient(port=self.port.http)
@@ -1211,6 +1202,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli,
     subprocess.check_call(cmd, shell=True)
 
     # list files we're going to compare
+    assert pg.pgdata_dir
     pgdata_files = list_files_to_compare(pg.pgdata_dir)
     restored_files = list_files_to_compare(restored_dir_path)
 
@@ -1237,7 +1229,7 @@ def check_restored_datadir_content(zenith_cli: ZenithCli,
             subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)
             subprocess.run("xxd -b {} > {}.hex ".format(f2, f2), shell=True)
 
-            cmd = ['diff {}.hex {}.hex'.format(f1, f2)]
-            subprocess.run(cmd, stdout=stdout_f, shell=True)
+            cmd = 'diff {}.hex {}.hex'.format(f1, f2)
+            subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])

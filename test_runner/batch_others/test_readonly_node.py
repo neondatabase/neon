@@ -84,6 +84,6 @@ def test_readonly_node(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     # Create node at pre-initdb lsn
     try:
         zenith_cli.run(["pg", "start", "test_branch_preinitdb", "test_readonly_node@0/42"])
-        assert false, "compute node startup with invalid LSN should have failed"
+        assert False, "compute node startup with invalid LSN should have failed"
     except Exception:
         print("Node creation with pre-initdb LSN failed (as expected)")

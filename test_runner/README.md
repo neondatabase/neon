@@ -95,13 +95,16 @@ Python destructors, e.g. `__del__()` aren't recommended for cleanup.
 
 ### Code quality
 
-We force code formatting via yapf:
+We force code formatting via yapf and type hints via mypy:
 
 1. Install `yapf` and other tools (`flake8`, `mypy`) with `pipenv install --dev`.
 1. Reformat all your code by running `pipenv run yapf -ri .` in the `test_runner/` directory.
+1. Ensure there are no type errors by running `pipenv run mypy .` in the `test_runner/` directory.
 
 Before submitting a patch, please consider:
 
 * Writing a couple of docstrings to clarify the reasoning behind a new test.
 * Running `flake8` (or a linter of your choice, e.g. `pycodestyle`) and fixing possible defects, if any.
-* (Optional) Typechecking the code with `mypy .`. Currently this mostly affects `fixtures/zenith_fixtures.py`.
+* Adding more type hints to your code to avoid `Any`, especially:
+  * For fixture parameters, they are not automatically deduced.
+  * For function arguments and return values.

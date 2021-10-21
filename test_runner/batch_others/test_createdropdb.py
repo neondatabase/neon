@@ -87,12 +87,14 @@ def test_dropdb(
     pg_before.connect(dbname='foodb').close()
 
     # Test that database subdir exists on the branch before drop
+    assert pg_before.pgdata_dir
     dbpath = pathlib.Path(pg_before.pgdata_dir) / 'base' / str(dboid)
     log.info(dbpath)
 
     assert os.path.isdir(dbpath) == True
 
     # Test that database subdir doesn't exist on the branch after drop
+    assert pg_after.pgdata_dir
     dbpath = pathlib.Path(pg_after.pgdata_dir) / 'base' / str(dboid)
     log.info(dbpath)
 
