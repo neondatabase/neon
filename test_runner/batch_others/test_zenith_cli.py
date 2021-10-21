@@ -1,13 +1,16 @@
 import json
 import uuid
 
+from psycopg2.extensions import cursor as PgCursor
 from fixtures.zenith_fixtures import ZenithCli, ZenithPageserver
 from typing import cast
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def helper_compare_branch_list(page_server_cur, zenith_cli: ZenithCli, initial_tenant: str):
+def helper_compare_branch_list(page_server_cur: PgCursor,
+                               zenith_cli: ZenithCli,
+                               initial_tenant: str):
     """
     Compare branches list returned by CLI and directly via API.
     Filters out branches created by other tests.
@@ -60,7 +63,7 @@ def test_cli_branch_list(pageserver: ZenithPageserver, zenith_cli: ZenithCli):
     assert 'test_cli_branch_list_nested' in branches_cli
 
 
-def helper_compare_tenant_list(page_server_cur, zenith_cli: ZenithCli):
+def helper_compare_tenant_list(page_server_cur: PgCursor, zenith_cli: ZenithCli):
     page_server_cur.execute(f'tenant_list')
     tenants_api = sorted(
         map(lambda t: cast(str, t['id']), json.loads(page_server_cur.fetchone()[0])))
