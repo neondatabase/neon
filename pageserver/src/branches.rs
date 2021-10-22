@@ -23,6 +23,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::tenant_mgr;
 use crate::walredo::WalRedoManager;
+use crate::CheckpointConfig;
 use crate::{repository::Repository, PageServerConf};
 use crate::{restore_local_repo, LOG_FILE_NAME};
 
@@ -238,7 +239,7 @@ fn bootstrap_timeline(
         timeline.writer().as_ref(),
         lsn,
     )?;
-    timeline.checkpoint()?;
+    timeline.checkpoint(CheckpointConfig::Forced)?;
 
     println!(
         "created initial timeline {} timeline.lsn {}",

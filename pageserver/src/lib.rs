@@ -18,6 +18,7 @@ pub mod relish_storage;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod tenant_mgr;
+pub mod tenant_threads;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
@@ -162,6 +163,15 @@ impl PageServerConf {
             relish_storage_config: None,
         }
     }
+}
+
+/// Config for the Repository checkpointer
+#[derive(Debug, Clone, Copy)]
+pub enum CheckpointConfig {
+    // Flush in-memory data that is older than this
+    Distance(u64),
+    // Flush all in-memory data
+    Forced,
 }
 
 /// External relish storage configuration, enough for creating a client for that storage.
