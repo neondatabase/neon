@@ -75,7 +75,7 @@ use tracing::*;
 
 use super::{RelishStorage, RemoteRelishInfo};
 use crate::{
-    layered_repository::{metadata_path, TimelineMetadata},
+    layered_repository::metadata::{metadata_path, TimelineMetadata},
     tenant_mgr::register_relish_download,
     PageServerConf,
 };
@@ -151,7 +151,9 @@ struct RemoteTimeline {
 
 impl RemoteTimeline {
     fn disk_consistent_lsn(&self) -> Option<Lsn> {
-        self.metadata.as_ref().map(|meta| meta.disk_consistent_lsn)
+        self.metadata
+            .as_ref()
+            .map(|meta| meta.disk_consistent_lsn())
     }
 }
 
@@ -333,7 +335,7 @@ fn latest_timelines(
         if latest_timeline_id != &remote_timeline_id
             && timeline_metadata
                 .as_ref()
-                .map(|metadata| metadata.disk_consistent_lsn)
+                .map(|metadata| metadata.disk_consistent_lsn())
                 < remote_timeline_data.disk_consistent_lsn()
         {
             *latest_timeline_id = remote_timeline_id;
@@ -518,8 +520,8 @@ async fn upload_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath = P
         match &uploaded_timeline_files.metadata {
             None => debug!("Partially uploaded timeline found, downloading missing files only"),
             Some(remote_metadata) => {
-                let new_lsn = new_upload.metadata.disk_consistent_lsn;
-                let remote_lsn = remote_metadata.disk_consistent_lsn;
+                let new_lsn = new_upload.metadata.disk_consistent_lsn();
+                let remote_lsn = remote_metadata.disk_consistent_lsn();
                 match new_lsn.cmp(&remote_lsn) {
                     Ordering::Equal | Ordering::Less => {
                         warn!(
@@ -903,7 +905,7 @@ mod tests {
 
         let new_upload_metadata = dummy_metadata(Lsn(0x20));
         assert!(
-            new_upload_metadata.disk_consistent_lsn < first_upload_metadata.disk_consistent_lsn
+            new_upload_metadata.disk_consistent_lsn() < first_upload_metadata.disk_consistent_lsn()
         );
         let new_upload =
             create_local_timeline(&repo_harness, TIMELINE_ID, &["b", "c"], new_upload_metadata)?;
@@ -927,7 +929,8 @@ mod tests {
         )?;
         let second_paths = second_timeline.layers.clone();
         assert!(
-            first_upload_metadata.disk_consistent_lsn < second_upload_metadata.disk_consistent_lsn
+            first_upload_metadata.disk_consistent_lsn()
+                < second_upload_metadata.disk_consistent_lsn()
         );
         ensure_correct_timeline_upload(
             &repo_harness,
@@ -955,7 +958,8 @@ mod tests {
 
         let third_upload_metadata = dummy_metadata(Lsn(0x50));
         assert!(
-            second_upload_metadata.disk_consistent_lsn < third_upload_metadata.disk_consistent_lsn
+            second_upload_metadata.disk_consistent_lsn()
+                < third_upload_metadata.disk_consistent_lsn()
         );
         let third_timeline = create_local_timeline(
             &repo_harness,
@@ -1249,7 +1253,7 @@ mod tests {
         while let Some(task) = queue_accessor.pop() {
             let task_lsn = match &task {
                 SyncTask::Upload(LocalTimeline { metadata, .. }) => {
-                    Some(metadata.disk_consistent_lsn)
+                    Some(metadata.disk_consistent_lsn())
                 }
                 SyncTask::UrgentDownload(remote_timeline) | SyncTask::Download(remote_timeline) => {
                     remote_timeline.disk_consistent_lsn()
@@ -1257,8 +1261,8 @@ mod tests {
             };
 
             if let Some(task_lsn) = task_lsn {
-                if task_lsn == smaller_lsn_metadata.disk_consistent_lsn
-                    || task_lsn == bigger_lsn_metadata.disk_consistent_lsn
+                if task_lsn == smaller_lsn_metadata.disk_consistent_lsn()
+                    || task_lsn == bigger_lsn_metadata.disk_consistent_lsn()
                 {
                     ordered_tasks.push(task);
                 }
@@ -1549,11 +1553,6 @@ mod tests {
     }
 
     fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
-        TimelineMetadata {
-            disk_consistent_lsn,
-            prev_record_lsn: None,
-            ancestor_timeline: None,
-            ancestor_lsn: Lsn(0),
-        }
+        TimelineMetadata::new(disk_consistent_lsn, None, None, Lsn(0))
     }
 }
