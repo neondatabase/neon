@@ -75,8 +75,12 @@ pub fn proxy_conn_main(
     // This will set conn.existing_user and we can decide on next actions
     conn.handle_startup()?;
 
+    let mut psql_session_id_buf = [0u8; 8];
+    rand::thread_rng().fill(&mut psql_session_id_buf);
+    conn.psql_session_id = hex::encode(psql_session_id_buf);
+
     // both scenarious here should end up producing database connection string
-    let db_info = if conn.is_existing_user() {
+    let conn_info = if conn.is_existing_user() {
         conn.handle_existing_user()?
     } else {
         conn.handle_new_user()?
@@ -84,7 +88,7 @@ pub fn proxy_conn_main(
 
     // XXX: move that inside handle_new_user/handle_existing_user to be able to
     // report wrong connection error.
-    proxy_pass(conn.pgb, db_info)
+    proxy_pass(conn.pgb, conn_info)
 }
 
 impl ProxyConnection {
@@ -156,6 +160,21 @@ impl ProxyConnection {
         Ok(())
     }
 
+    // Wait for proxy kick form the console with conninfo
+    fn wait_for_conninfo(&mut self) -> anyhow::Result<DatabaseInfo> {
+        let (tx, rx) = channel::<anyhow::Result<DatabaseInfo>>();
+        let _ = self
+            .state
+            .waiters
+            .lock()
+            .unwrap()
+            .insert(self.psql_session_id.clone(), tx);
+
+        // Wait for web console response
+        // TODO: respond with error to client
+        rx.recv()?
+    }
+
     fn handle_existing_user(&mut self) -> anyhow::Result<DatabaseInfo> {
         // ask password
         rand::thread_rng().fill(&mut self.md5_salt);
@@ -182,14 +201,41 @@ impl ProxyConnection {
                 self.database.as_str(),
                 md5_response,
                 &self.md5_salt,
+                &self.psql_session_id,
             ) {
                 Err(e) => {
-                    self.pgb
-                        .write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                    self.pgb.write_message(&BeMessage::ErrorResponse(format!(
+                        "cannot authenticate proxy: {}",
+                        e
+                    )))?;
 
                     bail!("auth failed: {}", e);
                 }
-                Ok(conn_info) => {
+
+                Ok(auth_info) => {
+                    let conn_info = if auth_info.ready {
+                        // Cluster is ready, so just take `conn_info` and respond to the client.
+                        auth_info
+                            .conn_info
+                            .expect("conn_info should be provided with ready cluster")
+                    } else {
+                        match auth_info.error {
+                            Some(e) => {
+                                self.pgb.write_message(&BeMessage::ErrorResponse(format!(
+                                    "cannot authenticate proxy: {}",
+                                    e
+                                )))?;
+
+                                bail!("auth failed: {}", e);
+                            }
+                            None => {
+                                // Cluster exists, but isn't active, await its start and proxy kick
+                                // with `conn_info`.
+                                self.wait_for_conninfo()?
+                            }
+                        }
+                    };
+
                     self.pgb
                         .write_message_noflush(&BeMessage::AuthenticationOk)?;
                     self.pgb
@@ -205,10 +251,6 @@ impl ProxyConnection {
     }
 
     fn handle_new_user(&mut self) -> anyhow::Result<DatabaseInfo> {
-        let mut psql_session_id_buf = [0u8; 8];
-        rand::thread_rng().fill(&mut psql_session_id_buf);
-        self.psql_session_id = hex::encode(psql_session_id_buf);
-
         let hello_message = format!("☀️  Welcome to Zenith!
 
 To proceed with database creation, open the following link:
@@ -227,25 +269,15 @@ databases without opening the browser.
         self.pgb
             .write_message(&BeMessage::NoticeResponse(hello_message))?;
 
-        // await for database creation
-        let (tx, rx) = channel::<anyhow::Result<DatabaseInfo>>();
-        let _ = self
-            .state
-            .waiters
-            .lock()
-            .unwrap()
-            .insert(self.psql_session_id.clone(), tx);
-
-        // Wait for web console response
-        // XXX: respond with error to client
-        let dbinfo = rx.recv()??;
+        // We requested the DB creation from the console. Now wait for conninfo
+        let conn_info = self.wait_for_conninfo()?;
 
         self.pgb.write_message_noflush(&BeMessage::NoticeResponse(
             "Connecting to database.".to_string(),
         ))?;
         self.pgb.write_message(&BeMessage::ReadyForQuery)?;
 
-        Ok(dbinfo)
+        Ok(conn_info)
     }
 }
 
