@@ -1,4 +1,5 @@
 use crate::relish::*;
+use crate::CheckpointConfig;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -24,9 +25,9 @@ pub trait Repository: Send + Sync {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
-    /// perform one garbage collection iteration.
-    /// garbage collection is periodically performed by gc thread,
-    /// but it can be explicitly requested through page server api.
+    /// perform one garbage collection iteration, removing old data files from disk.
+    /// this funtion is periodically called by gc thread.
+    /// also it can be explicitly requested through page server api 'do_gc' command.
     ///
     /// 'timelineid' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
@@ -39,6 +40,10 @@ pub trait Repository: Send + Sync {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
+
+    /// perform one checkpoint iteration, flushing in-memory data on disk.
+    /// this function is periodically called by checkponter thread.
+    fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()>;
 }
 
 ///
@@ -144,7 +149,7 @@ pub trait Timeline: Send + Sync {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
-    fn checkpoint(&self) -> Result<()>;
+    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
 
     /// Retrieve current logical size of the timeline
     ///
@@ -714,7 +719,7 @@ mod tests {
             .contains(&TESTREL_A));
 
         // Run checkpoint and garbage collection and check that it's still not visible
-        newtline.checkpoint()?;
+        newtline.checkpoint(CheckpointConfig::Forced)?;
         repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
 
         assert!(!newtline

@@ -4,6 +4,7 @@
 use crate::branches;
 use crate::layered_repository::LayeredRepository;
 use crate::repository::{Repository, Timeline};
+use crate::tenant_threads;
 use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
 use anyhow::{anyhow, bail, Context, Result};
@@ -16,7 +17,6 @@ use std::fs;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 lazy_static! {
@@ -28,7 +28,7 @@ struct Tenant {
     repo: Option<Arc<dyn Repository>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum TenantState {
     // This tenant only exists in cloud storage. It cannot be accessed.
     CloudOnly,
@@ -41,10 +41,12 @@ pub enum TenantState {
     // This tenant exists on local disk, and the layer map has been loaded into memory.
     // The local disk might have some newer files that don't exist in cloud storage yet.
     Active,
+    // Tenant is active, but there is no walreceiver connection.
+    Idle,
     // This tenant exists on local disk, and the layer map has been loaded into memory.
     // The local disk might have some newer files that don't exist in cloud storage yet.
     // The tenant cannot be accessed anymore for any reason, but graceful shutdown.
-    //Stopping,
+    Stopping,
 }
 
 impl fmt::Display for TenantState {
@@ -53,24 +55,14 @@ impl fmt::Display for TenantState {
             TenantState::CloudOnly => f.write_str("CloudOnly"),
             TenantState::Downloading => f.write_str("Downloading"),
             TenantState::Active => f.write_str("Active"),
+            TenantState::Idle => f.write_str("Idle"),
+            TenantState::Stopping => f.write_str("Stopping"),
         }
     }
 }
 
 fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
     TENANTS.lock().unwrap()
-}
-
-struct TenantHandleEntry {
-    checkpointer_handle: Option<JoinHandle<()>>,
-    gc_handle: Option<JoinHandle<()>>,
-}
-
-// Logically these handles belong to Repository,
-// but it's just simpler to store them separately
-lazy_static! {
-    static ref TENANT_HANDLES: Mutex<HashMap<ZTenantId, TenantHandleEntry>> =
-        Mutex::new(HashMap::new());
 }
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -106,21 +98,13 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
         true,
     ));
 
-    let checkpointer_handle = LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
-    let gc_handle = LayeredRepository::launch_gc_thread(conf, repo.clone());
-
-    let mut handles = TENANT_HANDLES.lock().unwrap();
-    let h = TenantHandleEntry {
-        checkpointer_handle: Some(checkpointer_handle),
-        gc_handle: Some(gc_handle),
-    };
-
-    handles.insert(tenant_id, h);
-
     let mut m = access_tenants();
     let tenant = m.get_mut(&tenant_id).unwrap();
     tenant.repo = Some(repo);
     tenant.state = TenantState::Active;
+
+    // TODO Start these threads only if tenant actively receives some WAL
+    tenant_threads::start_tenant_threads(conf, tenant_id);
 }
 
 pub fn register_relish_download(
@@ -142,8 +126,7 @@ pub fn register_relish_download(
         });
         tenant.state = TenantState::Downloading;
         match &tenant.repo {
-            Some(repo) =>
-            {
+            Some(repo) => {
                 init_timeline(repo.as_ref(), timeline_id);
                 tenant.state = TenantState::Active;
                 return;
@@ -171,27 +154,23 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }
 
-pub fn stop_tenant_threads(tenantid: ZTenantId) {
-    let mut handles = TENANT_HANDLES.lock().unwrap();
-    if let Some(h) = handles.get_mut(&tenantid) {
-        h.checkpointer_handle.take().map(JoinHandle::join);
-        debug!("checkpointer for tenant {} has stopped", tenantid);
-        h.gc_handle.take().map(JoinHandle::join);
-        debug!("gc for tenant {} has stopped", tenantid);
-    }
-}
-
 pub fn shutdown_all_tenants() -> Result<()> {
     SHUTDOWN_REQUESTED.swap(true, Ordering::Relaxed);
 
     let tenantids = list_tenantids()?;
+
+    for tenantid in &tenantids {
+        set_tenant_state(*tenantid, TenantState::Stopping)?;
+    }
+
     for tenantid in tenantids {
-        stop_tenant_threads(tenantid);
+        // Wait for checkpointer and GC to finish their job
+        tenant_threads::wait_for_tenant_threads_to_stop(tenantid);
+
         let repo = get_repository_for_tenant(tenantid)?;
         debug!("shutdown tenant {}", tenantid);
         repo.shutdown()?;
     }
-
     Ok(())
 }
 
@@ -221,6 +200,33 @@ pub fn create_repository_for_tenant(
     tenant.state = TenantState::Active;
 
     Ok(())
+}
+
+// If tenant is not found in the repository, return CloudOnly state
+pub fn get_tenant_state(tenantid: ZTenantId) -> TenantState {
+    let m = access_tenants();
+    match m.get(&tenantid) {
+        Some(tenant) => tenant.state,
+        None => TenantState::CloudOnly,
+    }
+}
+
+pub fn set_tenant_state(tenantid: ZTenantId, state: TenantState) -> Result<TenantState> {
+    let mut m = access_tenants();
+    let tenant = m.get_mut(&tenantid);
+
+    match tenant {
+        Some(tenant) => {
+            if state == TenantState::Idle && tenant.state != TenantState::Active {
+                // Only Active tenant can become Idle
+                return Ok(tenant.state);
+            }
+            info!("set_tenant_state: {} -> {}", tenant.state, state);
+            tenant.state = state;
+            Ok(tenant.state)
+        }
+        None => bail!("Tenant not found for tenant {}", tenantid),
+    }
 }
 
 pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
