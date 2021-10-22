@@ -3,7 +3,6 @@ use std::{
     thread,
 };
 
-use anyhow::{anyhow, bail};
 use bytes::Bytes;
 use serde::Deserialize;
 use zenith_utils::{
@@ -25,22 +24,23 @@ pub fn thread_main(state: &'static ProxyState, listener: TcpListener) -> anyhow:
         socket.set_nodelay(true).unwrap();
 
         thread::spawn(move || {
-            if let Err(err) = mgmt_conn_main(state, socket) {
+            if let Err(err) = handle_connection(state, socket) {
                 println!("error: {}", err);
             }
         });
     }
 }
 
-pub fn mgmt_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow::Result<()> {
+fn handle_connection(state: &ProxyState, socket: TcpStream) -> anyhow::Result<()> {
     let mut conn_handler = MgmtHandler { state };
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, true)?;
     pgbackend.run(&mut conn_handler)
 }
 
-struct MgmtHandler {
-    state: &'static ProxyState,
+struct MgmtHandler<'a> {
+    state: &'a ProxyState,
 }
+
 /// Serialized examples:
 // {
 //     "session_id": "71d6d03e6d93d99a",
@@ -64,18 +64,18 @@ struct MgmtHandler {
 // // to test manually by sending a query to mgmt interface:
 // psql -h 127.0.0.1 -p 9999 -c '{"session_id":"4f10dde522e14739","result":{"Success":{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"stas","password":"stas"}}}'
 #[derive(Deserialize)]
-pub struct PsqlSessionResponse {
+struct PsqlSessionResponse {
     session_id: String,
     result: PsqlSessionResult,
 }
 
 #[derive(Deserialize)]
-pub enum PsqlSessionResult {
+enum PsqlSessionResult {
     Success(DatabaseInfo),
     Failure(String),
 }
 
-impl postgres_backend::Handler for MgmtHandler {
+impl postgres_backend::Handler for MgmtHandler<'_> {
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
@@ -96,32 +96,26 @@ fn try_process_query(
     query_string: Bytes,
 ) -> anyhow::Result<()> {
     let query_string = query_from_cstring(query_string);
-
     println!("Got mgmt query: '{}'", std::str::from_utf8(&query_string)?);
 
     let resp: PsqlSessionResponse = serde_json::from_slice(&query_string)?;
 
-    let waiters = mgmt.state.waiters.lock().unwrap();
+    use PsqlSessionResult::*;
+    let msg = match resp.result {
+        Success(db_info) => Ok(db_info),
+        Failure(message) => Err(message),
+    };
 
-    let sender = waiters
-        .get(&resp.session_id)
-        .ok_or_else(|| anyhow!("psql_session_id is not found"))?;
-
-    match resp.result {
-        PsqlSessionResult::Success(db_info) => {
-            sender.send(Ok(db_info))?;
-
+    match mgmt.state.waiters.notify(&resp.session_id, msg) {
+        Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
                 .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-
-            Ok(())
         }
-
-        PsqlSessionResult::Failure(message) => {
-            sender.send(Err(anyhow!(message.clone())))?;
-
-            bail!("psql session request failed: {}", message)
+        Err(e) => {
+            pgb.write_message(&BeMessage::ErrorResponse(e.to_string()))?;
         }
     }
+
+    Ok(())
 }

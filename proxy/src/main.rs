@@ -5,76 +5,17 @@
 /// (control plane API in our case) and can create new databases and accounts
 /// in somewhat transparent manner (again via communication with control plane API).
 ///
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{mpsc, Arc, Mutex},
-    thread,
-};
-
-use anyhow::{anyhow, bail, ensure, Context};
-use clap::{App, Arg, ArgMatches};
-
-use cplane_api::DatabaseInfo;
-use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
+use anyhow::bail;
+use clap::{App, Arg};
+use state::{ProxyConfig, ProxyState};
+use std::thread;
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
 mod cplane_api;
 mod mgmt;
 mod proxy;
-
-pub struct ProxyConf {
-    /// main entrypoint for users to connect to
-    pub proxy_address: SocketAddr,
-
-    /// http management endpoint. Upon user account creation control plane
-    /// will notify us here, so that we can 'unfreeze' user session.
-    pub mgmt_address: SocketAddr,
-
-    /// send unauthenticated users to this URI
-    pub redirect_uri: String,
-
-    /// control plane address where we would check auth.
-    pub auth_endpoint: String,
-
-    pub ssl_config: Option<Arc<ServerConfig>>,
-}
-
-pub struct ProxyState {
-    pub conf: ProxyConf,
-    pub waiters: Mutex<HashMap<String, mpsc::Sender<anyhow::Result<DatabaseInfo>>>>,
-}
-
-fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<ServerConfig>>> {
-    let (key_path, cert_path) = match (
-        arg_matches.value_of("ssl-key"),
-        arg_matches.value_of("ssl-cert"),
-    ) {
-        (Some(key_path), Some(cert_path)) => (key_path, cert_path),
-        (None, None) => return Ok(None),
-        _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
-    };
-
-    let key = {
-        let key_bytes = std::fs::read(key_path).context("SSL key file")?;
-        let mut keys = pemfile::pkcs8_private_keys(&mut &key_bytes[..])
-            .map_err(|_| anyhow!("couldn't read TLS keys"))?;
-        ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
-        keys.pop().unwrap()
-    };
-
-    let cert_chain = {
-        let cert_chain_bytes = std::fs::read(cert_path).context("SSL cert file")?;
-        pemfile::certs(&mut &cert_chain_bytes[..])
-            .map_err(|_| anyhow!("couldn't read TLS certificates"))?
-    };
-
-    let mut config = ServerConfig::new(NoClientAuth::new());
-    config.set_single_cert(cert_chain, key)?;
-    config.versions = vec![ProtocolVersion::TLSv1_3];
-
-    Ok(Some(Arc::new(config)))
-}
+mod state;
+mod waiters;
 
 fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("Zenith proxy/router")
@@ -127,18 +68,25 @@ fn main() -> anyhow::Result<()> {
         )
         .get_matches();
 
-    let conf = ProxyConf {
+    let ssl_config = match (
+        arg_matches.value_of("ssl-key"),
+        arg_matches.value_of("ssl-cert"),
+    ) {
+        (Some(key_path), Some(cert_path)) => {
+            Some(crate::state::configure_ssl(key_path, cert_path)?)
+        }
+        (None, None) => None,
+        _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
+    };
+
+    let config = ProxyConfig {
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
         auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
-        ssl_config: configure_ssl(&arg_matches)?,
+        ssl_config,
     };
-    let state = ProxyState {
-        conf,
-        waiters: Default::default(),
-    };
-    let state: &'static ProxyState = Box::leak(Box::new(state));
+    let state: &ProxyState = Box::leak(Box::new(ProxyState::new(config)));
 
     println!("Version: {}", GIT_VERSION);
 
