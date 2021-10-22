@@ -15,6 +15,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::net::TcpListener;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -177,6 +178,27 @@ impl PagestreamBeMessage {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+#[allow(unused_macros)]
+macro_rules! syscall {
+    ($fn: ident ( $($arg: expr),* $(,)* ) ) => {{
+        let res = unsafe { libc::$fn($($arg, )*) };
+        if res == -1 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(res)
+        }
+    }};
+}
+
+fn epoll_create() -> io::Result<RawFd> {
+    let fd = syscall!(epoll_create1(0))?;
+    if let Ok(flags) = syscall!(fcntl(fd, libc::F_GETFD)) {
+        let _ = syscall!(fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC));
+    }
+
+    Ok(fd)
+}
+
 ///
 /// Main loop of the page service.
 ///
@@ -190,22 +212,67 @@ pub fn thread_main(
 ) -> anyhow::Result<()> {
     let mut join_handles = Vec::new();
 
+    listener.set_nonblocking(true)?;
+    let epoll_fd = epoll_create().expect("can create epoll queue");
+
+    let listener_fd = listener.as_raw_fd();
+    let mut event = libc::epoll_event {
+        events: (libc::EPOLLONESHOT | libc::EPOLLIN) as u32,
+        u64: 100,
+    };
+    syscall!(epoll_ctl(
+        epoll_fd,
+        libc::EPOLL_CTL_ADD,
+        listener_fd,
+        &mut event
+    ))?;
+
+    let mut events: Vec<libc::epoll_event> = Vec::with_capacity(1024);
+
     while !tenant_mgr::shutdown_requested() {
-        let (socket, peer_addr) = listener.accept()?;
-        debug!("accepted connection from {}", peer_addr);
-        socket.set_nodelay(true).unwrap();
-        let local_auth = auth.clone();
+        events.clear();
+        let res = match syscall!(epoll_wait(
+            epoll_fd,
+            events.as_mut_ptr() as *mut libc::epoll_event,
+            1024,
+            1000_i32,
+        )) {
+            Ok(v) => v,
+            Err(e) => panic!("error during epoll wait: {}", e),
+        };
 
-        let handle = thread::Builder::new()
-            .name("serving Page Service thread".into())
-            .spawn(move || {
-                if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
-                    error!(%err, "page server thread exited with error");
+        // safe  as long as the kernel does nothing wrong - copied from mio
+        unsafe { events.set_len(res as usize) };
+
+        for _ev in &events {
+            match listener.accept() {
+                Ok((socket, peer_addr)) => {
+                    debug!("accepted connection from {}", peer_addr);
+                    socket.set_nodelay(true).unwrap();
+                    let local_auth = auth.clone();
+
+                    let handle = thread::Builder::new()
+                        .name("serving Page Service thread".into())
+                        .spawn(move || {
+                            if let Err(err) =
+                                page_service_conn_main(conf, local_auth, socket, auth_type)
+                            {
+                                error!(%err, "page server thread exited with error");
+                            }
+                        })
+                        .unwrap();
+
+                    join_handles.push(handle);
                 }
-            })
-            .unwrap();
-
-        join_handles.push(handle);
+                Err(e) => eprintln!("couldn't accept: {}", e),
+            }
+            syscall!(epoll_ctl(
+                epoll_fd,
+                libc::EPOLL_CTL_MOD,
+                listener_fd,
+                &mut event
+            ))?;
+        }
     }
 
     debug!("page_service loop terminated. wait for connections to cancel");
