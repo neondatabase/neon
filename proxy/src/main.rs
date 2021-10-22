@@ -136,7 +136,7 @@ fn main() -> anyhow::Result<()> {
     };
     let state = ProxyState {
         conf,
-        waiters: Mutex::new(HashMap::new()),
+        waiters: Default::default(),
     };
     let state: &'static ProxyState = Box::leak(Box::new(state));
 

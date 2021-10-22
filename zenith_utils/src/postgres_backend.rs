@@ -322,6 +322,7 @@ impl PostgresBackend {
             );
         }
 
+        let have_tls = self.tls_config.is_some();
         match msg {
             FeMessage::StartupMessage(m) => {
                 trace!("got startup message {:?}", m);
@@ -330,12 +331,10 @@ impl PostgresBackend {
                     StartupRequestCode::NegotiateSsl => {
                         info!("SSL requested");
 
-                        if self.tls_config.is_some() {
-                            self.write_message(&BeMessage::EncryptionResponse(true))?;
+                        self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
+                        if have_tls {
                             self.start_tls()?;
                             self.state = ProtoState::Encrypted;
-                        } else {
-                            self.write_message(&BeMessage::EncryptionResponse(false))?;
                         }
                     }
                     StartupRequestCode::NegotiateGss => {
@@ -343,8 +342,7 @@ impl PostgresBackend {
                         self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
                     StartupRequestCode::Normal => {
-                        if self.tls_config.is_some() && !matches!(self.state, ProtoState::Encrypted)
-                        {
+                        if have_tls && !matches!(self.state, ProtoState::Encrypted) {
                             self.write_message(&BeMessage::ErrorResponse(
                                 "must connect with TLS".to_string(),
                             ))?;
@@ -394,7 +392,7 @@ impl PostgresBackend {
                     AuthType::MD5 => {
                         let (_, md5_response) = m
                             .split_last()
-                            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
+                            .ok_or_else(|| anyhow!("protocol violation"))?;
 
                         if let Err(e) = handler.check_auth_md5(self, md5_response) {
                             self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
@@ -404,7 +402,7 @@ impl PostgresBackend {
                     AuthType::ZenithJWT => {
                         let (_, jwt_response) = m
                             .split_last()
-                            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
+                            .ok_or_else(|| anyhow!("protocol violation"))?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                             self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;

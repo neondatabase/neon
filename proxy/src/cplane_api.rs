@@ -1,10 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, ToSocketAddrs};
-
-pub struct CPlaneApi {
-    auth_endpoint: &'static str,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DatabaseInfo {
@@ -23,13 +19,13 @@ pub struct ProxyAuthResult {
 }
 
 impl DatabaseInfo {
-    pub fn socket_addr(&self) -> Result<SocketAddr> {
+    pub fn socket_addr(&self) -> anyhow::Result<SocketAddr> {
         let host_port = format!("{}:{}", self.host, self.port);
         host_port
             .to_socket_addrs()
             .with_context(|| format!("cannot resolve {} to SocketAddr", host_port))?
             .next()
-            .ok_or_else(|| anyhow::Error::msg("cannot resolve at least one SocketAddr"))
+            .ok_or_else(|| anyhow!("cannot resolve at least one SocketAddr"))
     }
 }
 
@@ -51,6 +47,10 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
     }
 }
 
+pub struct CPlaneApi {
+    auth_endpoint: &'static str,
+}
+
 impl CPlaneApi {
     pub fn new(auth_endpoint: &'static str) -> CPlaneApi {
         CPlaneApi { auth_endpoint }
@@ -63,7 +63,7 @@ impl CPlaneApi {
         md5_response: &[u8],
         salt: &[u8; 4],
         psql_session_id: &str,
-    ) -> Result<ProxyAuthResult> {
+    ) -> anyhow::Result<ProxyAuthResult> {
         let mut url = reqwest::Url::parse(self.auth_endpoint)?;
         url.query_pairs_mut()
             .append_pair("login", user)
@@ -76,13 +76,12 @@ impl CPlaneApi {
 
         let resp = reqwest::blocking::get(url)?;
 
-        if resp.status().is_success() {
-            let auth_info: ProxyAuthResult = serde_json::from_str(resp.text()?.as_str())?;
-            println!("got auth info: #{:?}", auth_info);
-
-            Ok(auth_info)
-        } else {
-            bail!("Auth failed")
+        if !resp.status().is_success() {
+            bail!("Auth failed: {}", resp.status())
         }
+
+        let auth_info: ProxyAuthResult = serde_json::from_str(resp.text()?.as_str())?;
+        println!("got auth info: #{:?}", auth_info);
+        Ok(auth_info)
     }
 }

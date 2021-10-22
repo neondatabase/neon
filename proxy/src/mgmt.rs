@@ -3,7 +3,7 @@ use std::{
     thread,
 };
 
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use bytes::Bytes;
 use serde::Deserialize;
 use zenith_utils::{
@@ -105,7 +105,7 @@ fn try_process_query(
 
     let sender = waiters
         .get(&resp.session_id)
-        .ok_or_else(|| anyhow::Error::msg("psql_session_id is not found"))?;
+        .ok_or_else(|| anyhow!("psql_session_id is not found"))?;
 
     match resp.result {
         PsqlSessionResult::Success(db_info) => {
@@ -113,13 +113,13 @@ fn try_process_query(
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-            pgb.flush()?;
+                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+
             Ok(())
         }
 
         PsqlSessionResult::Failure(message) => {
-            sender.send(Err(anyhow::Error::msg(message.clone())))?;
+            sender.send(Err(anyhow!(message.clone())))?;
 
             bail!("psql session request failed: {}", message)
         }
