@@ -16,8 +16,9 @@ use anyhow::{bail, Context};
 use tokio::{fs, io};
 use tracing::*;
 
+use crate::layered_repository::metadata::METADATA_FILE_NAME;
+
 use super::{parse_ids_from_path, strip_path_prefix, RelishStorage, RemoteRelishInfo};
-use crate::layered_repository::METADATA_FILE_NAME;
 
 pub struct LocalFs {
     pageserver_workdir: &'static Path,
@@ -214,6 +215,7 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
 #[cfg(test)]
 mod pure_tests {
     use crate::{
+        layered_repository::metadata::METADATA_FILE_NAME,
         relish_storage::test_utils::{
             custom_tenant_id_path, custom_timeline_id_path, relative_timeline_path,
         },

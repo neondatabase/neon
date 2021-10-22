@@ -16,13 +16,11 @@ use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use postgres_ffi::pg_constants::BLCKSZ;
-use serde::{Deserialize, Serialize};
 use tracing::*;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use std::convert::TryInto;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -32,6 +30,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use self::metadata::{metadata_path, TimelineMetadata};
 use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
@@ -47,7 +46,6 @@ use zenith_metrics::{
     register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
 };
 use zenith_metrics::{register_histogram_vec, HistogramVec};
-use zenith_utils::bin_ser::BeSer;
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
@@ -59,6 +57,7 @@ mod image_layer;
 mod inmemory_layer;
 mod interval_tree;
 mod layer_map;
+pub mod metadata;
 mod page_versions;
 mod storage_layer;
 
@@ -111,8 +110,6 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
-/// The name of the metadata file pageserver creates per timeline.
-pub const METADATA_FILE_NAME: &str = "metadata";
 /// Parts of the `.zenith/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
 pub const TENANTS_SEGMENT_NAME: &str = "tenants";
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
@@ -145,12 +142,7 @@ impl Repository for LayeredRepository {
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
-        let metadata = TimelineMetadata {
-            disk_consistent_lsn: Lsn(0),
-            prev_record_lsn: None,
-            ancestor_timeline: None,
-            ancestor_lsn: Lsn(0),
-        };
+        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0));
         Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
@@ -189,12 +181,7 @@ impl Repository for LayeredRepository {
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
         // into the ancestor.
-        let metadata = TimelineMetadata {
-            disk_consistent_lsn: start_lsn,
-            prev_record_lsn: dst_prev,
-            ancestor_timeline: Some(src),
-            ancestor_lsn: start_lsn,
-        };
+        let metadata = TimelineMetadata::new(start_lsn, dst_prev, Some(src), start_lsn);
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
         Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
 
@@ -266,14 +253,14 @@ impl LayeredRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
-                let disk_consistent_lsn = metadata.disk_consistent_lsn;
+                let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
                 // Recurse to look up the ancestor timeline.
                 //
                 // TODO: If you have a very deep timeline history, this could become
                 // expensive. Perhaps delay this until we need to look up a page in
                 // ancestor.
-                let ancestor = if let Some(ancestor_timelineid) = metadata.ancestor_timeline {
+                let ancestor = if let Some(ancestor_timelineid) = metadata.ancestor_timeline() {
                     Some(self.get_timeline_locked(ancestor_timelineid, timelines)?)
                 } else {
                     None
@@ -490,66 +477,6 @@ impl LayeredRepository {
 
         totals.elapsed = now.elapsed();
         Ok(totals)
-    }
-}
-
-/// Metadata stored on disk for each timeline
-///
-/// The fields correspond to the values we hold in memory, in LayeredTimeline.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TimelineMetadata {
-    /// [`Lsn`] that corresponds to the corresponding timeline directory
-    /// contents, stored locally in the pageserver workdir.
-    pub disk_consistent_lsn: Lsn,
-
-    // This is only set if we know it. We track it in memory when the page
-    // server is running, but we only track the value corresponding to
-    // 'last_record_lsn', not 'disk_consistent_lsn' which can lag behind by a
-    // lot. We only store it in the metadata file when we flush *all* the
-    // in-memory data so that 'last_record_lsn' is the same as
-    // 'disk_consistent_lsn'.  That's OK, because after page server restart, as
-    // soon as we reprocess at least one record, we will have a valid
-    // 'prev_record_lsn' value in memory again. This is only really needed when
-    // doing a clean shutdown, so that there is no more WAL beyond
-    // 'disk_consistent_lsn'
-    pub prev_record_lsn: Option<Lsn>,
-
-    pub ancestor_timeline: Option<ZTimelineId>,
-    pub ancestor_lsn: Lsn,
-}
-
-impl TimelineMetadata {
-    pub fn from_bytes(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
-        ensure!(
-            metadata_bytes.len() == METADATA_MAX_SAFE_SIZE,
-            "metadata bytes size is wrong"
-        );
-
-        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
-        let calculated_checksum = crc32c::crc32c(data);
-
-        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
-            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
-        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
-        ensure!(
-            calculated_checksum == expected_checksum,
-            "metadata checksum mismatch"
-        );
-
-        let data = TimelineMetadata::des_prefix(data)?;
-        assert!(data.disk_consistent_lsn.is_aligned());
-
-        Ok(data)
-    }
-
-    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        let mut metadata_bytes = TimelineMetadata::ser(self)?;
-        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
-        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
-
-        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
-        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
-        Ok(metadata_bytes)
     }
 }
 
@@ -901,13 +828,13 @@ impl LayeredTimeline {
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
-                last: metadata.disk_consistent_lsn,
-                prev: metadata.prev_record_lsn.unwrap_or(Lsn(0)),
+                last: metadata.disk_consistent_lsn(),
+                prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
             }),
-            disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn.0),
+            disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             ancestor_timeline: ancestor,
-            ancestor_lsn: metadata.ancestor_lsn,
+            ancestor_lsn: metadata.ancestor_lsn(),
             current_logical_size: AtomicUsize::new(current_logical_size),
             current_logical_size_gauge,
             upload_relishes,
@@ -1315,12 +1242,12 @@ impl LayeredTimeline {
 
             let ancestor_timelineid = self.ancestor_timeline.as_ref().map(|x| x.timelineid);
 
-            let metadata = TimelineMetadata {
+            let metadata = TimelineMetadata::new(
                 disk_consistent_lsn,
-                prev_record_lsn: ondisk_prev_record_lsn,
-                ancestor_timeline: ancestor_timelineid,
-                ancestor_lsn: self.ancestor_lsn,
-            };
+                ondisk_prev_record_lsn,
+                ancestor_timelineid,
+                self.ancestor_lsn,
+            );
 
             LayeredRepository::save_metadata(
                 self.conf,
@@ -1886,15 +1813,6 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-pub fn metadata_path(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-) -> PathBuf {
-    conf.timeline_path(&timelineid, &tenantid)
-        .join(METADATA_FILE_NAME)
 }
 
 /// Add a suffix to a layer file's name: .{num}.old

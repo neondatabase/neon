@@ -323,9 +323,10 @@ pub mod repo_harness {
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
+    use crate::layered_repository::metadata::METADATA_FILE_NAME;
+
     use super::repo_harness::*;
     use super::*;
-    use crate::layered_repository::METADATA_FILE_NAME;
     use postgres_ffi::{pg_constants, xlog_utils::SIZEOF_CHECKPOINT};
 
     /// Arbitrary relation tag, for testing.

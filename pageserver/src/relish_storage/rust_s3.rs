@@ -11,7 +11,7 @@ use anyhow::Context;
 use s3::{bucket::Bucket, creds::Credentials, region::Region};
 
 use crate::{
-    layered_repository::METADATA_FILE_NAME,
+    layered_repository::metadata::METADATA_FILE_NAME,
     relish_storage::{parse_ids_from_path, strip_path_prefix, RelishStorage, RemoteRelishInfo},
     S3Config,
 };
