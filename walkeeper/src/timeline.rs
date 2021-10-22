@@ -114,7 +114,7 @@ impl SharedState {
             conf: conf.clone(),
         };
         let (flush_lsn, tli) = if state.server.wal_seg_size != 0 {
-            let wal_dir = conf.data_dir.join(format!("{}", timelineid));
+            let wal_dir = conf.workdir.join(format!("{}", timelineid));
             find_end_of_wal(
                 &wal_dir,
                 state.server.wal_seg_size as usize,
@@ -140,7 +140,7 @@ impl SharedState {
         create: CreateControlFile,
     ) -> Result<(File, SafeKeeperState)> {
         let control_file_path = conf
-            .data_dir
+            .workdir
             .join(timelineid.to_string())
             .join(CONTROL_FILE_NAME);
         info!(
@@ -419,12 +419,12 @@ impl Storage for FileStorage {
             let wal_file_name = XLogFileName(server.tli, segno, wal_seg_size);
             let wal_file_path = self
                 .conf
-                .data_dir
+                .workdir
                 .join(ztli.to_string())
                 .join(wal_file_name.clone());
             let wal_file_partial_path = self
                 .conf
-                .data_dir
+                .workdir
                 .join(ztli.to_string())
                 .join(wal_file_name.clone() + ".partial");
 

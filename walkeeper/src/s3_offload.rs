@@ -54,7 +54,7 @@ async fn offload_files(
             && IsXLogFileName(entry.file_name().to_str().unwrap())
             && entry.metadata().unwrap().created().unwrap() <= horizon
         {
-            let relpath = path.strip_prefix(&conf.data_dir).unwrap();
+            let relpath = path.strip_prefix(&conf.workdir).unwrap();
             let s3path = String::from("walarchive/") + relpath.to_str().unwrap();
             if !listing.contains(&s3path) {
                 let mut file = File::open(&path)?;
@@ -97,7 +97,7 @@ async fn main_loop(conf: &SafeKeeperConf) -> Result<()> {
             .flat_map(|b| b.contents.iter().map(|o| o.key.clone()))
             .collect();
 
-        let n = offload_files(&bucket, &listing, &conf.data_dir, conf).await?;
+        let n = offload_files(&bucket, &listing, &conf.workdir, conf).await?;
         info!("Offload {} files to S3", n);
         sleep(conf.ttl.unwrap()).await;
     }

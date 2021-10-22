@@ -243,7 +243,7 @@ impl ReplicationConn {
                     let segno = start_pos.segment_number(wal_seg_size);
                     let wal_file_name = XLogFileName(timeline, segno, wal_seg_size);
                     let timeline_id = swh.timeline.get().timelineid.to_string();
-                    let wal_file_path = swh.conf.data_dir.join(timeline_id).join(wal_file_name);
+                    let wal_file_path = swh.conf.workdir.join(timeline_id).join(wal_file_name);
                     Self::open_wal_file(&wal_file_path)?
                 }
             };

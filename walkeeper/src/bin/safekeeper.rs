@@ -79,7 +79,10 @@ fn main() -> Result<()> {
         .get_matches();
 
     let mut conf = SafeKeeperConf {
-        data_dir: PathBuf::from("./"),
+        // Always set to './'. We will chdir into the directory specified on the
+        // command line, so that when the server is running, all paths are relative
+        // to that.
+        workdir: PathBuf::from("./"),
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
@@ -91,10 +94,8 @@ fn main() -> Result<()> {
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
-        conf.data_dir = PathBuf::from(dir);
-
         // change into the data directory.
-        std::env::set_current_dir(&conf.data_dir)?;
+        std::env::set_current_dir(PathBuf::from(dir))?;
     }
 
     if arg_matches.is_present("no-sync") {
@@ -129,8 +130,7 @@ fn main() -> Result<()> {
 }
 
 fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
-    let log_filename = conf.data_dir.join("safekeeper.log");
-    let log_file = logging::init(log_filename, conf.daemonize)?;
+    let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
     let http_listener = TcpListener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
