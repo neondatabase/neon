@@ -27,7 +27,7 @@ use std::io::Write;
 use std::ops::{Bound::Included, Deref};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -35,11 +35,11 @@ use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
 use crate::tenant_mgr;
+use crate::toast_store::ToastStore;
 use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
-use crate::toast_store::ToastStore;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{
@@ -113,8 +113,8 @@ pub struct BufferedRepository {
 //
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum StoreKey {
-	Metadata(MetadataKey), // for relish size
-	Data(DataKey), // for relish content
+    Metadata(MetadataKey), // for relish size
+    Data(DataKey),         // for relish content
 }
 
 //
@@ -123,8 +123,8 @@ enum StoreKey {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct DataKey {
     rel: RelishTag,
-	blknum: u32,
-	lsn: Lsn,
+    blknum: u32,
+    lsn: Lsn,
 }
 
 //
@@ -133,7 +133,7 @@ struct DataKey {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct MetadataKey {
     rel: RelishTag,
-	lsn: Lsn,
+    lsn: Lsn,
 }
 
 //
@@ -141,7 +141,7 @@ struct MetadataKey {
 //
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct MetadataValue {
-	size: Option<u32> // empty for dropped relations
+    size: Option<u32>, // empty for dropped relations
 }
 
 //
@@ -149,16 +149,16 @@ struct MetadataValue {
 // We do not need to use Option here, because entries corresponding to dropped relation are removed from map
 //
 struct MetadataSnapshot {
-	size: u32,
-	lsn: Lsn,
+    size: u32,
+    lsn: Lsn,
 }
 
 //
 // Relish store consists of persistent KV store and transient metadata cache loadedon demand
 //
 struct RelishStore {
-	data: ToastStore,
-	meta: Option<HashMap<RelishTag, MetadataSnapshot>>,
+    data: ToastStore,
+    meta: Option<HashMap<RelishTag, MetadataSnapshot>>,
 }
 
 ///
@@ -650,7 +650,7 @@ pub struct BufferedTimeline {
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
 
-	store: RwLock<RelishStore>, // provide MURSIW access to the storage
+    store: RwLock<RelishStore>, // provide MURSIW access to the storage
 
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
@@ -692,9 +692,9 @@ pub struct BufferedTimeline {
     // this is needed because when we save it in metadata it can become out of sync
     // because current_logical_size is consistent on last_record_lsn, not ondisk_consistent_lsn
     // NOTE: current_logical_size also includes size of the ancestor
-	//
-	// FIXME-KK: it is not properly maintained. Do we really need to track logical size of database or its physical size on the disk?
-	// With compressed KV storage them are completely different.
+    //
+    // FIXME-KK: it is not properly maintained. Do we really need to track logical size of database or its physical size on the disk?
+    // With compressed KV storage them are completely different.
     current_logical_size: AtomicUsize, // bytes
 
     // To avoid calling .with_label_values and formatting the tenant and timeline IDs to strings
@@ -755,57 +755,63 @@ impl Timeline for BufferedTimeline {
         }
         debug_assert!(lsn <= self.get_last_record_lsn());
 
-		let from = StoreKey::Data( DataKey { rel, blknum, lsn: Lsn(0) }).ser()?.to_vec();
-		let till = StoreKey::Data( DataKey { rel, blknum, lsn }).ser()?.to_vec();
-		let store = self.store.read().unwrap();
-		let mut iter = store.data.range(&from..=&till);
+        let from = StoreKey::Data(DataKey {
+            rel,
+            blknum,
+            lsn: Lsn(0),
+        })
+        .ser()?
+        .to_vec();
+        let till = StoreKey::Data(DataKey { rel, blknum, lsn }).ser()?.to_vec();
+        let store = self.store.read().unwrap();
+        let mut iter = store.data.range(&from..=&till);
 
-		// locate latest version with LSN <= than requested
-		if let Some(pair) = iter.next_back() {
-			let ver = PageVersion::des(&pair?.1)?;
-			match ver {
-				PageVersion::Image(img) => Ok(img), // already materialized: we are done
-				PageVersion::Delta(rec) => {
-					let mut will_init = rec.will_init;
-					let mut data = PageReconstructData {
-						records: Vec::new(),
-						page_img: None,
-					};
-					data.records.push((lsn,rec));
-					// loop until we locate full page image or initialization WAL record
-					// FIXME-KK: cross-timelines histories are not handled now
-					while !will_init {
-						if let Some(entry) = iter.next_back() {
-							let pair = entry?;
-							let key = StoreKey::des(&pair.0)?;
-							let ver = PageVersion::des(&pair.1)?;
-							if let StoreKey::Data(dk) = key {
-								assert!(dk.rel == rel); // check that we don't jump to previous relish before locating full image
-								match ver {
-									PageVersion::Image(img) => {
-										data.page_img = Some(img);
-										break;
-									}
-									PageVersion::Delta(rec) => {
-										will_init = rec.will_init;
-										data.records.push((dk.lsn, rec));
-									}
-								}
-							} else {
-								bail!("Unexpected key type {:?}", key);
-							}
-						} else {
-							bail!("Base image not found for relish {} at {}", rel, lsn);
-						}
-					}
-					RECONSTRUCT_TIME
-						.observe_closure_duration(|| self.reconstruct_page(rel, blknum, lsn, data))
-				}
-			}
+        // locate latest version with LSN <= than requested
+        if let Some(pair) = iter.next_back() {
+            let ver = PageVersion::des(&pair?.1)?;
+            match ver {
+                PageVersion::Image(img) => Ok(img), // already materialized: we are done
+                PageVersion::Delta(rec) => {
+                    let mut will_init = rec.will_init;
+                    let mut data = PageReconstructData {
+                        records: Vec::new(),
+                        page_img: None,
+                    };
+                    data.records.push((lsn, rec));
+                    // loop until we locate full page image or initialization WAL record
+                    // FIXME-KK: cross-timelines histories are not handled now
+                    while !will_init {
+                        if let Some(entry) = iter.next_back() {
+                            let pair = entry?;
+                            let key = StoreKey::des(&pair.0)?;
+                            let ver = PageVersion::des(&pair.1)?;
+                            if let StoreKey::Data(dk) = key {
+                                assert!(dk.rel == rel); // check that we don't jump to previous relish before locating full image
+                                match ver {
+                                    PageVersion::Image(img) => {
+                                        data.page_img = Some(img);
+                                        break;
+                                    }
+                                    PageVersion::Delta(rec) => {
+                                        will_init = rec.will_init;
+                                        data.records.push((dk.lsn, rec));
+                                    }
+                                }
+                            } else {
+                                bail!("Unexpected key type {:?}", key);
+                            }
+                        } else {
+                            bail!("Base image not found for relish {} at {}", rel, lsn);
+                        }
+                    }
+                    RECONSTRUCT_TIME
+                        .observe_closure_duration(|| self.reconstruct_page(rel, blknum, lsn, data))
+                }
+            }
         } else {
             bail!("relish {} not found at {}", rel, lsn);
         }
-	}
+    }
 
     fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {
         if !rel.is_blocky() {
@@ -816,59 +822,64 @@ impl Timeline for BufferedTimeline {
         }
         debug_assert!(lsn <= self.get_last_record_lsn());
 
-		let store = self.store.read().unwrap();
-		// Use metadata hash only if it was loaded
-		if let Some(hash) = &store.meta {
-			if let Some(snap) = hash.get(&rel) {
-				// We can used cached version only of requested LSN is >= than LSN of last version.
-				// Otherwise extract historical value from KV storage.
-				if snap.lsn <= lsn {
-					return Ok(Some(snap.size));
-				}
-			}
-		}
-		let from = StoreKey::Metadata( MetadataKey { rel, lsn: Lsn(0) } ).ser()?.to_vec();
-		let till = StoreKey::Metadata( MetadataKey { rel, lsn } ).ser()?.to_vec();
-		// locate last version with LSN <= than requested
-		let mut iter = store.data.range(&from..=&till);
+        let store = self.store.read().unwrap();
+        // Use metadata hash only if it was loaded
+        if let Some(hash) = &store.meta {
+            if let Some(snap) = hash.get(&rel) {
+                // We can used cached version only of requested LSN is >= than LSN of last version.
+                // Otherwise extract historical value from KV storage.
+                if snap.lsn <= lsn {
+                    return Ok(Some(snap.size));
+                }
+            }
+        }
+        let from = StoreKey::Metadata(MetadataKey { rel, lsn: Lsn(0) })
+            .ser()?
+            .to_vec();
+        let till = StoreKey::Metadata(MetadataKey { rel, lsn }).ser()?.to_vec();
+        // locate last version with LSN <= than requested
+        let mut iter = store.data.range(&from..=&till);
 
-		if let Some(pair) = iter.next_back() {
-			let meta = MetadataValue::des(&pair?.1)?;
-			Ok(meta.size)
-		} else {
-			Ok(None)
-		}
+        if let Some(pair) = iter.next_back() {
+            let meta = MetadataValue::des(&pair?.1)?;
+            Ok(meta.size)
+        } else {
+            Ok(None)
+        }
     }
 
     fn get_rel_exists(&self, rel: RelishTag, lsn: Lsn) -> Result<bool> {
-		self.get_relish_size(rel, lsn).map(|meta| meta.is_some())
-	}
+        self.get_relish_size(rel, lsn).map(|meta| meta.is_some())
+    }
 
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelishTag>> {
-		let from = RelishTag::Relation(RelTag {
-			spcnode,
-			dbnode,
-			relnode: 0,
-			forknum: 0});
-		let till = RelishTag::Relation(RelTag {
-			spcnode,
-			dbnode,
-			relnode: u32::MAX,
-			forknum: u8::MAX});
+        let from = RelishTag::Relation(RelTag {
+            spcnode,
+            dbnode,
+            relnode: 0,
+            forknum: 0,
+        });
+        let till = RelishTag::Relation(RelTag {
+            spcnode,
+            dbnode,
+            relnode: u32::MAX,
+            forknum: u8::MAX,
+        });
 
-		self.list_relishes(from, till, lsn)
-	}
+        self.list_relishes(from, till, lsn)
+    }
 
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
-		let from = RelishTag::Relation(RelTag {
-			spcnode: u32::MAX,
-			dbnode: u32::MAX,
-			relnode: u32::MAX,
-			forknum: u8::MAX});
-		let till = RelishTag::Checkpoint;
+        let from = RelishTag::Relation(RelTag {
+            spcnode: u32::MAX,
+            dbnode: u32::MAX,
+            relnode: u32::MAX,
+            forknum: u8::MAX,
+        });
+        let till = RelishTag::Checkpoint;
 
-		self.list_relishes(from, till, lsn)
-	}
+        self.list_relishes(from, till, lsn)
+    }
 
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
@@ -940,36 +951,49 @@ impl Timeline for BufferedTimeline {
 }
 
 impl RelishStore {
-	fn load_metadata(&mut self) -> Result<()> {
-		if self.meta.is_none() {
-			let mut meta: HashMap<RelishTag, MetadataSnapshot> = HashMap::new();
-			let mut till = StoreKey::Metadata(MetadataKey { rel: RelishTag::Checkpoint, lsn: Lsn::MAX });
-			loop {
-				let mut iter = self.data.range(..&till.ser()?);
-				if let Some(entry) = iter.next_back() {
-					let pair = entry?;
-					let key = StoreKey::des(&pair.0)?;
-					if let StoreKey::Metadata(last) = key {
-						let metadata = MetadataValue::des(&pair.0)?;
-						if let Some(size) = metadata.size { // igonore dropped relations
-							meta.insert(last.rel, MetadataSnapshot { size, lsn: last.lsn });
-						}
-						till = StoreKey::Metadata(MetadataKey { rel: last.rel, lsn: Lsn(0) });
-					} else {
-						bail!("Storage is corrupted: unexpected key: {:?}", key);
-					}
-				} else {
-					break;
-				}
-			}
-			self.meta = Some(meta)
-		}
-		Ok(())
-	}
+    fn load_metadata(&mut self) -> Result<()> {
+        if self.meta.is_none() {
+            let mut meta: HashMap<RelishTag, MetadataSnapshot> = HashMap::new();
+            let mut till = StoreKey::Metadata(MetadataKey {
+                rel: RelishTag::Checkpoint,
+                lsn: Lsn::MAX,
+            });
+            loop {
+                let mut iter = self.data.range(..&till.ser()?);
+                if let Some(entry) = iter.next_back() {
+                    let pair = entry?;
+                    let key = StoreKey::des(&pair.0)?;
+                    if let StoreKey::Metadata(last) = key {
+                        let metadata = MetadataValue::des(&pair.0)?;
+                        if let Some(size) = metadata.size {
+                            // igonore dropped relations
+                            meta.insert(
+                                last.rel,
+                                MetadataSnapshot {
+                                    size,
+                                    lsn: last.lsn,
+                                },
+                            );
+                        }
+                        till = StoreKey::Metadata(MetadataKey {
+                            rel: last.rel,
+                            lsn: Lsn(0),
+                        });
+                    } else {
+                        bail!("Storage is corrupted: unexpected key: {:?}", key);
+                    }
+                } else {
+                    break;
+                }
+            }
+            self.meta = Some(meta)
+        }
+        Ok(())
+    }
 
-	fn _unload_metadata(&mut self) {
-		self.meta = None;
-	}
+    fn _unload_metadata(&mut self) {
+        self.meta = None;
+    }
 }
 
 impl BufferedTimeline {
@@ -990,12 +1014,15 @@ impl BufferedTimeline {
         let current_logical_size_gauge = LOGICAL_TIMELINE_SIZE
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
-		let path = conf.timeline_path(&timelineid, &tenantid);
+        let path = conf.timeline_path(&timelineid, &tenantid);
         let timeline = BufferedTimeline {
             conf,
             timelineid,
             tenantid,
-			store: RwLock::new(RelishStore { data: ToastStore::new(&path)?, meta: None }),
+            store: RwLock::new(RelishStore {
+                data: ToastStore::new(&path)?,
+                meta: None,
+            }),
 
             walredo_mgr,
 
@@ -1034,170 +1061,193 @@ impl BufferedTimeline {
         Ok(())
     }
 
-	//
-	// List all relish in inclsive range [from_rel, till_rel] exists at the specfied LSN
-    fn list_relishes(&self, from_rel: RelishTag, till_rel: RelishTag, lsn: Lsn) -> Result<HashSet<RelishTag>> {
+    //
+    // List all relish in inclsive range [from_rel, till_rel] exists at the specfied LSN
+    fn list_relishes(
+        &self,
+        from_rel: RelishTag,
+        till_rel: RelishTag,
+        lsn: Lsn,
+    ) -> Result<HashSet<RelishTag>> {
         let mut result = HashSet::new();
 
-		// from boundary is constant and till updated at each iteration
-		let from = StoreKey::Metadata( MetadataKey {
-			rel: from_rel,
-			lsn: Lsn(0) }).ser()?;
-		let mut till = StoreKey::Metadata( MetadataKey {
-			rel: till_rel,
-			lsn: Lsn::MAX }).ser()?; // Lsn::MAX tranforms inclusive boundary to exclusive
+        // from boundary is constant and till updated at each iteration
+        let from = StoreKey::Metadata(MetadataKey {
+            rel: from_rel,
+            lsn: Lsn(0),
+        })
+        .ser()?;
+        let mut till = StoreKey::Metadata(MetadataKey {
+            rel: till_rel,
+            lsn: Lsn::MAX,
+        })
+        .ser()?; // Lsn::MAX tranforms inclusive boundary to exclusive
 
-		let store = self.store.read().unwrap();
-		// Iterate through relish in reverse order (to locae last version)
-		loop {
-			// Use exclusive boundary for till to be able to skip to previous relish
-			let mut iter = store.data.range(&from..&till);
-			if let Some(entry) = iter.next_back() { // locate last version
-				let pair = entry?;
-				let key = StoreKey::des(&pair.0)?;
-				if let StoreKey::Metadata(mk) = key {
-					if mk.lsn <= lsn { // if LSN of last version is <= than requested, then we are done with this relish
-						let meta = MetadataValue::des(&pair.1)?;
-						if meta.size.is_some() { // if relish was not dropped
-							result.insert(mk.rel);
-						}
-					} else { // we need some older version
-						let from = StoreKey::Metadata( MetadataKey {
-							rel: mk.rel,
-							lsn: Lsn(0)
-						}).ser()?;
-						let till = StoreKey::Metadata( MetadataKey {
-							rel: mk.rel,
-							lsn
-						}).ser()?;
+        let store = self.store.read().unwrap();
+        // Iterate through relish in reverse order (to locae last version)
+        loop {
+            // Use exclusive boundary for till to be able to skip to previous relish
+            let mut iter = store.data.range(&from..&till);
+            if let Some(entry) = iter.next_back() {
+                // locate last version
+                let pair = entry?;
+                let key = StoreKey::des(&pair.0)?;
+                if let StoreKey::Metadata(mk) = key {
+                    if mk.lsn <= lsn {
+                        // if LSN of last version is <= than requested, then we are done with this relish
+                        let meta = MetadataValue::des(&pair.1)?;
+                        if meta.size.is_some() {
+                            // if relish was not dropped
+                            result.insert(mk.rel);
+                        }
+                    } else {
+                        // we need some older version
+                        let from = StoreKey::Metadata(MetadataKey {
+                            rel: mk.rel,
+                            lsn: Lsn(0),
+                        })
+                        .ser()?;
+                        let till = StoreKey::Metadata(MetadataKey { rel: mk.rel, lsn }).ser()?;
 
-						let mut iter = store.data.range(&from..=&till);
-						if let Some(entry) = iter.next_back() { // locate visible version
-							let pair = entry?;
-							let key = StoreKey::des(&pair.0)?;
-							if let StoreKey::Metadata(mk) = key {
-								let meta = MetadataValue::des(&pair.1)?;
-								if meta.size.is_some() {
-									result.insert(mk.rel);
-								}
-							} else {
-								bail!("Unexpected key {:?}", key);
-							}
-						}
-					}
-					// Jump to next relish by setting Lsn=0 and use it as exclusive boundary
-					till = StoreKey::Metadata( MetadataKey {
-						rel: mk.rel,
-						lsn: Lsn(0)
-					}).ser()?;
-				} else {
-					bail!("Unexpected key {:?}", key);
-				}
-			} else {
-				break; // no more entries
-			}
-		}
+                        let mut iter = store.data.range(&from..=&till);
+                        if let Some(entry) = iter.next_back() {
+                            // locate visible version
+                            let pair = entry?;
+                            let key = StoreKey::des(&pair.0)?;
+                            if let StoreKey::Metadata(mk) = key {
+                                let meta = MetadataValue::des(&pair.1)?;
+                                if meta.size.is_some() {
+                                    result.insert(mk.rel);
+                                }
+                            } else {
+                                bail!("Unexpected key {:?}", key);
+                            }
+                        }
+                    }
+                    // Jump to next relish by setting Lsn=0 and use it as exclusive boundary
+                    till = StoreKey::Metadata(MetadataKey {
+                        rel: mk.rel,
+                        lsn: Lsn(0),
+                    })
+                    .ser()?;
+                } else {
+                    bail!("Unexpected key {:?}", key);
+                }
+            } else {
+                break; // no more entries
+            }
+        }
         Ok(result)
     }
 
-	///
+    ///
     /// Matrialize last page versions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-	/// checkpoint_interval is used to measure total length of applied WAL records.
-	/// It can be used to prevent to frequent materialization of page. We can avoid store materialized page if history of changes is not so long
-	/// and can be fast replayed. Alternatively we can measure interval from last version LSN:
-	/// it will enforce materialization of "stabilized" pages. But there is a risk that permanently updated page will never be materialized.
-	///
+    /// checkpoint_interval is used to measure total length of applied WAL records.
+    /// It can be used to prevent to frequent materialization of page. We can avoid store materialized page if history of changes is not so long
+    /// and can be fast replayed. Alternatively we can measure interval from last version LSN:
+    /// it will enforce materialization of "stabilized" pages. But there is a risk that permanently updated page will never be materialized.
+    ///
     fn checkpoint_internal(&self, checkpoint_distance: u64, _forced: bool) -> Result<()> {
-		// From boundary is constant and till boundary is changed at each iteration.
-		let from = StoreKey::Data( DataKey {
-			rel: RelishTag::Relation(RelTag {
-				spcnode: 0,
-				dbnode: 0,
-				relnode: 0,
-				forknum: 0}),
-			blknum: 0,
-			lsn: Lsn(0) }).ser()?;
+        // From boundary is constant and till boundary is changed at each iteration.
+        let from = StoreKey::Data(DataKey {
+            rel: RelishTag::Relation(RelTag {
+                spcnode: 0,
+                dbnode: 0,
+                relnode: 0,
+                forknum: 0,
+            }),
+            blknum: 0,
+            lsn: Lsn(0),
+        })
+        .ser()?;
 
-		let mut till = StoreKey::Data( DataKey {
-			rel: RelishTag::Relation(RelTag {
-				spcnode: u32::MAX,
-				dbnode: u32::MAX,
-				relnode: u32::MAX,
-				forknum: u8::MAX}),
-			blknum: u32::MAX,
-			lsn: Lsn::MAX }).ser()?; // this MAX values allows to use this boundary as exclusive
+        let mut till = StoreKey::Data(DataKey {
+            rel: RelishTag::Relation(RelTag {
+                spcnode: u32::MAX,
+                dbnode: u32::MAX,
+                relnode: u32::MAX,
+                forknum: u8::MAX,
+            }),
+            blknum: u32::MAX,
+            lsn: Lsn::MAX,
+        })
+        .ser()?; // this MAX values allows to use this boundary as exclusive
 
-		loop {
-			let store = self.store.read().unwrap();
+        loop {
+            let store = self.store.read().unwrap();
 
-			let mut iter = store.data.range(&from..&till);
-			if let Some(entry) = iter.next_back() {
-				let pair = entry?;
-				let key = pair.0;
-				if let StoreKey::Data(dk) = StoreKey::des(&key)? {
-					let ver = PageVersion::des(&pair.1)?;
-					if let PageVersion::Delta(rec) = ver { // ignore already materialized pages
-						let mut will_init = rec.will_init;
-						let mut data = PageReconstructData {
-							records: Vec::new(),
-							page_img: None,
-						};
-						// Calculate total length of applied WAL records
-						let mut history_len = rec.rec.len();
-						data.records.push((dk.lsn, rec));
-						// loop until we locate full page image or initialization WAL record
-						// FIXME-KK: cross-timelines histories are not handled now
-						while !will_init {
-							if let Some(entry) = iter.next_back() {
-								let pair = entry?;
-								let key = StoreKey::des(&pair.0)?;
-								let ver = PageVersion::des(&pair.1)?;
-								if let StoreKey::Data(dk2) = key {
-									assert!(dk.rel == dk2.rel); // check that we don't jump to previous relish before locating full image
-									match ver {
-										PageVersion::Image(img) => {
-											data.page_img = Some(img);
-											break;
-										}
-										PageVersion::Delta(rec) => {
-											will_init = rec.will_init;
-											history_len += rec.rec.len();
-											data.records.push((dk2.lsn, rec));
-										}
-									}
-								} else {
-									bail!("Unexpected key type {:?}", key);
-								}
-							} else {
-								bail!("Base image not found for relish {} at {}", dk.rel, dk.lsn);
-							}
-						}
-						// release locks and  reconstruct page withut blocking storage
-						drop(iter);
-						drop(store);
-						// See comment above. May be we should also enforce here checkpointing of too old versions.
-						if history_len as u64 >= checkpoint_distance {
-							let img = RECONSTRUCT_TIME
-								.observe_closure_duration(|| self.reconstruct_page(dk.rel, dk.blknum, dk.lsn, data));
+            let mut iter = store.data.range(&from..&till);
+            if let Some(entry) = iter.next_back() {
+                let pair = entry?;
+                let key = pair.0;
+                if let StoreKey::Data(dk) = StoreKey::des(&key)? {
+                    let ver = PageVersion::des(&pair.1)?;
+                    if let PageVersion::Delta(rec) = ver {
+                        // ignore already materialized pages
+                        let mut will_init = rec.will_init;
+                        let mut data = PageReconstructData {
+                            records: Vec::new(),
+                            page_img: None,
+                        };
+                        // Calculate total length of applied WAL records
+                        let mut history_len = rec.rec.len();
+                        data.records.push((dk.lsn, rec));
+                        // loop until we locate full page image or initialization WAL record
+                        // FIXME-KK: cross-timelines histories are not handled now
+                        while !will_init {
+                            if let Some(entry) = iter.next_back() {
+                                let pair = entry?;
+                                let key = StoreKey::des(&pair.0)?;
+                                let ver = PageVersion::des(&pair.1)?;
+                                if let StoreKey::Data(dk2) = key {
+                                    assert!(dk.rel == dk2.rel); // check that we don't jump to previous relish before locating full image
+                                    match ver {
+                                        PageVersion::Image(img) => {
+                                            data.page_img = Some(img);
+                                            break;
+                                        }
+                                        PageVersion::Delta(rec) => {
+                                            will_init = rec.will_init;
+                                            history_len += rec.rec.len();
+                                            data.records.push((dk2.lsn, rec));
+                                        }
+                                    }
+                                } else {
+                                    bail!("Unexpected key type {:?}", key);
+                                }
+                            } else {
+                                bail!("Base image not found for relish {} at {}", dk.rel, dk.lsn);
+                            }
+                        }
+                        // release locks and  reconstruct page withut blocking storage
+                        drop(iter);
+                        drop(store);
+                        // See comment above. May be we should also enforce here checkpointing of too old versions.
+                        if history_len as u64 >= checkpoint_distance {
+                            let img = RECONSTRUCT_TIME.observe_closure_duration(|| {
+                                self.reconstruct_page(dk.rel, dk.blknum, dk.lsn, data)
+                            });
 
-							let mut store = self.store.write().unwrap();
-							store.data.put(&key, &img?.to_vec())?;
-						}
-					}
-					// Jump to next page. Setting lsn=0 and using it as exclusive boundary allows us to jump to previous page.
-					till = StoreKey::Data( DataKey {
-						rel: dk.rel,
-						blknum: dk.blknum,
-						lsn: Lsn(0) }).ser()?;
-				} else {
-					bail!("Unexpected key {:?}", key);
-				}
-			} else {
-				break;
-			}
-		}
+                            let mut store = self.store.write().unwrap();
+                            store.data.put(&key, &img?.to_vec())?;
+                        }
+                    }
+                    // Jump to next page. Setting lsn=0 and using it as exclusive boundary allows us to jump to previous page.
+                    till = StoreKey::Data(DataKey {
+                        rel: dk.rel,
+                        blknum: dk.blknum,
+                        lsn: Lsn(0),
+                    })
+                    .ser()?;
+                } else {
+                    bail!("Unexpected key {:?}", key);
+                }
+            } else {
+                break;
+            }
+        }
         if self.upload_relishes {
             schedule_timeline_upload(())
             // schedule_timeline_upload(
@@ -1234,7 +1284,7 @@ impl BufferedTimeline {
     /// obsolete.
     ///
     pub fn gc_timeline(&self, _retain_lsns: Vec<Lsn>, _cutoff: Lsn) -> Result<GcResult> {
-		// TODO: not implemented yet for buffred storage
+        // TODO: not implemented yet for buffred storage
         let result: GcResult = Default::default();
         Ok(result)
     }
@@ -1333,21 +1383,37 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         }
         ensure!(lsn.is_aligned(), "unaligned record LSN");
 
-		let key = StoreKey::Data( DataKey { rel, blknum, lsn } );
-		let value = PageVersion::Delta(rec);
-		let mut store = self.tl.store.write().unwrap();
-		store.data.put(&key.ser()?, &value.ser()?)?;
+        let key = StoreKey::Data(DataKey { rel, blknum, lsn });
+        let value = PageVersion::Delta(rec);
+        let mut store = self.tl.store.write().unwrap();
+        store.data.put(&key.ser()?, &value.ser()?)?;
 
-		// Update metadata
-		store.load_metadata()?;
-		if store.meta.as_ref().unwrap().get(&rel).map(|m| m.size).unwrap_or(0) <= blknum {
-			store.meta.as_mut().unwrap().insert(rel, MetadataSnapshot { size: blknum+1, lsn });
-			let mk = StoreKey::Metadata( MetadataKey { rel, lsn } );
-			let mv = MetadataValue { size: Some(blknum+1) };
-			store.data.put(&mk.ser()?, &mv.ser()?)?;
-		}
-		self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
-		Ok(())
+        // Update metadata
+        store.load_metadata()?;
+        if store
+            .meta
+            .as_ref()
+            .unwrap()
+            .get(&rel)
+            .map(|m| m.size)
+            .unwrap_or(0)
+            <= blknum
+        {
+            store.meta.as_mut().unwrap().insert(
+                rel,
+                MetadataSnapshot {
+                    size: blknum + 1,
+                    lsn,
+                },
+            );
+            let mk = StoreKey::Metadata(MetadataKey { rel, lsn });
+            let mv = MetadataValue {
+                size: Some(blknum + 1),
+            };
+            store.data.put(&mk.ser()?, &mv.ser()?)?;
+        }
+        self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        Ok(())
     }
 
     fn put_page_image(&self, rel: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
@@ -1360,21 +1426,37 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         }
         ensure!(lsn.is_aligned(), "unaligned record LSN");
 
-		let key = StoreKey::Data( DataKey { rel, blknum, lsn } );
-		let value = PageVersion::Image(img);
-		let mut store = self.tl.store.write().unwrap();
-		store.data.put(&key.ser()?, &value.ser()?)?;
+        let key = StoreKey::Data(DataKey { rel, blknum, lsn });
+        let value = PageVersion::Image(img);
+        let mut store = self.tl.store.write().unwrap();
+        store.data.put(&key.ser()?, &value.ser()?)?;
 
-		// Update netadata
-		store.load_metadata()?;
-		if store.meta.as_ref().unwrap().get(&rel).map(|m| m.size).unwrap_or(0) <= blknum {
-			store.meta.as_mut().unwrap().insert(rel, MetadataSnapshot { size: blknum+1, lsn });
-			let mk = StoreKey::Metadata( MetadataKey { rel, lsn } );
-			let mv = MetadataValue { size: Some(blknum+1) };
-			store.data.put(&mk.ser()?, &mv.ser()?)?;
-		}
-		self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
-		Ok(())
+        // Update netadata
+        store.load_metadata()?;
+        if store
+            .meta
+            .as_ref()
+            .unwrap()
+            .get(&rel)
+            .map(|m| m.size)
+            .unwrap_or(0)
+            <= blknum
+        {
+            store.meta.as_mut().unwrap().insert(
+                rel,
+                MetadataSnapshot {
+                    size: blknum + 1,
+                    lsn,
+                },
+            );
+            let mk = StoreKey::Metadata(MetadataKey { rel, lsn });
+            let mv = MetadataValue {
+                size: Some(blknum + 1),
+            };
+            store.data.put(&mk.ser()?, &mv.ser()?)?;
+        }
+        self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        Ok(())
     }
 
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: u32) -> Result<()> {
@@ -1385,14 +1467,20 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
 
         debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
 
-		let mut store = self.tl.store.write().unwrap();
-		store.load_metadata()?;
-		store.meta.as_mut().unwrap().insert(rel, MetadataSnapshot { size: relsize, lsn });
-		let mk = StoreKey::Metadata( MetadataKey { rel, lsn } );
-		let mv = MetadataValue { size: Some(relsize) };
-		store.data.put(&mk.ser()?, &mv.ser()?)?;
+        let mut store = self.tl.store.write().unwrap();
+        store.load_metadata()?;
+        store
+            .meta
+            .as_mut()
+            .unwrap()
+            .insert(rel, MetadataSnapshot { size: relsize, lsn });
+        let mk = StoreKey::Metadata(MetadataKey { rel, lsn });
+        let mv = MetadataValue {
+            size: Some(relsize),
+        };
+        store.data.put(&mk.ser()?, &mv.ser()?)?;
 
-		self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
 
         Ok(())
     }
@@ -1400,14 +1488,14 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
     fn drop_relish(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
         trace!("drop_segment: {} at {}", rel, lsn);
 
-		let mut store = self.tl.store.write().unwrap();
-		store.load_metadata()?;
-		store.meta.as_mut().unwrap().remove(&rel);
-		let mk = StoreKey::Metadata( MetadataKey { rel, lsn } );
-		let mv = MetadataValue { size: None }; // None indicates dropped relation
-		store.data.put(&mk.ser()?, &mv.ser()?)?;
+        let mut store = self.tl.store.write().unwrap();
+        store.load_metadata()?;
+        store.meta.as_mut().unwrap().remove(&rel);
+        let mk = StoreKey::Metadata(MetadataKey { rel, lsn });
+        let mv = MetadataValue { size: None }; // None indicates dropped relation
+        store.data.put(&mk.ser()?, &mv.ser()?)?;
 
-		self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
 
         Ok(())
     }
