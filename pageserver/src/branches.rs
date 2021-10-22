@@ -147,7 +147,7 @@ pub fn create_repo(
 
     let tli = create_timeline(conf, None, &tenantid)?;
 
-    let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
+    let repo = Arc::new(crate::buffered_repository::BufferedRepository::new(
         conf,
         wal_redo_manager,
         tenantid,

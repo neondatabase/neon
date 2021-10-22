@@ -2,7 +2,7 @@
 //! page server.
 
 use crate::branches;
-use crate::layered_repository::LayeredRepository;
+use crate::buffered_repository::BufferedRepository;
 use crate::repository::{Repository, Timeline};
 use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
@@ -98,15 +98,15 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
     let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
     // Set up an object repository, for actual data storage.
-    let repo = Arc::new(LayeredRepository::new(
+    let repo = Arc::new(BufferedRepository::new(
         conf,
         Arc::new(walredo_mgr),
         tenant_id,
         true,
     ));
 
-    let checkpointer_handle = LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
-    let gc_handle = LayeredRepository::launch_gc_thread(conf, repo.clone());
+    let checkpointer_handle = BufferedRepository::launch_checkpointer_thread(conf, repo.clone());
+    let gc_handle = BufferedRepository::launch_gc_thread(conf, repo.clone());
 
     let mut handles = TENANT_HANDLES.lock().unwrap();
     let h = TenantHandleEntry {

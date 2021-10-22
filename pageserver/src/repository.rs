@@ -111,8 +111,6 @@ pub trait Timeline: Send + Sync {
 
     /// Get a list of all existing relations
     /// Pass RelTag to get relation objects or None to get nonrels.
-    fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashSet<RelishTag>>;
-
     /// Get a list of all existing relations in given tablespace and database.
     fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
@@ -220,7 +218,7 @@ impl WALRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::{LayeredRepository, METADATA_FILE_NAME};
+    use crate::buffered_repository::{BufferedRepository, METADATA_FILE_NAME};
     use crate::walredo::{WalRedoError, WalRedoManager};
     use crate::PageServerConf;
     use hex_literal::hex;
@@ -296,7 +294,7 @@ mod tests {
         fn load(&self) -> Box<dyn Repository> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
-            Box::new(LayeredRepository::new(
+            Box::new(BufferedRepository::new(
                 self.conf,
                 walredo_mgr,
                 self.tenant_id,

@@ -10,7 +10,7 @@ use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 pub mod basebackup;
 pub mod branches;
 pub mod http;
-pub mod layered_repository;
+pub mod buffered_repository;
 pub mod page_service;
 pub mod relish;
 pub mod relish_storage;
@@ -20,6 +20,7 @@ pub mod tenant_mgr;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
+pub mod toast_store;
 
 pub mod defaults {
     use const_format::formatcp;
@@ -30,10 +31,8 @@ pub mod defaults {
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
-    // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
-    // would be more appropriate. But a low value forces the code to be exercised more,
-    // which is good for now to trigger bugs.
-    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
+	// Minimal size of WAL records chain to trigger materialization of the page
+    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 0;
     pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(1);
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;

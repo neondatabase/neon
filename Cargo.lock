@@ -919,6 +919,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "177c079243f6867429aca5af5053747f57e329d44f0c58bebca078cd14873ec2"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "matchers"
 version = "0.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1180,6 +1189,7 @@ dependencies = [
  "hyper",
  "lazy_static",
  "log",
+ "lz4_flex",
  "postgres",
  "postgres-protocol",
  "postgres-types",
@@ -1198,6 +1208,7 @@ dependencies = [
  "toml",
  "tracing",
  "workspace_hack",
+ "yakv",
  "zenith_metrics",
  "zenith_utils",
 ]
@@ -1909,6 +1920,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 
 [[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
 name = "stringprep"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2229,6 +2246,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59547bce71d9c38b83d9c0e92b6066c4253371f15005def0c30d9657f50c7642"
 
 [[package]]
+name = "twox-hash"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f559b464de2e2bdabcac6a210d12e9b5a5973c251e102c44c585c71d51bd78e"
+dependencies = [
+ "cfg-if 1.0.0",
+ "static_assertions",
+]
+
+[[package]]
 name = "typenum"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2541,6 +2568,17 @@ name = "xml-rs"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b07db065a5cf61a7e4ba64f29e67db906fb1787316516c4e6e5ff0fea1efcd8a"
+
+[[package]]
+name = "yakv"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54d2b862dd7bc9ac752c4642a0fb126dc17cb3895e20d25135f3f5052fa3000b"
+dependencies = [
+ "anyhow",
+ "crc32c",
+ "fs2",
+]
 
 [[package]]
 name = "zenith"
