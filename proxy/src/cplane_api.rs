@@ -2,7 +2,9 @@ use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, ToSocketAddrs};
 
-#[derive(Serialize, Deserialize, Debug)]
+use crate::state::ProxyWaiters;
+
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct DatabaseInfo {
     pub host: String,
     pub port: u16,
@@ -12,10 +14,11 @@ pub struct DatabaseInfo {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ProxyAuthResult {
-    pub ready: bool,
-    pub error: Option<String>,
-    pub conn_info: Option<DatabaseInfo>,
+#[serde(untagged)]
+enum ProxyAuthResponse {
+    Ready { conn_info: DatabaseInfo },
+    Error { error: String },
+    NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
 impl DatabaseInfo {
@@ -47,15 +50,21 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
     }
 }
 
-pub struct CPlaneApi {
-    auth_endpoint: &'static str,
+pub struct CPlaneApi<'a> {
+    auth_endpoint: &'a str,
+    waiters: &'a ProxyWaiters,
 }
 
-impl CPlaneApi {
-    pub fn new(auth_endpoint: &'static str) -> CPlaneApi {
-        CPlaneApi { auth_endpoint }
+impl<'a> CPlaneApi<'a> {
+    pub fn new(auth_endpoint: &'a str, waiters: &'a ProxyWaiters) -> Self {
+        Self {
+            auth_endpoint,
+            waiters,
+        }
     }
+}
 
+impl CPlaneApi<'_> {
     pub fn authenticate_proxy_request(
         &self,
         user: &str,
@@ -63,7 +72,7 @@ impl CPlaneApi {
         md5_response: &[u8],
         salt: &[u8; 4],
         psql_session_id: &str,
-    ) -> anyhow::Result<ProxyAuthResult> {
+    ) -> anyhow::Result<DatabaseInfo> {
         let mut url = reqwest::Url::parse(self.auth_endpoint)?;
         url.query_pairs_mut()
             .append_pair("login", user)
@@ -72,16 +81,59 @@ impl CPlaneApi {
             .append_pair("salt", &hex::encode(salt))
             .append_pair("psql_session_id", psql_session_id);
 
-        println!("cplane request: {}", url.as_str());
+        let waiter = self.waiters.register(psql_session_id.to_owned());
 
+        println!("cplane request: {}", url);
         let resp = reqwest::blocking::get(url)?;
-
         if !resp.status().is_success() {
             bail!("Auth failed: {}", resp.status())
         }
 
-        let auth_info: ProxyAuthResult = serde_json::from_str(resp.text()?.as_str())?;
+        let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text()?.as_str())?;
         println!("got auth info: #{:?}", auth_info);
-        Ok(auth_info)
+
+        use ProxyAuthResponse::*;
+        match auth_info {
+            Ready { conn_info } => Ok(conn_info),
+            Error { error } => bail!(error),
+            NotReady { .. } => waiter.wait()?.map_err(|e| anyhow!(e)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_proxy_auth_response() {
+        // Ready
+        let auth: ProxyAuthResponse = serde_json::from_value(json!({
+            "ready": true,
+            "conn_info": DatabaseInfo::default(),
+        }))
+        .unwrap();
+        assert!(matches!(
+            auth,
+            ProxyAuthResponse::Ready {
+                conn_info: DatabaseInfo { .. }
+            }
+        ));
+
+        // Error
+        let auth: ProxyAuthResponse = serde_json::from_value(json!({
+            "ready": false,
+            "error": "too bad, so sad",
+        }))
+        .unwrap();
+        assert!(matches!(auth, ProxyAuthResponse::Error { .. }));
+
+        // NotReady
+        let auth: ProxyAuthResponse = serde_json::from_value(json!({
+            "ready": false,
+        }))
+        .unwrap();
+        assert!(matches!(auth, ProxyAuthResponse::NotReady { .. }));
     }
 }
