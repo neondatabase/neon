@@ -142,7 +142,12 @@ pub fn register_relish_download(
         });
         tenant.state = TenantState::Downloading;
         match &tenant.repo {
-            Some(repo) => init_timeline(repo.as_ref(), timeline_id),
+            Some(repo) =>
+            {
+                init_timeline(repo.as_ref(), timeline_id);
+                tenant.state = TenantState::Active;
+                return;
+            }
             None => log::warn!("Initialize new repo"),
         }
         tenant.state = TenantState::Active;
