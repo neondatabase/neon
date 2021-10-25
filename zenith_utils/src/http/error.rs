@@ -69,7 +69,7 @@ impl HttpErrorBody {
 }
 
 pub async fn handler(err: routerify::RouteError) -> Response<Body> {
-    log::error!("{}", err);
+    tracing::error!("{}", err);
     err.downcast::<ApiError>()
         .expect("handler should always return api error")
         .into_response()
