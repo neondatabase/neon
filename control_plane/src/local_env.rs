@@ -24,6 +24,10 @@ pub struct LocalEnv {
     pub pageserver_http_port: u16,
 
     // Base directory for both pageserver and compute nodes
+    //
+    // This is not stored in the config file. Rather, this is the path where the
+    // config file itself is. It is read from the ZENITH_REPO_DIR env variable or
+    // '.zenith' if not given.
     pub base_data_dir: PathBuf,
 
     // Path to postgres distribution. It's expected that "bin", "include",
