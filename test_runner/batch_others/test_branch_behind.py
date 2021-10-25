@@ -1,5 +1,5 @@
 import subprocess
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -8,11 +8,12 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Create a couple of branches off the main branch, at a historical point in time.
 #
-def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
+def test_branch_behind(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
     # Branch at the point where only 100 rows were inserted
-    zenith_cli.run(["branch", "test_branch_behind", "empty"])
+    env.zenith_cli(["branch", "test_branch_behind", "empty"])
 
-    pgmain = postgres.create_start('test_branch_behind')
+    pgmain = env.postgres.create_start('test_branch_behind')
     log.info("postgres is running on 'test_branch_behind' branch")
 
     main_pg_conn = pgmain.connect()
@@ -40,7 +41,7 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     log.info(f'LSN after 200100 rows: {lsn_b}')
 
     # Branch at the point where only 100 rows were inserted
-    zenith_cli.run(["branch", "test_branch_behind_hundred", "test_branch_behind@" + lsn_a])
+    env.zenith_cli(["branch", "test_branch_behind_hundred", "test_branch_behind@" + lsn_a])
 
     # Insert many more rows. This generates enough WAL to fill a few segments.
     main_cur.execute('''
@@ -55,10 +56,10 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     log.info(f'LSN after 400100 rows: {lsn_c}')
 
     # Branch at the point where only 200100 rows were inserted
-    zenith_cli.run(["branch", "test_branch_behind_more", "test_branch_behind@" + lsn_b])
+    env.zenith_cli(["branch", "test_branch_behind_more", "test_branch_behind@" + lsn_b])
 
-    pg_hundred = postgres.create_start("test_branch_behind_hundred")
-    pg_more = postgres.create_start("test_branch_behind_more")
+    pg_hundred = env.postgres.create_start("test_branch_behind_hundred")
+    pg_more = env.postgres.create_start("test_branch_behind_more")
 
     # On the 'hundred' branch, we should see only 100 rows
     hundred_pg_conn = pg_hundred.connect()
@@ -79,8 +80,8 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     # Check bad lsn's for branching
 
     # branch at segment boundary
-    zenith_cli.run(["branch", "test_branch_segment_boundary", "test_branch_behind@0/3000000"])
-    pg = postgres.create_start("test_branch_segment_boundary")
+    env.zenith_cli(["branch", "test_branch_segment_boundary", "test_branch_behind@0/3000000"])
+    pg = env.postgres.create_start("test_branch_segment_boundary")
     cur = pg.connect().cursor()
     cur.execute('SELECT 1')
     assert cur.fetchone() == (1, )
@@ -89,7 +90,7 @@ def test_branch_behind(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
     #
     # FIXME: This works currently, but probably shouldn't be allowed
     try:
-        zenith_cli.run(["branch", "test_branch_preinitdb", "test_branch_behind@0/42"])
+        env.zenith_cli(["branch", "test_branch_preinitdb", "test_branch_behind@0/42"])
         # FIXME: assert false, "branch with invalid LSN should have failed"
     except subprocess.CalledProcessError:
         log.info("Branch creation with pre-initdb LSN failed (as expected)")

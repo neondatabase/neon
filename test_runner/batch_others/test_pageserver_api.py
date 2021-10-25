@@ -3,26 +3,28 @@ from uuid import uuid4
 import pytest
 import psycopg2
 import requests
-from fixtures.zenith_fixtures import ZenithCli, ZenithPageserver, ZenithPageserverHttpClient
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 from typing import cast
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_status_psql(pageserver):
-    assert pageserver.safe_psql('status') == [
+def test_status_psql(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+    assert env.pageserver.safe_psql('status') == [
         ('hello world', ),
     ]
 
 
-def test_branch_list_psql(pageserver: ZenithPageserver, zenith_cli):
+def test_branch_list_psql(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
     # Create a branch for us
-    zenith_cli.run(["branch", "test_branch_list_main", "empty"])
+    env.zenith_cli(["branch", "test_branch_list_main", "empty"])
 
-    conn = pageserver.connect()
+    conn = env.pageserver.connect()
     cur = conn.cursor()
 
-    cur.execute(f'branch_list {pageserver.initial_tenant}')
+    cur.execute(f'branch_list {env.initial_tenant}')
     branches = json.loads(cur.fetchone()[0])
     # Filter out branches created by other tests
     branches = [x for x in branches if x['name'].startswith('test_branch_list')]
@@ -35,10 +37,10 @@ def test_branch_list_psql(pageserver: ZenithPageserver, zenith_cli):
     assert 'ancestor_lsn' in branches[0]
 
     # Create another branch, and start Postgres on it
-    zenith_cli.run(['branch', 'test_branch_list_experimental', 'test_branch_list_main'])
-    zenith_cli.run(['pg', 'create', 'test_branch_list_experimental'])
+    env.zenith_cli(['branch', 'test_branch_list_experimental', 'test_branch_list_main'])
+    env.zenith_cli(['pg', 'create', 'test_branch_list_experimental'])
 
-    cur.execute(f'branch_list {pageserver.initial_tenant}')
+    cur.execute(f'branch_list {env.initial_tenant}')
     new_branches = json.loads(cur.fetchone()[0])
     # Filter out branches created by other tests
     new_branches = [x for x in new_branches if x['name'].startswith('test_branch_list')]
@@ -54,19 +56,22 @@ def test_branch_list_psql(pageserver: ZenithPageserver, zenith_cli):
     conn.close()
 
 
-def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli: ZenithCli):
-    res = zenith_cli.run(["tenant", "list"])
+def test_tenant_list_psql(zenith_env_builder: ZenithEnvBuilder):
+    # don't use zenith_simple_env, because there might be other tenants there,
+    # left over from other tests.
+    env = zenith_env_builder.init()
+
+    res = env.zenith_cli(["tenant", "list"])
     res.check_returncode()
     tenants = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
-    assert tenants == [pageserver.initial_tenant]
+    assert tenants == [env.initial_tenant]
 
-    conn = pageserver.connect()
+    conn = env.pageserver.connect()
     cur = conn.cursor()
 
     # check same tenant cannot be created twice
-    with pytest.raises(psycopg2.DatabaseError,
-                       match=f'tenant {pageserver.initial_tenant} already exists'):
-        cur.execute(f'tenant_create {pageserver.initial_tenant}')
+    with pytest.raises(psycopg2.DatabaseError, match=f'tenant {env.initial_tenant} already exists'):
+        cur.execute(f'tenant_create {env.initial_tenant}')
 
     # create one more tenant
     tenant1 = uuid4().hex
@@ -76,7 +81,7 @@ def test_tenant_list_psql(pageserver: ZenithPageserver, zenith_cli: ZenithCli):
 
     # compare tenants list
     new_tenants = sorted(map(lambda t: cast(str, t['id']), json.loads(cur.fetchone()[0])))
-    assert sorted([pageserver.initial_tenant, tenant1]) == new_tenants
+    assert sorted([env.initial_tenant, tenant1]) == new_tenants
 
 
 def check_client(client: ZenithPageserverHttpClient, initial_tenant: str):
@@ -98,12 +103,17 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: str):
     assert branch_name in {b['name'] for b in client.branch_list(tenant_id)}
 
 
-def test_pageserver_http_api_client(pageserver: ZenithPageserver):
-    client = pageserver.http_client()
-    check_client(client, pageserver.initial_tenant)
+def test_pageserver_http_api_client(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+    client = env.pageserver.http_client()
+    check_client(client, env.initial_tenant)
 
 
-def test_pageserver_http_api_client_auth_enabled(pageserver_auth_enabled: ZenithPageserver):
-    client = pageserver_auth_enabled.http_client(
-        auth_token=pageserver_auth_enabled.auth_keys.generate_management_token())
-    check_client(client, pageserver_auth_enabled.initial_tenant)
+def test_pageserver_http_api_client_auth_enabled(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.pageserver_auth_enabled = True
+    env = zenith_env_builder.init()
+
+    management_token = env.auth_keys.generate_management_token()
+
+    client = env.pageserver.http_client(auth_token=management_token)
+    check_client(client, env.initial_tenant)

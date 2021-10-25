@@ -31,11 +31,11 @@ To use, declare the 'zenbenchmark' fixture in the test function. Run the
 bencmark, and then record the result by calling zenbenchmark.record. For example:
 
 import timeit
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import ZenithEnv
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
-def test_mybench(postgres: PostgresFactory, pageserver: ZenithPageserver, zenbenchmark):
+def test_mybench(zenith_simple_env: env, zenbenchmark):
 
     # Initialize the test
     ...

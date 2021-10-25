@@ -4,7 +4,7 @@ import time
 
 from contextlib import closing
 from multiprocessing import Process, Value
-from fixtures.zenith_fixtures import WalAcceptorFactory, ZenithPageserver, PostgresFactory
+from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -13,16 +13,13 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up
 # along the way. 2 of 3 are always alive, so the work keeps going.
-def test_pageserver_restart(zenith_cli,
-                            pageserver: ZenithPageserver,
-                            postgres: PostgresFactory,
-                            wa_factory: WalAcceptorFactory):
-
+def test_pageserver_restart(zenith_env_builder: ZenithEnvBuilder):
     # One safekeeper is enough for this test.
-    wa_factory.start_n_new(1)
+    zenith_env_builder.num_safekeepers = 1
+    env = zenith_env_builder.init()
 
-    zenith_cli.run(["branch", "test_pageserver_restart", "empty"])
-    pg = postgres.create_start('test_pageserver_restart', wal_acceptors=wa_factory.get_connstrs())
+    env.zenith_cli(["branch", "test_pageserver_restart", "main"])
+    pg = env.postgres.create_start('test_pageserver_restart')
 
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
@@ -50,8 +47,8 @@ def test_pageserver_restart(zenith_cli,
     # Stop and restart pageserver. This is a more or less graceful shutdown, although
     # the page server doesn't currently have a shutdown routine so there's no difference
     # between stopping and crashing.
-    pageserver.stop()
-    pageserver.start()
+    env.pageserver.stop()
+    env.pageserver.start()
 
     # Stopping the pageserver breaks the connection from the postgres backend to
     # the page server, and causes the next query on the connection to fail. Start a new
@@ -65,5 +62,5 @@ def test_pageserver_restart(zenith_cli,
     assert cur.fetchone() == (100000, )
 
     # Stop the page server by force, and restart it
-    pageserver.stop()
-    pageserver.start()
+    env.pageserver.stop()
+    env.pageserver.start()

@@ -1,6 +1,7 @@
 from contextlib import closing
 import psycopg2.extras
 import time
+from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -22,13 +23,14 @@ def print_gc_result(row):
 # This test is pretty tightly coupled with the current implementation of layered
 # storage, in layered_repository.rs.
 #
-def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
-    zenith_cli.run(["branch", "test_layerfiles_gc", "empty"])
-    pg = postgres.create_start('test_layerfiles_gc')
+def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+    env.zenith_cli(["branch", "test_layerfiles_gc", "empty"])
+    pg = env.postgres.create_start('test_layerfiles_gc')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            with closing(pageserver.connect()) as psconn:
+            with closing(env.pageserver.connect()) as psconn:
                 with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
 
                     # Get the timeline ID of our branch. We need it for the 'do_gc' command
@@ -57,7 +59,7 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     cur.execute("DELETE FROM foo")
 
                     log.info("Running GC before test")
-                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     # remember the number of files
@@ -70,7 +72,7 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     # removing the old image and delta layer.
                     log.info("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
-                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
@@ -84,7 +86,7 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
@@ -96,7 +98,7 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
@@ -105,7 +107,7 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
 
                     # Run GC again, with no changes in the database. Should not remove anything.
                     log.info("Run GC again, with nothing to do")
-                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain
@@ -118,7 +120,7 @@ def test_layerfiles_gc(zenith_cli, pageserver, postgres, pg_bin):
                     log.info("Drop table and run GC again")
                     cur.execute("DROP TABLE foo")
 
-                    pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
 

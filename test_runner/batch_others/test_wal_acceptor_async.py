@@ -3,7 +3,7 @@ import asyncpg
 import random
 import time
 
-from fixtures.zenith_fixtures import WalAcceptor, WalAcceptorFactory, ZenithPageserver, PostgresFactory, Postgres
+from fixtures.zenith_fixtures import ZenithEnvBuilder, Postgres, Safekeeper
 from fixtures.log_helper import getLogger
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 from typing import List
@@ -104,7 +104,7 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accou
     await pg_conn.close()
 
 
-async def wait_for_lsn(safekeeper: WalAcceptor,
+async def wait_for_lsn(safekeeper: Safekeeper,
                        tenant_id: str,
                        timeline_id: str,
                        wait_lsn: str,
@@ -140,7 +140,7 @@ async def wait_for_lsn(safekeeper: WalAcceptor,
 # On each iteration 1 acceptor is stopped, and 2 others should allow
 # background workers execute transactions. In the end, state should remain
 # consistent.
-async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_workers=10):
+async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_workers=10):
     n_accounts = 100
     init_amount = 100000
     max_transfer = 100
@@ -192,18 +192,14 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[WalAcceptor], n_
 
 
 # restart acceptors one by one, while executing and validating bank transactions
-def test_restarts_under_load(zenith_cli,
-                             pageserver: ZenithPageserver,
-                             postgres: PostgresFactory,
-                             wa_factory: WalAcceptorFactory):
+def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init()
 
-    wa_factory.start_n_new(3)
+    env.zenith_cli(["branch", "test_wal_acceptors_restarts_under_load", "main"])
+    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load')
 
-    zenith_cli.run(["branch", "test_wal_acceptors_restarts_under_load", "empty"])
-    pg = postgres.create_start('test_wal_acceptors_restarts_under_load',
-                               wal_acceptors=wa_factory.get_connstrs())
-
-    asyncio.run(run_restarts_under_load(pg, wa_factory.instances))
+    asyncio.run(run_restarts_under_load(pg, env.safekeepers))
 
     # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
     pg.stop()

@@ -65,36 +65,44 @@ Exit after the first test failure:
 `pytest -x ...`
 (there are many more pytest options; run `pytest -h` to see them.)
 
+### Writing a test
 
-### Building new tests
+Every test needs a Zenith Environment, or ZenithEnv to operate in. A Zenith Environment
+is like a little cloud-in-a-box, and consists of a Pageserver, 0-N Safekeepers, and
+compute Postgres nodes. The connections between them can be configured to use JWT
+authentication tokens, and some other configuration options can be tweaked too.
 
-The tests make heavy use of pytest fixtures. You can read about how they work here: https://docs.pytest.org/en/stable/fixture.html
+The easiest way to get access to a Zenith Environment is by using the `zenith_simple_env`
+fixture. The 'simple' env may be shared across multiple tests, so don't shut down the nodes
+or make other destructive changes in that environment. Also don't assume that
+there are no tenants or branches or data in the cluster. For convenience, there is a
+branch called `empty`, though. The convention is to create a test-specific branch of
+that and load any test data there, instead of the 'main' branch.
 
-Essentially, this means that each time you see a fixture named as an input parameter, the function with that name will be run and passed as a parameter to the function.
-
-So this code:
+For more complicated cases, you can build a custom Zenith Environment, with the `zenith_env`
+fixture:
 
 ```python
-def test_something(zenith_cli, pg_bin):
-    pass
+def test_foobar(zenith_env_builder: ZenithEnvBuilder):
+    # Prescribe the environment.
+    # We want to have 3 safekeeper nodes, and use JWT authentication in the
+    # connections to the page server
+    zenith_env_builder.num_safekeepers = 3
+    zenith_env_builder.set_pageserver_auth(True)
+
+    # Now create the environment. This initializes the repository, and starts
+    # up the page server and the safekeepers
+    env = zenith_env_builder.init()
+
+    # Run the test
+    ...
 ```
 
-... will run the fixtures called `zenith_cli` and `pg_bin` and deliver those results to the test function.
+For more information about pytest fixtures, see https://docs.pytest.org/en/stable/fixture.html
 
-Fixtures can't be imported using the normal python syntax. Instead, use this:
-
-```python
-pytest_plugins = ("fixtures.something")
-```
-
-That will make all the fixtures in the `fixtures/something.py` file available.
-
-Anything that's likely to be used in multiple tests should be built into a fixture.
-
-Note that fixtures can clean up after themselves if they use the `yield` syntax.
-Cleanup will happen even if the test fails (raises an unhandled exception).
-Python destructors, e.g. `__del__()` aren't recommended for cleanup.
-
+At the end of a test, all the nodes in the environment are automatically stopped, so you
+don't need to worry about cleaning up. Logs and test data are preserved for the analysis,
+in a directory under `../test_output/<testname>`
 
 ### Before submitting a patch
 #### Obligatory checks
