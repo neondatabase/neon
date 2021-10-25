@@ -46,7 +46,6 @@ def test_compute_auth_to_pageserver(
     pageserver_auth_enabled: ZenithPageserver,
     repo_dir: str,
     with_wal_acceptors: bool,
-    pg_bin: PgBin,
     port_distributor: PortDistributor,
 ):
     ps = pageserver_auth_enabled
@@ -62,7 +61,6 @@ def test_compute_auth_to_pageserver(
     with Postgres(
             zenith_cli=zenith_cli,
             repo_dir=repo_dir,
-            pg_bin=pg_bin,
             tenant_id=ps.initial_tenant,
             port=port_distributor.get_port(),
     ).create_start(

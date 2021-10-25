@@ -593,12 +593,7 @@ def pageserver_auth_enabled(zenith_cli: ZenithCli, repo_dir: str, pageserver_por
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self,
-                 zenith_cli: ZenithCli,
-                 repo_dir: str,
-                 pg_bin: PgBin,
-                 tenant_id: str,
-                 port: int):
+    def __init__(self, zenith_cli: ZenithCli, repo_dir: str, tenant_id: str, port: int):
         super().__init__(host='localhost', port=port)
 
         self.zenith_cli = zenith_cli
@@ -607,7 +602,6 @@ class Postgres(PgProtocol):
         self.node_name: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
-        self.pg_bin = pg_bin
         # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
 
     def create(
@@ -781,7 +775,6 @@ class PostgresFactory:
     def __init__(self,
                  zenith_cli: ZenithCli,
                  repo_dir: str,
-                 pg_bin: PgBin,
                  initial_tenant: str,
                  port_distributor: PortDistributor):
         self.zenith_cli = zenith_cli
@@ -790,7 +783,6 @@ class PostgresFactory:
         self.instances: List[Postgres] = []
         self.initial_tenant: str = initial_tenant
         self.port_distributor = port_distributor
-        self.pg_bin = pg_bin
 
     def create_start(self,
                      node_name: str = "main",
@@ -802,7 +794,6 @@ class PostgresFactory:
         pg = Postgres(
             zenith_cli=self.zenith_cli,
             repo_dir=self.repo_dir,
-            pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
             port=self.port_distributor.get_port(),
         )
@@ -826,7 +817,6 @@ class PostgresFactory:
         pg = Postgres(
             zenith_cli=self.zenith_cli,
             repo_dir=self.repo_dir,
-            pg_bin=self.pg_bin,
             tenant_id=tenant_id or self.initial_tenant,
             port=self.port_distributor.get_port(),
         )
@@ -857,12 +847,10 @@ def initial_tenant(pageserver: ZenithPageserver):
 def postgres(zenith_cli: ZenithCli,
              initial_tenant: str,
              repo_dir: str,
-             pg_bin: PgBin,
              port_distributor: PortDistributor) -> Iterator[PostgresFactory]:
     pgfactory = PostgresFactory(
         zenith_cli=zenith_cli,
         repo_dir=repo_dir,
-        pg_bin=pg_bin,
         initial_tenant=initial_tenant,
         port_distributor=port_distributor,
     )
@@ -1167,7 +1155,8 @@ def check_restored_datadir_content(zenith_cli: ZenithCli,
     restored_dir_path = os.path.join(test_output_dir, f"{pg.node_name}_restored_datadir")
     mkdir_if_needed(restored_dir_path)
 
-    psql_path = os.path.join(pg.pg_bin.pg_bin_path, 'psql')
+    pg_bin = PgBin(test_output_dir)
+    psql_path = os.path.join(pg_bin.pg_bin_path, 'psql')
 
     cmd = rf"""
         {psql_path}                                    \
