@@ -153,7 +153,7 @@ impl PageServerNode {
 
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         cmd.args(&["-D", self.repo_path().to_str().unwrap()])
-            .arg("-d")
+            .arg("--daemonize")
             .env_clear()
             .env("RUST_BACKTRACE", "1");
 
