@@ -1157,10 +1157,7 @@ def list_files_to_compare(pgdata_dir: str):
 
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(zenith_cli: ZenithCli,
-                                   test_output_dir: str,
-                                   pg: Postgres,
-                                   pageserver_pg_port: int):
+def check_restored_datadir_content(test_output_dir: str, pg: Postgres, pageserver_pg_port: int):
 
     # Get the timeline ID of our branch. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:

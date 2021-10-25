@@ -18,7 +18,6 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 #
 def test_bulk_insert(postgres: PostgresFactory,
                      pageserver: ZenithPageserver,
-                     pg_bin,
                      zenith_cli,
                      zenbenchmark,
                      repo_dir: str):

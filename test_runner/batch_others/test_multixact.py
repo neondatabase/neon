@@ -71,4 +71,4 @@ def test_multixact(pageserver: ZenithPageserver,
     assert next_multixact_id_new == next_multixact_id
 
     # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(zenith_cli, test_output_dir, pg_new, pageserver.service_port.pg)
+    check_restored_datadir_content(test_output_dir, pg_new, pageserver.service_port.pg)

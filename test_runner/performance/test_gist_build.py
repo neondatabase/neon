@@ -13,7 +13,6 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 #
 def test_gist_buffering_build(postgres: PostgresFactory,
                               pageserver: ZenithPageserver,
-                              pg_bin,
                               zenith_cli,
                               zenbenchmark,
                               repo_dir: str):

@@ -1,6 +1,6 @@
 from contextlib import closing
 
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import PostgresFactory
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -9,7 +9,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test starting Postgres with custom options
 #
-def test_config(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
+def test_config(zenith_cli, postgres: PostgresFactory):
     # Create a branch for us
     zenith_cli.run(["branch", "test_config", "empty"])
 

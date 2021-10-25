@@ -20,7 +20,6 @@ pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
 def test_write_amplification(postgres: PostgresFactory,
                              pageserver: ZenithPageserver,
-                             pg_bin,
                              zenith_cli,
                              zenbenchmark,
                              repo_dir: str):
