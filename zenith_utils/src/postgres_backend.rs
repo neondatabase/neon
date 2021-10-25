@@ -7,7 +7,6 @@ use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
-use log::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
@@ -16,6 +15,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::*;
 
 static PGBACKEND_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
