@@ -222,9 +222,9 @@ pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Reposito
     let m = access_tenants();
     let tenant = m
         .get(&tenantid)
-        .ok_or_else(|| anyhow!("Tenant not found for tenant {}", tenantid));
+        .ok_or_else(|| anyhow!("Tenant not found for tenant {}", tenantid))?;
 
-    match &tenant.unwrap().repo {
+    match &tenant.repo {
         Some(repo) => Ok(Arc::clone(repo)),
         None => anyhow::bail!("Repository for tenant {} is not yet valid", tenantid),
     }
