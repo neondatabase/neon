@@ -575,7 +575,7 @@ class PgBin:
         return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
 
 
-@zenfixture
+@pytest.fixture(scope='function')
 def pg_bin(test_output_dir: str) -> PgBin:
     return PgBin(test_output_dir)
 
@@ -843,7 +843,7 @@ def initial_tenant(pageserver: ZenithPageserver):
     return pageserver.initial_tenant
 
 
-@zenfixture
+@pytest.fixture(scope='function')
 def postgres(zenith_cli: ZenithCli,
              initial_tenant: str,
              repo_dir: str,
@@ -1060,26 +1060,37 @@ class WalAcceptorHttpClient(requests.Session):
                                         flush_lsn=resj['flush_lsn'])
 
 
-@zenfixture
-def test_output_dir(request: Any) -> str:
+def get_test_output_dir(request: Any) -> str:
     """ Compute the working directory for an individual test. """
+    test_name = request.node.name
+    test_dir = os.path.join(top_output_dir, test_name)
+    log.info(f'get_test_output_dir is {test_dir}')
+    return test_dir
 
-    if os.environ.get('TEST_SHARED_FIXTURES') is None:
-        # one directory per test
-        test_name = request.node.name
-    else:
-        # We're running shared fixtures. Share a single directory.
-        test_name = 'shared'
 
-    test_output_dir = os.path.join(top_output_dir, test_name)
-    log.info(f'test_output_dir is {test_output_dir}')
-    shutil.rmtree(test_output_dir, ignore_errors=True)
-    mkdir_if_needed(test_output_dir)
-    return test_output_dir
+# This is autouse, so the test output directory always gets created, even
+# if a test doesn't put anything there. It also solves a problem with the
+# repo_dir() fixture: if TEST_SHARED_FIXTURES is not set, repo_dir()
+# creates the repo in the test output directory. But it cannot depend on
+# 'test_output_dir' fixture, because when TEST_SHARED_FIXTURES is not set,
+# it has 'session' scope and cannot access fixtures with 'function'
+# scope. So it uses the get_test_output_dir() function to get the path, and
+# this fixture ensures that the directory exists.  That works because
+# 'autouse' fixtures are run before other fixtures.
+@pytest.fixture(scope='function', autouse=True)
+def test_output_dir(request: Any) -> str:
+    """ Create the working directory for an individual test. """
+
+    # one directory per test
+    test_dir = get_test_output_dir(request)
+    log.info(f'test_output_dir is {test_dir}')
+    shutil.rmtree(test_dir, ignore_errors=True)
+    mkdir_if_needed(test_dir)
+    return test_dir
 
 
 @zenfixture
-def repo_dir(request: Any, test_output_dir: str) -> Path:
+def repo_dir(request: Any) -> Path:
     """
     Compute the test repo_dir.
 
@@ -1087,7 +1098,16 @@ def repo_dir(request: Any, test_output_dir: str) -> Path:
     It doesn't have anything to do with the git repo.
     """
 
-    repo_dir = os.path.join(test_output_dir, 'repo')
+    if os.environ.get('TEST_SHARED_FIXTURES') is None:
+        # Create the environment in the per-test output directory
+        # The 'test_output_dir' fixture should have created it already
+        repo_dir = os.path.join(get_test_output_dir(request), "repo")
+        assert os.path.exists(repo_dir)
+    else:
+        # We're running shared fixtures. Share a single directory.
+        repo_dir = os.path.join(top_output_dir, "shared")
+        shutil.rmtree(repo_dir, ignore_errors=True)
+
     return Path(repo_dir)
 
 
