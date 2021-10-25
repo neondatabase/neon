@@ -39,9 +39,11 @@ pub struct LocalEnv {
     // Path to pageserver binary.
     pub zenith_distrib_dir: PathBuf,
 
-    // keeping tenant id in config to reduce copy paste when running zenith locally with single tenant
-    #[serde(with = "hex")]
-    pub tenantid: ZTenantId,
+    // Default tenant ID to use with the 'zenith' command line utility, when
+    // --tenantid is not explicitly specified.
+    #[serde(with = "opt_tenantid_serde")]
+    #[serde(default)]
+    pub default_tenantid: Option<ZTenantId>,
 
     // jwt auth token used for communication with pageserver
     pub auth_token: String,
@@ -173,7 +175,7 @@ pub fn init(
         pg_distrib_dir,
         zenith_distrib_dir,
         base_data_dir: base_path,
-        tenantid,
+        default_tenantid: Some(tenantid),
         auth_token,
         auth_type,
         private_key_path,
@@ -203,4 +205,31 @@ pub fn load_config() -> Result<LocalEnv> {
     // load and parse file
     let config = fs::read_to_string(repopath.join("config"))?;
     toml::from_str(config.as_str()).map_err(|e| e.into())
+}
+
+/// Serde routines for Option<ZTenantId>. The serialized form is a hex string.
+mod opt_tenantid_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::str::FromStr;
+    use zenith_utils::zid::ZTenantId;
+
+    pub fn serialize<S>(tenantid: &Option<ZTenantId>, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        tenantid.map(|t| t.to_string()).serialize(ser)
+    }
+
+    pub fn deserialize<'de, D>(des: D) -> Result<Option<ZTenantId>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: Option<String> = Option::deserialize(des)?;
+        if let Some(s) = s {
+            return Ok(Some(
+                ZTenantId::from_str(&s).map_err(serde::de::Error::custom)?,
+            ));
+        }
+        Ok(None)
+    }
 }

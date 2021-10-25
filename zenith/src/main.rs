@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use anyhow::{Context, Result};
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
@@ -178,7 +178,8 @@ fn main() -> Result<()> {
         ("init", Some(init_match)) => {
             let pageserver = PageServerNode::from_env(&env);
             if let Err(e) = pageserver.init(
-                Some(&env.tenantid.to_string()),
+                // default_tenantid was generated before the `local_env::init` call above
+                Some(&env.default_tenantid.unwrap().to_string()),
                 init_match.is_present("enable-auth"),
             ) {
                 eprintln!("pageserver init failed: {}", e);
@@ -380,6 +381,17 @@ fn get_branch_infos(
     Ok(branch_infos)
 }
 
+// Helper function to parse --tenantid option, or get the default from config file
+fn get_tenantid(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<ZTenantId> {
+    if let Some(tenantid_cmd) = sub_match.value_of("tenantid") {
+        Ok(ZTenantId::from_str(tenantid_cmd)?)
+    } else if let Some(tenantid_conf) = env.default_tenantid {
+        Ok(tenantid_conf)
+    } else {
+        bail!("No tenantid. Use --tenantid, or set 'default_tenantid' in the config file");
+    }
+}
+
 fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let pageserver = PageServerNode::from_env(env);
     match tenant_match.subcommand() {
@@ -405,22 +417,18 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
 fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let pageserver = PageServerNode::from_env(env);
 
+    let tenantid = get_tenantid(branch_match, env)?;
+
     if let Some(branchname) = branch_match.value_of("branchname") {
         let startpoint_str = branch_match
             .value_of("start-point")
             .ok_or_else(|| anyhow!("Missing start-point"))?;
-        let tenantid: ZTenantId = branch_match
-            .value_of("tenantid")
-            .map_or(Ok(env.tenantid), |value| value.parse())?;
         let branch = pageserver.branch_create(branchname, startpoint_str, &tenantid)?;
         println!(
             "Created branch '{}' at {:?} for tenant: {}",
             branch.name, branch.latest_valid_lsn, tenantid,
         );
     } else {
-        let tenantid: ZTenantId = branch_match
-            .value_of("tenantid")
-            .map_or(Ok(env.tenantid), |value| value.parse())?;
         // No arguments, list branches for tenant
         let branches = pageserver.branch_list(&tenantid)?;
         print_branches_tree(branches)?;
@@ -434,9 +442,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
     match pg_match.subcommand() {
         ("list", Some(list_match)) => {
-            let tenantid: ZTenantId = list_match
-                .value_of("tenantid")
-                .map_or(Ok(env.tenantid), |value| value.parse())?;
+            let tenantid = get_tenantid(list_match, env)?;
 
             let branch_infos = get_branch_infos(env, &tenantid).unwrap_or_else(|e| {
                 eprintln!("Failed to load branch info: {}", e);
@@ -468,9 +474,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             }
         }
         ("create", Some(create_match)) => {
-            let tenantid: ZTenantId = create_match
-                .value_of("tenantid")
-                .map_or(Ok(env.tenantid), |value| value.parse())?;
+            let tenantid = get_tenantid(create_match, env)?;
             let node_name = create_match.value_of("node").unwrap_or("main");
             let timeline_name = create_match.value_of("timeline").unwrap_or(node_name);
 
@@ -481,9 +485,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             cplane.new_node(tenantid, node_name, timeline_name, port)?;
         }
         ("start", Some(start_match)) => {
-            let tenantid: ZTenantId = start_match
-                .value_of("tenantid")
-                .map_or(Ok(env.tenantid), |value| value.parse())?;
+            let tenantid = get_tenantid(start_match, env)?;
             let node_name = start_match.value_of("node").unwrap_or("main");
             let timeline_name = start_match.value_of("timeline");
 
@@ -523,11 +525,9 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             }
         }
         ("stop", Some(stop_match)) => {
+            let tenantid = get_tenantid(stop_match, env)?;
             let node_name = stop_match.value_of("node").unwrap_or("main");
             let destroy = stop_match.is_present("destroy");
-            let tenantid: ZTenantId = stop_match
-                .value_of("tenantid")
-                .map_or(Ok(env.tenantid), |value| value.parse())?;
 
             let node = cplane
                 .nodes
