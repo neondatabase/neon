@@ -39,8 +39,6 @@ impl ComputeControlPlane {
     // |  |- <tenant_id>
     // |  |   |- <branch name>
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
-        // TODO: since pageserver do not have config file yet we believe here that
-        // it is running on default port. Change that when pageserver will have config.
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
         let mut nodes = BTreeMap::default();
