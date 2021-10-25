@@ -1,7 +1,11 @@
 import os
 
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import PageserverPort, PostgresFactory, check_restored_datadir_content
+from fixtures.zenith_fixtures import (PageserverPort,
+                                      PostgresFactory,
+                                      check_restored_datadir_content,
+                                      base_dir,
+                                      pg_distrib_dir)
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -11,8 +15,6 @@ def test_zenith_regress(postgres: PostgresFactory,
                         pg_bin,
                         zenith_cli,
                         test_output_dir,
-                        pg_distrib_dir,
-                        base_dir,
                         capsys,
                         pageserver_port: PageserverPort):
 

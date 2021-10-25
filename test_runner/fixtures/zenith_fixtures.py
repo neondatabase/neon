@@ -54,6 +54,12 @@ DEFAULT_POSTGRES_DIR = 'tmp_install'
 BASE_PORT = 15000
 WORKER_PORT_NUM = 100
 
+# These are set in pytest_configure()
+base_dir = ""
+zenith_binpath = ""
+pg_distrib_dir = ""
+top_output_dir = ""
+
 
 def pytest_configure(config):
     """
@@ -76,9 +82,41 @@ def pytest_configure(config):
             'Found interfering processes running. Stop all Zenith pageservers, nodes, safekeepers, as well as stand-alone Postgres.'
         )
 
+    # find the base directory (currently this is the git root)
+    global base_dir
+    base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
+    log.info(f'base_dir is {base_dir}')
 
-def determine_scope(fixture_name: str, config: Any) -> str:
-    return 'session'
+    # Find the zenith binaries.
+    global zenith_binpath
+    env_zenith_bin = os.environ.get('ZENITH_BIN')
+    if env_zenith_bin:
+        zenith_binpath = env_zenith_bin
+    else:
+        zenith_binpath = os.path.join(base_dir, 'target/debug')
+    log.info(f'zenith_binpath is {zenith_binpath}')
+    if not os.path.exists(os.path.join(zenith_binpath, 'pageserver')):
+        raise Exception('zenith binaries not found at "{}"'.format(zenith_dir))
+
+    # Find the postgres installation.
+    global pg_distrib_dir
+    env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
+    if env_postgres_bin:
+        pg_distrib_dir = env_postgres_bin
+    else:
+        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
+    log.info(f'pg_distrib_dir is {pg_distrib_dir}')
+    if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/postgres')):
+        raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
+
+    # Compute the top-level directory for all tests.
+    global top_output_dir
+    env_test_output = os.environ.get('TEST_OUTPUT')
+    if env_test_output is not None:
+        top_output_dir = env_test_output
+    else:
+        top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
+    mkdir_if_needed(top_output_dir)
 
 
 def zenfixture(func: Fn) -> Fn:
@@ -183,10 +221,8 @@ class ZenithCli:
     We also store an environment that will tell the CLI to operate
     on a particular ZENITH_REPO_DIR.
     """
-    def __init__(self, binpath: str, repo_dir: str, pg_distrib_dir: str):
-        assert os.path.isdir(binpath)
-        self.binpath = binpath
-        self.bin_zenith = os.path.join(binpath, 'zenith')
+    def __init__(self, repo_dir: str):
+        self.bin_zenith = os.path.join(zenith_binpath, 'zenith')
         self.repo_dir = repo_dir
         self.env = os.environ.copy()
         self.env['ZENITH_REPO_DIR'] = repo_dir
@@ -233,8 +269,8 @@ class ZenithCli:
 
 
 @zenfixture
-def zenith_cli(zenith_binpath: str, repo_dir: str, pg_distrib_dir: str) -> ZenithCli:
-    return ZenithCli(zenith_binpath, repo_dir, pg_distrib_dir)
+def zenith_cli(repo_dir: str) -> ZenithCli:
+    return ZenithCli(repo_dir)
 
 
 class ZenithPageserverHttpClient(requests.Session):
@@ -484,7 +520,7 @@ def pageserver(zenith_cli: ZenithCli, repo_dir: str,
 
 class PgBin:
     """ A helper class for executing postgres binaries """
-    def __init__(self, log_dir: str, pg_distrib_dir: str):
+    def __init__(self, log_dir: str):
         self.log_dir = log_dir
         self.pg_install_path = pg_distrib_dir
         self.pg_bin_path = os.path.join(self.pg_install_path, 'bin')
@@ -540,8 +576,8 @@ class PgBin:
 
 
 @zenfixture
-def pg_bin(test_output_dir: str, pg_distrib_dir: str) -> PgBin:
-    return PgBin(test_output_dir, pg_distrib_dir)
+def pg_bin(test_output_dir: str) -> PgBin:
+    return PgBin(test_output_dir)
 
 
 @pytest.fixture
@@ -954,12 +990,8 @@ class WalAcceptor:
 
 class WalAcceptorFactory:
     """ An object representing multiple running wal acceptors. """
-    def __init__(self,
-                 zenith_binpath: Path,
-                 data_dir: Path,
-                 pageserver_port: int,
-                 port_distributor: PortDistributor):
-        self.wa_bin_path = zenith_binpath / 'safekeeper'
+    def __init__(self, data_dir: Path, pageserver_port: int, port_distributor: PortDistributor):
+        self.wa_bin_path = Path(os.path.join(zenith_binpath, 'safekeeper'))
         self.data_dir = data_dir
         self.instances: List[WalAcceptor] = []
         self.port_distributor = port_distributor
@@ -1004,13 +1036,10 @@ class WalAcceptorFactory:
 
 
 @zenfixture
-def wa_factory(zenith_binpath: str,
-               repo_dir: str,
-               pageserver_port: PageserverPort,
+def wa_factory(repo_dir: str, pageserver_port: PageserverPort,
                port_distributor: PortDistributor) -> Iterator[WalAcceptorFactory]:
     """ Gives WalAcceptorFactory providing wal acceptors. """
     wafactory = WalAcceptorFactory(
-        zenith_binpath=Path(zenith_binpath),
         data_dir=Path(repo_dir) / "wal_acceptors",
         pageserver_port=pageserver_port.pg,
         port_distributor=port_distributor,
@@ -1044,29 +1073,7 @@ class WalAcceptorHttpClient(requests.Session):
 
 
 @zenfixture
-def base_dir() -> str:
-    """ find the base directory (currently this is the git root) """
-
-    base_dir = os.path.normpath(os.path.join(get_self_dir(), '../..'))
-    log.info(f'base_dir is {base_dir}')
-    return base_dir
-
-
-@zenfixture
-def top_output_dir(base_dir: str) -> str:
-    """ Compute the top-level directory for all tests. """
-
-    env_test_output = os.environ.get('TEST_OUTPUT')
-    if env_test_output is not None:
-        output_dir = env_test_output
-    else:
-        output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
-    mkdir_if_needed(output_dir)
-    return output_dir
-
-
-@zenfixture
-def test_output_dir(request: Any, top_output_dir: str) -> str:
+def test_output_dir(request: Any) -> str:
     """ Compute the working directory for an individual test. """
 
     if os.environ.get('TEST_SHARED_FIXTURES') is None:
@@ -1084,7 +1091,7 @@ def test_output_dir(request: Any, top_output_dir: str) -> str:
 
 
 @zenfixture
-def repo_dir(request: Any, test_output_dir: str) -> str:
+def repo_dir(request: Any, test_output_dir: str) -> Path:
     """
     Compute the test repo_dir.
 
@@ -1093,36 +1100,7 @@ def repo_dir(request: Any, test_output_dir: str) -> str:
     """
 
     repo_dir = os.path.join(test_output_dir, 'repo')
-    return repo_dir
-
-
-@zenfixture
-def zenith_binpath(base_dir: str) -> str:
-    """ Find the zenith binaries. """
-
-    env_zenith_bin = os.environ.get('ZENITH_BIN')
-    if env_zenith_bin:
-        zenith_dir = env_zenith_bin
-    else:
-        zenith_dir = os.path.join(base_dir, 'target/debug')
-    if not os.path.exists(os.path.join(zenith_dir, 'pageserver')):
-        raise Exception('zenith binaries not found at "{}"'.format(zenith_dir))
-    return zenith_dir
-
-
-@zenfixture
-def pg_distrib_dir(base_dir: str) -> str:
-    """ Find the postgres install. """
-
-    env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
-    if env_postgres_bin:
-        pg_dir = env_postgres_bin
-    else:
-        pg_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
-    log.info(f'postgres dir is {pg_dir}')
-    if not os.path.exists(os.path.join(pg_dir, 'bin/postgres')):
-        raise Exception('postgres not found at "{}"'.format(pg_dir))
-    return pg_dir
+    return Path(repo_dir)
 
 
 class TenantFactory:

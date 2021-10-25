@@ -1,7 +1,7 @@
 import os
 
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory
+from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory, base_dir, pg_distrib_dir
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -11,8 +11,6 @@ def test_isolation(pageserver: ZenithPageserver,
                    pg_bin,
                    zenith_cli,
                    test_output_dir,
-                   pg_distrib_dir,
-                   base_dir,
                    capsys):
 
     # Create a branch for us
