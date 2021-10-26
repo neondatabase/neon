@@ -2549,6 +2549,7 @@ dependencies = [
  "postgres",
  "postgres_ffi",
  "serde_json",
+ "walkeeper",
  "workspace_hack",
  "zenith_utils",
 ]

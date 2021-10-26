@@ -125,7 +125,7 @@ impl ComputeControlPlane {
         });
 
         node.create_pgdata()?;
-        node.setup_pg_conf(self.env.auth_type)?;
+        node.setup_pg_conf(self.env.pageserver.auth_type)?;
 
         self.nodes
             .insert((tenantid, node.name.clone()), Arc::clone(&node));
@@ -328,9 +328,25 @@ impl PostgresNode {
         }
         conf.append_line("");
 
-        // Configure the node to stream WAL directly to the pageserver
-        conf.append("synchronous_standby_names", "pageserver"); // TODO: add a new function arg?
-        conf.append("zenith.callmemaybe_connstring", &self.connstr());
+        if !self.env.safekeepers.is_empty() {
+            // Configure the node to connect to the safekeepers
+            conf.append("synchronous_standby_names", "walproposer");
+
+            let wal_acceptors = self
+                .env
+                .safekeepers
+                .iter()
+                .map(|sk| format!("localhost:{}", sk.pg_port))
+                .collect::<Vec<String>>()
+                .join(",");
+            conf.append("wal_acceptors", &wal_acceptors);
+        } else {
+            // Configure the node to stream WAL directly to the pageserver
+            // This isn't really a supported configuration, but can be useful for
+            // testing.
+            conf.append("synchronous_standby_names", "pageserver");
+            conf.append("zenith.callmemaybe_connstring", &self.connstr());
+        }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
         file.write_all(conf.to_string().as_bytes())?;
