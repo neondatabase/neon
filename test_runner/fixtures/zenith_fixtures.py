@@ -642,7 +642,7 @@ class ZenithPageserver(PgProtocol):
     def __exit__(self, exc_type, exc, tb):
         self.stop(True)
 
-    def http_client(self, auth_token: Optional[str] = None):
+    def http_client(self, auth_token: Optional[str] = None) -> ZenithPageserverHttpClient:
         return ZenithPageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
@@ -1047,7 +1047,7 @@ class Safekeeper:
                 assert isinstance(res, dict)
                 return res
 
-    def http_client(self):
+    def http_client(self) -> SafekeeperHttpClient:
         return SafekeeperHttpClient(port=self.port.http)
 
 

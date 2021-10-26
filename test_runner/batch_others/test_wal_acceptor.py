@@ -80,7 +80,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         branch_metrics = []
         with env.pageserver.http_client() as pageserver_http:
             for branch_detail in branch_details:
-                timeline_id = branch_detail["timeline_id"]
+                timeline_id: str = branch_detail["timeline_id"]
 
                 m = BranchMetrics(
                     name=branch_detail["name"],
