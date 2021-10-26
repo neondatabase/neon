@@ -198,9 +198,21 @@ impl PageServerNode {
         bail!("pageserver failed to start in {} seconds", RETRIES);
     }
 
+    ///
+    /// Stop the server.
+    ///
+    /// If 'immediate' is true, we use SIGQUIT, killing the process immediately.
+    /// Otherwise we use SIGTERM, triggering a clean shutdown
+    ///
+    /// If the page server is not running, returns success
+    ///
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
-        let pid = read_pidfile(&self.pid_file())?;
-        let pid = Pid::from_raw(pid);
+        let pid_file = self.pid_file();
+        if !pid_file.exists() {
+            println!("Pageserver is already stopped");
+            return Ok(())
+        }
+        let pid = Pid::from_raw(read_pidfile(&pid_file)?);
         if immediate {
             println!("Stop pageserver immediately");
             if kill(pid, Signal::SIGQUIT).is_err() {
