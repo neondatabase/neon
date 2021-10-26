@@ -342,7 +342,7 @@ class ZenithEnvBuilder:
             log.info('Cleaning up all storage and compute nodes')
             self.env.postgres.stop_all()
             for sk in self.env.safekeepers:
-                sk.stop()
+                sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
 
 
@@ -675,7 +675,7 @@ class ZenithPageserver(PgProtocol):
         """
         cmd = ['pageserver', 'stop']
         if immediate:
-            cmd.append('immediate')
+            cmd.extend(['-m', 'immediate'])
 
         log.info(f"Stopping pageserver with {cmd}")
         if self.running:
@@ -1024,9 +1024,14 @@ class Safekeeper:
                 break  # success
         return self
 
-    def stop(self) -> 'Safekeeper':
+    def stop(self, immediate=False) -> 'Safekeeper':
+        cmd = ['safekeeper', 'stop']
+        if immediate:
+            cmd.extend(['-m', 'immediate'])
+        cmd.append(self.name)
+
         log.info('Stopping safekeeper {}'.format(self.name))
-        self.env.zenith_cli(['safekeeper', 'stop', self.name])
+        self.env.zenith_cli(cmd)
         return self
 
     def append_logical_message(self, tenant_id: str, timeline_id: str,

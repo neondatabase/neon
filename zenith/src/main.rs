@@ -93,6 +93,14 @@ fn main() -> Result<()> {
         .required(false)
         .value_name("port");
 
+    let stop_mode_arg = Arg::with_name("stop-mode")
+        .short("m")
+        .takes_value(true)
+        .possible_values(&["fast", "immediate"])
+        .help("If 'immediate', don't flush repository data at shutdown")
+        .required(false)
+        .value_name("stop-mode");
+
     let matches = App::new("Zenith CLI")
         .setting(AppSettings::ArgRequiredElseHelp)
         .subcommand(
@@ -125,10 +133,7 @@ fn main() -> Result<()> {
                 .subcommand(SubCommand::with_name("status"))
                 .subcommand(SubCommand::with_name("start").about("Start local pageserver"))
                 .subcommand(SubCommand::with_name("stop").about("Stop local pageserver")
-                            .arg(Arg::with_name("immediate")
-                                 .help("Don't flush repository data at shutdown")
-                                 .required(false)
-                            ))
+                            .arg(stop_mode_arg.clone()))
                 .subcommand(SubCommand::with_name("restart").about("Restart local pageserver"))
         )
         .subcommand(
@@ -142,13 +147,12 @@ fn main() -> Result<()> {
                 .subcommand(SubCommand::with_name("stop")
                             .about("Stop local safekeeper")
                             .arg(safekeeper_node_arg.clone())
-                            .arg(Arg::with_name("immediate")
-                                 .help("Don't flush data at shutdown")
-                                 .required(false)
-                            ))
+                            .arg(stop_mode_arg.clone())
+                )
                 .subcommand(SubCommand::with_name("restart")
                             .about("Restart local safekeeper")
                             .arg(safekeeper_node_arg.clone())
+                            .arg(stop_mode_arg.clone())
                 )
         )
         .subcommand(
@@ -195,10 +199,7 @@ fn main() -> Result<()> {
         .subcommand(
             SubCommand::with_name("stop")
                 .about("Stop page server and safekeepers")
-                .arg(Arg::with_name("immediate")
-                     .help("Don't flush repository data at shutdown")
-                     .required(false)
-                )
+                .arg(stop_mode_arg.clone())
         )
         .get_matches();
 
@@ -600,7 +601,7 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         }
 
         ("stop", Some(stop_match)) => {
-            let immediate = stop_match.is_present("immediate");
+            let immediate = stop_match.value_of("stop-mode") == Some("immediate");
 
             if let Err(e) = pageserver.stop(immediate) {
                 eprintln!("pageserver stop failed: {}", e);
@@ -652,7 +653,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             let node_name = sub_match
                 .value_of("node")
                 .unwrap_or(DEFAULT_SAFEKEEPER_NAME);
-            let immediate = sub_match.is_present("immediate");
+            let immediate = sub_match.value_of("stop-mode") == Some("immediate");
 
             let safekeeper = get_safekeeper(env, node_name)?;
 
@@ -707,7 +708,7 @@ fn handle_start_all(_sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
 }
 
 fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    let immediate = sub_match.is_present("immediate");
+    let immediate = sub_match.value_of("stop-mode") == Some("immediate");
 
     let pageserver = PageServerNode::from_env(env);
 

@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::{io, result, thread};
 
 use anyhow::{anyhow, bail};
+use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use pageserver::http::models::{BranchCreateRequest, TenantCreateRequest};
@@ -206,25 +207,37 @@ impl PageServerNode {
     /// If 'immediate' is true, we use SIGQUIT, killing the process immediately.
     /// Otherwise we use SIGTERM, triggering a clean shutdown
     ///
-    /// If the page server is not running, returns success
+    /// If the server is not running, returns success
     ///
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         let pid_file = self.pid_file();
         if !pid_file.exists() {
             println!("Pageserver is already stopped");
-            return Ok(())
+            return Ok(());
         }
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
-        if immediate {
+
+        let sig = if immediate {
             println!("Stop pageserver immediately");
-            if kill(pid, Signal::SIGQUIT).is_err() {
-                bail!("Failed to kill pageserver with pid {}", pid);
-            }
+            Signal::SIGQUIT
         } else {
             println!("Stop pageserver gracefully");
-            if kill(pid, Signal::SIGTERM).is_err() {
-                bail!("Failed to stop pageserver with pid {}", pid);
+            Signal::SIGTERM
+        };
+        match kill(pid, sig) {
+            Ok(_) => (),
+            Err(Errno::ESRCH) => {
+                println!(
+                    "Pageserver with pid {} does not exist, but a PID file was found",
+                    pid
+                );
+                return Ok(());
             }
+            Err(err) => bail!(
+                "Failed to send signal to pageserver with pid {}: {}",
+                pid,
+                err.desc()
+            ),
         }
 
         let address = connection_address(&self.pg_connection_config);
