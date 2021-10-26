@@ -305,14 +305,14 @@ lazy_static! {
     static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_bytes",
         "Bytes written to WAL in a single request, grouped by timeline",
-        &["ztli"],
+        &["timeline_id"],
         vec![1.0, 10.0, 100.0, 1024.0, 8192.0, 128.0 * 1024.0, 1024.0 * 1024.0, 10.0 * 1024.0 * 1024.0]
     )
     .expect("Failed to register safekeeper_write_wal_bytes histogram vec");
     static ref WRITE_WAL_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_seconds",
         "Seconds spent writing and syncing WAL to a disk in a single request, grouped by timeline",
-        &["ztli"],
+        &["timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_write_wal_seconds histogram vec");

@@ -78,14 +78,14 @@ lazy_static! {
     static ref PERSIST_SYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_persist_sync_control_file_seconds",
         "Seconds to persist and sync control file, grouped by timeline",
-        &["ztli"],
+        &["timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_sync_control_file_seconds histogram vec");
     static ref PERSIST_NOSYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_persist_nosync_control_file_seconds",
         "Seconds to persist and sync control file, grouped by timeline",
-        &["ztli"],
+        &["timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_nosync_control_file_seconds histogram vec");
