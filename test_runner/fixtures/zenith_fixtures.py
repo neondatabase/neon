@@ -610,7 +610,9 @@ class ZenithPageserverHttpClient(requests.Session):
         return res_json
 
     def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict[Any, Any]:
-        res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}", )
+        res = self.get(
+            f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}?include-non-incremental-logical-size=1",
+        )
         res.raise_for_status()
         res_json = res.json()
         assert isinstance(res_json, dict)
