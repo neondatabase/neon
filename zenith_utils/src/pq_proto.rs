@@ -352,13 +352,25 @@ pub enum BeMessage<'a> {
     EncryptionResponse(bool),
     NoData,
     ParameterDescription,
-    ParameterStatus,
+    ParameterStatus(BeParameterStatusMessage<'a>),
     ParseComplete,
     ReadyForQuery,
     RowDescription(&'a [RowDescriptor<'a>]),
     XLogData(XLogDataBody<'a>),
     NoticeResponse(String),
     KeepAlive(WalSndKeepAlive),
+}
+
+#[derive(Debug)]
+pub enum BeParameterStatusMessage<'a> {
+    Encoding(&'a str),
+    ServerVersion(&'a str),
+}
+
+impl BeParameterStatusMessage<'static> {
+    pub fn encoding() -> BeMessage<'static> {
+        BeMessage::ParameterStatus(Self::Encoding("UTF8"))
+    }
 }
 
 // One row desciption in RowDescription packet.
@@ -665,12 +677,23 @@ impl<'a> BeMessage<'a> {
                 buf.put_u8(response);
             }
 
-            BeMessage::ParameterStatus => {
+            BeMessage::ParameterStatus(param) => {
+                use std::io::{IoSlice, Write};
+                use BeParameterStatusMessage::*;
+
+                let [name, value] = match param {
+                    Encoding(name) => [b"client_encoding", name.as_bytes()],
+                    ServerVersion(version) => [b"server_version", version.as_bytes()],
+                };
+
+                // Parameter names and values are passed as null-terminated strings
+                let iov = &mut [name, b"\0", value, b"\0"].map(IoSlice::new);
+                let mut buffer = [0u8; 64]; // this should be enough
+                let cnt = buffer.as_mut().write_vectored(iov).unwrap();
+
                 buf.put_u8(b'S');
-                // parameter names and values are specified by null terminated strings
-                const PARAM_NAME_VALUE: &[u8] = b"client_encoding\0UTF8\0";
                 write_body(buf, |buf| {
-                    buf.put_slice(PARAM_NAME_VALUE);
+                    buf.put_slice(&buffer[..cnt]);
                     Ok::<_, io::Error>(())
                 })
                 .unwrap();

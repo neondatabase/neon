@@ -3,7 +3,9 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode};
+use crate::pq_proto::{
+    BeMessage, BeParameterStatusMessage, FeMessage, FeStartupMessage, StartupRequestCode,
+};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
@@ -355,11 +357,9 @@ impl PostgresBackend {
 
                         match self.auth_type {
                             AuthType::Trust => {
-                                self.write_message_noflush(&BeMessage::AuthenticationOk)?;
-                                // psycopg2 will not connect if client_encoding is not
-                                // specified by the server
-                                self.write_message_noflush(&BeMessage::ParameterStatus)?;
-                                self.write_message(&BeMessage::ReadyForQuery)?;
+                                self.write_message_noflush(&BeMessage::AuthenticationOk)?
+                                    .write_message_noflush(&BeParameterStatusMessage::encoding())?
+                                    .write_message(&BeMessage::ReadyForQuery)?;
                                 self.state = ProtoState::Established;
                             }
                             AuthType::MD5 => {
@@ -410,11 +410,9 @@ impl PostgresBackend {
                         }
                     }
                 }
-                self.write_message_noflush(&BeMessage::AuthenticationOk)?;
-                // psycopg2 will not connect if client_encoding is not
-                // specified by the server
-                self.write_message_noflush(&BeMessage::ParameterStatus)?;
-                self.write_message(&BeMessage::ReadyForQuery)?;
+                self.write_message_noflush(&BeMessage::AuthenticationOk)?
+                    .write_message_noflush(&BeParameterStatusMessage::encoding())?
+                    .write_message(&BeMessage::ReadyForQuery)?;
                 self.state = ProtoState::Established;
             }
 
