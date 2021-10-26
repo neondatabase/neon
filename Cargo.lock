@@ -1213,6 +1213,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "url",
  "workspace_hack",
  "zenith_metrics",
  "zenith_utils",

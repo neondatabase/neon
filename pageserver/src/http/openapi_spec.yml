@@ -25,6 +25,11 @@ paths:
         schema:
           type: string
           format: hex
+      - name: include-non-incremental-logical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_logical_size_non_incremental
     get:
       description: Get branches for tenant
       responses:
@@ -73,6 +78,11 @@ paths:
         required: true
         schema:
           type: string
+      - name: include-non-incremental-logical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_logical_size_non_incremental
     get:
       description: Get branches for tenant
       responses:
@@ -260,7 +270,6 @@ components:
         - timeline_id
         - latest_valid_lsn
         - current_logical_size
-        - current_logical_size_non_incremental
       properties:
         name:
           type: string
