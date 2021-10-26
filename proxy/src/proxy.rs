@@ -86,18 +86,24 @@ impl ProxyConnection {
         };
 
         // We'll get rid of this once migration to async is complete
-        let db_stream = {
+        let (pg_version, db_stream) = {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
 
-            let stream = runtime.block_on(conn)?.into_std()?;
+            let (pg_version, stream) = runtime.block_on(conn)?;
+            let stream = stream.into_std()?;
             stream.set_nonblocking(false)?;
-            stream
+
+            (pg_version, stream)
         };
 
         // Let the client send new requests
-        self.pgb.write_message(&Be::ReadyForQuery)?;
+        self.pgb
+            .write_message_noflush(&BeMessage::ParameterStatus(
+                BeParameterStatusMessage::ServerVersion(&pg_version),
+            ))?
+            .write_message(&Be::ReadyForQuery)?;
 
         Ok((self.pgb.into_stream(), db_stream))
     }
@@ -175,7 +181,7 @@ impl ProxyConnection {
 
         self.pgb
             .write_message_noflush(&Be::AuthenticationOk)?
-            .write_message_noflush(&Be::ParameterStatus)?;
+            .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
         Ok(db_info)
     }
@@ -189,7 +195,7 @@ impl ProxyConnection {
         // Give user a URL to spawn a new database
         self.pgb
             .write_message_noflush(&Be::AuthenticationOk)?
-            .write_message_noflush(&Be::ParameterStatus)?
+            .write_message_noflush(&BeParameterStatusMessage::encoding())?
             .write_message(&Be::NoticeResponse(greeting))?;
 
         // Wait for web console response
@@ -218,11 +224,21 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
 }
 
 /// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
-async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<tokio::net::TcpStream> {
+async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<(String, tokio::net::TcpStream)> {
     let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()?).await?;
     let config = tokio_postgres::Config::from(db_info);
-    let _ = config.connect_raw(&mut socket, NoTls).await?;
-    Ok(socket)
+    let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
+
+    let query = client.query_one("select current_setting('server_version')", &[]);
+
+    tokio::pin!(query, conn);
+
+    let version = tokio::select!(
+        x = query => x?.try_get(0)?,
+        _ = conn => bail!("connection closed too early"),
+    );
+
+    Ok((version, socket))
 }
 
 /// Concurrently proxy both directions of the client and server connections
