@@ -71,8 +71,8 @@ pub struct PageServerNode {
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let password = if env.auth_type == AuthType::ZenithJWT {
-            &env.auth_token
+        let password = if env.pageserver.auth_type == AuthType::ZenithJWT {
+            &env.pageserver.auth_token
         } else {
             ""
         };
@@ -80,24 +80,25 @@ impl PageServerNode {
         PageServerNode {
             pg_connection_config: Self::pageserver_connection_config(
                 password,
-                env.pageserver_pg_port,
+                env.pageserver.pg_port,
             ),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: format!("http://localhost:{}/v1", env.pageserver_http_port),
+            http_base_url: format!("http://localhost:{}/v1", env.pageserver.http_port),
         }
     }
 
+    /// Construct libpq connection string for connecting to the pageserver.
     fn pageserver_connection_config(password: &str, port: u16) -> Config {
         format!("postgresql://no_user:{}@localhost:{}/no_db", password, port)
             .parse()
             .unwrap()
     }
 
-    pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool) -> anyhow::Result<()> {
+    pub fn init(&self, create_tenant: Option<&str>) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        let listen_pg = format!("localhost:{}", self.env.pageserver_pg_port);
-        let listen_http = format!("localhost:{}", self.env.pageserver_http_port);
+        let listen_pg = format!("localhost:{}", self.env.pageserver.pg_port);
+        let listen_http = format!("localhost:{}", self.env.pageserver.http_port);
         let mut args = vec![
             "--init",
             "-D",
@@ -110,10 +111,11 @@ impl PageServerNode {
             &listen_http,
         ];
 
-        if enable_auth {
+        let auth_type_str = &self.env.pageserver.auth_type.to_string();
+        if self.env.pageserver.auth_type != AuthType::Trust {
             args.extend(&["--auth-validation-public-key-path", "auth_public_key.pem"]);
-            args.extend(&["--auth-type", "ZenithJWT"]);
         }
+        args.extend(&["--auth-type", auth_type_str]);
 
         if let Some(tenantid) = create_tenant {
             args.extend(&["--create-tenant", tenantid])
@@ -267,8 +269,8 @@ impl PageServerNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         let mut builder = self.http_client.request(method, url);
-        if self.env.auth_type == AuthType::ZenithJWT {
-            builder = builder.bearer_auth(&self.env.auth_token)
+        if self.env.pageserver.auth_type == AuthType::ZenithJWT {
+            builder = builder.bearer_auth(&self.env.pageserver.auth_token)
         }
         builder
     }

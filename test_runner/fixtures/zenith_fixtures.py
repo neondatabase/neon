@@ -16,6 +16,7 @@ import socket
 import subprocess
 import time
 import filecmp
+import tempfile
 
 from contextlib import closing, suppress
 from pathlib import Path
@@ -336,7 +337,7 @@ class ZenithEnvBuilder:
 
     def __exit__(self, exc_type, exc_value, traceback):
 
-        # After the yield comes any cleanup code we need. Stop all the nodes.
+        # Stop all the nodes.
         if self.env:
             log.info('Cleaning up all storage and compute nodes')
             self.env.postgres.stop_all()
@@ -385,36 +386,68 @@ class ZenithEnv:
 
         self.safekeepers: List[Safekeeper] = []
 
-        # Create and start up the pageserver, and safekeepers if any
+        # generate initial tenant ID here instead of letting 'zenith init' generate it,
+        # so that we don't need to dig it out of the config file afterwards.
+        self.initial_tenant = uuid.uuid4().hex
+
+        # Create a config file corresponding to the options
+        toml = f"""
+default_tenantid = '{self.initial_tenant}'
+        """
+
+        # Create config for pageserver
         pageserver_port = PageserverPort(
             pg=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
-        self.pageserver = ZenithPageserver(self,
-                                           port=pageserver_port,
-                                           enable_auth=config.pageserver_auth_enabled)
+        pageserver_auth_type = "ZenithJWT" if config.pageserver_auth_enabled else "Trust"
+
+        toml += f"""
+[pageserver]
+pg_port = {pageserver_port.pg}
+http_port = {pageserver_port.http}
+auth_type = '{pageserver_auth_type}'
+        """
+
+        # Create a corresponding ZenithPageserver object
+        self.pageserver = ZenithPageserver(self, port=pageserver_port)
+
+        # Create config and a Safekeeper object for each safekeeper
+        for i in range(1, config.num_safekeepers + 1):
+            port = SafekeeperPort(
+                pg=self.port_distributor.get_port(),
+                http=self.port_distributor.get_port(),
+            )
+
+            if config.num_safekeepers == 1:
+                name = "single"
+            else:
+                name = f"sk{i}"
+            toml += f"""
+[[safekeepers]]
+name = '{name}'
+pg_port = {port.pg}
+http_port = {port.http}
+sync = false # Disable fsyncs to make the tests go faster
+            """
+            safekeeper = Safekeeper(env=self, name=name, port=port)
+            self.safekeepers.append(safekeeper)
+
+        log.info(f"Config: {toml}")
+
+        # Run 'zenith init' using the config file we constructed
+        with tempfile.NamedTemporaryFile(mode='w+') as tmp:
+            tmp.write(toml)
+            tmp.flush()
+
+            cmd = ['init', f'--config={tmp.name}']
+            self.zenith_cli(cmd)
+
+        # Start up the page server and all the safekeepers
         self.pageserver.start()
 
-        # since we are in progress of refactoring protocols between compute safekeeper
-        # and page server use hardcoded management token in safekeeper
-        management_token = self.auth_keys.generate_management_token() \
-            if config.pageserver_auth_enabled else None
-
-        # get newly created tenant id
-        self.initial_tenant = self.zenith_cli(['tenant', 'list']).stdout.split()[0]
-
-        # Start up safekeepers
-        for wa_num in range(config.num_safekeepers):
-            wa = Safekeeper(env=self,
-                            data_dir=Path(os.path.join(self.repo_dir, f"safekeeper_{wa_num}")),
-                            port=SafekeeperPort(
-                                pg=self.port_distributor.get_port(),
-                                http=self.port_distributor.get_port(),
-                            ),
-                            num=wa_num,
-                            auth_token=management_token)
-            wa.start()
-            self.safekeepers.append(wa)
+        for safekeeper in self.safekeepers:
+            safekeeper.start()
 
     def get_safekeeper_connstrs(self) -> str:
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
@@ -624,15 +657,6 @@ class ZenithPageserver(PgProtocol):
         self.running = False
         self.service_port = port  # do not shadow PgProtocol.port which is just int
 
-        cmd = [
-            'init',
-            f'--pageserver-pg-port={self.service_port.pg}',
-            f'--pageserver-http-port={self.service_port.http}'
-        ]
-        if enable_auth:
-            cmd.append('--enable-auth')
-        self.env.zenith_cli(cmd)
-
     def start(self) -> 'ZenithPageserver':
         """
         Start the page server.
@@ -640,7 +664,7 @@ class ZenithPageserver(PgProtocol):
         """
         assert self.running == False
 
-        self.env.zenith_cli(['start'])
+        self.env.zenith_cli(['pageserver', 'start'])
         self.running = True
         return self
 
@@ -649,7 +673,7 @@ class ZenithPageserver(PgProtocol):
         Stop the page server.
         Returns self.
         """
-        cmd = ['stop']
+        cmd = ['pageserver', 'stop']
         if immediate:
             cmd.append('immediate')
 
@@ -977,29 +1001,12 @@ class SafekeeperPort:
 class Safekeeper:
     """ An object representing a running safekeeper daemon. """
     env: ZenithEnv
-    data_dir: Path
     port: SafekeeperPort
-    num: int  # identifier for logging
+    name: str  # identifier for logging
     auth_token: Optional[str] = None
 
     def start(self) -> 'Safekeeper':
-        # create data directory if not exists
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        with suppress(FileNotFoundError):
-            self.pidfile.unlink()
-
-        cmd = [os.path.join(str(zenith_binpath), "safekeeper")]
-        cmd.extend(["-D", str(self.data_dir)])
-        cmd.extend(["--listen-pg", f"localhost:{self.port.pg}"])
-        cmd.extend(["--listen-http", f"localhost:{self.port.http}"])
-        cmd.append("--daemonize")
-        cmd.append("--no-sync")
-        # Tell page server it can receive WAL from this WAL safekeeper
-        cmd.extend(["--pageserver", f"localhost:{self.env.pageserver.service_port.pg}"])
-        cmd.extend(["--recall", "1 second"])
-        log.info('Running command "{}"'.format(' '.join(cmd)))
-        env = {'PAGESERVER_AUTH_TOKEN': self.auth_token} if self.auth_token else None
-        subprocess.run(cmd, check=True, env=env)
+        self.env.zenith_cli(['safekeeper', 'start', self.name])
 
         # wait for wal acceptor start by checking its status
         started_at = time.time()
@@ -1017,33 +1024,9 @@ class Safekeeper:
                 break  # success
         return self
 
-    @property
-    def pidfile(self) -> Path:
-        return self.data_dir / "safekeeper.pid"
-
-    def get_pid(self) -> Optional[int]:
-        if not self.pidfile.exists():
-            return None
-
-        try:
-            pid = read_pid(self.pidfile)
-        except ValueError:
-            return None
-
-        return pid
-
     def stop(self) -> 'Safekeeper':
-        log.info('Stopping wal acceptor {}'.format(self.num))
-        pid = self.get_pid()
-        if pid is None:
-            log.info("Wal acceptor {} is not running".format(self.num))
-            return self
-
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except Exception:
-            # TODO: cleanup pid file on exit in wal acceptor
-            pass  # pidfile might be obsolete
+        log.info('Stopping safekeeper {}'.format(self.name))
+        self.env.zenith_cli(['safekeeper', 'stop', self.name])
         return self
 
     def append_logical_message(self, tenant_id: str, timeline_id: str,
