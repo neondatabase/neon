@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::{io, result, thread};
 
 use anyhow::bail;
+use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use postgres::Config;
@@ -190,24 +191,44 @@ impl SafekeeperNode {
         bail!("safekeeper failed to start in {} seconds", RETRIES);
     }
 
+    ///
+    /// Stop the server.
+    ///
+    /// If 'immediate' is true, we use SIGQUIT, killing the process immediately.
+    /// Otherwise we use SIGTERM, triggering a clean shutdown
+    ///
+    /// If the server is not running, returns success
+    ///
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         let pid_file = self.pid_file();
         if !pid_file.exists() {
             println!("Safekeeper {} is already stopped", self.name);
-            return Ok(())
+            return Ok(());
         }
         let pid = read_pidfile(&pid_file)?;
         let pid = Pid::from_raw(pid);
-        if immediate {
+
+        let sig = if immediate {
             println!("Stop safekeeper immediately");
-            if kill(pid, Signal::SIGQUIT).is_err() {
-                bail!("Failed to kill safekeeper with pid {}", pid);
-            }
+            Signal::SIGQUIT
         } else {
             println!("Stop safekeeper gracefully");
-            if kill(pid, Signal::SIGTERM).is_err() {
-                bail!("Failed to stop safekeeper with pid {}", pid);
+            Signal::SIGTERM
+        };
+        match kill(pid, sig) {
+            Ok(_) => (),
+            Err(Errno::ESRCH) => {
+                println!(
+                    "Safekeeper with pid {} does not exist, but a PID file was found",
+                    pid
+                );
+                return Ok(());
             }
+            Err(err) => bail!(
+                "Failed to send signal to safekeeper with pid {}: {}",
+                pid,
+                err.desc()
+            ),
         }
 
         let address = connection_address(&self.pg_connection_config);
