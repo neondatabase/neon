@@ -73,15 +73,6 @@ impl ComputeControlPlane {
             .unwrap_or(self.base_port)
     }
 
-    pub fn local(local_env: &LocalEnv, pageserver: &Arc<PageServerNode>) -> ComputeControlPlane {
-        ComputeControlPlane {
-            base_port: 65431,
-            pageserver: Arc::clone(pageserver),
-            nodes: BTreeMap::new(),
-            env: local_env.clone(),
-        }
-    }
-
     // FIXME: see also parse_point_in_time in branches.rs.
     fn parse_point_in_time(
         &self,

@@ -63,7 +63,6 @@ impl ResponseErrorMessageExt for Response {
 //
 #[derive(Debug)]
 pub struct PageServerNode {
-    pub kill_on_exit: bool,
     pub pg_connection_config: Config,
     pub env: LocalEnv,
     pub http_client: Client,
@@ -79,7 +78,6 @@ impl PageServerNode {
         };
 
         PageServerNode {
-            kill_on_exit: false,
             pg_connection_config: Self::pageserver_connection_config(
                 password,
                 env.pageserver_pg_port,
@@ -331,14 +329,5 @@ impl PageServerNode {
             .send()?
             .error_for_status()?
             .json()?)
-    }
-}
-
-impl Drop for PageServerNode {
-    fn drop(&mut self) {
-        // TODO Looks like this flag is never set
-        if self.kill_on_exit {
-            let _ = self.stop(true);
-        }
     }
 }
