@@ -3,9 +3,9 @@ use lz4_flex;
 use serde::{Deserialize, Serialize};
 use std::ops::RangeBounds;
 use std::path::Path;
+use tracing::*;
 use yakv::storage::{Key, Storage, StorageIterator, Value};
 use zenith_utils::bin_ser::BeSer;
-use tracing::*;
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CHECKPOINT_INTERVAL: u64 = 1u64 * 1024 * 1024 * 1024;
@@ -165,13 +165,13 @@ impl ToastStore {
         Ok(())
     }
 
-	pub fn checkpoint(&self) -> Result<()> {
-		let mut main_tx = self.main.start_transaction();
-		let mut toast_tx = self.toast.start_transaction();
-		toast_tx.commit()?;
-		main_tx.commit()?;
-		Ok(())
-	}
+    pub fn checkpoint(&self) -> Result<()> {
+        let mut main_tx = self.main.start_transaction();
+        let mut toast_tx = self.toast.start_transaction();
+        toast_tx.commit()?;
+        main_tx.commit()?;
+        Ok(())
+    }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Value>> {
         self.main
@@ -268,9 +268,9 @@ impl ToastStore {
 }
 
 impl Drop for ToastStore {
-	fn drop(&mut self) {
-		info!("Storage closed");
-		// FIXME-KK: better call close() explicitly
-		self.close().unwrap();
-	}
+    fn drop(&mut self) {
+        info!("Storage closed");
+        // FIXME-KK: better call close() explicitly
+        self.close().unwrap();
+    }
 }

@@ -139,7 +139,7 @@ pub fn import_timeline_from_postgres_datadir(
         lsn,
         &mut pg_control.checkPointCopy.clone(),
     )?;
-	writer.checkpoint()?;
+    writer.checkpoint()?;
 
     Ok(())
 }

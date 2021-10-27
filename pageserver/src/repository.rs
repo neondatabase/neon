@@ -180,10 +180,10 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
     /// Previous last record LSN is stored alongside the latest and can be read.
     fn advance_last_record_lsn(&self, lsn: Lsn);
 
-	///
-	/// Complete all delayed commits and advance disk_consistent_lsn
-	///
-	fn checkpoint(&self) -> Result<()>;
+    ///
+    /// Complete all delayed commits and advance disk_consistent_lsn
+    ///
+    fn checkpoint(&self) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

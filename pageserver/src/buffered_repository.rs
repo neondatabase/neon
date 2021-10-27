@@ -1486,15 +1486,17 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         Ok(())
     }
 
-	///
-	/// Complete all delayed commits and advance disk_consistent_lsn
-	///
-	fn checkpoint(&self) -> Result<()> {
-		let store = self.tl.store.write().unwrap();
-		store.data.checkpoint()?;
-		self.tl.disk_consistent_lsn.store(self.tl.get_last_record_lsn());
-		Ok(())
-	}
+    ///
+    /// Complete all delayed commits and advance disk_consistent_lsn
+    ///
+    fn checkpoint(&self) -> Result<()> {
+        let store = self.tl.store.write().unwrap();
+        store.data.checkpoint()?;
+        self.tl
+            .disk_consistent_lsn
+            .store(self.tl.get_last_record_lsn());
+        Ok(())
+    }
 
     ///
     /// Remember the (end of) last valid WAL record remembered in the timeline.
