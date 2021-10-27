@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct BlobRange {
-    offset: u64,
-    size: usize,
+    pub offset: u64,
+    pub size: usize,
 }
 
 pub fn read_blob(reader: &BoundedReader<&'_ File>, range: &BlobRange) -> Result<Vec<u8>> {

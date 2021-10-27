@@ -29,6 +29,7 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
+use crate::vfd::VirtualFile;
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::Bytes;
 use log::*;
@@ -36,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -110,6 +111,8 @@ pub struct ImageLayerInner {
 
     /// Derived from filename and bookfile chapter metadata
     image_type: ImageType,
+
+    vfile: VirtualFile,
 }
 
 impl Layer for ImageLayer {
@@ -147,11 +150,12 @@ impl Layer for ImageLayer {
     ) -> Result<PageReconstructResult> {
         assert!(lsn >= self.lsn);
 
-        let inner = self.load()?;
+        let mut inner = self.load()?;
 
         let base_blknum = blknum % RELISH_SEG_SIZE;
 
-        let (_path, book) = self.open_book()?;
+        let mut file = inner.vfile.open()?;
+        let mut book = Book::new(&mut file)?;
 
         let buf = match &inner.image_type {
             ImageType::Blocky { num_blocks } => {
@@ -162,16 +166,19 @@ impl Layer for ImageLayer {
                 let mut buf = vec![0u8; BLOCK_SIZE];
                 let offset = BLOCK_SIZE as u64 * base_blknum as u64;
 
-                let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
-                chapter.read_exact_at(&mut buf, offset)?;
+                let mut chapter = book.exclusive_chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
+                chapter.seek(SeekFrom::Start(offset))?;
+                chapter.read_exact(&mut buf)?;
 
                 buf
             }
             ImageType::NonBlocky => {
                 ensure!(base_blknum == 0);
-                book.read_chapter(NONBLOCKY_IMAGE_CHAPTER)?.into_vec()
+                book.exclusive_read_chapter(NONBLOCKY_IMAGE_CHAPTER)?.into_vec()
             }
         };
+
+        inner.vfile.cache(file);
 
         reconstruct_data.page_img = Some(Bytes::from(buf));
         Ok(PageReconstructResult::Complete)
@@ -266,6 +273,16 @@ impl ImageLayer {
             ImageType::NonBlocky
         };
 
+        let path = Self::path_for(
+            &PathOrConf::Conf(conf),
+            timelineid,
+            tenantid,
+            &ImageFileName {
+                seg: seg,
+                lsn: lsn,
+            }
+        );
+
         let layer = ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
@@ -275,12 +292,12 @@ impl ImageLayer {
             inner: Mutex::new(ImageLayerInner {
                 loaded: true,
                 image_type: image_type.clone(),
+                vfile: VirtualFile::new(&path),
             }),
         };
         let inner = layer.inner.lock().unwrap();
 
         // Write the images into a file
-        let path = layer.path();
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
         let file = File::create(&path)?;
@@ -374,7 +391,8 @@ impl ImageLayer {
             return Ok(inner);
         }
 
-        let (path, book) = self.open_book()?;
+
+        let book = Book::new(inner.vfile.open()?)?;
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
@@ -412,12 +430,10 @@ impl ImageLayer {
             ImageType::NonBlocky
         };
 
-        debug!("loaded from {}", &path.display());
+        debug!("loaded from {}", &self.path().display());
 
-        *inner = ImageLayerInner {
-            loaded: true,
-            image_type,
-        };
+        inner.loaded = true;
+        inner.image_type = image_type;
 
         Ok(inner)
     }
@@ -438,6 +454,14 @@ impl ImageLayer {
         tenantid: ZTenantId,
         filename: &ImageFileName,
     ) -> ImageLayer {
+
+        let path = Self::path_for(
+            &PathOrConf::Conf(conf),
+            timelineid,
+            tenantid,
+            filename,
+        );
+
         ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
@@ -447,6 +471,7 @@ impl ImageLayer {
             inner: Mutex::new(ImageLayerInner {
                 loaded: false,
                 image_type: ImageType::Blocky { num_blocks: 0 },
+                vfile: VirtualFile::new(&path),
             }),
         }
     }
@@ -467,6 +492,7 @@ impl ImageLayer {
             inner: Mutex::new(ImageLayerInner {
                 loaded: false,
                 image_type: ImageType::Blocky { num_blocks: 0 },
+                vfile: VirtualFile::new(path),
             }),
         })
     }

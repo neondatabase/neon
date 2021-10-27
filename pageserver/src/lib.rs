@@ -21,6 +21,7 @@ pub mod tenant_mgr;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
+pub mod vfd;
 
 pub mod defaults {
     use const_format::formatcp;

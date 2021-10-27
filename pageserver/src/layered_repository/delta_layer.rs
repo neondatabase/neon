@@ -42,6 +42,7 @@ use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag,
 };
+use crate::vfd::VirtualFile;
 use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
@@ -145,6 +146,8 @@ pub struct DeltaLayerInner {
 
     /// `relsizes` tracks the size of the relation at different points in time.
     relsizes: VecMap<Lsn, u32>,
+
+    vfile: VirtualFile,
 }
 
 impl Layer for DeltaLayer {
@@ -186,9 +189,11 @@ impl Layer for DeltaLayer {
         {
             // Open the file and lock the metadata in memory
             // TODO: avoid opening the file for each read
-            let (_path, book) = self.open_book()?;
+            let mut inner = self.load()?;
+            let file = inner.vfile.open()?;
+            let book = Book::new(file)?;
+
             let page_version_reader = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
-            let inner = self.load()?;
 
             // Scan the metadata BTreeMap backwards, starting from the given entry.
             let minkey = (blknum, Lsn(0));
@@ -221,6 +226,9 @@ impl Layer for DeltaLayer {
             }
 
             // release metadata lock and close the file
+
+            let file = book.close();
+            inner.vfile.cache(file);
         }
 
         // If an older page image is needed to reconstruct the page, let the
@@ -365,6 +373,18 @@ impl DeltaLayer {
             assert!(!relsizes.is_empty());
         }
 
+        let path = Self::path_for(
+            &PathOrConf::Conf(conf),
+            timelineid,
+            tenantid,
+            &DeltaFileName {
+                seg: seg,
+                start_lsn: start_lsn,
+                end_lsn: end_lsn,
+                dropped: dropped,
+            }
+        );
+
         let delta_layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
@@ -377,6 +397,7 @@ impl DeltaLayer {
                 loaded: true,
                 page_version_metas: VecMap::default(),
                 relsizes,
+                vfile: VirtualFile::new(&path),
             }),
         };
         let mut inner = delta_layer.inner.lock().unwrap();
@@ -496,11 +517,9 @@ impl DeltaLayer {
 
         debug!("loaded from {}", &path.display());
 
-        *inner = DeltaLayerInner {
-            loaded: true,
-            page_version_metas,
-            relsizes,
-        };
+        inner.loaded = true;
+        inner.page_version_metas = page_version_metas;
+        inner.relsizes = relsizes;
 
         Ok(inner)
     }
@@ -512,6 +531,13 @@ impl DeltaLayer {
         tenantid: ZTenantId,
         filename: &DeltaFileName,
     ) -> DeltaLayer {
+        let path = Self::path_for(
+            &PathOrConf::Conf(conf),
+            timelineid,
+            tenantid,
+            &filename,
+        );
+
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
@@ -524,6 +550,7 @@ impl DeltaLayer {
                 loaded: false,
                 page_version_metas: VecMap::default(),
                 relsizes: VecMap::default(),
+                vfile: VirtualFile::new(&path),
             }),
         }
     }
@@ -534,7 +561,7 @@ impl DeltaLayer {
     pub fn new_for_path(path: &Path, book: &Book<File>) -> Result<Self> {
         let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
         let summary = Summary::des(&chapter)?;
-
+        
         Ok(DeltaLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
             timelineid: summary.timelineid,
@@ -547,6 +574,7 @@ impl DeltaLayer {
                 loaded: false,
                 page_version_metas: VecMap::default(),
                 relsizes: VecMap::default(),
+                vfile: VirtualFile::new(path),
             }),
         })
     }

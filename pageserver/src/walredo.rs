@@ -252,7 +252,7 @@ impl PostgresRedoManager {
             .unwrap();
 
         let mut processes: Vec<Mutex<Option<PostgresRedoProcess>>> = Vec::new();
-        for _ in 1..4 {
+        for _ in 1..10 {
             processes.push(Mutex::new(None));
         }
 
@@ -291,10 +291,10 @@ impl PostgresRedoManager {
 
             let duration = start.elapsed();
 
-            info!(
-                "postgres applied {} WAL records in {} ms to reconstruct page image at LSN {}",
+            trace!(
+                "postgres applied {} WAL records in {} us to reconstruct page image at LSN {}",
                 nrecords,
-                duration.as_millis(),
+                duration.as_micros(),
                 lsn
             );
 
@@ -602,12 +602,8 @@ impl PostgresRedoProcess {
             // version is not needed.)
             let mut buf: Vec<u8> = Vec::new();
             build_begin_redo_for_block_msg(tag, &mut buf);
-            timeout(TIMEOUT, stdin.write_all(&buf)).await??;
-            buf.clear();
             if let Some(img) = base_img {
                 build_push_page_msg(tag, &img, &mut buf);
-                timeout(TIMEOUT, stdin.write_all(&buf)).await??;
-                buf.clear();
             }
 
             // Send WAL records.
@@ -615,8 +611,6 @@ impl PostgresRedoProcess {
                 WAL_REDO_RECORD_COUNTER.inc();
 
                 build_apply_record_msg(*lsn, &rec.rec, &mut buf);
-                timeout(TIMEOUT, stdin.write_all(&buf)).await??;
-                buf.clear();
 
                 //debug!("sent WAL record to wal redo postgres process ({:X}/{:X}",
                 //       r.lsn >> 32, r.lsn & 0xffff_ffff);
@@ -627,7 +621,6 @@ impl PostgresRedoProcess {
             // Send GetPage command to get the result back
             build_get_page_msg(tag, &mut buf);
             timeout(TIMEOUT, stdin.write_all(&buf)).await??;
-            buf.clear();
             timeout(TIMEOUT, stdin.flush()).await??;
             //debug!("sent GetPage for {}", tag.blknum);
             Ok::<(), Error>(())
@@ -663,7 +656,7 @@ fn build_begin_redo_for_block_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
 
-    debug_assert!(buf.len() == 1 + len);
+    //debug_assert!(buf.len() == 1 + len);
 }
 
 fn build_push_page_msg(tag: BufferTag, base_img: &[u8], buf: &mut Vec<u8>) {
@@ -677,7 +670,7 @@ fn build_push_page_msg(tag: BufferTag, base_img: &[u8], buf: &mut Vec<u8>) {
         .expect("serialize BufferTag should always succeed");
     buf.put(base_img);
 
-    debug_assert!(buf.len() == 1 + len);
+    //debug_assert!(buf.len() - oldlen == 1 + len);
 }
 
 fn build_apply_record_msg(endlsn: Lsn, rec: &[u8], buf: &mut Vec<u8>) {
@@ -688,7 +681,7 @@ fn build_apply_record_msg(endlsn: Lsn, rec: &[u8], buf: &mut Vec<u8>) {
     buf.put_u64(endlsn.0);
     buf.put(rec);
 
-    debug_assert!(buf.len() == 1 + len);
+    //debug_assert!(buf.len() - oldlen == 1 + len);
 }
 
 fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
@@ -699,5 +692,5 @@ fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
 
-    debug_assert!(buf.len() == 1 + len);
+    //debug_assert!(buf.len() == 1 + len);
 }
