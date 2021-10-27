@@ -1417,21 +1417,24 @@ impl<'a> BufferedTimelineWriter<'a> {
                 size: Some(blknum + 1),
             };
             store.data.put(&mk.ser()?, &mv.ser()?)?;
-/*
-            //  Fill gap with zero pages
-            for blk in rel_size..blknum {
-                let key = StoreKey::Data(DataKey {
-                    rel,
-                    blknum: blk,
-                    lsn,
-                });
-                store
-                    .data
-                    .put(&key.ser()?, &PageVersion::Image(ZERO_PAGE.clone()).ser()?)?;
-            }
-*/
+            /* Looks like we do not need to explicitly fill gap, because we in any case have to handle situation when
+             * page in accessed before been wal logged
+                        //  Fill gap with zero pages
+                        for blk in rel_size..blknum {
+                            let key = StoreKey::Data(DataKey {
+                                rel,
+                                blknum: blk,
+                                lsn,
+                            });
+                            store
+                                .data
+                                .put(&key.ser()?, &PageVersion::Image(ZERO_PAGE.clone()).ser()?)?;
+                        }
+            */
         }
-        self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        if store.data.committed {
+            self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        }
         Ok(())
     }
 }
@@ -1461,9 +1464,9 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
             size: Some(relsize),
         };
         store.data.put(&mk.ser()?, &mv.ser()?)?;
-
-        self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
-
+        if store.data.committed {
+            self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        }
         Ok(())
     }
 
@@ -1477,17 +1480,26 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         let mv = MetadataValue { size: None }; // None indicates dropped relation
         store.data.put(&mk.ser()?, &mv.ser()?)?;
 
-        self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
-
+        if store.data.committed {
+            self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        }
         Ok(())
     }
+
+	///
+	/// Complete all delayed commits and advance disk_consistent_lsn
+	///
+	fn checkpoint(&self) -> Result<()> {
+		let store = self.tl.store.write().unwrap();
+		store.data.checkpoint()?;
+		self.tl.disk_consistent_lsn.store(self.tl.get_last_record_lsn());
+		Ok(())
+	}
 
     ///
     /// Remember the (end of) last valid WAL record remembered in the timeline.
     ///
     fn advance_last_record_lsn(&self, new_lsn: Lsn) {
-        assert!(new_lsn.is_aligned());
-
         self.tl.last_record_lsn.advance(new_lsn);
     }
 }

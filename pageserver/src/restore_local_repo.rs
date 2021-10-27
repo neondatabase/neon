@@ -126,7 +126,6 @@ pub fn import_timeline_from_postgres_datadir(
         import_nonrel_file(writer, lsn, RelishTag::TwoPhase { xid }, &entry.path())?;
     }
     // TODO: Scan pg_tblspc
-
     writer.advance_last_record_lsn(lsn);
 
     // Import WAL. This is needed even when starting from a shutdown checkpoint, because
@@ -140,6 +139,7 @@ pub fn import_timeline_from_postgres_datadir(
         lsn,
         &mut pg_control.checkPointCopy.clone(),
     )?;
+	writer.checkpoint()?;
 
     Ok(())
 }

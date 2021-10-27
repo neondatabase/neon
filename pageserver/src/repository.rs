@@ -179,6 +179,11 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
     /// Advance requires aligned LSN as an argument and would wake wait_lsn() callers.
     /// Previous last record LSN is stored alongside the latest and can be read.
     fn advance_last_record_lsn(&self, lsn: Lsn);
+
+	///
+	/// Complete all delayed commits and advance disk_consistent_lsn
+	///
+	fn checkpoint(&self) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

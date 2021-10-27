@@ -5,10 +5,14 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use yakv::storage::{Key, Storage, StorageIterator, Value};
 use zenith_utils::bin_ser::BeSer;
+use tracing::*;
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CHECKPOINT_INTERVAL: u64 = 1u64 * 1024 * 1024 * 1024;
-const CACHE_SIZE: usize = 1024; // 8Mb
+const MAIN_CACHE_SIZE: usize = 8 * 1024; // 64Mb
+const TOAST_CACHE_SIZE: usize = 1024; // 8Mb
+const MAIN_COMMIT_THRESHOLD: usize = MAIN_CACHE_SIZE / 2;
+const TOAST_COMMIT_THRESHOLD: usize = TOAST_CACHE_SIZE / 2;
 
 const TOAST_VALUE_TAG: u8 = 0;
 const PLAIN_VALUE_TAG: u8 = 1;
@@ -22,10 +26,10 @@ type ToastId = u32;
 /// data locality and reduce key size for TOAST segments.
 ///
 pub struct ToastStore {
-	pub update_count: u64,
-    pub index: Storage, // primary storage
-    blobs: Storage,     // storage for TOAST segments
-    next_id: ToastId,   // counter used to identify new TOAST segments
+    main: Storage,       // primary storage
+    toast: Storage,      // storage for TOAST segments
+    next_id: ToastId,    // counter used to identify new TOAST segments
+    pub committed: bool, // last transaction was committed (not delayed)
 }
 
 ///
@@ -75,31 +79,31 @@ impl<'a> DoubleEndedIterator for ToastIterator<'a> {
 impl ToastStore {
     pub fn new(path: &Path) -> Result<ToastStore> {
         Ok(ToastStore {
-			update_count: 0,
-            index: Storage::open(
-                &path.join("index.db"),
-                None,
-                CACHE_SIZE,
+            main: Storage::open(
+                &path.join("main.db"),
+                Some(&path.join("main.log")),
+                MAIN_CACHE_SIZE,
                 CHECKPOINT_INTERVAL,
             )?,
-            blobs: Storage::open(
-                &path.join("blobs.db"),
-                None,
-                CACHE_SIZE,
+            toast: Storage::open(
+                &path.join("toast.db"),
+                Some(&path.join("toast.log")),
+                TOAST_CACHE_SIZE,
                 CHECKPOINT_INTERVAL,
             )?,
             next_id: 0,
+            committed: false,
         })
     }
 
     pub fn put(&mut self, key: &Key, value: &Value) -> Result<()> {
-        let mut index_tx = self.index.start_transaction();
+        let mut main_tx = self.main.start_transaction();
         let value_len = value.len();
-		self.update_count += 1;
+        let main_pinned;
         if value_len >= TOAST_SEGMENT_SIZE {
-            let mut blobs_tx = self.blobs.start_transaction();
+            let mut toast_tx = self.toast.start_transaction();
             if self.next_id == 0 {
-                self.next_id = blobs_tx
+                self.next_id = toast_tx
                     .iter()
                     .next_back()
                     .transpose()?
@@ -114,7 +118,7 @@ impl ToastStore {
             let mut offs: usize = 0;
             let mut segno = 0u32;
             while offs + TOAST_SEGMENT_SIZE <= compressed_data_len {
-                blobs_tx.put(
+                toast_tx.put(
                     &ToastSegId { toast_id, segno }.ser()?,
                     &compressed_data[offs..offs + TOAST_SEGMENT_SIZE].to_vec(),
                 )?;
@@ -122,7 +126,7 @@ impl ToastStore {
                 segno += 1;
             }
             if offs < compressed_data_len {
-                blobs_tx.put(
+                toast_tx.put(
                     &ToastSegId { toast_id, segno }.ser()?,
                     &compressed_data[offs..].to_vec(),
                 )?;
@@ -134,20 +138,43 @@ impl ToastStore {
             }
             .ser()?;
             value.insert(0, TOAST_VALUE_TAG);
-            index_tx.put(key, &value)?;
-            blobs_tx.commit()?;
+            main_tx.put(key, &value)?;
+            main_pinned = main_tx.get_cache_info().pinned;
+            // If we are going to commit main storage, then we have to commit toast storage first to avoid dangling references
+            if main_pinned > MAIN_COMMIT_THRESHOLD
+                || toast_tx.get_cache_info().pinned > TOAST_COMMIT_THRESHOLD
+            {
+                toast_tx.commit()?;
+            } else {
+                toast_tx.delay()?;
+            }
         } else {
             let mut vec = Vec::with_capacity(value.len() + 1);
             vec.push(PLAIN_VALUE_TAG);
             vec.extend_from_slice(&value);
-            index_tx.put(key, &vec)?;
+            main_tx.put(key, &vec)?;
+            main_pinned = main_tx.get_cache_info().pinned;
         }
-        index_tx.commit()?;
+        if main_pinned > MAIN_COMMIT_THRESHOLD {
+            main_tx.commit()?;
+            self.committed = true;
+        } else {
+            main_tx.delay()?;
+            self.committed = false;
+        }
         Ok(())
     }
 
+	pub fn checkpoint(&self) -> Result<()> {
+		let mut main_tx = self.main.start_transaction();
+		let mut toast_tx = self.toast.start_transaction();
+		toast_tx.commit()?;
+		main_tx.commit()?;
+		Ok(())
+	}
+
     pub fn get(&self, key: &[u8]) -> Result<Option<Value>> {
-        self.index
+        self.main
             .get(&key.to_vec())
             .transpose()
             .and_then(|res| Some(res.and_then(|value| Ok(self.detoast(value)?))))
@@ -161,20 +188,22 @@ impl ToastStore {
     pub fn range<R: RangeBounds<Key>>(&self, range: R) -> ToastIterator<'_> {
         ToastIterator {
             store: self,
-            iter: self.index.range(range),
+            iter: self.main.range(range),
         }
     }
 
-    pub fn remove(&self, key: &Key) -> Result<()> {
-        let mut index_tx = self.index.start_transaction();
-        if let Some(value) = index_tx.get(key)? {
+    pub fn remove(&mut self, key: &Key) -> Result<()> {
+        let mut main_tx = self.main.start_transaction();
+        if let Some(value) = main_tx.get(key)? {
+            main_tx.remove(key)?;
+            let main_pinned = main_tx.get_cache_info().pinned;
             if value[0] == TOAST_VALUE_TAG {
-                let mut blobs_tx = self.blobs.start_transaction();
+                let mut toast_tx = self.toast.start_transaction();
                 let toast_ref = ToastRef::des(&value[1..])?;
                 let n_segments = ((toast_ref.compressed_size as usize + TOAST_SEGMENT_SIZE - 1)
                     / TOAST_SEGMENT_SIZE) as u32;
                 for segno in 0..n_segments {
-                    blobs_tx.remove(
+                    toast_tx.remove(
                         &ToastSegId {
                             toast_id: toast_ref.toast_id,
                             segno,
@@ -182,11 +211,31 @@ impl ToastStore {
                         .ser()?,
                     )?;
                 }
-                blobs_tx.commit()?;
+                // If we are going to commit main storage, then we have to commit toast storage first to avoid dangling references
+                if main_pinned > MAIN_COMMIT_THRESHOLD
+                    || toast_tx.get_cache_info().pinned > TOAST_COMMIT_THRESHOLD
+                {
+                    toast_tx.commit()?;
+                } else {
+                    toast_tx.delay()?;
+                }
             }
-            index_tx.remove(key)?;
+            if main_pinned > MAIN_COMMIT_THRESHOLD {
+                main_tx.commit()?;
+                self.committed = true;
+            } else {
+                main_tx.delay()?;
+                self.committed = false;
+            }
+        } else {
+            self.committed = false;
         }
-        index_tx.commit()?;
+        Ok(())
+    }
+
+    pub fn close(&self) -> Result<()> {
+        self.toast.close()?; // commit and close TOAST store first to avoid dangling references
+        self.main.close()?;
         Ok(())
     }
 
@@ -207,7 +256,7 @@ impl ToastStore {
                 segno: n_segments,
             }
             .ser()?;
-            for seg in self.blobs.range(from..till) {
+            for seg in self.toast.range(from..till) {
                 toast.extend_from_slice(&seg?.1);
             }
             Ok(lz4_flex::decompress(&toast, toast_ref.orig_size as usize)?)
@@ -216,4 +265,12 @@ impl ToastStore {
             Ok(value)
         }
     }
+}
+
+impl Drop for ToastStore {
+	fn drop(&mut self) {
+		info!("Storage closed");
+		// FIXME-KK: better call close() explicitly
+		self.close().unwrap();
+	}
 }
