@@ -129,7 +129,7 @@ fn main() -> Result<()> {
         .subcommand(
             SubCommand::with_name("pageserver")
                 .setting(AppSettings::ArgRequiredElseHelp)
-                .about("Manage page server")
+                .about("Manage pageserver")
                 .subcommand(SubCommand::with_name("status"))
                 .subcommand(SubCommand::with_name("start").about("Start local pageserver"))
                 .subcommand(SubCommand::with_name("stop").about("Stop local pageserver")
@@ -271,7 +271,7 @@ fn main() -> Result<()> {
 
         ("pageserver", Some(sub_match)) => {
             if let Err(e) = handle_pageserver(sub_match, &env) {
-                eprintln!("branch command failed: {}", e);
+                eprintln!("pageserver command failed: {}", e);
                 exit(1);
             }
         }
@@ -285,7 +285,7 @@ fn main() -> Result<()> {
 
         ("safekeeper", Some(sub_match)) => {
             if let Err(e) = handle_safekeeper(sub_match, &env) {
-                eprintln!("branch command failed: {}", e);
+                eprintln!("safekeeper command failed: {}", e);
                 exit(1);
             }
         }
