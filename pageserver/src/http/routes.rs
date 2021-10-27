@@ -96,10 +96,9 @@ fn get_include_non_incremental_logical_size(request: &Request<Body>) -> bool {
         .map(|v| {
             url::form_urlencoded::parse(v.as_bytes())
                 .into_owned()
-                .position(|(param, _)| param == "include-non-incremental-logical-size")
+                .any(|(param, _)| param == "include-non-incremental-logical-size")
         })
-        .flatten()
-        .is_some()
+        .unwrap_or(false)
 }
 
 async fn branch_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
