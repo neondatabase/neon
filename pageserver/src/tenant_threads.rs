@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::*;
+use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 use zenith_utils::zid::ZTenantId;
 
 struct TenantHandleEntry {
@@ -23,6 +24,15 @@ struct TenantHandleEntry {
 lazy_static! {
     static ref TENANT_HANDLES: Mutex<HashMap<ZTenantId, TenantHandleEntry>> =
         Mutex::new(HashMap::new());
+}
+
+lazy_static! {
+    static ref TENANT_THREADS_COUNT: IntGaugeVec = register_int_gauge_vec!(
+        "tenant_threads_count",
+        "Number of live tenant threads",
+        &["tenant_thread_type"]
+    )
+    .expect("failed to define a metric");
 }
 
 pub fn start_tenant_threads(conf: &'static PageServerConf, tenantid: ZTenantId) {
@@ -69,6 +79,12 @@ pub fn wait_for_tenant_threads_to_stop(tenantid: ZTenantId) {
 /// Checkpointer thread's main loop
 ///
 fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
+    let gauge = TENANT_THREADS_COUNT.with_label_values(&["checkpointer"]);
+    gauge.inc();
+    scopeguard::defer! {
+        gauge.dec();
+    }
+
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != TenantState::Active {
             break;
@@ -95,6 +111,12 @@ fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result
 /// GC thread's main loop
 ///
 fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
+    let gauge = TENANT_THREADS_COUNT.with_label_values(&["gc"]);
+    gauge.inc();
+    scopeguard::defer! {
+        gauge.dec();
+    }
+
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != TenantState::Active {
             break;
