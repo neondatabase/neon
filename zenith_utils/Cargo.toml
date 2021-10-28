@@ -19,6 +19,7 @@ thiserror = "1.0"
 tokio = "1.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nix = "0.23.0"
 
 zenith_metrics = { path = "../zenith_metrics" }
 workspace_hack = { path = "../workspace_hack" }

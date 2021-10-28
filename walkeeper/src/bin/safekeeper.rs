@@ -7,11 +7,10 @@ use const_format::formatcp;
 use daemonize::Daemonize;
 use log::*;
 use std::env;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::thread;
 use zenith_utils::http::endpoint;
-use zenith_utils::logging;
+use zenith_utils::{logging, tcp_listener};
 
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
@@ -132,13 +131,13 @@ fn main() -> Result<()> {
 fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
-    let http_listener = TcpListener::bind(conf.listen_http_addr.clone()).map_err(|e| {
+    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
         e
     })?;
 
     info!("Starting safekeeper on {}", conf.listen_pg_addr);
-    let pg_listener = TcpListener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
+    let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
         e
     })?;
