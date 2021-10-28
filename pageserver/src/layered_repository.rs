@@ -65,6 +65,7 @@ mod interval_tree;
 mod layer_map;
 pub mod metadata;
 mod page_versions;
+mod par_fsync;
 mod storage_layer;
 
 use delta_layer::DeltaLayer;
@@ -1458,7 +1459,7 @@ impl LayeredTimeline {
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
 
-        let mut layer_uploads = Vec::new();
+        let mut layer_paths = Vec::new();
         while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
         {
@@ -1489,8 +1490,8 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let mut this_layer_uploads = self.evict_layer(oldest_layer_id, reconstruct_pages)?;
-            layer_uploads.append(&mut this_layer_uploads);
+            let mut this_layer_paths = self.evict_layer(oldest_layer_id, reconstruct_pages)?;
+            layer_paths.append(&mut this_layer_paths);
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
@@ -1506,12 +1507,16 @@ impl LayeredTimeline {
         drop(layers);
         drop(write_guard);
 
-        if !layer_uploads.is_empty() {
+        if !layer_paths.is_empty() {
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
-            let timeline_dir =
-                File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
-            timeline_dir.sync_all()?;
+            layer_paths.push(self.conf.timeline_path(&self.timelineid, &self.tenantid));
+
+            // Fsync all the layer files and directory using multiple threads to
+            // minimize latency.
+            par_fsync::par_fsync(&layer_paths)?;
+
+            layer_paths.pop().unwrap();
         }
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
@@ -1557,7 +1562,7 @@ impl LayeredTimeline {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
                     self.timelineid,
-                    layer_uploads,
+                    layer_paths,
                     metadata,
                 );
             }
@@ -1578,7 +1583,7 @@ impl LayeredTimeline {
         let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
-        let mut layer_uploads = Vec::new();
+        let mut layer_paths = Vec::new();
 
         let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
         if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
@@ -1604,18 +1609,18 @@ impl LayeredTimeline {
 
             // Add the historics to the LayerMap
             for delta_layer in new_historics.delta_layers {
-                layer_uploads.push(delta_layer.path());
+                layer_paths.push(delta_layer.path());
                 layers.insert_historic(Arc::new(delta_layer));
             }
             for image_layer in new_historics.image_layers {
-                layer_uploads.push(image_layer.path());
+                layer_paths.push(image_layer.path());
                 layers.insert_historic(Arc::new(image_layer));
             }
         }
         drop(layers);
         drop(write_guard);
 
-        Ok(layer_uploads)
+        Ok(layer_paths)
     }
 
     ///
