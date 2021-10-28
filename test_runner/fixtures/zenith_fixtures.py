@@ -1059,8 +1059,10 @@ class SafekeeperTimelineStatus:
 
 @dataclass
 class SafekeeperMetrics:
-    timeline_flush_lsn_inexact: Dict[str, int] = field(default_factory=dict)
-    timeline_commit_lsn_inexact: Dict[str, int] = field(default_factory=dict)
+    # These are metrics from Prometheus which uses float64 internally.
+    # As a consequence, values may differ from real original int64s.
+    flush_lsn_inexact: Dict[str, int] = field(default_factory=dict)
+    commit_lsn_inexact: Dict[str, int] = field(default_factory=dict)
 
 
 class SafekeeperHttpClient(requests.Session):
@@ -1087,11 +1089,11 @@ class SafekeeperHttpClient(requests.Session):
         for match in re.finditer(r'^safekeeper_flush_lsn{ztli="([0-9a-f]+)"} (\S+)$',
                                  all_metrics_text,
                                  re.MULTILINE):
-            metrics.timeline_flush_lsn_inexact[match.group(1)] = int(match.group(2))
+            metrics.flush_lsn_inexact[match.group(1)] = int(match.group(2))
         for match in re.finditer(r'^safekeeper_commit_lsn{ztli="([0-9a-f]+)"} (\S+)$',
                                  all_metrics_text,
                                  re.MULTILINE):
-            metrics.timeline_commit_lsn_inexact[match.group(1)] = int(match.group(2))
+            metrics.commit_lsn_inexact[match.group(1)] = int(match.group(2))
         return metrics
 
 

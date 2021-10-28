@@ -87,8 +87,8 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
                     latest_valid_lsn=branch_detail["latest_valid_lsn"],
                 )
                 for sk_m in sk_metrics:
-                    m.flush_lsns.append(sk_m.timeline_flush_lsn_inexact[timeline_id])
-                    m.commit_lsns.append(sk_m.timeline_commit_lsn_inexact[timeline_id])
+                    m.flush_lsns.append(sk_m.flush_lsn_inexact[timeline_id])
+                    m.commit_lsns.append(sk_m.commit_lsn_inexact[timeline_id])
 
                 for lsn in m.flush_lsns:
                     assert m.latest_valid_lsn <= lsn
