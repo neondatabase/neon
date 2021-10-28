@@ -66,7 +66,7 @@ use delta_layer::DeltaLayer;
 use image_layer::ImageLayer;
 
 use inmemory_layer::InMemoryLayer;
-use layer_map::LayerMap;
+use layer_map::{LayerId, LayerMap};
 use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
 };
@@ -1278,7 +1278,7 @@ impl LayeredTimeline {
 
         let mut created_historics = false;
         let mut layer_uploads = Vec::new();
-        while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
+        while let Some((oldest_layer_id, oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
 
             if tenant_mgr::shutdown_requested() && !forced {
@@ -1315,8 +1315,8 @@ impl LayeredTimeline {
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
-            layers.pop_oldest_open();
-            layers.insert_historic(oldest_layer.clone());
+            layers.remove(oldest_layer_id);
+            let oldest_layer_id = layers.insert_historic(oldest_layer.clone());
 
             // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
             drop(layers);
@@ -1332,7 +1332,7 @@ impl LayeredTimeline {
             }
 
             // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove_historic(oldest_layer);
+            layers.remove(oldest_layer_id);
 
             // Add the historics to the LayerMap
             for delta_layer in new_historics.delta_layers {
@@ -1348,7 +1348,7 @@ impl LayeredTimeline {
         // Call unload() on all frozen layers, to release memory.
         // This shouldn't be much memory, as only metadata is slurped
         // into memory.
-        for layer in layers.iter_historic_layers() {
+        for (_layer_id, layer) in layers.iter_historic_layers() {
             layer.unload()?;
         }
 
@@ -1440,7 +1440,7 @@ impl LayeredTimeline {
 
         debug!("retain_lsns: {:?}", retain_lsns);
 
-        let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
+        let mut layers_to_remove: Vec<LayerId> = Vec::new();
 
         // Scan all on-disk layers in the timeline.
         //
@@ -1451,7 +1451,7 @@ impl LayeredTimeline {
         // 4. this layer doesn't serve as a tombstone for some older layer;
         //
         let mut layers = self.layers.lock().unwrap();
-        'outer: for l in layers.iter_historic_layers() {
+        'outer: for (layer_id, l) in layers.iter_historic_layers() {
             let seg = l.get_seg_tag();
 
             if seg.rel.is_relation() {
@@ -1593,16 +1593,16 @@ impl LayeredTimeline {
                 l.get_end_lsn(),
                 l.is_dropped()
             );
-            layers_to_remove.push(Arc::clone(&l));
+            layers_to_remove.push(layer_id);
         }
 
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
-        for doomed_layer in layers_to_remove {
+        for doomed_layer_id in layers_to_remove {
+            let doomed_layer = layers.get_with_id(doomed_layer_id);
             doomed_layer.delete()?;
-            layers.remove_historic(doomed_layer.clone());
-
+            layers.remove(doomed_layer_id);
             match (
                 doomed_layer.is_dropped(),
                 doomed_layer.get_seg_tag().rel.is_relation(),

@@ -41,23 +41,22 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::ops::Range;
-use std::sync::Arc;
 
-pub struct IntervalTree<I: ?Sized>
+pub struct IntervalTree<I>
 where
     I: IntervalItem,
 {
     points: BTreeMap<I::Key, Point<I>>,
 }
 
-struct Point<I: ?Sized> {
+struct Point<I> {
     /// All intervals that contain this point, in no particular order.
     ///
     /// We assume that there aren't a lot of overlappingg intervals, so that this vector
     /// never grows very large. If that assumption doesn't hold, we could keep this ordered
     /// by the end bound, to speed up `search`. But as long as there are only a few elements,
     /// a linear search is OK.
-    elements: Vec<Arc<I>>,
+    elements: Vec<I>,
 }
 
 /// Abstraction for an interval that can be stored in the tree
@@ -75,14 +74,14 @@ pub trait IntervalItem {
     }
 }
 
-impl<I: ?Sized> IntervalTree<I>
+impl<I> IntervalTree<I>
 where
-    I: IntervalItem,
+    I: IntervalItem + PartialEq + Clone,
 {
     /// Return an element that contains 'key', or precedes it.
     ///
     /// If there are multiple candidates, returns the one with the highest 'end' key.
-    pub fn search(&self, key: I::Key) -> Option<Arc<I>> {
+    pub fn search(&self, key: I::Key) -> Option<&I> {
         // Find the greatest point that precedes or is equal to the search key. If there is
         // none, returns None.
         let (_, p) = self.points.range(..=key).next_back()?;
@@ -100,7 +99,7 @@ where
                 }
             })
             .unwrap();
-        Some(Arc::clone(highest_item))
+        Some(highest_item)
     }
 
     /// Iterate over all items with start bound >= 'key'
@@ -119,7 +118,7 @@ where
         }
     }
 
-    pub fn insert(&mut self, item: Arc<I>) {
+    pub fn insert(&mut self, item: &I) {
         let start_key = item.start_key();
         let end_key = item.end_key();
         assert!(start_key < end_key);
@@ -133,18 +132,18 @@ where
                 found_start_point = true;
                 // It is an error to insert the same item to the tree twice.
                 assert!(
-                    !point.elements.iter().any(|x| Arc::ptr_eq(x, &item)),
+                    !point.elements.iter().any(|x| x == item),
                     "interval is already in the tree"
                 );
             }
-            point.elements.push(Arc::clone(&item));
+            point.elements.push(item.clone());
         }
         if !found_start_point {
             // Create a new Point for the starting point
 
             // Look at the previous point, and copy over elements that overlap with this
             // new point
-            let mut new_elements: Vec<Arc<I>> = Vec::new();
+            let mut new_elements: Vec<I> = Vec::new();
             if let Some((_, prev_point)) = self.points.range(..start_key).next_back() {
                 let overlapping_prev_elements = prev_point
                     .elements
@@ -154,7 +153,7 @@ where
 
                 new_elements.extend(overlapping_prev_elements);
             }
-            new_elements.push(item);
+            new_elements.push(item.clone());
 
             let new_point = Point {
                 elements: new_elements,
@@ -163,7 +162,7 @@ where
         }
     }
 
-    pub fn remove(&mut self, item: &Arc<I>) {
+    pub fn remove(&mut self, item: &I) {
         // range search points
         let start_key = item.start_key();
         let end_key = item.end_key();
@@ -176,7 +175,7 @@ where
                 found_start_point = true;
             }
             let len_before = point.elements.len();
-            point.elements.retain(|other| !Arc::ptr_eq(other, item));
+            point.elements.retain(|other| other != item);
             let len_after = point.elements.len();
             assert_eq!(len_after + 1, len_before);
             if len_after == 0 {
@@ -191,19 +190,19 @@ where
     }
 }
 
-pub struct IntervalIter<'a, I: ?Sized>
+pub struct IntervalIter<'a, I>
 where
     I: IntervalItem,
 {
     point_iter: std::collections::btree_map::Range<'a, I::Key, Point<I>>,
-    elem_iter: Option<(I::Key, std::slice::Iter<'a, Arc<I>>)>,
+    elem_iter: Option<(I::Key, std::slice::Iter<'a, I>)>,
 }
 
 impl<'a, I> Iterator for IntervalIter<'a, I>
 where
-    I: IntervalItem + ?Sized,
+    I: IntervalItem,
 {
-    type Item = Arc<I>;
+    type Item = &'a I;
 
     fn next(&mut self) -> Option<Self::Item> {
         // Iterate over all elements in all the points in 'point_iter'. To avoid
@@ -214,7 +213,7 @@ where
             if let Some((point_key, elem_iter)) = &mut self.elem_iter {
                 for elem in elem_iter {
                     if elem.start_key() == *point_key {
-                        return Some(Arc::clone(elem));
+                        return Some(elem);
                     }
                 }
             }
@@ -230,7 +229,7 @@ where
     }
 }
 
-impl<I: ?Sized> Default for IntervalTree<I>
+impl<I> Default for IntervalTree<I>
 where
     I: IntervalItem,
 {
@@ -246,7 +245,7 @@ mod tests {
     use super::*;
     use std::fmt;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone, PartialEq)]
     struct MockItem {
         start_key: u32,
         end_key: u32,
@@ -288,7 +287,7 @@ mod tests {
         tree: &IntervalTree<MockItem>,
         key: u32,
         expected: &[&str],
-    ) -> Option<Arc<MockItem>> {
+    ) -> Option<MockItem> {
         if let Some(v) = tree.search(key) {
             let vstr = v.to_string();
 
@@ -299,7 +298,7 @@ mod tests {
                 key, v, expected,
             );
 
-            Some(v)
+            Some(v.clone())
         } else {
             assert!(
                 expected.is_empty(),
@@ -331,12 +330,12 @@ mod tests {
         let mut tree: IntervalTree<MockItem> = IntervalTree::default();
 
         // Simple, non-overlapping ranges.
-        tree.insert(Arc::new(MockItem::new(10, 11)));
-        tree.insert(Arc::new(MockItem::new(11, 12)));
-        tree.insert(Arc::new(MockItem::new(12, 13)));
-        tree.insert(Arc::new(MockItem::new(18, 19)));
-        tree.insert(Arc::new(MockItem::new(17, 18)));
-        tree.insert(Arc::new(MockItem::new(15, 16)));
+        tree.insert(&MockItem::new(10, 11));
+        tree.insert(&MockItem::new(11, 12));
+        tree.insert(&MockItem::new(12, 13));
+        tree.insert(&MockItem::new(18, 19));
+        tree.insert(&MockItem::new(17, 18));
+        tree.insert(&MockItem::new(15, 16));
 
         assert_search(&tree, 9, &[]);
         assert_search(&tree, 10, &["10-11"]);
@@ -370,13 +369,13 @@ mod tests {
         let mut tree: IntervalTree<MockItem> = IntervalTree::default();
 
         // Overlapping items
-        tree.insert(Arc::new(MockItem::new(22, 24)));
-        tree.insert(Arc::new(MockItem::new(23, 25)));
-        let x24_26 = Arc::new(MockItem::new(24, 26));
-        tree.insert(Arc::clone(&x24_26));
-        let x26_28 = Arc::new(MockItem::new(26, 28));
-        tree.insert(Arc::clone(&x26_28));
-        tree.insert(Arc::new(MockItem::new(25, 27)));
+        tree.insert(&MockItem::new(22, 24));
+        tree.insert(&MockItem::new(23, 25));
+        let x24_26 = MockItem::new(24, 26);
+        tree.insert(&x24_26);
+        let x26_28 = MockItem::new(26, 28);
+        tree.insert(&x26_28);
+        tree.insert(&MockItem::new(25, 27));
 
         assert_search(&tree, 22, &["22-24"]);
         assert_search(&tree, 23, &["22-24", "23-25"]);
@@ -403,10 +402,10 @@ mod tests {
         let mut tree: IntervalTree<MockItem> = IntervalTree::default();
 
         // Items containing other items
-        tree.insert(Arc::new(MockItem::new(31, 39)));
-        tree.insert(Arc::new(MockItem::new(32, 34)));
-        tree.insert(Arc::new(MockItem::new(33, 35)));
-        tree.insert(Arc::new(MockItem::new(30, 40)));
+        tree.insert(&MockItem::new(31, 39));
+        tree.insert(&MockItem::new(32, 34));
+        tree.insert(&MockItem::new(33, 35));
+        tree.insert(&MockItem::new(30, 40));
 
         assert_search(&tree, 30, &["30-40"]);
         assert_search(&tree, 31, &["30-40", "31-39"]);
@@ -427,16 +426,16 @@ mod tests {
         let mut tree: IntervalTree<MockItem> = IntervalTree::default();
 
         // Duplicate keys
-        let item_a = Arc::new(MockItem::new_str(55, 56, "a"));
-        tree.insert(Arc::clone(&item_a));
-        let item_b = Arc::new(MockItem::new_str(55, 56, "b"));
-        tree.insert(Arc::clone(&item_b));
-        let item_c = Arc::new(MockItem::new_str(55, 56, "c"));
-        tree.insert(Arc::clone(&item_c));
-        let item_d = Arc::new(MockItem::new_str(54, 56, "d"));
-        tree.insert(Arc::clone(&item_d));
-        let item_e = Arc::new(MockItem::new_str(55, 57, "e"));
-        tree.insert(Arc::clone(&item_e));
+        let item_a = MockItem::new_str(55, 56, "a");
+        tree.insert(&item_a);
+        let item_b = MockItem::new_str(55, 56, "b");
+        tree.insert(&item_b);
+        let item_c = MockItem::new_str(55, 56, "c");
+        tree.insert(&item_c);
+        let item_d = MockItem::new_str(54, 56, "d");
+        tree.insert(&item_d);
+        let item_e = MockItem::new_str(55, 57, "e");
+        tree.insert(&item_e);
 
         dump_tree(&tree);
 
@@ -461,8 +460,8 @@ mod tests {
         let mut tree: IntervalTree<MockItem> = IntervalTree::default();
 
         // Inserting the same item twice is not cool
-        let item = Arc::new(MockItem::new(1, 2));
-        tree.insert(Arc::clone(&item));
-        tree.insert(Arc::clone(&item)); // fails assertion
+        let item = MockItem::new(1, 2);
+        tree.insert(&item);
+        tree.insert(&item); // fails assertion
     }
 }

@@ -49,13 +49,10 @@ impl VirtualFile {
 
             if let Some(mut file) = l.files[self.vfd].file.take() {
                 // return cached File
-                eprintln!("reusing {} from {}/{}", self.path.display(), self.vfd, self.tag);
                 file.rewind()?;
                 return Ok(file);
             }
         }
-        eprintln!("opening {}", self.path.display());
-
         File::open(&self.path)
     }
 
@@ -85,8 +82,6 @@ impl VirtualFile {
         self.vfd = next;
         self.tag = l.files[next].tag;
 
-        eprintln!("caching {} at {}/{}", self.path.display(), self.vfd, self.tag);
-        
         drop(l);
     }
 }

@@ -9,6 +9,22 @@
 //! new image and delta layers and corresponding files are written to disk.
 //!
 
+
+
+//
+// Global layer registry:
+//
+// Every layer is inserted into the global registry, and assigned an ID
+//
+// The global registry tracks memory usage and usage count for each layer
+//
+//
+// In addition to that, there is a per-timeline LayerMap, used for lookups
+//
+// 
+
+
+
 use crate::layered_repository::interval_tree::{IntervalItem, IntervalIter, IntervalTree};
 use crate::layered_repository::storage_layer::{Layer, SegmentTag};
 use crate::layered_repository::InMemoryLayer;
@@ -17,7 +33,7 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
 
@@ -28,7 +44,91 @@ lazy_static! {
     static ref NUM_ONDISK_LAYERS: IntGauge =
         register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")
             .expect("failed to define a metric");
+
+    // Global layer map
+    static ref LAYERS: Mutex<GlobalLayerMap> = Mutex::new(GlobalLayerMap::new());
 }
+
+const MAX_LOADED_LAYERS: usize = 10;
+
+#[derive(Clone)]
+enum GlobalLayerEntry {
+    InMemory(Arc<InMemoryLayer>),
+    Historic(Arc<dyn Layer>),
+}
+
+struct GlobalLayerMap {
+    layers: HashMap<LayerId, GlobalLayerEntry>,
+    last_id: u64,
+
+    // Layers currently loaded. We run a clock algorithm across these.
+    loaded_layers: Vec<LayerId>,
+}
+
+impl GlobalLayerMap {
+    pub fn new() -> GlobalLayerMap {
+        GlobalLayerMap {
+            layers: HashMap::new(),
+            last_id: 0,
+            loaded_layers: Vec::new(),
+        }
+    }
+
+    pub fn get(&mut self, layer_id: LayerId) -> Arc<dyn Layer> {
+
+        match self.layers.get(&layer_id) {
+            Some(GlobalLayerEntry::InMemory(layer)) => layer.clone(),
+            Some(GlobalLayerEntry::Historic(layer)) => layer.clone(),
+            None => panic!()
+        }
+    }
+
+    pub fn get_open(&mut self, layer_id: LayerId) -> Arc<InMemoryLayer> {
+        match self.layers.get(&layer_id) {
+            Some(GlobalLayerEntry::InMemory(layer)) => layer.clone(),
+            Some(GlobalLayerEntry::Historic(_layer)) => panic!(),
+            None => panic!()
+        }
+    }
+
+    pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) -> LayerId {
+        let layer_id = LayerId(self.last_id);
+        self.last_id += 1;
+
+        self.layers.insert(layer_id, GlobalLayerEntry::InMemory(layer));
+
+        layer_id
+    }
+
+    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) -> LayerId {
+        let layer_id = LayerId(self.last_id);
+        self.last_id += 1;
+
+        self.layers.insert(layer_id, GlobalLayerEntry::Historic(layer));
+
+        layer_id
+    }
+
+    pub fn remove(&mut self, layer_id: LayerId) -> GlobalLayerEntry {
+        if let Some(entry) = self.layers.remove(&layer_id) {
+            let orig_entry = entry.clone();
+            match orig_entry {
+                GlobalLayerEntry::InMemory(_layer) => {
+                    NUM_INMEMORY_LAYERS.dec();
+                },
+                GlobalLayerEntry::Historic(_layer) => {
+                    NUM_ONDISK_LAYERS.dec();
+                }
+            }
+            entry.clone()
+        } else {
+            panic!()
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LayerId(u64);
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -41,7 +141,7 @@ pub struct LayerMap {
     /// All in-memory layers, ordered by 'oldest_pending_lsn' and generation
     /// of each layer. This allows easy access to the in-memory layer that
     /// contains the oldest WAL record.
-    open_layers: BinaryHeap<OpenLayerEntry>,
+    open_layers: BinaryHeap<OpenLayerHeapEntry>,
 
     /// Generation number, used to distinguish newly inserted entries in the
     /// binary heap from older entries during checkpoint.
@@ -61,6 +161,11 @@ impl LayerMap {
         segentry.get(lsn)
     }
 
+    pub fn get_with_id(&self, layer_id: LayerId) -> Arc<dyn Layer> {
+        // TODO: check that it belongs to this tenant+timeline
+        LAYERS.lock().unwrap().get(layer_id)
+    }
+
     ///
     /// Get the open layer for given segment for writing. Or None if no open
     /// layer exists.
@@ -68,16 +173,24 @@ impl LayerMap {
     pub fn get_open(&self, tag: &SegmentTag) -> Option<Arc<InMemoryLayer>> {
         let segentry = self.segs.get(tag)?;
 
-        segentry.open.as_ref().map(Arc::clone)
+        
+        if let Some((layer_id, _start_lsn)) = segentry.open {
+            Some(LAYERS.lock().unwrap().get_open(layer_id))
+        } else {
+            None
+        }
     }
 
     ///
     /// Insert an open in-memory layer
     ///
     pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
+
+        let layer_id = LAYERS.lock().unwrap().insert_open(Arc::clone(&layer));
+        
         let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
 
-        segentry.update_open(Arc::clone(&layer));
+        segentry.update_open(layer_id, layer.get_start_lsn());
 
         let oldest_pending_lsn = layer.get_oldest_pending_lsn();
 
@@ -87,9 +200,9 @@ impl LayerMap {
         assert!(oldest_pending_lsn.is_aligned());
 
         // Also add it to the binary heap
-        let open_layer_entry = OpenLayerEntry {
+        let open_layer_entry = OpenLayerHeapEntry {
             oldest_pending_lsn: layer.get_oldest_pending_lsn(),
-            layer,
+            layer_id,
             generation: self.current_generation,
         };
         self.open_layers.push(open_layer_entry);
@@ -98,47 +211,46 @@ impl LayerMap {
     }
 
     /// Remove the oldest in-memory layer
-    pub fn pop_oldest_open(&mut self) {
-        // Pop it from the binary heap
-        let oldest_entry = self.open_layers.pop().unwrap();
-        let segtag = oldest_entry.layer.get_seg_tag();
+    pub fn remove(&mut self, layer_id: LayerId) {
+        let layer_entry = LAYERS.lock().unwrap().remove(layer_id);
 
         // Also remove it from the SegEntry of this segment
-        let mut segentry = self.segs.get_mut(&segtag).unwrap();
-        if Arc::ptr_eq(segentry.open.as_ref().unwrap(), &oldest_entry.layer) {
-            segentry.open = None;
-        } else {
-            // We could have already updated segentry.open for
-            // dropped (non-writeable) layer. This is fine.
-            assert!(!oldest_entry.layer.is_writeable());
-            assert!(oldest_entry.layer.is_dropped());
-        }
+        match layer_entry {
+            GlobalLayerEntry::InMemory(layer) => {
+                let tag = layer.get_seg_tag();
 
-        NUM_INMEMORY_LAYERS.dec();
+                if let Some(segentry) = self.segs.get_mut(&tag) {
+                    segentry.historic.remove(&HistoricLayerIntervalTreeEntry::new(layer_id, layer));
+                }
+            }
+            GlobalLayerEntry::Historic(layer) => {
+                let segtag = layer.get_seg_tag();
+                let mut segentry = self.segs.get_mut(&segtag).unwrap();
+                if let Some(open) = segentry.open {
+                    if open.0 == layer_id {
+                        segentry.open = None;
+                    }
+                } else {
+                    // We could have already updated segentry.open for
+                    // dropped (non-writeable) layer. This is fine.
+                    //assert!(!layer.is_writeable());
+                    //assert!(layer.is_dropped());
+                }
+            }
+        }
     }
 
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) -> LayerId {
+
+        let layer_id = LAYERS.lock().unwrap().insert_historic(Arc::clone(&layer));
+
         let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
-        segentry.insert_historic(layer);
+        segentry.insert_historic(layer_id, layer);
 
-        NUM_ONDISK_LAYERS.inc();
-    }
-
-    ///
-    /// Remove an on-disk layer from the map.
-    ///
-    /// This should be called when the corresponding file on disk has been deleted.
-    ///
-    pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
-        let tag = layer.get_seg_tag();
-
-        if let Some(segentry) = self.segs.get_mut(&tag) {
-            segentry.historic.remove(&layer);
-        }
-        NUM_ONDISK_LAYERS.dec();
+        layer_id
     }
 
     // List relations along with a flag that marks if they exist at the given lsn.
@@ -199,10 +311,15 @@ impl LayerMap {
     }
 
     /// Return the oldest in-memory layer, along with its generation number.
-    pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
-        self.open_layers
-            .peek()
-            .map(|oldest_entry| (Arc::clone(&oldest_entry.layer), oldest_entry.generation))
+    pub fn peek_oldest_open(&self) -> Option<(LayerId, Arc<InMemoryLayer>, u64)> {
+
+        if let Some(oldest_entry) = self.open_layers.peek() {
+            Some((oldest_entry.layer_id,
+                  LAYERS.lock().unwrap().get_open(oldest_entry.layer_id),
+                  oldest_entry.generation))
+        } else {
+            None
+        }
     }
 
     /// Increment the generation number used to stamp open in-memory layers. Layers
@@ -220,6 +337,7 @@ impl LayerMap {
         }
     }
 
+    /*
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
     pub fn dump(&self) -> Result<()> {
@@ -236,16 +354,39 @@ impl LayerMap {
         println!("End dump LayerMap");
         Ok(())
     }
+*/
 }
 
-impl IntervalItem for dyn Layer {
+#[derive(Clone)]
+struct HistoricLayerIntervalTreeEntry {
+    layer_id: LayerId,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+}
+
+impl HistoricLayerIntervalTreeEntry {
+    fn new(layer_id: LayerId, layer: Arc<dyn Layer>) -> HistoricLayerIntervalTreeEntry{
+        HistoricLayerIntervalTreeEntry {
+            layer_id,
+            start_lsn: layer.get_start_lsn(),
+            end_lsn: layer.get_end_lsn(),
+        }
+    }
+}
+
+impl PartialEq for HistoricLayerIntervalTreeEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.layer_id == other.layer_id
+    }
+}
+impl IntervalItem for HistoricLayerIntervalTreeEntry {
     type Key = Lsn;
 
     fn start_key(&self) -> Lsn {
-        self.get_start_lsn()
+        self.start_lsn
     }
     fn end_key(&self) -> Lsn {
-        self.get_end_lsn()
+        self.end_lsn
     }
 }
 
@@ -259,8 +400,8 @@ impl IntervalItem for dyn Layer {
 /// IntervalTree.
 #[derive(Default)]
 struct SegEntry {
-    open: Option<Arc<InMemoryLayer>>,
-    historic: IntervalTree<dyn Layer>,
+    open: Option<(LayerId, Lsn)>,
+    historic: IntervalTree<HistoricLayerIntervalTreeEntry>,
 }
 
 impl SegEntry {
@@ -276,13 +417,17 @@ impl SegEntry {
 
     pub fn get(&self, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         if let Some(open) = &self.open {
-            if open.get_start_lsn() <= lsn {
-                let x: Arc<dyn Layer> = Arc::clone(open) as _;
-                return Some(x);
+            let layer = LAYERS.lock().unwrap().get(open.0);
+            if layer.get_start_lsn() <= lsn {
+                return Some(layer);
             }
         }
 
-        self.historic.search(lsn)
+        if let Some(historic) = self.historic.search(lsn) {
+            Some(LAYERS.lock().unwrap().get(historic.layer_id))
+        } else {
+            None
+        }
     }
 
     pub fn newer_image_layer_exists(&self, lsn: Lsn) -> bool {
@@ -291,21 +436,25 @@ impl SegEntry {
 
         self.historic
             .iter_newer(lsn)
-            .any(|layer| !layer.is_incremental())
+            .any(|e| {
+                let layer = LAYERS.lock().unwrap().get(e.layer_id);
+                !layer.is_incremental()
+            }
+            )
     }
 
     // Set new open layer for a SegEntry.
     // It's ok to rewrite previous open layer,
     // but only if it is not writeable anymore.
-    pub fn update_open(&mut self, layer: Arc<InMemoryLayer>) {
-        if let Some(prev_open) = &self.open {
-            assert!(!prev_open.is_writeable());
+    pub fn update_open(&mut self, layer_id: LayerId, start_lsn: Lsn) {
+        if let Some(_prev_open) = &self.open {
+            //assert!(!prev_open.is_writeable());
         }
-        self.open = Some(layer);
+        self.open = Some((layer_id, start_lsn));
     }
 
-    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        self.historic.insert(layer);
+    pub fn insert_historic(&mut self, layer_id: LayerId, layer: Arc<dyn Layer>) {
+        self.historic.insert(&HistoricLayerIntervalTreeEntry::new(layer_id, layer));
     }
 }
 
@@ -315,12 +464,12 @@ impl SegEntry {
 /// The generation number associated with each entry can be used to distinguish
 /// recently-added entries (i.e after last call to increment_generation()) from older
 /// entries with the same 'oldest_pending_lsn'.
-struct OpenLayerEntry {
+struct OpenLayerHeapEntry {
     pub oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
     pub generation: u64,
-    pub layer: Arc<InMemoryLayer>,
+    pub layer_id: LayerId,
 }
-impl Ord for OpenLayerEntry {
+impl Ord for OpenLayerHeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
         // to get that. Entries with identical oldest_pending_lsn are ordered by generation
@@ -330,32 +479,33 @@ impl Ord for OpenLayerEntry {
             .then_with(|| other.generation.cmp(&self.generation))
     }
 }
-impl PartialOrd for OpenLayerEntry {
+impl PartialOrd for OpenLayerHeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl PartialEq for OpenLayerEntry {
+impl PartialEq for OpenLayerHeapEntry {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
-impl Eq for OpenLayerEntry {}
+impl Eq for OpenLayerHeapEntry {}
 
 /// Iterator returned by LayerMap::iter_historic_layers()
 pub struct HistoricLayerIter<'a> {
     seg_iter: std::collections::hash_map::Iter<'a, SegmentTag, SegEntry>,
-    iter: Option<IntervalIter<'a, dyn Layer>>,
+    iter: Option<IntervalIter<'a, HistoricLayerIntervalTreeEntry>>,
 }
 
 impl<'a> Iterator for HistoricLayerIter<'a> {
-    type Item = Arc<dyn Layer>;
+    type Item = (LayerId, Arc<dyn Layer>);
 
     fn next(&mut self) -> std::option::Option<<Self as std::iter::Iterator>::Item> {
         loop {
             if let Some(x) = &mut self.iter {
                 if let Some(x) = x.next() {
-                    return Some(Arc::clone(&x));
+                    let layer = LAYERS.lock().unwrap().get(x.layer_id);
+                    return Some((x.layer_id, layer));
                 }
             }
             if let Some((_tag, segentry)) = self.seg_iter.next() {
@@ -426,10 +576,10 @@ mod tests {
         // A helper function (closure) to pop the next oldest open entry from the layer map,
         // and assert that it is what we'd expect
         let mut assert_pop_layer = |expected_segno: u32, expected_generation: u64| {
-            let (l, generation) = layers.peek_oldest_open().unwrap();
+            let (layer_id, l, generation) = layers.peek_oldest_open().unwrap();
             assert!(l.get_seg_tag().segno == expected_segno);
             assert!(generation == expected_generation);
-            layers.pop_oldest_open();
+            layers.remove(layer_id);
         };
 
         assert_pop_layer(0, gen1); // 0x100

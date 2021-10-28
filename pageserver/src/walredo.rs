@@ -28,19 +28,20 @@ use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::Error;
 use std::path::PathBuf;
+
+use std::process::{ChildStdin, ChildStdout, ChildStderr, Command};
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use std::time::Instant;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::time::timeout;
 use zenith_metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantId;
+
+use std::os::unix::io::AsRawFd;
+use nix::poll::*;
 
 use crate::relish::*;
 use crate::repository::WALRecord;
@@ -140,7 +141,6 @@ pub struct PostgresRedoManager {
     tenantid: ZTenantId,
     conf: &'static PageServerConf,
 
-    runtime: tokio::runtime::Runtime,
     processes: Vec<Mutex<Option<PostgresRedoProcess>>>,
     next: AtomicUsize,
 }
@@ -218,16 +218,12 @@ impl WalRedoManager for PostgresRedoManager {
 
             // launch the WAL redo process on first use
             if process_guard.is_none() {
-                let p = self
-                    .runtime
-                    .block_on(PostgresRedoProcess::launch(self.conf, process_no, &self.tenantid))?;
+                let p = PostgresRedoProcess::launch(self.conf, process_no, &self.tenantid)?;
                 *process_guard = Some(p);
             }
             let process = process_guard.as_mut().unwrap();
 
-            result = self
-                .runtime
-                .block_on(self.handle_apply_request_postgres(process, &request));
+            result = self.handle_apply_request_postgres(process, &request);
 
             WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
             end_time = Instant::now();
@@ -243,14 +239,6 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
-        // We block on waiting for requests on the walredo request channel, but
-        // use async I/O to communicate with the child process. Initialize the
-        // runtime for the async part.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
         let mut processes: Vec<Mutex<Option<PostgresRedoProcess>>> = Vec::new();
         for _ in 1..10 {
             processes.push(Mutex::new(None));
@@ -258,7 +246,6 @@ impl PostgresRedoManager {
 
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
-            runtime,
             tenantid,
             conf,
             processes,
@@ -269,7 +256,7 @@ impl PostgresRedoManager {
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
-    async fn handle_apply_request_postgres(
+    fn handle_apply_request_postgres(
         &self,
         process: &mut PostgresRedoProcess,
         request: &WalRedoRequest,
@@ -287,7 +274,7 @@ impl PostgresRedoManager {
         if let RelishTag::Relation(rel) = request.rel {
             // Relational WAL records are applied using wal-redo-postgres
             let buf_tag = BufferTag { rel, blknum };
-            apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
+            apply_result = process.apply_wal_records(buf_tag, base_img, records);
 
             let duration = start.elapsed();
 
@@ -480,13 +467,14 @@ impl PostgresRedoManager {
 struct PostgresRedoProcess {
     stdin: ChildStdin,
     stdout: ChildStdout,
+    stderr: ChildStderr,
 }
 
 impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    async fn launch(
+    fn launch(
         conf: &PageServerConf,
         process_no: usize,
         tenantid: &ZTenantId,
@@ -511,7 +499,6 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
             .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
             .output()
-            .await
             .expect("failed to execute initdb");
 
         if !initdb.status.success() {
@@ -548,98 +535,106 @@ impl PostgresRedoProcess {
             datadir.display()
         );
 
-        let stdin = child.stdin.take().expect("failed to open child's stdin");
-        let stderr = child.stderr.take().expect("failed to open child's stderr");
-        let stdout = child.stdout.take().expect("failed to open child's stdout");
-
-        // This async block reads the child's stderr, and forwards it to the logger
-        let f_stderr = async {
-            let mut stderr_buffered = tokio::io::BufReader::new(stderr);
-
-            let mut line = String::new();
-            loop {
-                let res = stderr_buffered.read_line(&mut line).await;
-                if res.is_err() {
-                    debug!("could not convert line to utf-8");
-                    continue;
-                }
-                if res.unwrap() == 0 {
-                    break;
-                }
-                error!("wal-redo-postgres: {}", line.trim());
-                line.clear();
-            }
-            Ok::<(), Error>(())
-        };
-        tokio::spawn(f_stderr);
-
-        Ok(PostgresRedoProcess { stdin, stdout })
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        Ok(PostgresRedoProcess { stdin, stdout, stderr })
     }
 
     //
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
-    async fn apply_wal_records(
+    fn apply_wal_records(
         &mut self,
         tag: BufferTag,
         base_img: Option<Bytes>,
         records: &[(Lsn, WALRecord)],
     ) -> Result<Bytes, std::io::Error> {
-        let stdout = &mut self.stdout;
-        // Buffer the writes to avoid a lot of small syscalls.
-        let mut stdin = tokio::io::BufWriter::new(&mut self.stdin);
 
-        // We do three things simultaneously: send the old base image and WAL records to
-        // the child process's stdin, read the result from child's stdout, and forward any logging
-        // information that the child writes to its stderr to the page server's log.
-        //
-        // 'f_stdin' handles writing the base image and WAL records to the child process.
-        // 'f_stdout' below reads the result back. And 'f_stderr', which was spawned into the
-        // tokio runtime in the 'launch' function already, forwards the logging.
-        let f_stdin = async {
-            // Send base image, if any. (If the record initializes the page, previous page
-            // version is not needed.)
-            let mut buf: Vec<u8> = Vec::new();
-            build_begin_redo_for_block_msg(tag, &mut buf);
-            if let Some(img) = base_img {
-                build_push_page_msg(tag, &img, &mut buf);
+        // Send base image, if any. (If the record initializes the page, previous page
+        // version is not needed.)
+        let mut buf: Vec<u8> = Vec::new();
+        build_begin_redo_for_block_msg(tag, &mut buf);
+        if let Some(img) = base_img {
+            build_push_page_msg(tag, &img, &mut buf);
+        }
+
+        // Send WAL records.
+        for (lsn, rec) in records.iter() {
+            WAL_REDO_RECORD_COUNTER.inc();
+
+            build_apply_record_msg(*lsn, &rec.rec, &mut buf);
+
+            //debug!("sent WAL record to wal redo postgres process ({:X}/{:X}",
+            //       r.lsn >> 32, r.lsn & 0xffff_ffff);
+        }
+        //debug!("sent {} WAL records to wal redo postgres process ({:X}/{:X}",
+        //       records.len(), lsn >> 32, lsn & 0xffff_ffff);
+
+        // Send GetPage command to get the result back
+        build_get_page_msg(tag, &mut buf);
+
+
+        // The input is now in 'buf'.
+
+        let mut nwrite = 0;
+
+        let mut resultbuf = Vec::new();
+        resultbuf.resize(8192, 0);
+
+        let mut nresult = 0;
+
+        let mut pollfds = [
+            PollFd::new(self.stdout.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(self.stderr.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(self.stdin.as_raw_fd(), PollFlags::POLLOUT),
+        ];
+
+        // Do a blind write first
+        let n = self.stdin.write(&buf[nwrite..])?;
+        nwrite += n;
+
+        while nresult < 8192 {
+
+            let nfds = if nwrite < buf.len() {
+                3
+            } else {
+                2
+            };
+            nix::poll::poll(&mut pollfds[0..nfds], TIMEOUT.as_millis() as i32)?;
+
+            // We do three things simultaneously: send the old base image and WAL records to
+            // the child process's stdin, read the result from child's stdout, and forward any logging
+            // information that the child writes to its stderr to the page server's log.
+            //
+            // 'f_stdin' handles writing the base image and WAL records to the child process.
+            // 'f_stdout' below reads the result back. And 'f_stderr', which was spawned into the
+            // tokio runtime in the 'launch' function already, forwards the logging.
+            if nwrite < buf.len() && !pollfds[2].revents().unwrap().is_empty() {
+                // stdin
+                let n = self.stdin.write(&buf[nwrite..])?;
+                nwrite += n;
             }
+            if !pollfds[0].revents().unwrap().is_empty() {
+                // stdout
+                // Read back new page image
+                let n = self.stdout.read(&mut resultbuf[nresult..])?;
 
-            // Send WAL records.
-            for (lsn, rec) in records.iter() {
-                WAL_REDO_RECORD_COUNTER.inc();
-
-                build_apply_record_msg(*lsn, &rec.rec, &mut buf);
-
-                //debug!("sent WAL record to wal redo postgres process ({:X}/{:X}",
-                //       r.lsn >> 32, r.lsn & 0xffff_ffff);
+                nresult += n;
             }
-            //debug!("sent {} WAL records to wal redo postgres process ({:X}/{:X}",
-            //       records.len(), lsn >> 32, lsn & 0xffff_ffff);
+            if !pollfds[1].revents().unwrap().is_empty() {
+                // stderr
+                let mut readbuf: [u8; 16384] = [0; 16384];
 
-            // Send GetPage command to get the result back
-            build_get_page_msg(tag, &mut buf);
-            timeout(TIMEOUT, stdin.write_all(&buf)).await??;
-            timeout(TIMEOUT, stdin.flush()).await??;
+                let n = self.stderr.read(&mut readbuf)?;
+
+                error!("wal-redo-postgres: {}", String::from_utf8_lossy(&readbuf[0..n]));
+            }
             //debug!("sent GetPage for {}", tag.blknum);
-            Ok::<(), Error>(())
-        };
+        }
 
-        // Read back new page image
-        let f_stdout = async {
-            let mut buf = [0u8; 8192];
-
-            timeout(TIMEOUT, stdout.read_exact(&mut buf)).await??;
-            //debug!("got response for {}", tag.blknum);
-            Ok::<[u8; 8192], Error>(buf)
-        };
-
-        let res = tokio::try_join!(f_stdout, f_stdin)?;
-
-        let buf = res.0;
-
-        Ok::<Bytes, Error>(Bytes::from(std::vec::Vec::from(buf)))
+        Ok(Bytes::from(Vec::from(resultbuf)))
     }
 }
 
