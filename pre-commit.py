@@ -38,19 +38,13 @@ def rustfmt(fix_inplace: bool = False, no_color: bool = False) -> str:
 
 
 def get_commit_files() -> List[str]:
-    files = subprocess.check_output(
-        "git diff --cached --name-only --diff-filter=ACM".split()
-    )
+    files = subprocess.check_output("git diff --cached --name-only --diff-filter=ACM".split())
     return files.decode().splitlines()
 
 
-def check(
-    name: str, suffix: str, cmd: str, changed_files: List[str], no_color: bool = False
-):
+def check(name: str, suffix: str, cmd: str, changed_files: List[str], no_color: bool = False):
     print(f"Checking: {name} ", end="")
-    applicable_files = list(
-        filter(lambda fname: fname.strip().endswith(suffix), changed_files)
-    )
+    applicable_files = list(filter(lambda fname: fname.strip().endswith(suffix), changed_files))
     if not applicable_files:
         print(colorify("[NOT APPLICABLE]", Color.CYAN, no_color))
         return
@@ -68,12 +62,11 @@ def check(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--fix-inplace", action="store_true", help="apply fixes inplace"
-    )
-    parser.add_argument(
-        "--no-color", action="store_true", help="disable colored output", default=not sys.stdout.isatty()
-    )
+    parser.add_argument("--fix-inplace", action="store_true", help="apply fixes inplace")
+    parser.add_argument("--no-color",
+                        action="store_true",
+                        help="disable colored output",
+                        default=not sys.stdout.isatty())
     args = parser.parse_args()
 
     files = get_commit_files()
