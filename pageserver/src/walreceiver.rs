@@ -8,6 +8,8 @@
 use crate::relish::*;
 use crate::restore_local_repo;
 use crate::tenant_mgr;
+use crate::tenant_mgr::TenantState;
+use crate::tenant_threads;
 use crate::waldecoder::*;
 use crate::PageServerConf;
 use anyhow::{bail, Error, Result};
@@ -38,6 +40,7 @@ use zenith_utils::zid::ZTimelineId;
 struct WalReceiverEntry {
     wal_producer_connstr: String,
     wal_receiver_handle: Option<JoinHandle<()>>,
+    tenantid: ZTenantId,
 }
 
 lazy_static! {
@@ -65,6 +68,23 @@ pub fn stop_wal_receiver(timelineid: ZTimelineId) {
     }
 }
 
+pub fn drop_wal_receiver(timelineid: ZTimelineId, tenantid: ZTenantId) {
+    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    receivers.remove(&timelineid);
+
+    // Check if it was the last walreceiver of the tenant.
+    // TODO now we store one WalReceiverEntry per timeline,
+    // so this iterator looks a bit strange.
+    for (_timelineid, entry) in receivers.iter() {
+        if entry.tenantid == tenantid {
+            return;
+        }
+    }
+
+    // When last walreceiver of the tenant is gone, change state to Idle
+    tenant_mgr::set_tenant_state(tenantid, TenantState::Idle).unwrap();
+}
+
 // Launch a new WAL receiver, or tell one that's running about change in connection string
 pub fn launch_wal_receiver(
     conf: &'static PageServerConf,
@@ -90,8 +110,13 @@ pub fn launch_wal_receiver(
             let receiver = WalReceiverEntry {
                 wal_producer_connstr: wal_producer_connstr.into(),
                 wal_receiver_handle: Some(wal_receiver_handle),
+                tenantid,
             };
             receivers.insert(timelineid, receiver);
+
+            // Update tenant state and start tenant threads, if they are not running yet.
+            tenant_mgr::set_tenant_state(tenantid, TenantState::Active).unwrap();
+            tenant_threads::start_tenant_threads(conf, tenantid);
         }
     };
 }
@@ -114,11 +139,15 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
     let _enter = info_span!("WAL receiver", timeline = %timelineid, tenant = %tenantid).entered();
     info!("WAL receiver thread started");
 
+    let mut retry_count = 10;
+
     //
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it. If the connection is lost, keep retrying.
+    // TODO How long should we retry in case of losing connection?
+    // Should we retry at all or we can wait for the next callmemaybe request?
     //
-    while !tenant_mgr::shutdown_requested() {
+    while !tenant_mgr::shutdown_requested() && retry_count > 0 {
         // Look up the current WAL producer address
         let wal_producer_connstr = get_wal_producer_connstr(timelineid);
 
@@ -129,10 +158,20 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
                 "WAL streaming connection failed ({}), retrying in 1 second",
                 e
             );
+            retry_count -= 1;
             sleep(Duration::from_secs(1));
+        } else {
+            info!(
+                "walreceiver disconnected tenant {}, timelineid {}",
+                tenantid, timelineid
+            );
+            break;
         }
     }
-    debug!("WAL streaming shut down");
+    info!("WAL streaming shut down");
+    // Drop it from list of active WAL_RECEIVERS
+    // so that next callmemaybe request launched a new thread
+    drop_wal_receiver(timelineid, tenantid);
 }
 
 fn walreceiver_main(
@@ -300,6 +339,7 @@ fn walreceiver_main(
             break;
         }
     }
+
     Ok(())
 }
 

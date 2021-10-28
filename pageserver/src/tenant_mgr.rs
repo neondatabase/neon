@@ -101,10 +101,7 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
     let mut m = access_tenants();
     let tenant = m.get_mut(&tenant_id).unwrap();
     tenant.repo = Some(repo);
-    tenant.state = TenantState::Active;
-
-    // TODO Start these threads only if tenant actively receives some WAL
-    tenant_threads::start_tenant_threads(conf, tenant_id);
+    tenant.state = TenantState::Idle;
 }
 
 pub fn register_relish_download(
@@ -128,12 +125,12 @@ pub fn register_relish_download(
         match &tenant.repo {
             Some(repo) => {
                 init_timeline(repo.as_ref(), timeline_id);
-                tenant.state = TenantState::Active;
+                tenant.state = TenantState::Idle;
                 return;
             }
             None => log::warn!("Initialize new repo"),
         }
-        tenant.state = TenantState::Active;
+        tenant.state = TenantState::Idle;
     }
 
     // init repo updates Tenant state
@@ -197,7 +194,7 @@ pub fn create_repository_for_tenant(
     let mut m = access_tenants();
     let tenant = m.get_mut(&tenantid).unwrap();
     tenant.repo = Some(repo);
-    tenant.state = TenantState::Active;
+    tenant.state = TenantState::Idle;
 
     Ok(())
 }
@@ -211,18 +208,18 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> TenantState {
     }
 }
 
-pub fn set_tenant_state(tenantid: ZTenantId, state: TenantState) -> Result<TenantState> {
+pub fn set_tenant_state(tenantid: ZTenantId, newstate: TenantState) -> Result<TenantState> {
     let mut m = access_tenants();
     let tenant = m.get_mut(&tenantid);
 
     match tenant {
         Some(tenant) => {
-            if state == TenantState::Idle && tenant.state != TenantState::Active {
+            if newstate == TenantState::Idle && tenant.state != TenantState::Active {
                 // Only Active tenant can become Idle
                 return Ok(tenant.state);
             }
-            info!("set_tenant_state: {} -> {}", tenant.state, state);
-            tenant.state = state;
+            info!("set_tenant_state: {} -> {}", tenant.state, newstate);
+            tenant.state = newstate;
             Ok(tenant.state)
         }
         None => bail!("Tenant not found for tenant {}", tenantid),

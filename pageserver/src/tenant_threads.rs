@@ -35,33 +35,35 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+// Launch checkpointer and GC for the tenant.
+// It's possible that the threads are running already,
+// if so, just don't spawn new ones.
 pub fn start_tenant_threads(conf: &'static PageServerConf, tenantid: ZTenantId) {
-    //ensure that old threads are stopeed
-    wait_for_tenant_threads_to_stop(tenantid);
-
-    let checkpointer_handle = std::thread::Builder::new()
-        .name("Checkpointer thread".into())
-        .spawn(move || {
-            checkpoint_loop(tenantid, conf).expect("Checkpointer thread died");
-        })
-        .ok();
-
-    let gc_handle = std::thread::Builder::new()
-        .name("GC thread".into())
-        .spawn(move || {
-            gc_loop(tenantid, conf).expect("GC thread died");
-        })
-        .ok();
-
-    // TODO handle thread errors if any
-
     let mut handles = TENANT_HANDLES.lock().unwrap();
-    let h = TenantHandleEntry {
-        checkpointer_handle,
-        gc_handle,
-    };
+    let h = handles
+        .entry(tenantid)
+        .or_insert_with(|| TenantHandleEntry {
+            checkpointer_handle: None,
+            gc_handle: None,
+        });
 
-    handles.insert(tenantid, h);
+    if h.checkpointer_handle.is_none() {
+        h.checkpointer_handle = std::thread::Builder::new()
+            .name("Checkpointer thread".into())
+            .spawn(move || {
+                checkpoint_loop(tenantid, conf).expect("Checkpointer thread died");
+            })
+            .ok();
+    }
+
+    if h.gc_handle.is_none() {
+        h.gc_handle = std::thread::Builder::new()
+            .name("GC thread".into())
+            .spawn(move || {
+                gc_loop(tenantid, conf).expect("GC thread died");
+            })
+            .ok();
+    }
 }
 
 pub fn wait_for_tenant_threads_to_stop(tenantid: ZTenantId) {
