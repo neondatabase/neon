@@ -1,0 +1,7 @@
+vendor/
+target/
+tmp_install/
+__pycache__/
+test_output/
+.zenith/
+.git/
