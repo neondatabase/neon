@@ -2578,6 +2578,7 @@ dependencies = [
  "hyper",
  "jsonwebtoken",
  "lazy_static",
+ "nix",
  "postgres",
  "rand",
  "routerify",

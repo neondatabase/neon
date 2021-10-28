@@ -7,7 +7,7 @@
 ///
 use std::{
     collections::HashMap,
-    net::{SocketAddr, TcpListener},
+    net::SocketAddr,
     sync::{mpsc, Arc, Mutex},
     thread,
 };
@@ -17,6 +17,7 @@ use clap::{App, Arg, ArgMatches};
 
 use cplane_api::DatabaseInfo;
 use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
+use zenith_utils::tcp_listener;
 
 mod cplane_api;
 mod mgmt;
@@ -140,10 +141,10 @@ fn main() -> anyhow::Result<()> {
 
     // Check that we can bind to address before further initialization
     println!("Starting proxy on {}", state.conf.proxy_address);
-    let pageserver_listener = TcpListener::bind(state.conf.proxy_address)?;
+    let pageserver_listener = tcp_listener::bind(state.conf.proxy_address)?;
 
     println!("Starting mgmt on {}", state.conf.mgmt_address);
-    let mgmt_listener = TcpListener::bind(state.conf.mgmt_address)?;
+    let mgmt_listener = tcp_listener::bind(state.conf.mgmt_address)?;
 
     let threads = [
         // Spawn a thread to listen for connections. It will spawn further threads
