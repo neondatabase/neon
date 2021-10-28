@@ -503,8 +503,7 @@ impl ImageLayerWriter {
         let book = chapter.close()?;
 
         // This flushes the underlying 'buf_writer'.
-        let writer = book.close()?;
-        writer.get_ref().sync_all()?;
+        book.close()?;
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
