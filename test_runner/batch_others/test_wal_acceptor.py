@@ -3,6 +3,7 @@ import random
 import time
 import os
 import subprocess
+import threading
 import uuid
 
 from contextlib import closing
@@ -90,6 +91,9 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
                     m.flush_lsns.append(sk_m.flush_lsn_inexact[timeline_id])
                     m.commit_lsns.append(sk_m.commit_lsn_inexact[timeline_id])
 
+                for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
+                    # Invariant. May be < when transaction is in progress.
+                    assert commit_lsn <= flush_lsn
                 # We only call collect_metrics() after a transaction is confirmed by
                 # the compute node, which only happens after a consensus of safekeepers
                 # has confirmed the transaction. In local tests it's quite often
@@ -114,8 +118,28 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     init_m = collect_metrics("after CREATE TABLE")
 
     # Populate data for 2/3 branches
+    class MetricsChecker(threading.Thread):
+        def __init__(self):
+            super().__init__(daemon=True)
+            self.should_stop = threading.Event()
+
+        def run(self) -> None:
+            while not self.should_stop.is_set():
+                collect_metrics("during INSERT INTO")
+                time.sleep(1)
+
+        def stop(self) -> None:
+            self.should_stop.set()
+            self.join()
+
+    metrics_checker = MetricsChecker()
+    metrics_checker.start()
+
     for pg in pgs[:-1]:
         pg.safe_psql("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+
+    metrics_checker.stop()
+
     collect_metrics("after INSERT INTO")
 
     # Check data for 2/3 branches
