@@ -19,7 +19,10 @@ use lazy_static::lazy_static;
 
 use crate::replication::HotStandbyFeedback;
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
-use zenith_metrics::{register_gauge_vec, Gauge, GaugeVec};
+use zenith_metrics::{
+    register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,
+    DISK_WRITE_SECONDS_BUCKETS,
+};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::pq_proto::SystemId;
@@ -299,11 +302,27 @@ lazy_static! {
         &["ztli"]
     )
     .expect("Failed to register safekeeper_commit_lsn gauge vec");
+    static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
+        "safekeeper_write_wal_bytes",
+        "Bytes written to WAL in a single request, grouped by timeline",
+        &["timeline_id"],
+        vec![1.0, 10.0, 100.0, 1024.0, 8192.0, 128.0 * 1024.0, 1024.0 * 1024.0, 10.0 * 1024.0 * 1024.0]
+    )
+    .expect("Failed to register safekeeper_write_wal_bytes histogram vec");
+    static ref WRITE_WAL_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_write_wal_seconds",
+        "Seconds spent writing and syncing WAL to a disk in a single request, grouped by timeline",
+        &["timeline_id"],
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_write_wal_seconds histogram vec");
 }
 
 struct SafeKeeperMetrics {
     flush_lsn: Gauge,
     commit_lsn: Gauge,
+    write_wal_bytes: Histogram,
+    write_wal_seconds: Histogram,
 }
 
 impl SafeKeeperMetrics {
@@ -312,6 +331,8 @@ impl SafeKeeperMetrics {
         SafeKeeperMetrics {
             flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&ztli_str]),
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
+            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&ztli_str]),
+            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&ztli_str]),
         }
     }
 
@@ -319,6 +340,8 @@ impl SafeKeeperMetrics {
         SafeKeeperMetrics {
             flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&["n/a"]),
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&["n/a"]),
+            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&["n/a"]),
+            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&["n/a"]),
         }
     }
 }
@@ -472,8 +495,14 @@ where
         // do the job
         let mut last_rec_lsn = Lsn(0);
         if !msg.wal_data.is_empty() {
-            self.storage
-                .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data)?;
+            self.metrics
+                .write_wal_bytes
+                .observe(msg.wal_data.len() as f64);
+            {
+                let _timer = self.metrics.write_wal_seconds.start_timer();
+                self.storage
+                    .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data)?;
+            }
 
             // figure out last record's end lsn for reporting (if we got the
             // whole record)
