@@ -1212,8 +1212,7 @@ impl LayeredTimeline {
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
 
-        let mut created_historics = false;
-        let mut layer_uploads = Vec::new();
+        let mut layer_paths = Vec::new();
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
 
@@ -1259,20 +1258,16 @@ impl LayeredTimeline {
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
 
-            if !new_historics.is_empty() {
-                created_historics = true;
-            }
-
             // Finally, replace the frozen in-memory layer with the new on-disk layers
             layers.remove_historic(oldest_layer);
 
             // Add the historics to the LayerMap
             for delta_layer in new_historics.delta_layers {
-                layer_uploads.push(delta_layer.path());
+                layer_paths.push(delta_layer.path());
                 layers.insert_historic(Arc::new(delta_layer));
             }
             for image_layer in new_historics.image_layers {
-                layer_uploads.push(image_layer.path());
+                layer_paths.push(image_layer.path());
                 layers.insert_historic(Arc::new(image_layer));
             }
         }
@@ -1287,7 +1282,12 @@ impl LayeredTimeline {
         drop(layers);
         drop(write_guard);
 
-        if created_historics {
+        if !layer_paths.is_empty() {
+            for layer_path in &layer_paths {
+                let file = File::open(layer_path)?;
+                file.sync_all()?;
+            }
+
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
             let timeline_dir =
@@ -1330,7 +1330,7 @@ impl LayeredTimeline {
                 false,
             )?;
             if self.upload_relishes {
-                schedule_timeline_upload(self.tenantid, self.timelineid, layer_uploads, metadata);
+                schedule_timeline_upload(self.tenantid, self.timelineid, layer_paths, metadata);
             }
 
             // Also update the in-memory copy

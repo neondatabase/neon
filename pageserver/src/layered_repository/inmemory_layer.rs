@@ -281,12 +281,6 @@ pub struct LayersOnDisk {
     pub image_layers: Vec<ImageLayer>,
 }
 
-impl LayersOnDisk {
-    pub fn is_empty(&self) -> bool {
-        self.delta_layers.is_empty() && self.image_layers.is_empty()
-    }
-}
-
 impl InMemoryLayer {
     /// Return the oldest page version that's stored in this layer
     pub fn get_oldest_pending_lsn(&self) -> Lsn {
