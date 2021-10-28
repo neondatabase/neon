@@ -90,6 +90,11 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
                     m.flush_lsns.append(sk_m.flush_lsn_inexact[timeline_id])
                     m.commit_lsns.append(sk_m.commit_lsn_inexact[timeline_id])
 
+                # We only call collect_metrics() after a transaction is confirmed by
+                # the compute node, which only happens after a consensus of safekeepers
+                # has confirmed the transaction. In local tests it's quite often
+                # that all safekeepers has confirmed the transaction, so we ensure that
+                # until it's flaky.
                 for lsn in m.flush_lsns:
                     assert m.latest_valid_lsn <= lsn
                 for lsn in m.commit_lsns:
@@ -98,7 +103,8 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         log.info(f"{message}: {branch_metrics}")
         return branch_metrics
 
-    collect_metrics("before CREATE TABLE")
+    # TODO: https://github.com/zenithdb/zenith/issues/809
+    # collect_metrics("before CREATE TABLE")
 
     # Do everything in different loops to have actions on different timelines
     # interleaved.
