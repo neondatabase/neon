@@ -188,17 +188,14 @@ jobs:
       - checkout
       - run:
           name: Install deps
-          working_directory: test_runner
           command: pipenv --python 3.7 install --dev
       - run:
           name: Run yapf to ensure code format
           when: always
-          working_directory: test_runner
           command: pipenv run yapf --recursive --diff .
       - run:
           name: Run mypy to check types
           when: always
-          working_directory: test_runner
           command: pipenv run mypy .
 
   run-pytest:
