@@ -230,7 +230,7 @@ fn bootstrap_timeline(
         timeline.writer().as_ref(),
         lsn,
     )?;
-    timeline.checkpoint()?;
+    timeline.checkpoint_forced()?;
 
     println!(
         "created initial timeline {} timeline.lsn {}",

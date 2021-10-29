@@ -59,6 +59,7 @@ mod image_layer;
 mod inmemory_layer;
 mod interval_tree;
 mod layer_map;
+mod jobs;
 mod page_versions;
 mod storage_layer;
 
@@ -70,6 +71,8 @@ use layer_map::{LayerId, LayerMap};
 use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
 };
+use jobs::{GlobalJob, schedule_job};
+pub use jobs::launch_global_job_thread;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -129,10 +132,17 @@ pub struct LayeredRepository {
     /// Makes evey repo's timelines to backup their files to remote storage,
     /// when they get frozen.
     upload_relishes: bool,
+
+    is_gc_scheduled: Mutex<bool>,
 }
 
 /// Public interface
 impl Repository for LayeredRepository {
+
+    fn upgrade_to_layered_repository(&self) -> &crate::layered_repository::LayeredRepository {
+        self
+    }
+
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
@@ -206,17 +216,31 @@ impl Repository for LayeredRepository {
     /// Public entry point to GC. All the logic is in the private
     /// gc_iteration_internal function, this public facade just wraps it for
     /// metrics collection.
-    fn gc_iteration(
+    fn gc_manual(
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         STORAGE_TIME
-            .with_label_values(&["gc"])
+            .with_label_values(&["gc_manual"])
             .observe_closure_duration(|| {
                 self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
             })
+    }
+
+    fn gc_scheduled(&self) -> Result<GcResult> {
+        let result = STORAGE_TIME
+            .with_label_values(&["gc_scheduled"])
+            .observe_closure_duration(|| {
+                self.gc_iteration_internal(None, self.conf.gc_horizon, false)
+            });
+
+        let mut guard = self.is_gc_scheduled.lock().unwrap();
+
+        *guard = false;
+
+        result
     }
 
     // Wait for all threads to complete and persist repository data before pageserver shutdown.
@@ -228,7 +252,7 @@ impl Repository for LayeredRepository {
             walreceiver::stop_wal_receiver(*timelineid);
             // Wait for syncing data to disk
             trace!("repo shutdown. checkpoint timeline {}", timelineid);
-            timeline.checkpoint()?;
+            timeline.checkpoint_forced()?;
 
             //TODO Wait for walredo process to shutdown too
         }
@@ -306,6 +330,7 @@ impl LayeredRepository {
             timelines: Mutex::new(HashMap::new()),
             walredo_mgr,
             upload_relishes,
+            is_gc_scheduled: Mutex::new(false),
         }
     }
 
@@ -352,44 +377,6 @@ impl LayeredRepository {
             }
         }
         trace!("Checkpointer thread shut down");
-        Ok(())
-    }
-
-    ///
-    /// Launch the GC thread in given repository.
-    ///
-    pub fn launch_gc_thread(
-        conf: &'static PageServerConf,
-        rc: Arc<LayeredRepository>,
-    ) -> JoinHandle<()> {
-        std::thread::Builder::new()
-            .name("GC thread".into())
-            .spawn(move || {
-                // FIXME: relaunch it? Panic is not good.
-                rc.gc_loop(conf).expect("GC thread died");
-            })
-            .unwrap()
-    }
-
-    ///
-    /// GC thread's main loop
-    ///
-    fn gc_loop(&self, conf: &'static PageServerConf) -> Result<()> {
-        while !tenant_mgr::shutdown_requested() {
-            // Garbage collect old files that are not needed for PITR anymore
-            if conf.gc_horizon > 0 {
-                self.gc_iteration(None, conf.gc_horizon, false).unwrap();
-            }
-
-            // TODO Write it in more adequate way using
-            // condvar.wait_timeout() or something
-            let mut sleep_time = conf.gc_period.as_secs();
-            while sleep_time > 0 && !tenant_mgr::shutdown_requested() {
-                sleep_time -= 1;
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            info!("gc thread for tenant {} waking up", self.tenantid);
-        }
         Ok(())
     }
 
@@ -546,7 +533,7 @@ impl LayeredRepository {
                 // so that they too can be garbage collected. That's
                 // used in tests, so we want as deterministic results as possible.
                 if checkpoint_before_gc {
-                    timeline.checkpoint()?;
+                    timeline.checkpoint_forced()?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
 
@@ -689,10 +676,18 @@ pub struct LayeredTimeline {
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
     write_lock: Mutex<()>,
+
+    is_checkpoint_scheduled: Mutex<bool>,
+    last_gc: Mutex<Option<Lsn>>,
 }
 
 /// Public interface functions
 impl Timeline for LayeredTimeline {
+
+    fn upgrade_to_layered_timeline(&self) -> &crate::layered_repository::LayeredTimeline {
+        self
+    }
+
     fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
     }
@@ -867,11 +862,23 @@ impl Timeline for LayeredTimeline {
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
-    fn checkpoint(&self) -> Result<()> {
+    fn checkpoint_forced(&self) -> Result<()> {
         STORAGE_TIME
-            .with_label_values(&["checkpoint_force"])
+            .with_label_values(&["checkpoint_forced"])
             //pass checkpoint_distance=0 to force checkpoint
             .observe_closure_duration(|| self.checkpoint_internal(0, true))
+    }
+
+    fn checkpoint_scheduled(&self) -> Result<()> {
+
+        let result = STORAGE_TIME
+            .with_label_values(&["checkpoint_scheduled"])
+            .observe_closure_duration(|| self.checkpoint_internal(self.conf.checkpoint_distance, false));
+
+        let mut guard = self.is_checkpoint_scheduled.lock().unwrap();
+        *guard = false;
+
+        result
     }
 
     fn get_last_record_lsn(&self) -> Lsn {
@@ -977,6 +984,9 @@ impl LayeredTimeline {
             upload_relishes,
 
             write_lock: Mutex::new(()),
+
+            is_checkpoint_scheduled: Mutex::new(false),
+            last_gc: Mutex::new(None),
         };
         Ok(timeline)
     }
@@ -1145,7 +1155,7 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<dyn Layer>> {
         let mut layers = self.layers.lock().unwrap();
 
         assert!(lsn.is_aligned());
@@ -1160,7 +1170,9 @@ impl LayeredTimeline {
 
         // Do we have a layer open for writing already?
         let layer;
-        if let Some(open_layer) = layers.get_open(&seg) {
+        if let Some(open_layer_arc) = layers.get_open(&seg) {
+            let open_layer = open_layer_arc.upgrade_to_inmemory_layer().expect("open layer is not an in-memory layer");
+
             if open_layer.get_start_lsn() > lsn {
                 bail!("unexpected open layer in the future");
             }
@@ -1185,7 +1197,7 @@ impl LayeredTimeline {
                     lsn,
                 )?;
             } else {
-                return Ok(open_layer);
+                return Ok(open_layer_arc);
             }
         }
         // No writeable layer for this relation. Create one.
@@ -1276,9 +1288,10 @@ impl LayeredTimeline {
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
 
-        let mut created_historics = false;
         let mut layer_uploads = Vec::new();
-        while let Some((oldest_layer_id, oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
+        while let Some((oldest_layer_id, oldest_layer_arc, oldest_generation)) = layers.peek_oldest_open() {
+            let oldest_layer = oldest_layer_arc.upgrade_to_inmemory_layer().expect("open layer is not an in-memory layer");
+            
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
 
             if tenant_mgr::shutdown_requested() && !forced {
@@ -1307,42 +1320,14 @@ impl LayeredTimeline {
                 break;
             }
 
-            // Mark the layer as no longer accepting writes and record the end_lsn.
-            // This happens in-place, no new layers are created now.
-            // We call `get_last_record_lsn` again, which may be different from the
-            // original load, as we may have released the write lock since then.
-            oldest_layer.freeze(self.get_last_record_lsn());
-
-            // The layer is no longer open, update the layer map to reflect this.
-            // We will replace it with on-disk historics below.
-            layers.remove(oldest_layer_id);
-            let oldest_layer_id = layers.insert_historic(oldest_layer.clone());
-
-            // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
             drop(layers);
             drop(write_guard);
 
-            let new_historics = oldest_layer.write_to_disk(self)?;
+            // Evict the layer
+            self.evict_layer(oldest_layer_id)?;
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
-
-            if !new_historics.is_empty() {
-                created_historics = true;
-            }
-
-            // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove(oldest_layer_id);
-
-            // Add the historics to the LayerMap
-            for delta_layer in new_historics.delta_layers {
-                layer_uploads.push(delta_layer.path());
-                layers.insert_historic(Arc::new(delta_layer));
-            }
-            for image_layer in new_historics.image_layers {
-                layer_uploads.push(image_layer.path());
-                layers.insert_historic(Arc::new(image_layer));
-            }
         }
 
         // Call unload() on all frozen layers, to release memory.
@@ -1354,14 +1339,6 @@ impl LayeredTimeline {
 
         drop(layers);
         drop(write_guard);
-
-        if created_historics {
-            // We must fsync the timeline dir to ensure the directory entries for
-            // new layer files are durable
-            let timeline_dir =
-                File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
-            timeline_dir.sync_all()?;
-        }
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
@@ -1405,6 +1382,131 @@ impl LayeredTimeline {
             self.disk_consistent_lsn.store(disk_consistent_lsn);
         }
 
+        Ok(())
+    }
+
+    pub fn schedule_checkpoint_if_needed(&self) -> Result<()> {
+
+        let mut guard = self.is_checkpoint_scheduled.lock().unwrap();
+        if *guard == true {
+            return Ok(());
+        }
+        
+        let RecordLsn {
+            last: last_record_lsn,
+            prev: _prev_record_lsn,
+        } = self.last_record_lsn.load();
+
+        let mut layers = self.layers.lock().unwrap();
+        if let Some((_oldest_layer_id, oldest_layer_arc, _oldest_generation)) = layers.peek_oldest_open() {
+            let oldest_layer = oldest_layer_arc.upgrade_to_inmemory_layer().expect("open layer is not an in-memory layer");
+            let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
+            let distance = last_record_lsn.widening_sub(oldest_pending_lsn);
+            if distance > self.conf.checkpoint_distance.into() {
+                schedule_job(GlobalJob::CheckpointTimeline(self.tenantid, self.timelineid));
+                *guard = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn schedule_gc_if_needed(&self) -> Result<()> {
+
+        let RecordLsn {
+            last: last_record_lsn,
+            prev: _prev_record_lsn,
+        } = self.last_record_lsn.load();
+
+        let gc_needed = {
+            let last_gc = self.last_gc.lock().unwrap();
+
+            if let Some(last_gc) = *last_gc {
+                let distance = last_record_lsn.widening_sub(last_gc);
+                if distance > std::cmp::max(10*1024*1024, self.conf.gc_horizon / 2) as i128 {
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        };
+
+        if !gc_needed {
+            return Ok(());
+        }
+
+        let repo = tenant_mgr::get_repository_for_tenant(self.tenantid)?;
+        let repo = repo.upgrade_to_layered_repository();
+
+        let mut gc_scheduled = repo.is_gc_scheduled.lock().unwrap();
+        if *gc_scheduled == true {
+            return Ok(());
+        }
+
+        schedule_job(GlobalJob::GarbageCollect(self.tenantid));
+        *gc_scheduled = true;
+
+        Ok(())
+    }
+    
+    fn evict_layer(&self, layer_id: LayerId) -> Result<()> {
+        let mut write_guard = self.write_lock.lock().unwrap();
+        let mut layers = self.layers.lock().unwrap();
+
+        if let Some(victim_layer_arc) = layers.get_with_id(layer_id) {
+
+            if let Some(victim_layer) = victim_layer_arc.upgrade_to_inmemory_layer() {
+
+                // Mark the layer as no longer accepting writes and record the end_lsn.
+                // This happens in-place, no new layers are created now.
+                // We call `get_last_record_lsn` again, which may be different from the
+                // original load, as we may have released the write lock since then.
+                victim_layer.freeze(self.get_last_record_lsn());
+
+                // The layer is no longer open, update the layer map to reflect this.
+                // We will replace it with on-disk historics below.
+                layers.remove(layer_id);
+
+                let frozen_layer_id = layers.insert_historic(victim_layer_arc.clone());
+
+                // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
+                drop(layers);
+                drop(write_guard);
+
+                let new_historics = victim_layer.write_to_disk(self)?;
+                let created_historics = !new_historics.is_empty();
+
+                write_guard = self.write_lock.lock().unwrap();
+                layers = self.layers.lock().unwrap();
+
+                // Finally, replace the frozen in-memory layer with the new on-disk layers
+                layers.remove(frozen_layer_id);
+
+                // Add the historics to the LayerMap
+                for delta_layer in new_historics.delta_layers {
+                    // FIXME layer_uploads.push(delta_layer.path());
+                    layers.insert_historic(Arc::new(delta_layer));
+                }
+                for image_layer in new_historics.image_layers {
+                    // FIXME layer_uploads.push(image_layer.path());
+                    layers.insert_historic(Arc::new(image_layer));
+                }
+
+                if created_historics {
+                    // We must fsync the timeline dir to ensure the directory entries for
+                    // new layer files are durable
+                    //
+                    // TODO: it's inefficient to do this after every eviction, if we're evicting
+                    // a lot of layers.
+                    let timeline_dir =
+                        File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
+                    timeline_dir.sync_all()?;
+                }
+                drop(layers);
+                drop(write_guard);
+            }
+        }
         Ok(())
     }
 
@@ -1462,7 +1564,7 @@ impl LayeredTimeline {
 
             // 1. Is it newer than cutoff point?
             if l.get_end_lsn() > cutoff {
-                info!(
+                trace!(
                     "keeping {} {}-{} because it's newer than cutoff {}",
                     seg,
                     l.get_start_lsn(),
@@ -1481,7 +1583,7 @@ impl LayeredTimeline {
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive and end_lsn is exclusive
                 if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
-                    info!(
+                    trace!(
                         "keeping {} {}-{} because it's needed by branch point {}",
                         seg,
                         l.get_start_lsn(),
@@ -1500,7 +1602,7 @@ impl LayeredTimeline {
             // 3. Is there a later on-disk layer for this relation?
             if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
             {
-                info!(
+                trace!(
                     "keeping {} {}-{} because it is the latest layer",
                     seg,
                     l.get_start_lsn(),
@@ -1569,7 +1671,7 @@ impl LayeredTimeline {
                 }
 
                 if is_tombstone {
-                    info!(
+                    trace!(
                         "keeping {} {}-{} because this layer servers as a tombstome for older layer",
                         seg,
                         l.get_start_lsn(),
@@ -1600,19 +1702,24 @@ impl LayeredTimeline {
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
         for doomed_layer_id in layers_to_remove {
-            let doomed_layer = layers.get_with_id(doomed_layer_id);
-            doomed_layer.delete()?;
-            layers.remove(doomed_layer_id);
-            match (
-                doomed_layer.is_dropped(),
-                doomed_layer.get_seg_tag().rel.is_relation(),
-            ) {
-                (true, true) => result.ondisk_relfiles_dropped += 1,
-                (true, false) => result.ondisk_nonrelfiles_dropped += 1,
-                (false, true) => result.ondisk_relfiles_removed += 1,
-                (false, false) => result.ondisk_nonrelfiles_removed += 1,
+            if let Some(doomed_layer) = layers.get_with_id(doomed_layer_id) {
+
+                doomed_layer.delete()?;
+                layers.remove(doomed_layer_id);
+                match (
+                    doomed_layer.is_dropped(),
+                    doomed_layer.get_seg_tag().rel.is_relation(),
+                ) {
+                    (true, true) => result.ondisk_relfiles_dropped += 1,
+                    (true, false) => result.ondisk_nonrelfiles_dropped += 1,
+                    (false, true) => result.ondisk_relfiles_removed += 1,
+                    (false, false) => result.ondisk_nonrelfiles_removed += 1,
+                }
             }
         }
+
+        let mut guard = self.last_gc.lock().unwrap();
+        *guard = Some(cutoff);
 
         result.elapsed = now.elapsed();
         Ok(result)
@@ -1806,9 +1913,10 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
 
         let seg = SegmentTag::from_blknum(rel, blknum);
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_wal_record(lsn, blknum, rec);
+        let delta_size = layer.upgrade_to_inmemory_layer().unwrap().put_wal_record(lsn, blknum, rec);
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
+
         Ok(())
     }
 
@@ -1825,7 +1933,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         let seg = SegmentTag::from_blknum(rel, blknum);
 
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_page_image(blknum, lsn, img);
+        let delta_size = layer.upgrade_to_inmemory_layer().unwrap().put_page_image(blknum, lsn, img);
 
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
@@ -1870,7 +1978,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
             };
 
             let layer = self.tl.get_layer_for_write(seg, lsn)?;
-            layer.drop_segment(lsn);
+            layer.upgrade_to_inmemory_layer().unwrap().drop_segment(lsn);
         }
 
         // Truncate the last remaining segment to the specified size
@@ -1880,7 +1988,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                 segno: last_remain_seg,
             };
             let layer = self.tl.get_layer_for_write(seg, lsn)?;
-            layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)
+            layer.upgrade_to_inmemory_layer().unwrap().put_truncation(lsn, relsize % RELISH_SEG_SIZE)
         }
         self.tl
             .decrease_current_logical_size((oldsize - relsize) * BLCKSZ as u32);
@@ -1908,7 +2016,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                         segno: remove_segno,
                     };
                     let layer = self.tl.get_layer_for_write(seg, lsn)?;
-                    layer.drop_segment(lsn);
+                    layer.upgrade_to_inmemory_layer().unwrap().drop_segment(lsn);
                 }
                 self.tl
                     .decrease_current_logical_size(oldsize * BLCKSZ as u32);
@@ -1922,7 +2030,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
             // TODO handle TwoPhase relishes
             let seg = SegmentTag::from_blknum(rel, 0);
             let layer = self.tl.get_layer_for_write(seg, lsn)?;
-            layer.drop_segment(lsn);
+            layer.upgrade_to_inmemory_layer().unwrap().drop_segment(lsn);
         }
 
         Ok(())

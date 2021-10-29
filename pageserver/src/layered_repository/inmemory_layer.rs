@@ -90,6 +90,11 @@ impl InMemoryLayerInner {
 }
 
 impl Layer for InMemoryLayer {
+
+    fn upgrade_to_inmemory_layer(&self) -> Option<&InMemoryLayer> {
+        Some(self)
+    }
+
     // An in-memory layer doesn't really have a filename as it's not stored on disk,
     // but we construct a filename as if it was a delta layer
     fn filename(&self) -> PathBuf {
@@ -111,6 +116,10 @@ impl Layer for InMemoryLayer {
         .to_string();
 
         PathBuf::from(format!("inmem-{}", delta_filename))
+    }
+
+    fn get_tenant_id(&self) -> ZTenantId {
+        self.tenantid
     }
 
     fn get_timeline_id(&self) -> ZTimelineId {

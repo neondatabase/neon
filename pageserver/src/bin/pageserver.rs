@@ -28,6 +28,7 @@ use daemonize::Daemonize;
 
 use pageserver::{
     branches, defaults::*, http, page_service, relish_storage, tenant_mgr, PageServerConf,
+    layered_repository,
     RelishStorageConfig, RelishStorageKind, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
@@ -549,6 +550,8 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
             page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
         })?;
 
+    let global_job_thread = layered_repository::launch_global_job_thread(conf);
+
     for info in SignalsInfo::<WithOrigin>::new(TERM_SIGNALS)?.into_iter() {
         match info.signal {
             SIGQUIT => {
@@ -577,6 +580,12 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
                         .expect("thread panicked")
                         .expect("thread exited with an error");
                 }
+
+                // Shut down global job thread
+                global_job_thread
+                    .join()
+                    .expect("thread panicked");
+
                 info!("Pageserver shut down successfully completed");
                 exit(0);
             }

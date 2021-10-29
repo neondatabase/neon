@@ -251,6 +251,9 @@ fn walreceiver_main(
                     last_rec_lsn = lsn;
                 }
 
+                timeline.upgrade_to_layered_timeline().schedule_checkpoint_if_needed()?;
+                timeline.upgrade_to_layered_timeline().schedule_gc_if_needed()?;
+
                 if !caught_up && endlsn >= end_of_wal {
                     info!("caught up at LSN {}", endlsn);
                     caught_up = true;

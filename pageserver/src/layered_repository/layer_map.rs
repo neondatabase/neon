@@ -25,6 +25,7 @@
 
 
 
+use crate::layered_repository::{schedule_job, GlobalJob};
 use crate::layered_repository::interval_tree::{IntervalItem, IntervalIter, IntervalTree};
 use crate::layered_repository::storage_layer::{Layer, SegmentTag};
 use crate::layered_repository::InMemoryLayer;
@@ -34,6 +35,7 @@ use lazy_static::lazy_static;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex};
+use tracing::*;
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
 
@@ -49,86 +51,172 @@ lazy_static! {
     static ref LAYERS: Mutex<GlobalLayerMap> = Mutex::new(GlobalLayerMap::new());
 }
 
-const MAX_LOADED_LAYERS: usize = 10;
+const MAX_OPEN_LAYERS: usize = 10;
 
-#[derive(Clone)]
-enum GlobalLayerEntry {
-    InMemory(Arc<InMemoryLayer>),
-    Historic(Arc<dyn Layer>),
+const MAX_LOADED_LAYERS: usize = 100;
+
+struct GlobalLayerEntry {
+    tag: u64, // to fix ABA problem
+    layer: Option<Arc<dyn Layer>>,
+    usage_count: u32,
 }
 
 struct GlobalLayerMap {
-    layers: HashMap<LayerId, GlobalLayerEntry>,
-    last_id: u64,
+    open_layers: Vec<GlobalLayerEntry>,
+    clock_arm: u32,
 
-    // Layers currently loaded. We run a clock algorithm across these.
-    loaded_layers: Vec<LayerId>,
+    num_open_layers: usize,
+    eviction_scheduled: bool,
+    
+    historic_layers: Vec<GlobalLayerEntry>,
 }
 
 impl GlobalLayerMap {
     pub fn new() -> GlobalLayerMap {
         GlobalLayerMap {
-            layers: HashMap::new(),
-            last_id: 0,
-            loaded_layers: Vec::new(),
+            open_layers: Vec::new(),
+            clock_arm: 0,
+            historic_layers: Vec::new(),
+            eviction_scheduled: false,
+            num_open_layers: 0,
         }
     }
 
-    pub fn get(&mut self, layer_id: LayerId) -> Arc<dyn Layer> {
-
-        match self.layers.get(&layer_id) {
-            Some(GlobalLayerEntry::InMemory(layer)) => layer.clone(),
-            Some(GlobalLayerEntry::Historic(layer)) => layer.clone(),
-            None => panic!()
+    pub fn get(&mut self, layer_id: LayerId) -> Option<Arc<dyn Layer>> {
+        let e = if layer_id.is_historic() {
+            let idx = (layer_id.index - 1) as usize;
+            &mut self.historic_layers[idx]
+        } else {
+            let idx = ((-layer_id.index) - 1) as usize;
+            &mut self.open_layers[idx]
+        };
+        if e.usage_count < 5 {
+            e.usage_count += 1;
         }
-    }
 
-    pub fn get_open(&mut self, layer_id: LayerId) -> Arc<InMemoryLayer> {
-        match self.layers.get(&layer_id) {
-            Some(GlobalLayerEntry::InMemory(layer)) => layer.clone(),
-            Some(GlobalLayerEntry::Historic(_layer)) => panic!(),
-            None => panic!()
-        }
+        e.layer.clone()
     }
 
     pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) -> LayerId {
-        let layer_id = LayerId(self.last_id);
-        self.last_id += 1;
+        let index = -(self.open_layers.len() as isize + 1);
 
-        self.layers.insert(layer_id, GlobalLayerEntry::InMemory(layer));
+        let entry = GlobalLayerEntry {
+            layer: Some(layer),
+            usage_count: 1,
+            tag: 1,
+        };
+        let tag = entry.tag;
+        self.open_layers.push(entry);
+        self.num_open_layers += 1;
 
-        layer_id
+        NUM_INMEMORY_LAYERS.inc();
+        
+        if !self.eviction_scheduled && self.num_open_layers >= MAX_OPEN_LAYERS {
+            info!("scheduling global eviction");
+            schedule_job(GlobalJob::EvictSomeLayer);
+            self.eviction_scheduled = true;
+        }
+
+        LayerId {
+            index,
+            tag,
+        }
     }
 
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) -> LayerId {
-        let layer_id = LayerId(self.last_id);
-        self.last_id += 1;
+        let index = self.historic_layers.len() as isize + 1;
 
-        self.layers.insert(layer_id, GlobalLayerEntry::Historic(layer));
+        let entry = GlobalLayerEntry {
+            layer: Some(layer),
+            usage_count: 1,
+            tag: 1,
+        };
+        let tag = entry.tag;
+        self.historic_layers.push(entry);
 
-        layer_id
+        NUM_ONDISK_LAYERS.inc();
+
+        LayerId {
+            index,
+            tag,
+        }
     }
 
-    pub fn remove(&mut self, layer_id: LayerId) -> GlobalLayerEntry {
-        if let Some(entry) = self.layers.remove(&layer_id) {
-            let orig_entry = entry.clone();
-            match orig_entry {
-                GlobalLayerEntry::InMemory(_layer) => {
-                    NUM_INMEMORY_LAYERS.dec();
-                },
-                GlobalLayerEntry::Historic(_layer) => {
-                    NUM_ONDISK_LAYERS.dec();
-                }
+    pub fn remove(&mut self, layer_id: LayerId) -> Option<Arc<dyn Layer>> {
+        let old_layer;
+
+        if layer_id.is_historic() {
+            let idx = (layer_id.index - 1) as usize;
+            old_layer = self.historic_layers[idx].layer.take();
+            if old_layer.is_some() {
+                NUM_ONDISK_LAYERS.dec();
             }
-            entry.clone()
         } else {
-            panic!()
+            let idx = ((-layer_id.index) - 1) as usize;
+            old_layer = self.open_layers[idx].layer.take();
+            if old_layer.is_some() {
+                NUM_INMEMORY_LAYERS.dec();
+                self.num_open_layers -= 1;
+            }
         }
+        old_layer
+    }
+
+    pub fn find_victim(&mut self) -> Option<LayerId> {
+        // run the clock algorithm among all open layers
+        for _ in 0..self.open_layers.len() * 5 {
+            self.clock_arm += 1;
+            if self.clock_arm >= self.open_layers.len() as u32 {
+                self.clock_arm = 0;
+            }
+            let next = self.clock_arm as usize;
+
+            if self.open_layers[next].usage_count == 0 {
+                return Some(LayerId {
+                    index: -((next + 1) as isize),
+                    tag: self.open_layers[next].tag,
+                });
+            } else {
+                self.open_layers[next].usage_count -= 1;
+            }
+        }
+        None
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LayerId(u64);
+pub fn find_victim() -> Option<LayerId> {
+    let mut l = LAYERS.lock().unwrap();
+
+    if l.num_open_layers >= MAX_OPEN_LAYERS {
+        if let Some(x) = l.find_victim() {
+            info!("found victim out of {} open layers", l.num_open_layers);
+            Some(x)
+        } else {
+            info!("no victim found at {} open layers", l.num_open_layers);
+            None
+        }
+    } else {
+        info!("no victim needed at {} open layers", l.num_open_layers);
+        l.eviction_scheduled = false;
+        None
+    }
+}
+
+pub fn get_layer(layer_id: LayerId) -> Option<Arc<dyn Layer>> {
+    LAYERS.lock().unwrap().get(layer_id)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct LayerId {
+    index: isize,
+    tag: u64
+}
+
+impl LayerId {
+    pub fn is_historic(&self) -> bool {
+        self.index > 0
+    }
+}
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -161,7 +249,7 @@ impl LayerMap {
         segentry.get(lsn)
     }
 
-    pub fn get_with_id(&self, layer_id: LayerId) -> Arc<dyn Layer> {
+    pub fn get_with_id(&self, layer_id: LayerId) -> Option<Arc<dyn Layer>> {
         // TODO: check that it belongs to this tenant+timeline
         LAYERS.lock().unwrap().get(layer_id)
     }
@@ -170,15 +258,11 @@ impl LayerMap {
     /// Get the open layer for given segment for writing. Or None if no open
     /// layer exists.
     ///
-    pub fn get_open(&self, tag: &SegmentTag) -> Option<Arc<InMemoryLayer>> {
+    pub fn get_open(&self, tag: &SegmentTag) -> Option<Arc<dyn Layer>> {
         let segentry = self.segs.get(tag)?;
 
-        
-        if let Some((layer_id, _start_lsn)) = segentry.open {
-            Some(LAYERS.lock().unwrap().get_open(layer_id))
-        } else {
-            None
-        }
+        let (layer_id, _start_lsn) = segentry.open?;
+        LAYERS.lock().unwrap().get(layer_id)
     }
 
     ///
@@ -206,24 +290,19 @@ impl LayerMap {
             generation: self.current_generation,
         };
         self.open_layers.push(open_layer_entry);
-
-        NUM_INMEMORY_LAYERS.inc();
     }
 
-    /// Remove the oldest in-memory layer
+    /// Remove a layer
     pub fn remove(&mut self, layer_id: LayerId) {
-        let layer_entry = LAYERS.lock().unwrap().remove(layer_id);
-
-        // Also remove it from the SegEntry of this segment
-        match layer_entry {
-            GlobalLayerEntry::InMemory(layer) => {
+        if let Some(layer) = LAYERS.lock().unwrap().remove(layer_id) {
+            // Also remove it from the SegEntry of this segment
+            if layer_id.is_historic() {
                 let tag = layer.get_seg_tag();
 
                 if let Some(segentry) = self.segs.get_mut(&tag) {
                     segentry.historic.remove(&HistoricLayerIntervalTreeEntry::new(layer_id, layer));
                 }
-            }
-            GlobalLayerEntry::Historic(layer) => {
+            } else {
                 let segtag = layer.get_seg_tag();
                 let mut segentry = self.segs.get_mut(&segtag).unwrap();
                 if let Some(open) = segentry.open {
@@ -311,15 +390,18 @@ impl LayerMap {
     }
 
     /// Return the oldest in-memory layer, along with its generation number.
-    pub fn peek_oldest_open(&self) -> Option<(LayerId, Arc<InMemoryLayer>, u64)> {
+    pub fn peek_oldest_open(&mut self) -> Option<(LayerId, Arc<dyn Layer>, u64)> {
 
-        if let Some(oldest_entry) = self.open_layers.peek() {
-            Some((oldest_entry.layer_id,
-                  LAYERS.lock().unwrap().get_open(oldest_entry.layer_id),
-                  oldest_entry.generation))
-        } else {
-            None
+        while let Some(oldest_entry) = self.open_layers.peek() {
+            if let Some(layer) = LAYERS.lock().unwrap().get(oldest_entry.layer_id) {
+                return Some((oldest_entry.layer_id,
+                             layer,
+                             oldest_entry.generation));
+            } else {
+                self.open_layers.pop();
+            }
         }
+        None
     }
 
     /// Increment the generation number used to stamp open in-memory layers. Layers
@@ -417,14 +499,15 @@ impl SegEntry {
 
     pub fn get(&self, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         if let Some(open) = &self.open {
-            let layer = LAYERS.lock().unwrap().get(open.0);
-            if layer.get_start_lsn() <= lsn {
-                return Some(layer);
+            if let Some(layer) = LAYERS.lock().unwrap().get(open.0) {
+                if layer.get_start_lsn() <= lsn {
+                    return Some(layer);
+                }
             }
         }
 
         if let Some(historic) = self.historic.search(lsn) {
-            Some(LAYERS.lock().unwrap().get(historic.layer_id))
+            Some(LAYERS.lock().unwrap().get(historic.layer_id).unwrap())
         } else {
             None
         }
@@ -437,7 +520,7 @@ impl SegEntry {
         self.historic
             .iter_newer(lsn)
             .any(|e| {
-                let layer = LAYERS.lock().unwrap().get(e.layer_id);
+                let layer = LAYERS.lock().unwrap().get(e.layer_id).unwrap();
                 !layer.is_incremental()
             }
             )
@@ -504,7 +587,7 @@ impl<'a> Iterator for HistoricLayerIter<'a> {
         loop {
             if let Some(x) = &mut self.iter {
                 if let Some(x) = x.next() {
-                    let layer = LAYERS.lock().unwrap().get(x.layer_id);
+                    let layer = LAYERS.lock().unwrap().get(x.layer_id).unwrap();
                     return Some((x.layer_id, layer));
                 }
             }

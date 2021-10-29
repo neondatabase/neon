@@ -151,6 +151,10 @@ pub struct DeltaLayerInner {
 }
 
 impl Layer for DeltaLayer {
+    fn get_tenant_id(&self) -> ZTenantId {
+        self.tenantid
+    }
+
     fn get_timeline_id(&self) -> ZTimelineId {
         self.timelineid
     }

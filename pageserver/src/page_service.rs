@@ -690,7 +690,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
 
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
+            let result = repo.gc_manual(Some(timelineid), gc_horizon, true)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layer_relfiles_total"),

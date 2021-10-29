@@ -33,12 +33,16 @@ pub trait Repository: Send + Sync {
     /// `checkpoint_before_gc` parameter is used to force compaction of storage before CG
     /// to make tests more deterministic.
     /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
-    fn gc_iteration(
+    fn gc_manual(
         &self,
         timelineid: Option<ZTimelineId>,
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
+
+    fn gc_scheduled(&self) -> Result<GcResult>;
+
+    fn upgrade_to_layered_repository(&self) -> &crate::layered_repository::LayeredRepository;
 }
 
 ///
@@ -144,7 +148,9 @@ pub trait Timeline: Send + Sync {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
-    fn checkpoint(&self) -> Result<()>;
+    fn checkpoint_forced(&self) -> Result<()>;
+
+    fn checkpoint_scheduled(&self) -> Result<()>;
 
     /// Retrieve current logical size of the timeline
     ///
@@ -155,6 +161,8 @@ pub trait Timeline: Send + Sync {
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used in tests to ensure thet incremental and non incremental variants match.
     fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize>;
+
+    fn upgrade_to_layered_timeline(&self) -> &crate::layered_repository::LayeredTimeline;
 }
 
 /// Various functions to mutate the timeline.
@@ -714,8 +722,8 @@ mod tests {
             .contains(&TESTREL_A));
 
         // Run checkpoint and garbage collection and check that it's still not visible
-        newtline.checkpoint()?;
-        repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
+        newtline.checkpoint_forced()?;
+        repo.gc_manual(Some(NEW_TIMELINE_ID), 0, true)?;
 
         assert!(!newtline
             .list_rels(0, TESTDB, Lsn(0x40))?

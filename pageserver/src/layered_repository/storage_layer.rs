@@ -2,9 +2,10 @@
 //! Common traits and structs for layers
 //!
 
+use crate::layered_repository::InMemoryLayer;
 use crate::relish::RelishTag;
 use crate::repository::WALRecord;
-use crate::ZTimelineId;
+use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,14 @@ pub enum PageReconstructResult {
 /// in-memory and on-disk layers.
 ///
 pub trait Layer: Send + Sync {
+    
+    fn upgrade_to_inmemory_layer(&self) -> Option<&InMemoryLayer> {
+        None
+    }
+
+    /// Identify the timeline this relish belongs to
+    fn get_tenant_id(&self) -> ZTenantId;
+
     /// Identify the timeline this relish belongs to
     fn get_timeline_id(&self) -> ZTimelineId;
 

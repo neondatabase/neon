@@ -106,17 +106,6 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
         true,
     ));
 
-    let checkpointer_handle = LayeredRepository::launch_checkpointer_thread(conf, repo.clone());
-    let gc_handle = LayeredRepository::launch_gc_thread(conf, repo.clone());
-
-    let mut handles = TENANT_HANDLES.lock().unwrap();
-    let h = TenantHandleEntry {
-        checkpointer_handle: Some(checkpointer_handle),
-        gc_handle: Some(gc_handle),
-    };
-
-    handles.insert(tenant_id, h);
-
     let mut m = access_tenants();
     let tenant = m.get_mut(&tenant_id).unwrap();
     tenant.repo = Some(repo);
