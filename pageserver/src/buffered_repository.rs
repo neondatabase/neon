@@ -754,55 +754,77 @@ impl Timeline for BufferedTimeline {
         .ser()?
         .to_vec();
         let till = StoreKey::Data(DataKey { rel, blknum, lsn }).ser()?.to_vec();
-        let store = self.store.read().unwrap();
-        let mut iter = store.data.range(&from..=&till);
+        //let mut reconstruct_key: Option<DataKey> = None;
+        let result = {
+            let store = self.store.read().unwrap();
+            let mut iter = store.data.range(&from..=&till);
 
-        // locate latest version with LSN <= than requested
-        if let Some(pair) = iter.next_back() {
-            let ver = PageVersion::des(&pair?.1)?;
-            match ver {
-                PageVersion::Image(img) => Ok(img), // already materialized: we are done
-                PageVersion::Delta(rec) => {
-                    let mut will_init = rec.will_init;
-                    let mut data = PageReconstructData {
-                        records: Vec::new(),
-                        page_img: None,
-                    };
-                    data.records.push((lsn, rec));
-                    // loop until we locate full page image or initialization WAL record
-                    // FIXME-KK: cross-timelines histories are not handled now
-                    while !will_init {
-                        if let Some(entry) = iter.next_back() {
-                            let pair = entry?;
-                            let key = StoreKey::des(&pair.0)?;
-                            let ver = PageVersion::des(&pair.1)?;
-                            if let StoreKey::Data(dk) = key {
-                                assert!(dk.rel == rel); // check that we don't jump to previous relish before locating full image
-                                match ver {
-                                    PageVersion::Image(img) => {
-                                        data.page_img = Some(img);
-                                        break;
+            // locate latest version with LSN <= than requested
+            if let Some(entry) = iter.next_back() {
+                let pair = entry?;
+                let key = StoreKey::des(&pair.0)?;
+                if let StoreKey::Data(dk) = key {
+                    let ver = PageVersion::des(&pair.1)?;
+                    match ver {
+                        PageVersion::Image(img) => Ok(img), // already materialized: we are done
+                        PageVersion::Delta(rec) => {
+                            let mut will_init = rec.will_init;
+                            let mut data = PageReconstructData {
+                                records: Vec::new(),
+                                page_img: None,
+                            };
+                            //reconstruct_key = Some(dk);
+                            data.records.push((dk.lsn, rec));
+                            // loop until we locate full page image or initialization WAL record
+                            // FIXME-KK: cross-timelines histories are not handled now
+                            while !will_init {
+                                if let Some(entry) = iter.next_back() {
+                                    let pair = entry?;
+                                    let key = StoreKey::des(&pair.0)?;
+                                    let ver = PageVersion::des(&pair.1)?;
+                                    if let StoreKey::Data(dk) = key {
+                                        assert!(dk.rel == rel); // check that we don't jump to previous relish before locating full image
+                                        match ver {
+                                            PageVersion::Image(img) => {
+                                                data.page_img = Some(img);
+                                                break;
+                                            }
+                                            PageVersion::Delta(rec) => {
+                                                will_init = rec.will_init;
+                                                data.records.push((dk.lsn, rec));
+                                            }
+                                        }
+                                    } else {
+                                        bail!("Unexpected key type {:?}", key);
                                     }
-                                    PageVersion::Delta(rec) => {
-                                        will_init = rec.will_init;
-                                        data.records.push((dk.lsn, rec));
-                                    }
+                                } else {
+                                    bail!("Base image not found for relish {} at {}", rel, lsn);
                                 }
-                            } else {
-                                bail!("Unexpected key type {:?}", key);
                             }
-                        } else {
-                            bail!("Base image not found for relish {} at {}", rel, lsn);
+                            RECONSTRUCT_TIME.observe_closure_duration(|| {
+                                self.reconstruct_page(rel, blknum, lsn, data)
+                            })
                         }
                     }
-                    RECONSTRUCT_TIME
-                        .observe_closure_duration(|| self.reconstruct_page(rel, blknum, lsn, data))
+                } else {
+                    bail!("Unexpected key type {:?}", key);
                 }
+            } else {
+                warn!("block {} of relish {} not found at {}", blknum, rel, lsn);
+                Ok(ZERO_PAGE.clone())
             }
-        } else {
-            warn!("block {} of relish {} not found at {}", blknum, rel, lsn);
-            Ok(ZERO_PAGE.clone())
+        };
+		/*
+        if let Some(key) = reconstruct_key {
+            if let Ok(img) = &result {
+                let mut store = self.store.write().unwrap();
+                store
+                    .data
+                    .put(&StoreKey::Data(key).ser()?, &PageVersion::Image(img.clone()).ser()?)?;
+            }
         }
+		*/
+        result
     }
 
     fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {

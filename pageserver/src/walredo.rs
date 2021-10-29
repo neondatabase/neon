@@ -53,6 +53,8 @@ use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::XLogRecord;
 
+const WAL_REDO_WORKERS: usize = 2;
+
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
 ///

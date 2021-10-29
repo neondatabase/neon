@@ -33,7 +33,7 @@ pub mod defaults {
 
     // Minimal size of WAL records chain to trigger materialization of the page
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 0;
-    pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_millis(1000);
+    pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(1);
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
