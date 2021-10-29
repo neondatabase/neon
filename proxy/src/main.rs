@@ -17,7 +17,7 @@ use clap::{App, Arg, ArgMatches};
 
 use cplane_api::DatabaseInfo;
 use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
-use zenith_utils::tcp_listener;
+use zenith_utils::{tcp_listener, GIT_VERSION};
 
 mod cplane_api;
 mod mgmt;
@@ -78,6 +78,7 @@ fn configure_ssl(arg_matches: &ArgMatches) -> anyhow::Result<Option<Arc<ServerCo
 
 fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("Zenith proxy/router")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("proxy")
                 .short("p")
@@ -138,6 +139,8 @@ fn main() -> anyhow::Result<()> {
         waiters: Mutex::new(HashMap::new()),
     };
     let state: &'static ProxyState = Box::leak(Box::new(state));
+
+    println!("Version: {}", GIT_VERSION);
 
     // Check that we can bind to address before further initialization
     println!("Starting proxy on {}", state.conf.proxy_address);

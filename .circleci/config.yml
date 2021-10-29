@@ -299,7 +299,7 @@ jobs:
           name: Build and push Docker image
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
-            docker build -t zenithdb/zenith:latest . && docker push zenithdb/zenith:latest
+            docker build --build-arg GIT_VERSION=$CIRCLE_SHA1 -t zenithdb/zenith:latest . && docker push zenithdb/zenith:latest
 
   # Trigger a new remote CI job
   remote-ci-trigger:

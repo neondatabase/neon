@@ -21,11 +21,15 @@ RUN rm -rf postgres_install/build
 # net time waste in a lot of cases. Copying Cargo.lock with empty lib.rs should do the work.
 #
 FROM zenithdb/build:buster AS build
+
+ARG GIT_VERSION
+RUN if [ -z "$GIT_VERSION" ]; then echo "GIT_VERSION is reqired, use build_arg to pass it"; exit 1; fi
+
 WORKDIR /zenith
 COPY --from=pg-build /zenith/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 
 COPY . .
-RUN cargo build --release
+RUN GIT_VERSION=$GIT_VERSION cargo build --release
 
 #
 # Copy binaries to resulting image.

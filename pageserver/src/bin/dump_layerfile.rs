@@ -5,10 +5,12 @@ use anyhow::Result;
 use clap::{App, Arg};
 use pageserver::layered_repository::dump_layerfile_from_path;
 use std::path::PathBuf;
+use zenith_utils::GIT_VERSION;
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith dump_layerfile utility")
         .about("Dump contents of one layer file, for debugging")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("path")
                 .help("Path to file to dump")

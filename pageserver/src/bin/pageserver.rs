@@ -10,7 +10,7 @@ use std::{
     thread,
 };
 use tracing::*;
-use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener};
+use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
 
 use anyhow::{bail, ensure, Context, Result};
 use signal_hook::consts::signal::*;
@@ -264,6 +264,7 @@ fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("listen-pg")
                 .short("l")
@@ -475,6 +476,8 @@ fn main() -> Result<()> {
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, conf.daemonize)?;
+
+    info!("version: {}", GIT_VERSION);
 
     let term_now = Arc::new(AtomicBool::new(false));
     for sig in TERM_SIGNALS {

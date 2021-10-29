@@ -20,6 +20,7 @@ use walkeeper::defaults::{
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::GIT_VERSION;
 
 use pageserver::branches::BranchInfo;
 
@@ -103,6 +104,7 @@ fn main() -> Result<()> {
 
     let matches = App::new("Zenith CLI")
         .setting(AppSettings::ArgRequiredElseHelp)
+        .version(GIT_VERSION)
         .subcommand(
             SubCommand::with_name("init")
                 .about("Initialize a new Zenith repository")
