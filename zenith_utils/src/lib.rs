@@ -46,3 +46,31 @@ pub mod tcp_listener;
 
 // Utility for putting a raw file descriptor into non-blocking mode
 pub mod nonblock;
+
+// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
+//
+// we have several cases:
+// * building locally from git repo
+// * building in CI from git repo
+// * building in docker (either in CI or locally)
+//
+// One thing to note is that .git is not available in docker (and it is bad to include it there).
+// So everything becides docker build is covered by git_version crate.
+// For docker use environment variable to pass git version, which is then retrieved by buildscript (build.rs).
+// It takes variable from build process env and puts it to the rustc env. And then we can retrieve it here by using env! macro.
+// Git version received from environment variable used as a fallback in git_version invokation.
+// And to avoid running buildscript every recompilation, we use rerun-if-env-changed option.
+// So the build script will be run only when GIT_VERSION envvar has changed.
+//
+// Why not to use buildscript to get git commit sha directly without procmacro from different crate?
+// Caching and workspaces complicates that. In case zenith_utils is not
+// recompiled due to caching then version may become outdated.
+// git_version crate handles that case by introducing a dependency on .git internals via include_bytes! macro,
+// so if we changed the index state git_version will pick that up and rerun the macro.
+//
+// Note that with git_version prefix is `git:` and in case of git version from env its `git-env:`.
+use git_version::git_version;
+pub const GIT_VERSION: &str = git_version!(
+    prefix = "git:",
+    fallback = concat!("git-env:", env!("GIT_VERSION"))
+);

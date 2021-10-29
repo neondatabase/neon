@@ -10,7 +10,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::thread;
 use zenith_utils::http::endpoint;
-use zenith_utils::{logging, tcp_listener};
+use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
@@ -22,6 +22,7 @@ fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
     let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("datadir")
                 .short("D")
@@ -130,6 +131,8 @@ fn main() -> Result<()> {
 
 fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
+
+    info!("version: {}", GIT_VERSION);
 
     let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
