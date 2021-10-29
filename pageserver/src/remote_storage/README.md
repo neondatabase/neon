@@ -46,18 +46,6 @@ This could be avoided by a background thread/future storing the serialized index
 
 No file checksum assertion is done currently, but should be (AWS S3 returns file checksums during the `list` operation)
 
-* sad rust-s3 api
-
-rust-s3 is not very pleasant to use:
-1. it returns `anyhow::Result` and it's hard to distinguish "missing file" cases from "no connection" one, for instance
-2. at least one function it its API that we need (`get_object_stream`) has `async` keyword and blocks (!), see details [here](https://github.com/zenithdb/zenith/pull/752#discussion_r728373091)
-3. it's a prerelease library with unclear maintenance status
-4. noisy on debug level
-
-But it's already used in the project, so for now it's reused to avoid bloating the dependency tree.
-Based on previous evaluation, even `rusoto-s3` could be a better choice over this library, but needs further benchmarking.
-
-
 * gc is ignored
 
 So far, we don't adjust the remote storage based on GC thread loop results, only checkpointer loop affects the remote storage.
