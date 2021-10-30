@@ -814,7 +814,7 @@ impl Timeline for BufferedTimeline {
                 Ok(ZERO_PAGE.clone())
             }
         };
-		/*
+        /*
         if let Some(key) = reconstruct_key {
             if let Ok(img) = &result {
                 let mut store = self.store.write().unwrap();
@@ -823,7 +823,7 @@ impl Timeline for BufferedTimeline {
                     .put(&StoreKey::Data(key).ser()?, &PageVersion::Image(img.clone()).ser()?)?;
             }
         }
-		*/
+        */
         result
     }
 
@@ -1314,11 +1314,125 @@ impl BufferedTimeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub fn gc_timeline(&self, _retain_lsns: Vec<Lsn>, _cutoff: Lsn) -> Result<GcResult> {
-        // TODO: not implemented yet for buffred storage
-        let result: GcResult = Default::default();
+    pub fn gc_timeline(&self, _retain_lsns: Vec<Lsn>, cutoff: Lsn) -> Result<GcResult> {
+        let now = Instant::now();
+        let mut result: GcResult = Default::default();
+
+        let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
+
+        info!("GC starting");
+
+        let mut from_rel = RelishTag::Relation(RelTag {
+            spcnode: 0,
+            dbnode: 0,
+            relnode: 0,
+            forknum: 0,
+        });
+        let mut from = StoreKey::Metadata(MetadataKey {
+            rel: from_rel,
+            lsn: Lsn(0),
+        });
+
+        // We can not remove deteriorated version immediately, we need to check first that successor exists
+        let mut last_key: Option<yakv::storage::Key> = None;
+
+        'meta: loop {
+            let store = self.store.read().unwrap();
+            let mut iter = store.data.range(&from.ser()?..);
+            while let Some(entry) = iter.next() {
+                let raw_key = entry?.0;
+                let key = StoreKey::des(&raw_key)?;
+                if let StoreKey::Metadata(dk) = key {
+                    if dk.lsn < cutoff {
+                        // we have something deteriorated
+                        if let Some(prev_key) = last_key {
+                            // We are still on the same relish...
+                            if from_rel == dk.rel {
+                                drop(store);
+                                let mut store = self.store.write().unwrap();
+                                store.data.remove(&prev_key)?;
+                                last_key = None;
+                                // We should reset iterator and start from the current point
+                                continue 'meta;
+                            }
+                        }
+                        from_rel = dk.rel;
+                        from = key;
+                        // Remember key as candidate for deletion
+                        last_key = Some(raw_key);
+                    } else {
+                        from_rel = dk.rel;
+                        from = StoreKey::Metadata(MetadataKey {
+                            rel: from_rel,
+                            lsn: Lsn::MAX,
+                        });
+                        last_key = None;
+                    }
+                } else {
+                    break 'meta;
+                }
+            }
+            break;
+        }
+
+        // Array to accumulate keys we can remove
+        let mut deteriorated: Vec<yakv::storage::Key> = Vec::new();
+        // currently proceed block number
+        let mut from_blknum = 0;
+
+        'data: loop {
+            let store = self.store.read().unwrap();
+            let mut iter = store.data.range(&from.ser()?..);
+            while let Some(entry) = iter.next() {
+                let pair = entry?;
+                let raw_key = pair.0;
+                let key = StoreKey::des(&raw_key)?;
+                if let StoreKey::Data(dk) = key {
+                    if dk.lsn < cutoff {
+                        // we have something deteriorated
+                        let ver = PageVersion::des(&pair.1)?;
+                        // We are still on the same page...
+                        if from_rel == dk.rel && from_blknum == dk.blknum {
+                            if let PageVersion::Image(_) = ver {
+                                // We have full page image: remove all preceding deteriorated records
+                                drop(store);
+                                let mut store = self.store.write().unwrap();
+                                for key in deteriorated.iter() {
+                                    store.data.remove(key)?;
+                                }
+                                deteriorated.clear();
+                                // We should reset iterator and start from the current point
+                                continue 'data;
+                            }
+                            // No full page image, so we can't remove deteriorated stuff
+                            deteriorated.clear();
+                        }
+                        // Remember key as candidate for deletion
+                        deteriorated.push(raw_key);
+                        from_rel = dk.rel;
+                        from_blknum = dk.blknum;
+                        from = key;
+                    } else {
+                        // Jump to next page
+                        from_rel = dk.rel;
+                        from = StoreKey::Data(DataKey {
+                            rel: from_rel,
+                            blknum: from_blknum + 1,
+                            lsn: Lsn(0),
+                        });
+                        deteriorated.clear();
+                    }
+                } else {
+                    break 'data;
+                }
+            }
+            break;
+        }
+
+        result.elapsed = now.elapsed();
         Ok(result)
     }
+
     ///
     /// Reconstruct a page version, using the given base image and WAL records in 'data'.
     ///

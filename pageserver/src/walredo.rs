@@ -22,6 +22,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
+use rand::Rng;
 use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
@@ -53,7 +54,7 @@ use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
 use postgres_ffi::XLogRecord;
 
-const WAL_REDO_WORKERS: usize = 2;
+const WAL_REDO_WORKERS: usize = 1;
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -142,7 +143,7 @@ pub struct PostgresRedoManager {
     conf: &'static PageServerConf,
 
     runtime: tokio::runtime::Runtime,
-    process: Mutex<Option<PostgresRedoProcess>>,
+    workers: [Mutex<Option<PostgresRedoProcess>>; WAL_REDO_WORKERS],
 }
 
 #[derive(Debug)]
@@ -197,7 +198,9 @@ impl WalRedoManager for PostgresRedoManager {
 
         start_time = Instant::now();
         let result = {
-            let mut process_guard = self.process.lock().unwrap();
+            let mut process_guard = self.workers[rand::thread_rng().gen_range(0..WAL_REDO_WORKERS)]
+                .lock()
+                .unwrap();
             lock_time = Instant::now();
 
             // launch the WAL redo process on first use
@@ -239,7 +242,7 @@ impl PostgresRedoManager {
             runtime,
             tenantid,
             conf,
-            process: Mutex::new(None),
+            workers: [(); WAL_REDO_WORKERS].map(|_| Mutex::new(None)),
         }
     }
 
