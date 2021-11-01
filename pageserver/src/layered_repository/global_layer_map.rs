@@ -76,9 +76,9 @@ impl OpenLayers {
         }
     }
 
-    pub fn get(&self, slot_id: &LayerId) -> Option<Arc<InMemoryLayer>> {
-        let slot = self.slots.get(slot_id.index)?; // TODO should out of bounds indexes just panic?
-        if slot.tag != slot_id.tag {
+    pub fn get(&self, layer_id: &LayerId) -> Option<Arc<InMemoryLayer>> {
+        let slot = self.slots.get(layer_id.index)?; // TODO should out of bounds indexes just panic?
+        if slot.tag != layer_id.tag {
             return None;
         }
 
@@ -90,10 +90,10 @@ impl OpenLayers {
     }
 
     // TODO this won't be a public API in the future
-    pub fn remove(&mut self, slot_id: &LayerId) {
-        let slot = &mut self.slots[slot_id.index];
+    pub fn remove(&mut self, layer_id: &LayerId) {
+        let slot = &mut self.slots[layer_id.index];
 
-        if slot.tag != slot_id.tag {
+        if slot.tag != layer_id.tag {
             return;
         }
 
@@ -105,7 +105,7 @@ impl OpenLayers {
         }
 
         slot.data = SlotData::Vacant(self.next_empty_slot_idx);
-        self.next_empty_slot_idx = Some(slot_id.index);
+        self.next_empty_slot_idx = Some(layer_id.index);
 
         slot.tag = slot.tag.wrapping_add(1);
     }
