@@ -53,6 +53,7 @@ use zenith_utils::seqwait::SeqWait;
 mod blob;
 mod delta_layer;
 mod filename;
+mod global_layer_map;
 mod image_layer;
 mod inmemory_layer;
 mod interval_tree;
