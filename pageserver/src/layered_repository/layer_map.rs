@@ -72,7 +72,7 @@ impl LayerMap {
 
         segentry
             .open_layer_id
-            .map(|slot_id| GLOBAL_LAYER_MAP.read().unwrap().get(&slot_id))
+            .map(|layer_id| GLOBAL_LAYER_MAP.read().unwrap().get(&layer_id))
             .flatten()
     }
 
@@ -82,7 +82,7 @@ impl LayerMap {
     pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
         let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
 
-        let slot_id = segentry.update_open(Arc::clone(&layer));
+        let layer_id = segentry.update_open(Arc::clone(&layer));
 
         let oldest_pending_lsn = layer.get_oldest_pending_lsn();
 
@@ -94,7 +94,7 @@ impl LayerMap {
         // Also add it to the binary heap
         let open_layer_entry = OpenLayerEntry {
             oldest_pending_lsn: layer.get_oldest_pending_lsn(),
-            layer_id: slot_id,
+            layer_id,
             generation: self.current_generation,
         };
         self.open_layers.push(open_layer_entry);
