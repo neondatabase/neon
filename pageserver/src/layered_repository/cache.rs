@@ -1,3 +1,13 @@
+//!
+//! Global registry of open layers.
+//!
+//! Whenever a new in-memory layer is created to hold incoming WAL, it is registered
+//! in GLOBAL_CACHE, so that we can keep track of the total number of in-memory layers
+//! in the system, and know when we need to evict some to release memory.
+//!
+//! Each layer is assigned a unique ID when it's registered in the global registry.
+//! The ID can be used to relocate the layer later, without having to hold locks.
+
 use std::sync::{Arc, RwLock};
 
 use super::inmemory_layer::InMemoryLayer;
@@ -11,11 +21,13 @@ lazy_static! {
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct SlotId {
     index: usize,
-    version: u64,
+    version: u64, // tag to avoid ABA problem
 }
 
 enum SlotData {
     Occupied(Arc<InMemoryLayer>),
+    /// Vacant slots form a linked list, the value is the index
+    /// of the next vacant slot in the list.
     Vacant(Option<usize>),
 }
 
@@ -28,6 +40,8 @@ struct Slot {
 #[derive(Default)]
 pub struct Cache {
     slots: Vec<Slot>,
+
+    // Head of free-slot list.
     next_empty_slot_id: Option<usize>,
 }
 
