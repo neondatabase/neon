@@ -2,7 +2,7 @@
 //! Global registry of open layers.
 //!
 //! Whenever a new in-memory layer is created to hold incoming WAL, it is registered
-//! in GLOBAL_CACHE, so that we can keep track of the total number of in-memory layers
+//! in [`GLOBAL_LAYER_MAP`], so that we can keep track of the total number of in-memory layers
 //! in the system, and know when we need to evict some to release memory.
 //!
 //! Each layer is assigned a unique ID when it's registered in the global registry.

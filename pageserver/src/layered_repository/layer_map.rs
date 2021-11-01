@@ -108,10 +108,10 @@ impl LayerMap {
         let oldest_entry = self.open_layers.pop().unwrap();
 
         let layer_opt = {
-            let mut cache = GLOBAL_LAYER_MAP.write().unwrap();
-            let layer_opt = cache.get(&oldest_entry.layer_id);
-            cache.remove(&oldest_entry.layer_id);
-            // TODO it's bad that a ref can still exist after being evicted from cache
+            let mut global_map = GLOBAL_LAYER_MAP.write().unwrap();
+            let layer_opt = global_map.get(&oldest_entry.layer_id);
+            global_map.remove(&oldest_entry.layer_id);
+            // TODO it's bad that a ref can still exist after being evicted from global map
             layer_opt
         };
 
@@ -247,7 +247,7 @@ impl LayerMap {
                 if let Some(layer) = GLOBAL_LAYER_MAP.read().unwrap().get(open) {
                     layer.dump()?;
                 } else {
-                    println!("layer not found in cache");
+                    println!("layer not found in global map");
                 }
             }
 
