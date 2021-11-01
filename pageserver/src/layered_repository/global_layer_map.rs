@@ -18,10 +18,11 @@ lazy_static! {
     pub static ref GLOBAL_LAYER_MAP: RwLock<OpenLayers> = RwLock::new(OpenLayers::default());
 }
 
+// TODO these types can probably be smaller
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct LayerId {
     index: usize,
-    version: u64, // tag to avoid ABA problem
+    tag: u64, // to avoid ABA problem
 }
 
 enum SlotData {
@@ -32,7 +33,7 @@ enum SlotData {
 }
 
 struct Slot {
-    version: u64,
+    tag: u64,
     data: SlotData,
 }
 
@@ -51,7 +52,7 @@ impl OpenLayers {
             None => {
                 let idx = self.slots.len();
                 self.slots.push(Slot {
-                    version: 0,
+                    tag: 0,
                     data: SlotData::Vacant(None),
                 });
                 idx
@@ -71,13 +72,13 @@ impl OpenLayers {
 
         LayerId {
             index: slot_idx,
-            version: slot.version,
+            tag: slot.tag,
         }
     }
 
     pub fn get(&self, slot_id: &LayerId) -> Option<Arc<InMemoryLayer>> {
         let slot = self.slots.get(slot_id.index)?; // TODO should out of bounds indexes just panic?
-        if slot.version != slot_id.version {
+        if slot.tag != slot_id.tag {
             return None;
         }
 
@@ -92,7 +93,7 @@ impl OpenLayers {
     pub fn remove(&mut self, slot_id: &LayerId) {
         let slot = &mut self.slots[slot_id.index];
 
-        if slot.version != slot_id.version {
+        if slot.tag != slot_id.tag {
             return;
         }
 
@@ -106,6 +107,6 @@ impl OpenLayers {
         slot.data = SlotData::Vacant(self.next_empty_slot_idx);
         self.next_empty_slot_idx = Some(slot_id.index);
 
-        slot.version = slot.version.wrapping_add(1);
+        slot.tag = slot.tag.wrapping_add(1);
     }
 }
