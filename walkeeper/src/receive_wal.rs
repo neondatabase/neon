@@ -133,9 +133,12 @@ impl<'pg> ReceiveWalConn<'pg> {
             // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
             let conf = swh.conf.clone();
             let timelineid = swh.timeline.get().timelineid;
-            thread::spawn(move || {
-                request_callback(conf, timelineid, tenant_id);
-            });
+            let _ = thread::Builder::new()
+                .name("request_callback thread".into())
+                .spawn(move || {
+                    request_callback(conf, timelineid, tenant_id);
+                })
+                .unwrap();
         }
 
         loop {

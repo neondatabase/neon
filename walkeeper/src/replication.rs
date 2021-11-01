@@ -173,11 +173,14 @@ impl ReplicationConn {
         let bg_timeline = Arc::clone(swh.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();
 
-        thread::spawn(move || {
-            if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline) {
-                error!("Replication background thread failed: {}", err);
-            }
-        });
+        let _ = thread::Builder::new()
+            .name("HotStandbyFeedback thread".into())
+            .spawn(move || {
+                if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline) {
+                    error!("Replication background thread failed: {}", err);
+                }
+            })
+            .unwrap();
 
         let (mut start_pos, mut stop_pos) = Self::parse_start_stop(cmd)?;
 
