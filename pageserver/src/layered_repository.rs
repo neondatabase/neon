@@ -1142,7 +1142,9 @@ impl LayeredTimeline {
 
         let mut created_historics = false;
         let mut layer_uploads = Vec::new();
-        while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
+        while let Some((oldest_slot_id, oldest_layer, oldest_generation)) =
+            layers.peek_oldest_open()
+        {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
 
             // Does this layer need freezing?
@@ -1175,7 +1177,7 @@ impl LayeredTimeline {
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
-            layers.pop_oldest_open();
+            layers.remove_open(oldest_slot_id);
             layers.insert_historic(oldest_layer.clone());
 
             // Write the now-frozen layer to disk. That could take a while, so release the lock while do it

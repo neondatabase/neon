@@ -72,8 +72,7 @@ impl LayerMap {
 
         segentry
             .open_layer_id
-            .map(|layer_id| GLOBAL_LAYER_MAP.read().unwrap().get(&layer_id))
-            .flatten()
+            .and_then(|layer_id| GLOBAL_LAYER_MAP.read().unwrap().get(&layer_id))
     }
 
     ///
@@ -102,24 +101,25 @@ impl LayerMap {
         NUM_INMEMORY_LAYERS.inc();
     }
 
-    /// Remove the oldest in-memory layer
-    pub fn pop_oldest_open(&mut self) {
-        // Pop it from the binary heap
-        let oldest_entry = self.open_layers.pop().unwrap();
+    /// Remove an open in-memory layer
+    pub fn remove_open(&mut self, layer_id: LayerId) {
+        // Note: we don't try to remove the entry from the binary heap.
+        // It will be removed lazily by peek_oldest_open() when it's made it to
+        // the top of the heap.
 
         let layer_opt = {
             let mut global_map = GLOBAL_LAYER_MAP.write().unwrap();
-            let layer_opt = global_map.get(&oldest_entry.layer_id);
-            global_map.remove(&oldest_entry.layer_id);
-            // TODO it's bad that a ref can still exist after being evicted from global map
+            let layer_opt = global_map.get(&layer_id);
+            global_map.remove(&layer_id);
+            // TODO it's bad that a ref can still exist after being evicted from cache
             layer_opt
         };
 
         if let Some(layer) = layer_opt {
             let mut segentry = self.segs.get_mut(&layer.get_seg_tag()).unwrap();
 
-            // Also remove it from the SegEntry of this segment
-            if segentry.open_layer_id.unwrap() == oldest_entry.layer_id {
+            if segentry.open_layer_id == Some(layer_id) {
+                // Also remove it from the SegEntry of this segment
                 segentry.open_layer_id = None;
             } else {
                 // We could have already updated segentry.open for
@@ -127,9 +127,9 @@ impl LayerMap {
                 assert!(!layer.is_writeable());
                 assert!(layer.is_dropped());
             }
-        }
 
-        NUM_INMEMORY_LAYERS.dec();
+            NUM_INMEMORY_LAYERS.dec();
+        }
     }
 
     ///
@@ -214,13 +214,17 @@ impl LayerMap {
     }
 
     /// Return the oldest in-memory layer, along with its generation number.
-    pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
-        let oldest_entry = self.open_layers.peek()?;
-        let layer = GLOBAL_LAYER_MAP
-            .read()
-            .unwrap()
-            .get(&oldest_entry.layer_id)?;
-        Some((layer, oldest_entry.generation))
+    pub fn peek_oldest_open(&mut self) -> Option<(LayerId, Arc<InMemoryLayer>, u64)> {
+        let global_map = GLOBAL_LAYER_MAP.read().unwrap();
+
+        while let Some(oldest_entry) = self.open_layers.peek() {
+            if let Some(layer) = global_map.get(&oldest_entry.layer_id) {
+                return Some((oldest_entry.layer_id, layer, oldest_entry.generation));
+            } else {
+                self.open_layers.pop();
+            }
+        }
+        None
     }
 
     /// Increment the generation number used to stamp open in-memory layers. Layers
@@ -453,10 +457,10 @@ mod tests {
         // A helper function (closure) to pop the next oldest open entry from the layer map,
         // and assert that it is what we'd expect
         let mut assert_pop_layer = |expected_segno: u32, expected_generation: u64| {
-            let (l, generation) = layers.peek_oldest_open().unwrap();
+            let (layer_id, l, generation) = layers.peek_oldest_open().unwrap();
             assert!(l.get_seg_tag().segno == expected_segno);
             assert!(generation == expected_generation);
-            layers.pop_oldest_open();
+            layers.remove_open(layer_id);
         };
 
         assert_pop_layer(0, gen1); // 0x100
