@@ -18,11 +18,15 @@ pub fn thread_main(conf: SafeKeeperConf, listener: TcpListener) -> Result<()> {
             Ok((socket, peer_addr)) => {
                 debug!("accepted connection from {}", peer_addr);
                 let conf = conf.clone();
-                thread::spawn(move || {
-                    if let Err(err) = handle_socket(socket, conf) {
-                        error!("connection handler exited: {}", err);
-                    }
-                });
+
+                let _ = thread::Builder::new()
+                    .name("WAL service thread".into())
+                    .spawn(move || {
+                        if let Err(err) = handle_socket(socket, conf) {
+                            error!("connection handler exited: {}", err);
+                        }
+                    })
+                    .unwrap();
             }
             Err(e) => error!("Failed to accept connection: {}", e),
         }
