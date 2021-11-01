@@ -21,7 +21,7 @@ use std::sync::Arc;
 use zenith_metrics::{register_int_gauge, IntGauge};
 use zenith_utils::lsn::Lsn;
 
-use super::cache::{SlotId, GLOBAL_CACHE};
+use super::global_layer_map::{LayerId, GLOBAL_LAYER_MAP};
 
 lazy_static! {
     static ref NUM_INMEMORY_LAYERS: IntGauge =
@@ -71,8 +71,8 @@ impl LayerMap {
         let segentry = self.segs.get(tag)?;
 
         segentry
-            .open
-            .map(|slot_id| GLOBAL_CACHE.read().unwrap().get(&slot_id))
+            .open_layer_id
+            .map(|slot_id| GLOBAL_LAYER_MAP.read().unwrap().get(&slot_id))
             .flatten()
     }
 
@@ -94,7 +94,7 @@ impl LayerMap {
         // Also add it to the binary heap
         let open_layer_entry = OpenLayerEntry {
             oldest_pending_lsn: layer.get_oldest_pending_lsn(),
-            slot_id,
+            layer_id: slot_id,
             generation: self.current_generation,
         };
         self.open_layers.push(open_layer_entry);
@@ -108,9 +108,9 @@ impl LayerMap {
         let oldest_entry = self.open_layers.pop().unwrap();
 
         let layer_opt = {
-            let mut cache = GLOBAL_CACHE.write().unwrap();
-            let layer_opt = cache.get(&oldest_entry.slot_id);
-            cache.remove(&oldest_entry.slot_id);
+            let mut cache = GLOBAL_LAYER_MAP.write().unwrap();
+            let layer_opt = cache.get(&oldest_entry.layer_id);
+            cache.remove(&oldest_entry.layer_id);
             // TODO it's bad that a ref can still exist after being evicted from cache
             layer_opt
         };
@@ -119,8 +119,8 @@ impl LayerMap {
             let mut segentry = self.segs.get_mut(&layer.get_seg_tag()).unwrap();
 
             // Also remove it from the SegEntry of this segment
-            if segentry.open.unwrap() == oldest_entry.slot_id {
-                segentry.open = None;
+            if segentry.open_layer_id.unwrap() == oldest_entry.layer_id {
+                segentry.open_layer_id = None;
             } else {
                 // We could have already updated segentry.open for
                 // dropped (non-writeable) layer. This is fine.
@@ -216,7 +216,10 @@ impl LayerMap {
     /// Return the oldest in-memory layer, along with its generation number.
     pub fn peek_oldest_open(&self) -> Option<(Arc<InMemoryLayer>, u64)> {
         let oldest_entry = self.open_layers.peek()?;
-        let layer = GLOBAL_CACHE.read().unwrap().get(&oldest_entry.slot_id)?;
+        let layer = GLOBAL_LAYER_MAP
+            .read()
+            .unwrap()
+            .get(&oldest_entry.layer_id)?;
         Some((layer, oldest_entry.generation))
     }
 
@@ -240,8 +243,8 @@ impl LayerMap {
     pub fn dump(&self) -> Result<()> {
         println!("Begin dump LayerMap");
         for (seg, segentry) in self.segs.iter() {
-            if let Some(open) = &segentry.open {
-                if let Some(layer) = GLOBAL_CACHE.read().unwrap().get(open) {
+            if let Some(open) = &segentry.open_layer_id {
+                if let Some(layer) = GLOBAL_LAYER_MAP.read().unwrap().get(open) {
                     layer.dump()?;
                 } else {
                     println!("layer not found in cache");
@@ -278,7 +281,7 @@ impl IntervalItem for dyn Layer {
 /// IntervalTree.
 #[derive(Default)]
 struct SegEntry {
-    open: Option<SlotId>,
+    open_layer_id: Option<LayerId>,
     historic: IntervalTree<dyn Layer>,
 }
 
@@ -294,11 +297,10 @@ impl SegEntry {
     }
 
     pub fn get(&self, lsn: Lsn) -> Option<Arc<dyn Layer>> {
-        if let Some(slot_id) = &self.open {
-            let open = GLOBAL_CACHE.read().unwrap().get(slot_id)?;
-            if open.get_start_lsn() <= lsn {
-                let x: Arc<dyn Layer> = Arc::clone(&open) as _;
-                return Some(x);
+        if let Some(open_layer_id) = &self.open_layer_id {
+            let open_layer = GLOBAL_LAYER_MAP.read().unwrap().get(open_layer_id)?;
+            if open_layer.get_start_lsn() <= lsn {
+                return Some(open_layer);
             }
         }
 
@@ -317,15 +319,16 @@ impl SegEntry {
     // Set new open layer for a SegEntry.
     // It's ok to rewrite previous open layer,
     // but only if it is not writeable anymore.
-    pub fn update_open(&mut self, layer: Arc<InMemoryLayer>) -> SlotId {
-        if let Some(prev_open_slot_id) = &self.open {
-            if let Some(prev_open) = GLOBAL_CACHE.read().unwrap().get(prev_open_slot_id) {
-                assert!(!prev_open.is_writeable());
+    pub fn update_open(&mut self, layer: Arc<InMemoryLayer>) -> LayerId {
+        if let Some(prev_open_layer_id) = &self.open_layer_id {
+            if let Some(prev_open_layer) = GLOBAL_LAYER_MAP.read().unwrap().get(prev_open_layer_id)
+            {
+                assert!(!prev_open_layer.is_writeable());
             }
         }
-        let slot_id = GLOBAL_CACHE.write().unwrap().insert(layer);
-        self.open = Some(slot_id);
-        slot_id
+        let open_layer_id = GLOBAL_LAYER_MAP.write().unwrap().insert(layer);
+        self.open_layer_id = Some(open_layer_id);
+        open_layer_id
     }
 
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
@@ -340,9 +343,9 @@ impl SegEntry {
 /// recently-added entries (i.e after last call to increment_generation()) from older
 /// entries with the same 'oldest_pending_lsn'.
 struct OpenLayerEntry {
-    pub oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
-    pub generation: u64,
-    pub slot_id: SlotId,
+    oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
+    generation: u64,
+    layer_id: LayerId,
 }
 impl Ord for OpenLayerEntry {
     fn cmp(&self, other: &Self) -> Ordering {

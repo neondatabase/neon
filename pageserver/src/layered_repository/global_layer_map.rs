@@ -15,11 +15,11 @@ use super::inmemory_layer::InMemoryLayer;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    pub static ref GLOBAL_CACHE: RwLock<Cache> = RwLock::new(Cache::default());
+    pub static ref GLOBAL_LAYER_MAP: RwLock<OpenLayers> = RwLock::new(OpenLayers::default());
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-pub struct SlotId {
+pub struct LayerId {
     index: usize,
     version: u64, // tag to avoid ABA problem
 }
@@ -36,26 +36,25 @@ struct Slot {
     data: SlotData,
 }
 
-// TODO Cache isn't really the right name
 #[derive(Default)]
-pub struct Cache {
+pub struct OpenLayers {
     slots: Vec<Slot>,
 
     // Head of free-slot list.
     next_empty_slot_idx: Option<usize>,
 }
 
-impl Cache {
-    pub fn insert(&mut self, layer: Arc<InMemoryLayer>) -> SlotId {
+impl OpenLayers {
+    pub fn insert(&mut self, layer: Arc<InMemoryLayer>) -> LayerId {
         let slot_idx = match self.next_empty_slot_idx {
             Some(slot_idx) => slot_idx,
             None => {
-                let id = self.slots.len();
+                let idx = self.slots.len();
                 self.slots.push(Slot {
                     version: 0,
                     data: SlotData::Vacant(None),
                 });
-                id
+                idx
             }
         };
 
@@ -70,13 +69,13 @@ impl Cache {
 
         slot.data = SlotData::Occupied(layer);
 
-        SlotId {
+        LayerId {
             index: slot_idx,
             version: slot.version,
         }
     }
 
-    pub fn get(&self, slot_id: &SlotId) -> Option<Arc<InMemoryLayer>> {
+    pub fn get(&self, slot_id: &LayerId) -> Option<Arc<InMemoryLayer>> {
         let slot = self.slots.get(slot_id.index)?; // TODO should out of bounds indexes just panic?
         if slot.version != slot_id.version {
             return None;
@@ -90,7 +89,7 @@ impl Cache {
     }
 
     // TODO this won't be a public API in the future
-    pub fn remove(&mut self, slot_id: &SlotId) {
+    pub fn remove(&mut self, slot_id: &LayerId) {
         let slot = &mut self.slots[slot_id.index];
 
         if slot.version != slot_id.version {
