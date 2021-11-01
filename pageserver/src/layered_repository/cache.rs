@@ -42,13 +42,13 @@ pub struct Cache {
     slots: Vec<Slot>,
 
     // Head of free-slot list.
-    next_empty_slot_id: Option<usize>,
+    next_empty_slot_idx: Option<usize>,
 }
 
 impl Cache {
     pub fn insert(&mut self, layer: Arc<InMemoryLayer>) -> SlotId {
-        let slot_id = match self.next_empty_slot_id {
-            Some(slot_id) => slot_id,
+        let slot_idx = match self.next_empty_slot_idx {
+            Some(slot_idx) => slot_idx,
             None => {
                 let id = self.slots.len();
                 self.slots.push(Slot {
@@ -59,19 +59,19 @@ impl Cache {
             }
         };
 
-        let slot = &mut self.slots[slot_id];
+        let slot = &mut self.slots[slot_idx];
 
         match slot.data {
             SlotData::Occupied(_) => unimplemented!(),
-            SlotData::Vacant(next_empty_slot_id) => {
-                self.next_empty_slot_id = next_empty_slot_id;
+            SlotData::Vacant(next_empty_slot_idx) => {
+                self.next_empty_slot_idx = next_empty_slot_idx;
             }
         }
 
         slot.data = SlotData::Occupied(layer);
 
         SlotId {
-            index: slot_id,
+            index: slot_idx,
             version: slot.version,
         }
     }
@@ -104,8 +104,8 @@ impl Cache {
             SlotData::Vacant(_) => unimplemented!(),
         }
 
-        slot.data = SlotData::Vacant(self.next_empty_slot_id);
-        self.next_empty_slot_id = Some(slot_id.index);
+        slot.data = SlotData::Vacant(self.next_empty_slot_idx);
+        self.next_empty_slot_idx = Some(slot_id.index);
 
         slot.version = slot.version.wrapping_add(1);
     }
