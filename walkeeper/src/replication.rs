@@ -3,7 +3,7 @@
 
 use crate::send_wal::SendWalHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use log::*;
 use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE};
@@ -194,10 +194,7 @@ impl ReplicationConn {
                 break;
             }
         }
-        let (_wal_end, timeline) = swh.timeline.get().get_end_of_wal();
-        if start_pos == Lsn(0) {
-            bail!("Invalid start_pos!");
-        }
+        let (_, timeline) = swh.timeline.get().get_end_of_wal();
         info!("Start replication from {}", start_pos);
 
         // switch to copy
