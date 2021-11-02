@@ -18,6 +18,9 @@ Current implementation
 * provides remote storage wrappers for AWS S3 and local FS
 * uploads layers, frozen by pageserver checkpoint thread
 * downloads and registers layers, found on the remote storage, but missing locally
+* uses compression when deals with files, for better S3 usage
+* maintains an index of what's stored remotely
+* evicts failing tasks and stops the corresponding timelines
 
 No good optimisations or performance testing is done, the feature is disabled by default and gets polished over time.
 It's planned to deal with all questions that are currently on and prepare the feature to be enabled by default in cloud environments.
@@ -27,21 +30,16 @@ It's planned to deal with all questions that are currently on and prepare the fe
 As mentioned, the backup component is rather new and under development currently, so not all things are done properly from the start.
 Here's the list of known compromises with comments:
 
-* Remote storage model is the same as the `tenants/` directory contents of the pageserver's local workdir storage.
-This is relatively simple to implement, but may be costly to use in AWS S3: an initial data image contains ~782 relish files and a metadata file, ~31 MB combined.
-AWS charges per API call and for traffic either, layers are expected to be updated frequently, so this model most probably is ineffective.
-Additionally, pageservers might need to migrate images between tenants, which does not improve the situation.
+* Remote storage file model is currently a custom archive format, that's not possible to deserialize without a particular Rust code of ours (including `serde`).
+We also don't optimize the archivation and pack every timeline checkpoint separately, so the resulting blob's size that gets on S3 could be arbitrary.
+But, it's a single blob, which is way better than storing ~780 small files separately.
 
-Storage sync API operates images when backing up or restoring a backup, so we're fluent to repack the layer contents the way we want to, which most probably will be done later.
+* Archive index restoration requires reading every blob's head.
+This could be avoided by a background thread/future storing the serialized index in the remote storage.
 
 * no proper file comparison
 
-Currently, every layer contains `Lsn` in their name, to map the data it holds against a certain DB state.
-Then the images with same ids and different `Lsn`'s are compared, files are considered equal if their local file paths are equal (for remote files, "local file path" is their download destination).
-No file contents assertion is done currently, but should be.
-AWS S3 returns file checksums during the `list` operation, so that can be used to ensure the backup consistency, but that needs further research and, since current pageserver impl also needs to deal with layer file checksums.
-
-For now, due to this, we consider local workdir files as source of truth, not removing them ever and adjusting remote files instead, if image files mismatch.
+No file checksum assertion is done currently, but should be (AWS S3 returns file checksums during the `list` operation)
 
 * sad rust-s3 api
 
@@ -60,7 +58,7 @@ Based on previous evaluation, even `rusoto-s3` could be a better choice over thi
 So far, we don't consider non-main images and don't adjust the remote storage based on GC thread loop results.
 Only checkpointer loop affects the remote storage.
 
-* more layers should be downloaded on demand
+* more timelines should be downloaded on demand
 
 Since we download and load remote layers into pageserver, there's a possibility a need for those layers' ancestors arise.
 Most probably, every downloaded image's ancestor is not present in locally too, but currently there's no logic for downloading such ancestors and their metadata,

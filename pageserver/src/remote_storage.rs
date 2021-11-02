@@ -20,7 +20,7 @@
 //! |       pageserver       |    (schedule checkpoint upload)    | upload/download |
 //! |                        |                                    |      loop       |
 //! |                        |  <-------------------------------  |                 |
-//! |                        |    (register downloaded layers)    |                 |
+//! |                        |   (register downloaded timelines)  |                 |
 //! +------------------------+                                    +---------<-------+
 //!                                                                         |
 //!                                                                         |
@@ -36,24 +36,27 @@
 //!                                                            | access to this storage |
 //!                                                            +------------------------+
 //!
-//! First, during startup, the pageserver inits the storage sync thread with the async loop, or leaves the loop unitialised, if configured so.
+//! First, during startup, the pageserver inits the storage sync thread with the async loop, or leaves the loop uninitialised, if configured so.
 //! Some time later, during pageserver checkpoints, in-memory data is flushed onto disk along with its metadata.
-//! If the storage sync loop was successfully started before, pageserver schedules the new image uploads after every checkpoint.
+//! If the storage sync loop was successfully started before, pageserver schedules the new checkpoint file uploads after every checkpoint.
 //! See [`crate::layered_repository`] for the upload calls and the adjacent logic.
 //!
 //! The storage logic considers `image` as a set of local files, fully representing a certain timeline at given moment (identified with `disk_consistent_lsn`).
 //! Timeline can change its state, by adding more files on disk and advancing its `disk_consistent_lsn`: this happens after pageserver checkpointing and is followed
 //! by the storage upload, if enabled.
-//! When a certain image gets uploaded, the sync loop remembers the fact, preventing further reuploads of the same image state.
+//! When a certain checkpoint gets uploaded, the sync loop remembers the fact, preventing further reuploads of the same state.
 //! No files are deleted from either local or remote storage, only the missing ones locally/remotely get downloaded/uploaded, local metadata file will be overwritten
-//! when the newer timeline is downloaded.
+//! when the newer image is downloaded.
 //!
 //! Meanwhile, the loop inits the storage connection and checks the remote files stored.
 //! This is done once at startup only, relying on the fact that pageserver uses the storage alone (ergo, nobody else uploads the files to the storage but this server).
-//! Based on the remote image data, the storage sync logic queues image downloads, while accepting any potential upload tasks from pageserver and managing the tasks by their priority.
-//! On the image download, a [`crate::tenant_mgr::register_relish_download`] function is called to register the new image in pageserver, initializing all related threads and internal state.
+//! Based on the remote storage data, the sync logic queues timeline downloads, while accepting any potential upload tasks from pageserver and managing the tasks by their priority.
+//! On the timeline download, a [`crate::tenant_mgr::register_timeline_download`] function is called to register the new timeline in pageserver, initializing all related threads and internal state.
 //!
-//! When the pageserver terminates, the upload loop finishes a current image sync task (if any) and exits.
+//! To optimize S3 storage (and access), the sync loop compresses the checkpoint files before placing them to S3, and uncompresses them back, keeping track of timeline files and metadata.
+//! Also, the file remote file list is queried once only, at startup, to avoid possible extra costs and latency issues.
+//!
+//! When the pageserver terminates, the upload loop finishes a current sync task (if any) and exits.
 //!
 //! NOTES:
 //! * pageserver assumes it has exclusive write access to the remote storage. If supported, the way multiple pageservers can be separated in the same storage
@@ -64,10 +67,6 @@
 //!     2. pageserver loads the timeline from disk for the first time
 //!
 //! * the uploads do not happen right after the upload registration: the sync loop might be occupied with other tasks, or tasks with bigger priority could be waiting already
-//!
-//! * all synchronization tasks (including the public API to register uploads and downloads and the sync queue management) happens on an image scale: a big set of remote files,
-//! enough to represent (and recover, if needed) a certain timeline state. On the contrary, all internal storage CRUD calls are made per reilsh file from those images.
-//! This way, the synchronization is able to download the image partially, if some state was synced before, but exposes correctly synced images only.
 
 mod local_fs;
 mod rust_s3;

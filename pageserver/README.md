@@ -9,7 +9,7 @@ The Page Server has a few different duties:
 
 S3 is the main fault-tolerant storage of all data, as there are no Page Server
 replicas. We use a separate fault-tolerant WAL service to reduce latency. It
-keeps track of WAL records which are not syncted to S3 yet.
+keeps track of WAL records which are not synced to S3 yet.
 
 The Page Server consists of multiple threads that operate on a shared
 repository of page versions:

@@ -355,7 +355,7 @@ mod pure_tests {
                 .local_path(
                     &storage_root.join(local_path.strip_prefix(&repo_harness.conf.workdir)?)
                 )
-                .expect("For a valid input, valid S3 info should be parsed"),
+                .expect("For a valid input, valid local path should be parsed"),
             "Should be able to parse metadata out of the correctly named remote delta file"
         );
 

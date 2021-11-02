@@ -49,15 +49,15 @@ pub enum TenantState {
     Stopping,
 }
 
-/// A remote storage timeline synchronization event, that needs another step
-/// to be fully completed.
+/// A remote storage timeline synchronization event, that needs another registration step
+/// inside the manager to be fully completed.
 #[derive(Debug)]
-pub enum PostTimelineSyncStep {
+pub enum TimelineRegistration {
     /// The timeline cannot be synchronized anymore due to some sync issues.
     /// Needs to be removed from pageserver, to avoid further data diverging.
     Evict,
     /// A new timeline got downloaded and needs to be loaded into pageserver.
-    RegisterDownload,
+    Download,
 }
 
 impl fmt::Display for TenantState {
@@ -117,9 +117,10 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
 
 pub fn perform_post_timeline_sync_steps(
     conf: &'static PageServerConf,
-    post_sync_steps: HashMap<(ZTenantId, ZTimelineId), PostTimelineSyncStep>,
+    post_sync_steps: HashMap<(ZTenantId, ZTimelineId), TimelineRegistration>,
 ) {
     if post_sync_steps.is_empty() {
+        debug!("no post-sync steps to perform");
         return;
     }
 
@@ -148,7 +149,7 @@ pub fn perform_post_timeline_sync_steps(
 
     for ((tenant_id, timeline_id), post_sync_step) in post_sync_steps {
         match post_sync_step {
-            PostTimelineSyncStep::Evict => {
+            TimelineRegistration::Evict => {
                 if let Err(e) = get_repository_for_tenant(tenant_id)
                     .and_then(|repo| repo.unload_timeline(timeline_id))
                 {
@@ -158,7 +159,14 @@ pub fn perform_post_timeline_sync_steps(
                     )
                 }
             }
-            PostTimelineSyncStep::RegisterDownload => {
+            TimelineRegistration::Download => {
+                // TODO remove later, when branching is added to remote storage sync
+                for missing_path in [conf.branches_path(&tenant_id), conf.tags_path(&tenant_id)] {
+                    if !missing_path.exists() {
+                        fs::create_dir_all(&missing_path).unwrap();
+                    }
+                }
+
                 // init repo updates Tenant state
                 init_repo(conf, tenant_id);
                 let new_repo = get_repository_for_tenant(tenant_id).unwrap();
