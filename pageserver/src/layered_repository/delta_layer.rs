@@ -205,22 +205,22 @@ impl Layer for DeltaLayer {
             for ((_blknum, pv_lsn), blob_range) in iter {
                 let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
 
-                if let Some(img) = pv.page_image {
-                    // Found a page image, return it
-                    reconstruct_data.page_img = Some(img);
-                    need_image = false;
-                    break;
-                } else if let Some(rec) = pv.record {
-                    let will_init = rec.will_init;
-                    reconstruct_data.records.push((*pv_lsn, rec));
-                    if will_init {
-                        // This WAL record initializes the page, so no need to go further back
+                match pv {
+                    PageVersion::Page(img) => {
+                        // Found a page image, return it
+                        reconstruct_data.page_img = Some(img);
                         need_image = false;
                         break;
                     }
-                } else {
-                    // No base image, and no WAL record. Huh?
-                    bail!("no page image or WAL record for requested page");
+                    PageVersion::Wal(rec) => {
+                        let will_init = rec.will_init;
+                        reconstruct_data.records.push((*pv_lsn, rec));
+                        if will_init {
+                            // This WAL record initializes the page, so no need to go further back
+                            need_image = false;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -311,19 +311,22 @@ impl Layer for DeltaLayer {
             let buf = read_blob(&chapter, blob_range)?;
             let pv = PageVersion::des(&buf)?;
 
-            if let Some(img) = pv.page_image.as_ref() {
-                write!(&mut desc, " img {} bytes", img.len())?;
+            match pv {
+                PageVersion::Page(img) => {
+                    write!(&mut desc, " img {} bytes", img.len())?;
+                }
+                PageVersion::Wal(rec) => {
+                    let wal_desc = waldecoder::describe_wal_record(&rec.rec);
+                    write!(
+                        &mut desc,
+                        " rec {} bytes will_init: {} {}",
+                        rec.rec.len(),
+                        rec.will_init,
+                        wal_desc
+                    )?;
+                }
             }
-            if let Some(rec) = pv.record.as_ref() {
-                let wal_desc = waldecoder::describe_wal_record(&rec.rec);
-                write!(
-                    &mut desc,
-                    " rec {} bytes will_init: {} {}",
-                    rec.rec.len(),
-                    rec.will_init,
-                    wal_desc
-                )?;
-            }
+
             println!("  blk {} at {}: {}", blk, lsn, desc);
         }
 

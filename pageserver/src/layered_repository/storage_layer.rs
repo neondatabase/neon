@@ -51,23 +51,10 @@ impl SegmentTag {
 ///
 /// A page version can be stored as a full page image, or as WAL record that needs
 /// to be applied over the previous page version to reconstruct this version.
-///
-/// It's also possible to have both a WAL record and a page image in the same
-/// PageVersion. That happens if page version is originally stored as a WAL record
-/// but it is later reconstructed by a GetPage@LSN request by performing WAL
-/// redo. The get_page_at_lsn() code will store the reconstructed pag image next to
-/// the WAL record in that case. TODO: That's pretty accidental, not the result
-/// of any grand design. If we want to keep reconstructed page versions around, we
-/// probably should have a separate buffer cache so that we could control the
-/// replacement policy globally. Or if we keep a reconstructed page image, we
-/// could throw away the WAL record.
-///
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PageVersion {
-    /// an 8kb page image
-    pub page_image: Option<Bytes>,
-    /// WAL record to get from previous page version to this one.
-    pub record: Option<WALRecord>,
+pub enum PageVersion {
+    Page(Bytes),
+    Wal(WALRecord),
 }
 
 ///

@@ -104,12 +104,9 @@ impl<'a> Iterator for OrderedPageVersionIter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use bytes::Bytes;
 
-    const EMPTY_PAGE_VERSION: PageVersion = PageVersion {
-        page_image: None,
-        record: None,
-    };
+    use super::*;
 
     #[test]
     fn test_ordered_iter() {
@@ -117,9 +114,16 @@ mod tests {
         const BLOCKS: u32 = 1000;
         const LSNS: u64 = 50;
 
+        let empty_page = Bytes::from_static(&[0u8; 8192]);
+        let empty_page_version = PageVersion::Page(empty_page);
+
         for blknum in 0..BLOCKS {
             for lsn in 0..LSNS {
-                let old = page_versions.append_or_update_last(blknum, Lsn(lsn), EMPTY_PAGE_VERSION);
+                let old = page_versions.append_or_update_last(
+                    blknum,
+                    Lsn(lsn),
+                    empty_page_version.clone(),
+                );
                 assert!(old.is_none());
             }
         }
