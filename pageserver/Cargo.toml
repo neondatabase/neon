@@ -41,6 +41,7 @@ nix = "0.23"
 once_cell = "1.8.0"
 
 rust-s3 = { version = "0.28", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls"] }
+async-compression = {version = "0.3", features = ["zstd", "tokio"]}
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }
