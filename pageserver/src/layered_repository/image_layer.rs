@@ -117,6 +117,10 @@ impl Layer for ImageLayer {
         PathBuf::from(self.layer_name().to_string())
     }
 
+    fn get_tenant_id(&self) -> ZTenantId {
+        self.tenantid
+    }
+
     fn get_timeline_id(&self) -> ZTimelineId {
         self.timelineid
     }

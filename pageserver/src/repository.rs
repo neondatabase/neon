@@ -160,6 +160,9 @@ pub trait Timeline: Send + Sync {
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used in tests to ensure thet incremental and non incremental variants match.
     fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize>;
+
+    /// An escape hatch to allow "casting" a generic Timeline to LayeredTimeline.
+    fn upgrade_to_layered_timeline(&self) -> &crate::layered_repository::LayeredTimeline;
 }
 
 /// Various functions to mutate the timeline.

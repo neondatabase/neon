@@ -3,6 +3,7 @@
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
 use crate::layered_repository::filename::DeltaFileName;
+use crate::layered_repository::global_layer_map::GLOBAL_OPEN_MEM_USAGE;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
@@ -16,6 +17,7 @@ use anyhow::{bail, ensure, Result};
 use bytes::Bytes;
 use log::*;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use zenith_utils::vec_map::VecMap;
 
@@ -69,6 +71,15 @@ pub struct InMemoryLayerInner {
     /// a non-blocky rel, 'segsizes' is not used and is always empty.
     ///
     segsizes: VecMap<Lsn, u32>,
+
+    /// Approximate amount of memory used by this layer.
+    ///
+    /// TODO: This is currently a very crude metric, we don't take into account allocator
+    /// overhead, memory fragmentation, memory used by the VecMaps, nor many other things.
+    /// Just the actual # of bytes of a page image (8 kB) or the size of a WAL record.
+    ///
+    /// Whenever this is changed, you must also modify GLOBAL_OPEN_MEM_USAGE accordingly!
+    mem_usage: usize,
 }
 
 impl InMemoryLayerInner {
@@ -85,6 +96,15 @@ impl InMemoryLayerInner {
             *entry
         } else {
             panic!("could not find seg size in in-memory layer");
+        }
+    }
+}
+
+impl Drop for InMemoryLayerInner {
+    fn drop(&mut self) {
+        if self.mem_usage > 0 {
+            GLOBAL_OPEN_MEM_USAGE.fetch_sub(self.mem_usage, Ordering::Relaxed);
+            self.mem_usage = 0;
         }
     }
 }
@@ -111,6 +131,10 @@ impl Layer for InMemoryLayer {
         .to_string();
 
         PathBuf::from(format!("inmem-{}", delta_filename))
+    }
+
+    fn get_tenant_id(&self) -> ZTenantId {
+        self.tenantid
     }
 
     fn get_timeline_id(&self) -> ZTimelineId {
@@ -281,12 +305,6 @@ pub struct LayersOnDisk {
     pub image_layers: Vec<ImageLayer>,
 }
 
-impl LayersOnDisk {
-    pub fn is_empty(&self) -> bool {
-        self.delta_layers.is_empty() && self.image_layers.is_empty()
-    }
-}
-
 impl InMemoryLayer {
     /// Return the oldest page version that's stored in this layer
     pub fn get_oldest_pending_lsn(&self) -> Lsn {
@@ -330,6 +348,7 @@ impl InMemoryLayer {
                 dropped: false,
                 page_versions: PageVersions::default(),
                 segsizes,
+                mem_usage: 0,
             }),
         })
     }
@@ -376,6 +395,13 @@ impl InMemoryLayer {
 
         inner.assert_writeable();
 
+        let mut mem_usage = 0;
+        if let Some(img) = &pv.page_image {
+            mem_usage += img.len();
+        } else if let Some(rec) = &pv.record {
+            mem_usage += rec.rec.len();
+        }
+
         let old = inner.page_versions.append_or_update_last(blknum, lsn, pv);
 
         if old.is_some() {
@@ -385,6 +411,9 @@ impl InMemoryLayer {
                 self.seg.rel, blknum, lsn
             );
         }
+
+        inner.mem_usage += mem_usage;
+        GLOBAL_OPEN_MEM_USAGE.fetch_add(mem_usage, Ordering::Relaxed);
 
         // Also update the relation size, if this extended the relation.
         if self.seg.rel.is_blocky() {
@@ -521,6 +550,7 @@ impl InMemoryLayer {
                 dropped: false,
                 page_versions: PageVersions::default(),
                 segsizes,
+                mem_usage: 0,
             }),
         })
     }
@@ -549,6 +579,16 @@ impl InMemoryLayer {
 
             for (_blk, lsn, _pv) in inner.page_versions.ordered_page_version_iter(None) {
                 assert!(lsn <= end_lsn);
+            }
+
+            // It's a bit premature to subtract the global mem usage here already.
+            // This layer consumes memory until it's written out to disk and dropped.
+            // But GLOBAL_OPEN_MEM_USAGE is used to trigger layer eviction, if there are
+            // too many open layers, and from that point of view this should no longer be
+            // counted against the global mem usage.
+            if inner.mem_usage > 0 {
+                GLOBAL_OPEN_MEM_USAGE.fetch_sub(inner.mem_usage, Ordering::Relaxed);
+                inner.mem_usage = 0;
             }
         }
     }

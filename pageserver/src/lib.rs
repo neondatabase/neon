@@ -43,6 +43,8 @@ pub mod defaults {
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
     pub const DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
+
+    pub const DEFAULT_OPEN_MEM_LIMIT: usize = 128 * 1024 * 1024;
 }
 
 lazy_static! {
@@ -70,6 +72,8 @@ pub struct PageServerConf {
     pub gc_horizon: u64,
     pub gc_period: Duration,
     pub superuser: String,
+
+    pub open_mem_limit: usize,
 
     // Repository directory, relative to current working directory.
     // Normally, the page server changes the current working directory
@@ -153,6 +157,7 @@ impl PageServerConf {
             checkpoint_period: Duration::from_secs(10),
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
+            open_mem_limit: defaults::DEFAULT_OPEN_MEM_LIMIT,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             superuser: "zenith_admin".to_string(),

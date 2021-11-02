@@ -5,6 +5,7 @@
 //!
 //! We keep one WAL receiver active per timeline.
 
+use crate::layered_repository;
 use crate::relish::*;
 use crate::restore_local_repo;
 use crate::tenant_mgr;
@@ -175,7 +176,7 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
 }
 
 fn walreceiver_main(
-    _conf: &PageServerConf,
+    conf: &PageServerConf,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
     tenantid: ZTenantId,
@@ -294,6 +295,9 @@ fn walreceiver_main(
                     info!("caught up at LSN {}", endlsn);
                     caught_up = true;
                 }
+
+                // Release memory if needed
+                layered_repository::evict_layer_if_needed(conf)?;
 
                 Some(endlsn)
             }

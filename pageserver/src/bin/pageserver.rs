@@ -43,6 +43,7 @@ struct CfgFileParams {
     checkpoint_period: Option<String>,
     gc_horizon: Option<String>,
     gc_period: Option<String>,
+    open_mem_limit: Option<String>,
     pg_distrib_dir: Option<String>,
     auth_validation_public_key_path: Option<String>,
     auth_type: Option<String>,
@@ -104,6 +105,7 @@ impl CfgFileParams {
             checkpoint_period: get_arg("checkpoint_period"),
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
+            open_mem_limit: get_arg("open_mem_limit"),
             pg_distrib_dir: get_arg("postgres-distrib"),
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
             auth_type: get_arg("auth-type"),
@@ -122,6 +124,7 @@ impl CfgFileParams {
             checkpoint_period: self.checkpoint_period.or(other.checkpoint_period),
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
+            open_mem_limit: self.open_mem_limit.or(other.open_mem_limit),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
             auth_validation_public_key_path: self
                 .auth_validation_public_key_path
@@ -164,6 +167,11 @@ impl CfgFileParams {
         let gc_period = match self.gc_period.as_ref() {
             Some(period_str) => humantime::parse_duration(period_str)?,
             None => DEFAULT_GC_PERIOD,
+        };
+
+        let open_mem_limit: usize = match self.open_mem_limit.as_ref() {
+            Some(open_mem_limit_str) => open_mem_limit_str.parse()?,
+            None => DEFAULT_OPEN_MEM_LIMIT,
         };
 
         let pg_distrib_dir = match self.pg_distrib_dir.as_ref() {
@@ -237,6 +245,7 @@ impl CfgFileParams {
             checkpoint_period,
             gc_horizon,
             gc_period,
+            open_mem_limit,
 
             superuser: String::from(DEFAULT_SUPERUSER),
 
@@ -306,6 +315,12 @@ fn main() -> Result<()> {
                 .long("gc_period")
                 .takes_value(true)
                 .help("Interval between garbage collector iterations"),
+        )
+        .arg(
+            Arg::with_name("open_mem_limit")
+                .long("open_mem_limit")
+                .takes_value(true)
+                .help("Amount of memory reserved for buffering incoming WAL"),
         )
         .arg(
             Arg::with_name("workdir")
@@ -601,6 +616,7 @@ mod tests {
             checkpoint_period: Some("checkpoint_period_VALUE".to_string()),
             gc_horizon: Some("gc_horizon_VALUE".to_string()),
             gc_period: Some("gc_period_VALUE".to_string()),
+            open_mem_limit: Some("open_mem_limit_VALUE".to_string()),
             pg_distrib_dir: Some("pg_distrib_dir_VALUE".to_string()),
             auth_validation_public_key_path: Some(
                 "auth_validation_public_key_path_VALUE".to_string(),
@@ -624,6 +640,7 @@ checkpoint_distance = 'checkpoint_distance_VALUE'
 checkpoint_period = 'checkpoint_period_VALUE'
 gc_horizon = 'gc_horizon_VALUE'
 gc_period = 'gc_period_VALUE'
+open_mem_limit = 'open_mem_limit_VALUE'
 pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
 auth_type = 'auth_type_VALUE'
@@ -658,6 +675,7 @@ local_path = 'relish_storage_local_VALUE'
             checkpoint_period: Some("checkpoint_period_VALUE".to_string()),
             gc_horizon: Some("gc_horizon_VALUE".to_string()),
             gc_period: Some("gc_period_VALUE".to_string()),
+            open_mem_limit: Some("open_mem_limit_VALUE".to_string()),
             pg_distrib_dir: Some("pg_distrib_dir_VALUE".to_string()),
             auth_validation_public_key_path: Some(
                 "auth_validation_public_key_path_VALUE".to_string(),
@@ -684,6 +702,7 @@ checkpoint_distance = 'checkpoint_distance_VALUE'
 checkpoint_period = 'checkpoint_period_VALUE'
 gc_horizon = 'gc_horizon_VALUE'
 gc_period = 'gc_period_VALUE'
+open_mem_limit = 'open_mem_limit_VALUE'
 pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
 auth_type = 'auth_type_VALUE'

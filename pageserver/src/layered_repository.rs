@@ -65,6 +65,7 @@ mod storage_layer;
 use delta_layer::DeltaLayer;
 use image_layer::ImageLayer;
 
+use global_layer_map::{LayerId, GLOBAL_LAYER_MAP};
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use storage_layer::{
@@ -799,6 +800,10 @@ impl Timeline for LayeredTimeline {
             _write_guard: self.write_lock.lock().unwrap(),
         })
     }
+
+    fn upgrade_to_layered_timeline(&self) -> &crate::layered_repository::LayeredTimeline {
+        self
+    }
 }
 
 impl LayeredTimeline {
@@ -1140,9 +1145,8 @@ impl LayeredTimeline {
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
 
-        let mut created_historics = false;
         let mut layer_uploads = Vec::new();
-        while let Some((oldest_slot_id, oldest_layer, oldest_generation)) =
+        while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
         {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
@@ -1169,42 +1173,14 @@ impl LayeredTimeline {
                 break;
             }
 
-            // Mark the layer as no longer accepting writes and record the end_lsn.
-            // This happens in-place, no new layers are created now.
-            // We call `get_last_record_lsn` again, which may be different from the
-            // original load, as we may have released the write lock since then.
-            oldest_layer.freeze(self.get_last_record_lsn());
-
-            // The layer is no longer open, update the layer map to reflect this.
-            // We will replace it with on-disk historics below.
-            layers.remove_open(oldest_slot_id);
-            layers.insert_historic(oldest_layer.clone());
-
-            // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
             drop(layers);
             drop(write_guard);
 
-            let new_historics = oldest_layer.write_to_disk(self)?;
+            let mut this_layer_uploads = self.evict_layer(oldest_layer_id)?;
+            layer_uploads.append(&mut this_layer_uploads);
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
-
-            if !new_historics.is_empty() {
-                created_historics = true;
-            }
-
-            // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove_historic(oldest_layer);
-
-            // Add the historics to the LayerMap
-            for delta_layer in new_historics.delta_layers {
-                layer_uploads.push(delta_layer.path());
-                layers.insert_historic(Arc::new(delta_layer));
-            }
-            for image_layer in new_historics.image_layers {
-                layer_uploads.push(image_layer.path());
-                layers.insert_historic(Arc::new(image_layer));
-            }
         }
 
         // Call unload() on all frozen layers, to release memory.
@@ -1217,7 +1193,7 @@ impl LayeredTimeline {
         drop(layers);
         drop(write_guard);
 
-        if created_historics {
+        if !layer_uploads.is_empty() {
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
             let timeline_dir =
@@ -1268,6 +1244,55 @@ impl LayeredTimeline {
         }
 
         Ok(())
+    }
+
+    fn evict_layer(&self, layer_id: LayerId) -> Result<Vec<PathBuf>> {
+        // Mark the layer as no longer accepting writes and record the end_lsn.
+        // This happens in-place, no new layers are created now.
+        // We call `get_last_record_lsn` again, which may be different from the
+        // original load, as we may have released the write lock since then.
+
+        let mut write_guard = self.write_lock.lock().unwrap();
+        let mut layers = self.layers.lock().unwrap();
+
+        let mut layer_uploads = Vec::new();
+
+        let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
+        if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
+            drop(global_layer_map);
+            oldest_layer.freeze(self.get_last_record_lsn());
+
+            // The layer is no longer open, update the layer map to reflect this.
+            // We will replace it with on-disk historics below.
+            layers.remove_open(layer_id);
+            layers.insert_historic(oldest_layer.clone());
+
+            // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
+            drop(layers);
+            drop(write_guard);
+
+            let new_historics = oldest_layer.write_to_disk(self)?;
+
+            write_guard = self.write_lock.lock().unwrap();
+            layers = self.layers.lock().unwrap();
+
+            // Finally, replace the frozen in-memory layer with the new on-disk layers
+            layers.remove_historic(oldest_layer);
+
+            // Add the historics to the LayerMap
+            for delta_layer in new_historics.delta_layers {
+                layer_uploads.push(delta_layer.path());
+                layers.insert_historic(Arc::new(delta_layer));
+            }
+            for image_layer in new_historics.image_layers {
+                layer_uploads.push(image_layer.path());
+                layers.insert_historic(Arc::new(image_layer));
+            }
+        }
+        drop(layers);
+        drop(write_guard);
+
+        Ok(layer_uploads)
     }
 
     ///
@@ -1836,4 +1861,33 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
         "couldn't find an unused backup number for {:?}",
         path
     ))
+}
+
+//----- Global layer management
+
+/// Check if too much memory is being used by open layers. If so, evict
+pub fn evict_layer_if_needed(conf: &PageServerConf) -> Result<()> {
+    // Keep evicting layers until we are below the memory threshold.
+    let mut global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
+    while let Some((layer_id, layer)) = global_layer_map.find_victim_if_needed(conf.open_mem_limit)
+    {
+        drop(global_layer_map);
+        let tenantid = layer.get_tenant_id();
+        let timelineid = layer.get_timeline_id();
+
+        let _entered =
+            info_span!("global evict", timeline = %timelineid, tenant = %tenantid).entered();
+        info!("evicting {}", layer.filename().display());
+        drop(layer);
+
+        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
+
+        timeline
+            .upgrade_to_layered_timeline()
+            .evict_layer(layer_id)?;
+
+        global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
+    }
+
+    Ok(())
 }
