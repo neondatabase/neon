@@ -39,8 +39,6 @@ impl ComputeControlPlane {
     // |  |- <tenant_id>
     // |  |   |- <branch name>
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
-        // TODO: since pageserver do not have config file yet we believe here that
-        // it is running on default port. Change that when pageserver will have config.
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
         let mut nodes = BTreeMap::default();
@@ -73,15 +71,6 @@ impl ComputeControlPlane {
             .map(|(_name, node)| node.address.port())
             .max()
             .unwrap_or(self.base_port)
-    }
-
-    pub fn local(local_env: &LocalEnv, pageserver: &Arc<PageServerNode>) -> ComputeControlPlane {
-        ComputeControlPlane {
-            base_port: 65431,
-            pageserver: Arc::clone(pageserver),
-            nodes: BTreeMap::new(),
-            env: local_env.clone(),
-        }
     }
 
     // FIXME: see also parse_point_in_time in branches.rs.
@@ -136,7 +125,7 @@ impl ComputeControlPlane {
         });
 
         node.create_pgdata()?;
-        node.setup_pg_conf(self.env.auth_type)?;
+        node.setup_pg_conf(self.env.pageserver.auth_type)?;
 
         self.nodes
             .insert((tenantid, node.name.clone()), Arc::clone(&node));
@@ -210,7 +199,7 @@ impl PostgresNode {
         })
     }
 
-    fn sync_walkeepers(&self) -> Result<Lsn> {
+    fn sync_safekeepers(&self) -> Result<Lsn> {
         let pg_path = self.env.pg_bin_dir().join("postgres");
         let sync_handle = Command::new(pg_path)
             .arg("--sync-safekeepers")
@@ -235,7 +224,7 @@ impl PostgresNode {
         }
 
         let lsn = Lsn::from_str(std::str::from_utf8(&sync_output.stdout)?.trim())?;
-        println!("Walkeepers synced on {}", lsn);
+        println!("Safekeepers synced on {}", lsn);
         Ok(lsn)
     }
 
@@ -339,9 +328,25 @@ impl PostgresNode {
         }
         conf.append_line("");
 
-        // Configure the node to stream WAL directly to the pageserver
-        conf.append("synchronous_standby_names", "pageserver"); // TODO: add a new function arg?
-        conf.append("zenith.callmemaybe_connstring", &self.connstr());
+        if !self.env.safekeepers.is_empty() {
+            // Configure the node to connect to the safekeepers
+            conf.append("synchronous_standby_names", "walproposer");
+
+            let wal_acceptors = self
+                .env
+                .safekeepers
+                .iter()
+                .map(|sk| format!("localhost:{}", sk.pg_port))
+                .collect::<Vec<String>>()
+                .join(",");
+            conf.append("wal_acceptors", &wal_acceptors);
+        } else {
+            // Configure the node to stream WAL directly to the pageserver
+            // This isn't really a supported configuration, but can be useful for
+            // testing.
+            conf.append("synchronous_standby_names", "pageserver");
+            conf.append("zenith.callmemaybe_connstring", &self.connstr());
+        }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
         file.write_all(conf.to_string().as_bytes())?;
@@ -357,7 +362,7 @@ impl PostgresNode {
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
             // when things would be more stable (TODO).
-            let lsn = self.sync_walkeepers()?;
+            let lsn = self.sync_safekeepers()?;
             if lsn == Lsn(0) {
                 None
             } else {

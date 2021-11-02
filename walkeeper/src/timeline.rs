@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
-
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};
@@ -21,10 +22,39 @@ use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
     Storage, SK_FORMAT_VERSION, SK_MAGIC,
 };
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 
 const CONTROL_FILE_NAME: &str = "safekeeper.control";
+const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Replica status: host standby feedback + disk consistent lsn
+#[derive(Debug, Clone, Copy)]
+pub struct ReplicaState {
+    /// combined disk_consistent_lsn of pageservers
+    pub disk_consistent_lsn: Lsn,
+    /// combined hot standby feedback from all replicas
+    pub hs_feedback: HotStandbyFeedback,
+}
+
+impl Default for ReplicaState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReplicaState {
+    pub fn new() -> ReplicaState {
+        ReplicaState {
+            disk_consistent_lsn: Lsn(u64::MAX),
+            hs_feedback: HotStandbyFeedback {
+                ts: 0,
+                xmin: u64::MAX,
+                catalog_xmin: u64::MAX,
+            },
+        }
+    }
+}
 
 /// Shared state associated with database instance (tenant)
 struct SharedState {
@@ -33,8 +63,8 @@ struct SharedState {
     /// For receiving-sending wal cooperation
     /// quorum commit LSN we've notified walsenders about
     notified_commit_lsn: Lsn,
-    /// combined hot standby feedback from all replicas
-    hs_feedback: HotStandbyFeedback,
+    /// State of replicas
+    replicas: Vec<Option<ReplicaState>>,
 }
 
 // A named boolean.
@@ -44,23 +74,70 @@ pub enum CreateControlFile {
     False,
 }
 
+lazy_static! {
+    static ref PERSIST_SYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_persist_sync_control_file_seconds",
+        "Seconds to persist and sync control file, grouped by timeline",
+        &["timeline_id"],
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_persist_sync_control_file_seconds histogram vec");
+    static ref PERSIST_NOSYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_persist_nosync_control_file_seconds",
+        "Seconds to persist and sync control file, grouped by timeline",
+        &["timeline_id"],
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_persist_nosync_control_file_seconds histogram vec");
+}
+
 impl SharedState {
+    /// Get combined stateof all alive replicas
+    pub fn get_replicas_state(&self) -> ReplicaState {
+        let mut acc = ReplicaState::new();
+        for state in self.replicas.iter().flatten() {
+            acc.hs_feedback.ts = max(acc.hs_feedback.ts, state.hs_feedback.ts);
+            acc.hs_feedback.xmin = min(acc.hs_feedback.xmin, state.hs_feedback.xmin);
+            acc.hs_feedback.catalog_xmin =
+                min(acc.hs_feedback.catalog_xmin, state.hs_feedback.catalog_xmin);
+            acc.disk_consistent_lsn = Lsn::min(acc.disk_consistent_lsn, state.disk_consistent_lsn);
+        }
+        acc
+    }
+
+    /// Assign new replica ID. We choose first empty cell in the replicas vector
+    /// or extend the vector if there are not free items.
+    pub fn add_replica(&mut self, state: ReplicaState) -> usize {
+        if let Some(pos) = self.replicas.iter().position(|r| r.is_none()) {
+            self.replicas[pos] = Some(state);
+            return pos;
+        }
+        let pos = self.replicas.len();
+        self.replicas.push(Some(state));
+        pos
+    }
+
     /// Restore SharedState from control file. Locks the control file along the
     /// way to prevent running more than one instance of safekeeper on the same
     /// data dir.
     /// If create=false and file doesn't exist, bails out.
     fn create_restore(
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         timelineid: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<Self> {
         let (cf, state) = SharedState::load_control_file(conf, timelineid, create)?;
+        let timelineid_str = format!("{}", timelineid);
         let storage = FileStorage {
             control_file: cf,
             conf: conf.clone(),
+            persist_sync_control_file_seconds: PERSIST_SYNC_CONTROL_FILE_SECONDS
+                .with_label_values(&[&timelineid_str]),
+            persist_nosync_control_file_seconds: PERSIST_NOSYNC_CONTROL_FILE_SECONDS
+                .with_label_values(&[&timelineid_str]),
         };
         let (flush_lsn, tli) = if state.server.wal_seg_size != 0 {
-            let wal_dir = conf.data_dir.join(format!("{}", timelineid));
+            let wal_dir = conf.workdir.join(format!("{}", timelineid));
             find_end_of_wal(
                 &wal_dir,
                 state.server.wal_seg_size as usize,
@@ -74,30 +151,19 @@ impl SharedState {
         Ok(Self {
             notified_commit_lsn: Lsn(0),
             sk: SafeKeeper::new(Lsn(flush_lsn), tli, storage, state),
-            hs_feedback: HotStandbyFeedback {
-                ts: 0,
-                xmin: u64::MAX,
-                catalog_xmin: u64::MAX,
-            },
+            replicas: Vec::new(),
         })
-    }
-
-    /// Accumulate hot standby feedbacks from replicas
-    pub fn add_hs_feedback(&mut self, feedback: HotStandbyFeedback) {
-        self.hs_feedback.xmin = min(self.hs_feedback.xmin, feedback.xmin);
-        self.hs_feedback.catalog_xmin = min(self.hs_feedback.catalog_xmin, feedback.catalog_xmin);
-        self.hs_feedback.ts = max(self.hs_feedback.ts, feedback.ts);
     }
 
     /// Fetch and lock control file (prevent running more than one instance of safekeeper)
     /// If create=false and file doesn't exist, bails out.
     fn load_control_file(
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         timelineid: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<(File, SafeKeeperState)> {
         let control_file_path = conf
-            .data_dir
+            .workdir
             .join(timelineid.to_string())
             .join(CONTROL_FILE_NAME);
         info!(
@@ -178,20 +244,27 @@ impl Timeline {
         }
     }
 
-    /// Wait for an LSN to be committed.
+    /// Timed wait for an LSN to be committed.
     ///
     /// Returns the last committed LSN, which will be at least
-    /// as high as the LSN waited for.
+    /// as high as the LSN waited for, or None if timeout expired.
     ///
-    pub fn wait_for_lsn(&self, lsn: Lsn) -> Lsn {
+    pub fn wait_for_lsn(&self, lsn: Lsn) -> Option<Lsn> {
         let mut shared_state = self.mutex.lock().unwrap();
         loop {
             let commit_lsn = shared_state.notified_commit_lsn;
             // This must be `>`, not `>=`.
             if commit_lsn > lsn {
-                return commit_lsn;
+                return Some(commit_lsn);
             }
-            shared_state = self.cond.wait(shared_state).unwrap();
+            let result = self
+                .cond
+                .wait_timeout(shared_state, POLL_STATE_TIMEOUT)
+                .unwrap();
+            if result.1.timed_out() {
+                return None;
+            }
+            shared_state = result.0
         }
     }
 
@@ -219,9 +292,11 @@ impl Timeline {
             // commit_lsn if we are catching up safekeeper.
             commit_lsn = shared_state.sk.commit_lsn;
 
-            // if this is AppendResponse, fill in proper hot standby feedback
+            // if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
             if let AcceptorProposerMessage::AppendResponse(ref mut resp) = rmsg {
-                resp.hs_feedback = shared_state.hs_feedback.clone();
+                let state = shared_state.get_replicas_state();
+                resp.hs_feedback = state.hs_feedback;
+                resp.disk_consistent_lsn = state.disk_consistent_lsn;
             }
         }
         // Ping wal sender that new data might be available.
@@ -233,15 +308,14 @@ impl Timeline {
         self.mutex.lock().unwrap().sk.s.clone()
     }
 
-    // Accumulate hot standby feedbacks from replicas
-    pub fn add_hs_feedback(&self, feedback: HotStandbyFeedback) {
+    pub fn add_replica(&self, state: ReplicaState) -> usize {
         let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.add_hs_feedback(feedback);
+        shared_state.add_replica(state)
     }
 
-    pub fn get_hs_feedback(&self) -> HotStandbyFeedback {
-        let shared_state = self.mutex.lock().unwrap();
-        shared_state.hs_feedback.clone()
+    pub fn update_replica_state(&self, id: usize, state: Option<ReplicaState>) {
+        let mut shared_state = self.mutex.lock().unwrap();
+        shared_state.replicas[id] = state;
     }
 
     pub fn get_end_of_wal(&self) -> (Lsn, u32) {
@@ -254,7 +328,7 @@ impl Timeline {
 pub trait TimelineTools {
     fn set(
         &mut self,
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
@@ -266,7 +340,7 @@ pub trait TimelineTools {
 impl TimelineTools for Option<Arc<Timeline>> {
     fn set(
         &mut self,
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
@@ -295,7 +369,7 @@ impl GlobalTimelines {
     /// Get a timeline with control file loaded from the global TIMELINES map.
     /// If control file doesn't exist and create=false, bails out.
     pub fn get(
-        conf: &WalAcceptorConf,
+        conf: &SafeKeeperConf,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         create: CreateControlFile,
@@ -324,11 +398,19 @@ impl GlobalTimelines {
 #[derive(Debug)]
 struct FileStorage {
     control_file: File,
-    conf: WalAcceptorConf,
+    conf: SafeKeeperConf,
+    persist_sync_control_file_seconds: Histogram,
+    persist_nosync_control_file_seconds: Histogram,
 }
 
 impl Storage for FileStorage {
     fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()> {
+        let _timer = if sync {
+            &self.persist_sync_control_file_seconds
+        } else {
+            &self.persist_nosync_control_file_seconds
+        }
+        .start_timer();
         self.control_file.seek(SeekFrom::Start(0))?;
         s.ser_into(&mut self.control_file)?;
         if sync {
@@ -368,12 +450,12 @@ impl Storage for FileStorage {
             let wal_file_name = XLogFileName(server.tli, segno, wal_seg_size);
             let wal_file_path = self
                 .conf
-                .data_dir
+                .workdir
                 .join(ztli.to_string())
                 .join(wal_file_name.clone());
             let wal_file_partial_path = self
                 .conf
-                .data_dir
+                .workdir
                 .join(ztli.to_string())
                 .join(wal_file_name.clone() + ".partial");
 

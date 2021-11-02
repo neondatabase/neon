@@ -14,12 +14,16 @@ asyncpg = "*"
 cached-property = "*"
 
 [dev-packages]
-flake8 = "*"
-mypy = "*"
 # Behavior may change slightly between versions. These are run continuously,
 # so we pin exact versions to avoid suprising breaks. Update if comfortable.
 yapf = "==0.31.0"
+mypy = "==0.910"
+# Non-pinned packages follow.
+pipenv = "*"
+flake8 = "*"
+types-requests = "*"
+types-psycopg2 = "*"
 
 [requires]
-# we need at least 3.6, but pipenv doesn't allow to say this directly
+# we need at least 3.7, but pipenv doesn't allow to say this directly
 python_version = "3"

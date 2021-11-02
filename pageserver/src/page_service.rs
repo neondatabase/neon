@@ -630,14 +630,16 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
 
-            let branches = crate::branches::get_branches(self.conf, &tenantid)?;
+            // since these handlers for tenant/branch commands are deprecated (in favor of http based ones)
+            // just use false in place of include non incremental logical size
+            let branches = crate::branches::get_branches(self.conf, &tenantid, false)?;
             let branches_buf = serde_json::to_vec(&branches)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(&branches_buf)]))?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("tenant_list") {
-            let tenants = crate::branches::get_tenants(self.conf)?;
+            let tenants = crate::tenant_mgr::list_tenants()?;
             let tenants_buf = serde_json::to_vec(&tenants)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?

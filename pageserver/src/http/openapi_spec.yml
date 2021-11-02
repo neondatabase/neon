@@ -25,6 +25,11 @@ paths:
         schema:
           type: string
           format: hex
+      - name: include-non-incremental-logical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_logical_size_non_incremental
     get:
       description: Get branches for tenant
       responses:
@@ -73,6 +78,11 @@ paths:
         required: true
         schema:
           type: string
+      - name: include-non-incremental-logical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_logical_size_non_incremental
     get:
       description: Get branches for tenant
       responses:
@@ -164,13 +174,13 @@ paths:
       description: Get tenants list
       responses:
         "200":
-          description: OK
+          description: TenantInfo
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  type: string
+                  $ref: "#/components/schemas/TenantInfo"
         "401":
           description: Unauthorized Error
           content:
@@ -243,6 +253,16 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    TenantInfo:
+      type: object
+      required:
+        - id
+        - state
+      properties:
+        id:
+          type: string
+        state:
+          type: string
     BranchInfo:
       type: object
       required:
@@ -250,7 +270,6 @@ components:
         - timeline_id
         - latest_valid_lsn
         - current_logical_size
-        - current_logical_size_non_incremental
       properties:
         name:
           type: string

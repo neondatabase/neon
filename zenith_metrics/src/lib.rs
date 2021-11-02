@@ -74,6 +74,10 @@ lazy_static! {
     .expect("Failed to register maxrss_kb int gauge");
 }
 
+pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
+    0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,
+];
+
 // Records I/O stats in a "cross-platform" way.
 // Compiles both on macOS and Linux, but current macOS implementation always returns 0 as values for I/O stats.
 // An alternative is to read procfs (`/proc/[pid]/io`) which does not work under macOS at all, hence abandoned.

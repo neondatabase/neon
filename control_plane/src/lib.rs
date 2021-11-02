@@ -13,6 +13,7 @@ use std::path::Path;
 pub mod compute;
 pub mod local_env;
 pub mod postgresql_conf;
+pub mod safekeeper;
 pub mod storage;
 
 /// Read a PID file

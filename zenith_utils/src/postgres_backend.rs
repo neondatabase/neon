@@ -7,15 +7,16 @@ use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
-use log::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::*;
 
 static PGBACKEND_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -74,6 +75,16 @@ impl FromStr for AuthType {
             "ZenithJWT" => Ok(Self::ZenithJWT),
             _ => bail!("invalid value \"{}\" for auth type", s),
         }
+    }
+}
+
+impl fmt::Display for AuthType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AuthType::Trust => "Trust",
+            AuthType::MD5 => "MD5",
+            AuthType::ZenithJWT => "ZenithJWT",
+        })
     }
 }
 

@@ -1,6 +1,6 @@
 import os
 
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver, PgBin
+from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -9,13 +9,11 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test branching, when a transaction is in prepared state
 #
-def test_twophase(zenith_cli,
-                  pageserver: ZenithPageserver,
-                  postgres: PostgresFactory,
-                  pg_bin: PgBin):
-    zenith_cli.run(["branch", "test_twophase", "empty"])
+def test_twophase(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+    env.zenith_cli(["branch", "test_twophase", "empty"])
 
-    pg = postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
+    pg = env.postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
     log.info("postgres is running on 'test_twophase' branch")
 
     conn = pg.connect()
@@ -60,10 +58,10 @@ def test_twophase(zenith_cli,
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    zenith_cli.run(["branch", "test_twophase_prepared", "test_twophase"])
+    env.zenith_cli(["branch", "test_twophase_prepared", "test_twophase"])
 
     # Start compute on the new branch
-    pg2 = postgres.create_start(
+    pg2 = env.postgres.create_start(
         'test_twophase_prepared',
         config_lines=['max_prepared_transactions=5'],
     )

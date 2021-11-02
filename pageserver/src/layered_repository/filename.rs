@@ -13,7 +13,7 @@ use anyhow::Result;
 use log::*;
 use zenith_utils::lsn::Lsn;
 
-use super::METADATA_FILE_NAME;
+use super::metadata::METADATA_FILE_NAME;
 
 // Note: LayeredTimeline::load_layer_map() relies on this sort order
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]

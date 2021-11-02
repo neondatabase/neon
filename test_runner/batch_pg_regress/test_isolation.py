@@ -1,26 +1,20 @@
 import os
 
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory
+from fixtures.zenith_fixtures import ZenithEnv, base_dir, pg_distrib_dir
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def test_isolation(pageserver: ZenithPageserver,
-                   postgres: PostgresFactory,
-                   pg_bin,
-                   zenith_cli,
-                   test_output_dir,
-                   pg_distrib_dir,
-                   base_dir,
-                   capsys):
+def test_isolation(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
+    env = zenith_simple_env
 
     # Create a branch for us
-    zenith_cli.run(["branch", "test_isolation", "empty"])
+    env.zenith_cli(["branch", "test_isolation", "empty"])
 
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    pg = postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])
+    pg = env.postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])
     pg.safe_psql('CREATE DATABASE isolation_regression')
 
     # Create some local directories for pg_isolation_regress to run in.
@@ -44,7 +38,7 @@ def test_isolation(pageserver: ZenithPageserver,
         '--schedule={}'.format(schedule),
     ]
 
-    env = {
+    env_vars = {
         'PGPORT': str(pg.port),
         'PGUSER': pg.username,
         'PGHOST': pg.host,
@@ -54,4 +48,4 @@ def test_isolation(pageserver: ZenithPageserver,
     # We don't capture the output. It's not too chatty, and it always
     # logs the exact same data to `regression.out` anyway.
     with capsys.disabled():
-        pg_bin.run(pg_isolation_regress_command, env=env, cwd=runpath)
+        pg_bin.run(pg_isolation_regress_command, env=env_vars, cwd=runpath)

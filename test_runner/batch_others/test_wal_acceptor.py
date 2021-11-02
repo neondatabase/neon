@@ -7,7 +7,7 @@ import uuid
 
 from contextlib import closing
 from multiprocessing import Process, Value
-from fixtures.zenith_fixtures import WalAcceptorFactory, ZenithPageserver, PostgresFactory, PgBin
+from fixtures.zenith_fixtures import PgBin, ZenithEnv, ZenithEnvBuilder
 from fixtures.utils import lsn_to_hex, mkdir_if_needed
 from fixtures.log_helper import log
 
@@ -16,14 +16,13 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 # basic test, write something in setup with wal acceptors, ensure that commits
 # succeed and data is written
-def test_normal_work(zenith_cli,
-                     pageserver: ZenithPageserver,
-                     postgres: PostgresFactory,
-                     wa_factory):
-    zenith_cli.run(["branch", "test_wal_acceptors_normal_work", "empty"])
-    wa_factory.start_n_new(3)
-    pg = postgres.create_start('test_wal_acceptors_normal_work',
-                               wal_acceptors=wa_factory.get_connstrs())
+def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init()
+
+    env.zenith_cli(["branch", "test_wal_acceptors_normal_work", "main"])
+
+    pg = env.postgres.create_start('test_wal_acceptors_normal_work')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -37,21 +36,19 @@ def test_normal_work(zenith_cli,
 
 # Run page server and multiple acceptors, and multiple compute nodes running
 # against different timelines.
-def test_many_timelines(zenith_cli,
-                        pageserver: ZenithPageserver,
-                        postgres: PostgresFactory,
-                        wa_factory):
-    n_timelines = 2
+def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init()
 
-    wa_factory.start_n_new(3)
+    n_timelines = 2
 
     branches = ["test_wal_acceptors_many_timelines_{}".format(tlin) for tlin in range(n_timelines)]
 
     # start postgres on each timeline
     pgs = []
     for branch in branches:
-        zenith_cli.run(["branch", branch, "empty"])
-        pgs.append(postgres.create_start(branch, wal_acceptors=wa_factory.get_connstrs()))
+        env.zenith_cli(["branch", branch, "main"])
+        pgs.append(env.postgres.create_start(branch))
 
     # Do everything in different loops to have actions on different timelines
     # interleaved.
@@ -72,19 +69,16 @@ def test_many_timelines(zenith_cli,
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up
 # along the way. 2 of 3 are always alive, so the work keeps going.
-def test_restarts(zenith_cli,
-                  pageserver: ZenithPageserver,
-                  postgres: PostgresFactory,
-                  wa_factory: WalAcceptorFactory):
+def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     fault_probability = 0.01
     n_inserts = 1000
     n_acceptors = 3
 
-    wa_factory.start_n_new(n_acceptors)
+    zenith_env_builder.num_safekeepers = n_acceptors
+    env = zenith_env_builder.init()
 
-    zenith_cli.run(["branch", "test_wal_acceptors_restarts", "empty"])
-    pg = postgres.create_start('test_wal_acceptors_restarts',
-                               wal_acceptors=wa_factory.get_connstrs())
+    env.zenith_cli(["branch", "test_wal_acceptors_restarts", "main"])
+    pg = env.postgres.create_start('test_wal_acceptors_restarts')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -98,7 +92,7 @@ def test_restarts(zenith_cli,
 
         if random.random() <= fault_probability:
             if failed_node is None:
-                failed_node = wa_factory.instances[random.randrange(0, n_acceptors)]
+                failed_node = env.safekeepers[random.randrange(0, n_acceptors)]
                 failed_node.stop()
             else:
                 failed_node.start()
@@ -116,12 +110,12 @@ def delayed_wal_acceptor_start(wa):
 
 
 # When majority of acceptors is offline, commits are expected to be frozen
-def test_unavailability(zenith_cli, postgres: PostgresFactory, wa_factory):
-    wa_factory.start_n_new(2)
+def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 2
+    env = zenith_env_builder.init()
 
-    zenith_cli.run(["branch", "test_wal_acceptors_unavailability", "empty"])
-    pg = postgres.create_start('test_wal_acceptors_unavailability',
-                               wal_acceptors=wa_factory.get_connstrs())
+    env.zenith_cli(["branch", "test_wal_acceptors_unavailability", "main"])
+    pg = env.postgres.create_start('test_wal_acceptors_unavailability')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -133,9 +127,9 @@ def test_unavailability(zenith_cli, postgres: PostgresFactory, wa_factory):
     cur.execute("INSERT INTO t values (1, 'payload')")
 
     # shutdown one of two acceptors, that is, majority
-    wa_factory.instances[0].stop()
+    env.safekeepers[0].stop()
 
-    proc = Process(target=delayed_wal_acceptor_start, args=(wa_factory.instances[0], ))
+    proc = Process(target=delayed_wal_acceptor_start, args=(env.safekeepers[0], ))
     proc.start()
 
     start = time.time()
@@ -145,9 +139,9 @@ def test_unavailability(zenith_cli, postgres: PostgresFactory, wa_factory):
     proc.join()
 
     # for the world's balance, do the same with second acceptor
-    wa_factory.instances[1].stop()
+    env.safekeepers[1].stop()
 
-    proc = Process(target=delayed_wal_acceptor_start, args=(wa_factory.instances[1], ))
+    proc = Process(target=delayed_wal_acceptor_start, args=(env.safekeepers[1], ))
     proc.start()
 
     start = time.time()
@@ -186,17 +180,13 @@ def stop_value():
 
 
 # do inserts while concurrently getting up/down subsets of acceptors
-def test_race_conditions(zenith_cli,
-                         pageserver: ZenithPageserver,
-                         postgres: PostgresFactory,
-                         wa_factory,
-                         stop_value):
+def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 
-    wa_factory.start_n_new(3)
+    zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init()
 
-    zenith_cli.run(["branch", "test_wal_acceptors_race_conditions", "empty"])
-    pg = postgres.create_start('test_wal_acceptors_race_conditions',
-                               wal_acceptors=wa_factory.get_connstrs())
+    env.zenith_cli(["branch", "test_wal_acceptors_race_conditions", "main"])
+    pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -205,7 +195,7 @@ def test_race_conditions(zenith_cli,
 
     cur.execute('CREATE TABLE t(key int primary key, value text)')
 
-    proc = Process(target=xmas_garland, args=(wa_factory.instances, stop_value))
+    proc = Process(target=xmas_garland, args=(env.safekeepers, stop_value))
     proc.start()
 
     for i in range(1000):
@@ -220,7 +210,8 @@ def test_race_conditions(zenith_cli,
 
 class ProposerPostgres:
     """Object for running safekeepers sync with walproposer"""
-    def __init__(self, pgdata_dir: str, pg_bin: PgBin, timeline_id: str, tenant_id: str):
+    def __init__(self, env: ZenithEnv, pgdata_dir: str, pg_bin, timeline_id: str, tenant_id: str):
+        self.env = env
         self.pgdata_dir: str = pgdata_dir
         self.pg_bin: PgBin = pg_bin
         self.timeline_id: str = timeline_id
@@ -266,16 +257,20 @@ class ProposerPostgres:
 
 
 # insert wal in all safekeepers and run sync on proposer
-def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorFactory):
-    wa_factory.start_n_new(3)
+def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder, pg_bin: PgBin):
+
+    # We don't really need the full environment for this test, just the
+    # safekeepers would be enough.
+    zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init()
 
     timeline_id = uuid.uuid4().hex
     tenant_id = uuid.uuid4().hex
 
     # write config for proposer
-    pgdata_dir = os.path.join(repo_dir, "proposer_pgdata")
-    pg = ProposerPostgres(pgdata_dir, pg_bin, timeline_id, tenant_id)
-    pg.create_dir_config(wa_factory.get_connstrs())
+    pgdata_dir = os.path.join(env.repo_dir, "proposer_pgdata")
+    pg = ProposerPostgres(env, pgdata_dir, pg_bin, timeline_id, tenant_id)
+    pg.create_dir_config(env.get_safekeeper_connstrs())
 
     # valid lsn, which is not in the segment start, nor in zero segment
     epoch_start_lsn = 0x16B9188  # 0/16B9188
@@ -284,7 +279,7 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
     # append and commit WAL
     lsn_after_append = []
     for i in range(3):
-        res = wa_factory.instances[i].append_logical_message(
+        res = env.safekeepers[i].append_logical_message(
             tenant_id,
             timeline_id,
             {
@@ -308,13 +303,15 @@ def test_sync_safekeepers(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorF
     assert all(lsn_after_sync == lsn for lsn in lsn_after_append)
 
 
-def test_timeline_status(zenith_cli, pageserver, postgres, wa_factory: WalAcceptorFactory):
-    wa_factory.start_n_new(1)
+def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
 
-    zenith_cli.run(["branch", "test_timeline_status", "empty"])
-    pg = postgres.create_start('test_timeline_status', wal_acceptors=wa_factory.get_connstrs())
+    zenith_env_builder.num_safekeepers = 1
+    env = zenith_env_builder.init()
 
-    wa = wa_factory.instances[0]
+    env.zenith_cli(["branch", "test_timeline_status", "main"])
+    pg = env.postgres.create_start('test_timeline_status')
+
+    wa = env.safekeepers[0]
     wa_http_cli = wa.http_client()
     wa_http_cli.check_status()
 

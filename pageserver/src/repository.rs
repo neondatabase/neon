@@ -1,4 +1,5 @@
 use crate::relish::*;
+use crate::CheckpointConfig;
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -24,9 +25,9 @@ pub trait Repository: Send + Sync {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
-    /// perform one garbage collection iteration.
-    /// garbage collection is periodically performed by gc thread,
-    /// but it can be explicitly requested through page server api.
+    /// perform one garbage collection iteration, removing old data files from disk.
+    /// this funtion is periodically called by gc thread.
+    /// also it can be explicitly requested through page server api 'do_gc' command.
     ///
     /// 'timelineid' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
@@ -39,6 +40,10 @@ pub trait Repository: Send + Sync {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
+
+    /// perform one checkpoint iteration, flushing in-memory data on disk.
+    /// this function is periodically called by checkponter thread.
+    fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()>;
 }
 
 ///
@@ -134,6 +139,7 @@ pub trait Timeline: Send + Sync {
     fn get_last_record_lsn(&self) -> Lsn;
     fn get_prev_record_lsn(&self) -> Lsn;
     fn get_start_lsn(&self) -> Lsn;
+    fn get_disk_consistent_lsn(&self) -> Lsn;
 
     /// Mutate the timeline with a [`TimelineWriter`].
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a>;
@@ -143,7 +149,7 @@ pub trait Timeline: Send + Sync {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
-    fn checkpoint(&self) -> Result<()>;
+    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
 
     /// Retrieve current logical size of the timeline
     ///
@@ -213,27 +219,115 @@ impl WALRecord {
     }
 }
 
+#[cfg(test)]
+pub mod repo_harness {
+    use std::{fs, path::PathBuf};
+
+    use crate::{
+        layered_repository::{LayeredRepository, TIMELINES_SEGMENT_NAME},
+        walredo::{WalRedoError, WalRedoManager},
+        PageServerConf,
+    };
+
+    use super::*;
+    use hex_literal::hex;
+    use zenith_utils::zid::ZTenantId;
+
+    pub const TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
+    pub const NEW_TIMELINE_ID: ZTimelineId =
+        ZTimelineId::from_array(hex!("AA223344556677881122334455667788"));
+
+    /// Convenience function to create a page image with given string as the only content
+    #[allow(non_snake_case)]
+    pub fn TEST_IMG(s: &str) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(s.as_bytes());
+        buf.resize(8192, 0);
+
+        buf.freeze()
+    }
+
+    pub struct RepoHarness {
+        pub conf: &'static PageServerConf,
+        pub tenant_id: ZTenantId,
+    }
+
+    impl RepoHarness {
+        pub fn create(test_name: &'static str) -> Result<Self> {
+            let repo_dir = PageServerConf::test_repo_dir(test_name);
+            let _ = fs::remove_dir_all(&repo_dir);
+            fs::create_dir_all(&repo_dir)?;
+            fs::create_dir_all(&repo_dir.join(TIMELINES_SEGMENT_NAME))?;
+
+            let conf = PageServerConf::dummy_conf(repo_dir);
+            // Make a static copy of the config. This can never be free'd, but that's
+            // OK in a test.
+            let conf: &'static PageServerConf = Box::leak(Box::new(conf));
+
+            let tenant_id = ZTenantId::generate();
+            fs::create_dir_all(conf.tenant_path(&tenant_id))?;
+
+            Ok(Self { conf, tenant_id })
+        }
+
+        pub fn load(&self) -> Box<dyn Repository> {
+            let walredo_mgr = Arc::new(TestRedoManager);
+
+            Box::new(LayeredRepository::new(
+                self.conf,
+                walredo_mgr,
+                self.tenant_id,
+                false,
+            ))
+        }
+
+        pub fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
+            self.conf.timeline_path(timeline_id, &self.tenant_id)
+        }
+    }
+
+    // Mock WAL redo manager that doesn't do much
+    struct TestRedoManager;
+
+    impl WalRedoManager for TestRedoManager {
+        fn request_redo(
+            &self,
+            rel: RelishTag,
+            blknum: u32,
+            lsn: Lsn,
+            base_img: Option<Bytes>,
+            records: Vec<(Lsn, WALRecord)>,
+        ) -> Result<Bytes, WalRedoError> {
+            let s = format!(
+                "redo for {} blk {} to get to {}, with {} and {} records",
+                rel,
+                blknum,
+                lsn,
+                if base_img.is_some() {
+                    "base image"
+                } else {
+                    "no base image"
+                },
+                records.len()
+            );
+            println!("{}", s);
+            Ok(TEST_IMG(&s))
+        }
+    }
+}
+
 ///
 /// Tests that should work the same with any Repository/Timeline implementation.
 ///
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::layered_repository::{LayeredRepository, METADATA_FILE_NAME};
-    use crate::walredo::{WalRedoError, WalRedoManager};
-    use crate::PageServerConf;
-    use hex_literal::hex;
-    use postgres_ffi::pg_constants;
-    use postgres_ffi::xlog_utils::SIZEOF_CHECKPOINT;
-    use std::fs;
-    use std::path::PathBuf;
-    use zenith_utils::zid::ZTenantId;
+    use crate::layered_repository::metadata::METADATA_FILE_NAME;
 
-    const TIMELINE_ID: ZTimelineId =
-        ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
-    const NEW_TIMELINE_ID: ZTimelineId =
-        ZTimelineId::from_array(hex!("AA223344556677881122334455667788"));
+    use super::repo_harness::*;
+    use super::*;
+    use postgres_ffi::{pg_constants, xlog_utils::SIZEOF_CHECKPOINT};
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
@@ -249,16 +343,6 @@ mod tests {
         forknum: 0,
     });
 
-    /// Convenience function to create a page image with given string as the only content
-    #[allow(non_snake_case)]
-    fn TEST_IMG(s: &str) -> Bytes {
-        let mut buf = BytesMut::new();
-        buf.extend_from_slice(s.as_bytes());
-        buf.resize(8192, 0);
-
-        buf.freeze()
-    }
-
     fn assert_current_logical_size(timeline: &Arc<dyn Timeline>, lsn: Lsn) {
         let incremental = timeline.get_current_logical_size();
         let non_incremental = timeline
@@ -269,45 +353,6 @@ mod tests {
 
     static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
-
-    struct RepoHarness {
-        conf: &'static PageServerConf,
-        tenant_id: ZTenantId,
-    }
-
-    impl RepoHarness {
-        fn create(test_name: &'static str) -> Result<Self> {
-            let repo_dir = PageServerConf::test_repo_dir(test_name);
-            let _ = fs::remove_dir_all(&repo_dir);
-            fs::create_dir_all(&repo_dir)?;
-            fs::create_dir_all(&repo_dir.join("timelines"))?;
-
-            let conf = PageServerConf::dummy_conf(repo_dir);
-            // Make a static copy of the config. This can never be free'd, but that's
-            // OK in a test.
-            let conf: &'static PageServerConf = Box::leak(Box::new(conf));
-
-            let tenant_id = ZTenantId::generate();
-            fs::create_dir_all(conf.tenant_path(&tenant_id))?;
-
-            Ok(Self { conf, tenant_id })
-        }
-
-        fn load(&self) -> Box<dyn Repository> {
-            let walredo_mgr = Arc::new(TestRedoManager);
-
-            Box::new(LayeredRepository::new(
-                self.conf,
-                walredo_mgr,
-                self.tenant_id,
-                false,
-            ))
-        }
-
-        fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
-            self.conf.timeline_path(timeline_id, &self.tenant_id)
-        }
-    }
 
     #[test]
     fn test_relsize() -> Result<()> {
@@ -675,7 +720,7 @@ mod tests {
             .contains(&TESTREL_A));
 
         // Run checkpoint and garbage collection and check that it's still not visible
-        newtline.checkpoint()?;
+        newtline.checkpoint(CheckpointConfig::Forced)?;
         repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
 
         assert!(!newtline
@@ -819,34 +864,5 @@ mod tests {
         check_old(&delta_filename, 1);
 
         Ok(())
-    }
-
-    // Mock WAL redo manager that doesn't do much
-    struct TestRedoManager;
-
-    impl WalRedoManager for TestRedoManager {
-        fn request_redo(
-            &self,
-            rel: RelishTag,
-            blknum: u32,
-            lsn: Lsn,
-            base_img: Option<Bytes>,
-            records: Vec<(Lsn, WALRecord)>,
-        ) -> Result<Bytes, WalRedoError> {
-            let s = format!(
-                "redo for {} blk {} to get to {}, with {} and {} records",
-                rel,
-                blknum,
-                lsn,
-                if base_img.is_some() {
-                    "base image"
-                } else {
-                    "no base image"
-                },
-                records.len()
-            );
-            println!("{}", s);
-            Ok(TEST_IMG(&s))
-        }
     }
 }

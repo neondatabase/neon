@@ -7,17 +7,16 @@ use const_format::formatcp;
 use daemonize::Daemonize;
 use log::*;
 use std::env;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::thread;
 use zenith_utils::http::endpoint;
-use zenith_utils::logging;
+use zenith_utils::{logging, tcp_listener};
 
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
-use walkeeper::WalAcceptorConf;
+use walkeeper::SafeKeeperConf;
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
@@ -54,7 +53,7 @@ fn main() -> Result<()> {
             Arg::with_name("ttl")
                 .long("ttl")
                 .takes_value(true)
-                .help("interval for keeping WAL as walkeeper node, after which them will be uploaded to S3 and removed locally"),
+                .help("interval for keeping WAL at safekeeper node, after which them will be uploaded to S3 and removed locally"),
         )
         .arg(
             Arg::with_name("recall")
@@ -78,8 +77,11 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let mut conf = WalAcceptorConf {
-        data_dir: PathBuf::from("./"),
+    let mut conf = SafeKeeperConf {
+        // Always set to './'. We will chdir into the directory specified on the
+        // command line, so that when the server is running, all paths are relative
+        // to that.
+        workdir: PathBuf::from("./"),
         daemonize: false,
         no_sync: false,
         pageserver_addr: None,
@@ -91,10 +93,8 @@ fn main() -> Result<()> {
     };
 
     if let Some(dir) = arg_matches.value_of("datadir") {
-        conf.data_dir = PathBuf::from(dir);
-
         // change into the data directory.
-        std::env::set_current_dir(&conf.data_dir)?;
+        std::env::set_current_dir(PathBuf::from(dir))?;
     }
 
     if arg_matches.is_present("no-sync") {
@@ -125,20 +125,19 @@ fn main() -> Result<()> {
         conf.recall_period = Some(humantime::parse_duration(recall)?);
     }
 
-    start_wal_acceptor(conf)
+    start_safekeeper(conf)
 }
 
-fn start_wal_acceptor(conf: WalAcceptorConf) -> Result<()> {
-    let log_filename = conf.data_dir.join("safekeeper.log");
-    let log_file = logging::init(log_filename, conf.daemonize)?;
+fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
+    let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
-    let http_listener = TcpListener::bind(conf.listen_http_addr.clone()).map_err(|e| {
+    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
         e
     })?;
 
     info!("Starting safekeeper on {}", conf.listen_pg_addr);
-    let pg_listener = TcpListener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
+    let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
         e
     })?;

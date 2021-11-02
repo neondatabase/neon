@@ -1,4 +1,4 @@
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver, check_restored_datadir_content
+from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -10,15 +10,11 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # it only checks next_multixact_id field in restored pg_control,
 # since we don't have functions to check multixact internals.
 #
-def test_multixact(pageserver: ZenithPageserver,
-                   postgres: PostgresFactory,
-                   pg_bin,
-                   zenith_cli,
-                   base_dir,
-                   test_output_dir):
+def test_multixact(zenith_simple_env: ZenithEnv, test_output_dir):
+    env = zenith_simple_env
     # Create a branch for us
-    zenith_cli.run(["branch", "test_multixact", "empty"])
-    pg = postgres.create_start('test_multixact')
+    env.zenith_cli(["branch", "test_multixact", "empty"])
+    pg = env.postgres.create_start('test_multixact')
 
     log.info("postgres is running on 'test_multixact' branch")
     pg_conn = pg.connect()
@@ -57,8 +53,8 @@ def test_multixact(pageserver: ZenithPageserver,
     assert int(next_multixact_id) > int(next_multixact_id_old)
 
     # Branch at this point
-    zenith_cli.run(["branch", "test_multixact_new", "test_multixact@" + lsn])
-    pg_new = postgres.create_start('test_multixact_new')
+    env.zenith_cli(["branch", "test_multixact_new", "test_multixact@" + lsn])
+    pg_new = env.postgres.create_start('test_multixact_new')
 
     log.info("postgres is running on 'test_multixact_new' branch")
     pg_new_conn = pg_new.connect()
@@ -71,4 +67,4 @@ def test_multixact(pageserver: ZenithPageserver,
     assert next_multixact_id_new == next_multixact_id
 
     # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(zenith_cli, test_output_dir, pg_new, pageserver.service_port.pg)
+    check_restored_datadir_content(test_output_dir, env, pg_new)

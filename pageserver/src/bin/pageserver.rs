@@ -5,13 +5,12 @@
 use serde::{Deserialize, Serialize};
 use std::{
     env,
-    net::TcpListener,
     path::{Path, PathBuf},
     str::FromStr,
     thread,
 };
 use tracing::*;
-use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType};
+use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener};
 
 use anyhow::{bail, ensure, Context, Result};
 use signal_hook::consts::signal::*;
@@ -480,13 +479,13 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
         "Starting pageserver http handler on {}",
         conf.listen_http_addr
     );
-    let http_listener = TcpListener::bind(conf.listen_http_addr.clone())?;
+    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone())?;
 
     info!(
         "Starting pageserver pg protocol handler on {}",
         conf.listen_pg_addr
     );
-    let pageserver_listener = TcpListener::bind(conf.listen_pg_addr.clone())?;
+    let pageserver_listener = tcp_listener::bind(conf.listen_pg_addr.clone())?;
 
     if conf.daemonize {
         info!("daemonizing...");

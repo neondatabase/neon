@@ -4,7 +4,7 @@
 // TODO: move all paths construction to conf impl
 //
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,6 +23,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::tenant_mgr;
 use crate::walredo::WalRedoManager;
+use crate::CheckpointConfig;
 use crate::{repository::Repository, PageServerConf};
 use crate::{restore_local_repo, LOG_FILE_NAME};
 
@@ -35,7 +36,7 @@ pub struct BranchInfo {
     pub ancestor_id: Option<String>,
     pub ancestor_lsn: Option<String>,
     pub current_logical_size: usize,
-    pub current_logical_size_non_incremental: usize,
+    pub current_logical_size_non_incremental: Option<usize>,
 }
 
 impl BranchInfo {
@@ -44,6 +45,7 @@ impl BranchInfo {
         conf: &PageServerConf,
         tenantid: &ZTenantId,
         repo: &Arc<dyn Repository>,
+        include_non_incremental_logical_size: bool,
     ) -> Result<Self> {
         let name = path
             .as_ref()
@@ -78,6 +80,14 @@ impl BranchInfo {
             );
         }
 
+        // non incremental size calculation can be heavy, so let it be optional
+        // needed for tests to check size calculation
+        let current_logical_size_non_incremental = include_non_incremental_logical_size
+            .then(|| {
+                timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn())
+            })
+            .transpose()?;
+
         Ok(BranchInfo {
             name,
             timeline_id,
@@ -85,8 +95,7 @@ impl BranchInfo {
             ancestor_id,
             ancestor_lsn,
             current_logical_size: timeline.get_current_logical_size(),
-            current_logical_size_non_incremental: timeline
-                .get_current_logical_size_non_incremental(timeline.get_last_record_lsn())?,
+            current_logical_size_non_incremental,
         })
     }
 }
@@ -230,7 +239,7 @@ fn bootstrap_timeline(
         timeline.writer().as_ref(),
         lsn,
     )?;
-    timeline.checkpoint()?;
+    timeline.checkpoint(CheckpointConfig::Forced)?;
 
     println!(
         "created initial timeline {} timeline.lsn {}",
@@ -248,19 +257,11 @@ fn bootstrap_timeline(
     Ok(())
 }
 
-pub(crate) fn get_tenants(conf: &PageServerConf) -> Result<Vec<String>> {
-    let tenants_dir = conf.tenants_path();
-
-    std::fs::read_dir(&tenants_dir)?
-        .map(|dir_entry_res| {
-            let dir_entry = dir_entry_res?;
-            ensure!(dir_entry.file_type()?.is_dir());
-            Ok(dir_entry.file_name().to_str().unwrap().to_owned())
-        })
-        .collect()
-}
-
-pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
+pub(crate) fn get_branches(
+    conf: &PageServerConf,
+    tenantid: &ZTenantId,
+    include_non_incremental_logical_size: bool,
+) -> Result<Vec<BranchInfo>> {
     let repo = tenant_mgr::get_repository_for_tenant(*tenantid)?;
 
     // Each branch has a corresponding record (text file) in the refs/branches
@@ -270,7 +271,13 @@ pub(crate) fn get_branches(conf: &PageServerConf, tenantid: &ZTenantId) -> Resul
     std::fs::read_dir(&branches_dir)?
         .map(|dir_entry_res| {
             let dir_entry = dir_entry_res?;
-            BranchInfo::from_path(dir_entry.path(), conf, tenantid, &repo)
+            BranchInfo::from_path(
+                dir_entry.path(),
+                conf,
+                tenantid,
+                &repo,
+                include_non_incremental_logical_size,
+            )
         })
         .collect()
 }
@@ -332,7 +339,7 @@ pub(crate) fn create_branch(
         ancestor_id: None,
         ancestor_lsn: None,
         current_logical_size: 0,
-        current_logical_size_non_incremental: 0,
+        current_logical_size_non_incremental: Some(0),
     })
 }
 

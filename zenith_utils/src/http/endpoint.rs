@@ -9,6 +9,7 @@ use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
 use std::net::TcpListener;
+use tracing::info;
 use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use zenith_metrics::{Encoder, TextEncoder};
 
@@ -32,7 +33,7 @@ lazy_static! {
 }
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
-    log::info!("{} {} {}", info.method(), info.uri().path(), res.status(),);
+    info!("{} {} {}", info.method(), info.uri().path(), res.status(),);
     Ok(res)
 }
 
@@ -163,7 +164,7 @@ pub fn serve_thread_main(
     router_builder: RouterBuilder<hyper::Body, ApiError>,
     listener: TcpListener,
 ) -> anyhow::Result<()> {
-    log::info!("Starting a http endpoint at {}", listener.local_addr()?);
+    info!("Starting a http endpoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();

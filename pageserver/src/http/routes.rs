@@ -86,31 +86,59 @@ async fn branch_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     Ok(json_response(StatusCode::CREATED, response_data)?)
 }
 
+// Gate non incremental logical size calculation behind a flag
+// after pgbench -i -s100 calculation took 28ms so if multiplied by the number of timelines
+// and tenants it can take noticeable amount of time. Also the value currently used only in tests
+fn get_include_non_incremental_logical_size(request: &Request<Body>) -> bool {
+    request
+        .uri()
+        .query()
+        .map(|v| {
+            url::form_urlencoded::parse(v.as_bytes())
+                .into_owned()
+                .any(|(param, _)| param == "include-non-incremental-logical-size")
+        })
+        .unwrap_or(false)
+}
+
 async fn branch_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
+
+    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
 
     check_permission(&request, Some(tenantid))?;
 
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("branch_list", tenant = %tenantid).entered();
-        crate::branches::get_branches(get_config(&request), &tenantid)
+        crate::branches::get_branches(
+            get_config(&request),
+            &tenantid,
+            include_non_incremental_logical_size,
+        )
     })
     .await
     .map_err(ApiError::from_err)??;
     Ok(json_response(StatusCode::OK, response_data)?)
 }
 
-// TODO add to swagger
 async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let branch_name: String = get_request_param(&request, "branch_name")?.to_string();
     let conf = get_state(&request).conf;
     let path = conf.branch_path(&branch_name, &tenantid);
 
+    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
+
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("branch_detail", tenant = %tenantid, branch=%branch_name).entered();
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-        BranchInfo::from_path(path, conf, &tenantid, &repo)
+        BranchInfo::from_path(
+            path,
+            conf,
+            &tenantid,
+            &repo,
+            include_non_incremental_logical_size,
+        )
     })
     .await
     .map_err(ApiError::from_err)??;
@@ -124,7 +152,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_list").entered();
-        crate::branches::get_tenants(get_config(&request))
+        crate::tenant_mgr::list_tenants()
     })
     .await
     .map_err(ApiError::from_err)??;

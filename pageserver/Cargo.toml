@@ -17,7 +17,7 @@ lazy_static = "1.4.0"
 log = "0.4.14"
 clap = "2.33.0"
 daemonize = "0.4.1"
-tokio = { version = "1.11", features = ["process", "macros", "fs", "rt"] }
+tokio = { version = "1.11", features = ["process", "macros", "fs", "rt", "io-util"] }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
@@ -37,6 +37,7 @@ async-trait = "0.1"
 const_format = "0.2.21"
 tracing = "0.1.27"
 signal-hook = {version = "0.3.10", features = ["extended-siginfo"] }
+url = "2"
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }
@@ -45,3 +46,4 @@ workspace_hack = { path = "../workspace_hack" }
 
 [dev-dependencies]
 hex-literal = "0.3"
+tempfile = "3.2"

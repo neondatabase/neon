@@ -1,6 +1,6 @@
 from contextlib import closing
 
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -16,13 +16,11 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # just a hint that the page hasn't been modified since that LSN, and the page
 # server should return the latest page version regardless of the LSN.
 #
-def test_old_request_lsn(zenith_cli,
-                         pageserver: ZenithPageserver,
-                         postgres: PostgresFactory,
-                         pg_bin):
+def test_old_request_lsn(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
     # Create a branch for us
-    zenith_cli.run(["branch", "test_old_request_lsn", "empty"])
-    pg = postgres.create_start('test_old_request_lsn')
+    env.zenith_cli(["branch", "test_old_request_lsn", "empty"])
+    pg = env.postgres.create_start('test_old_request_lsn')
     log.info('postgres is running on test_old_request_lsn branch')
 
     pg_conn = pg.connect()
@@ -32,7 +30,7 @@ def test_old_request_lsn(zenith_cli,
     cur.execute("SHOW zenith.zenith_timeline")
     timeline = cur.fetchone()[0]
 
-    psconn = pageserver.connect()
+    psconn = env.pageserver.connect()
     pscur = psconn.cursor()
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
@@ -59,7 +57,7 @@ def test_old_request_lsn(zenith_cli,
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
     for i in range(10):
-        pscur.execute(f"do_gc {pageserver.initial_tenant} {timeline} 0")
+        pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
         for j in range(100):
             cur.execute('UPDATE foo SET val = val + 1 WHERE id = 1;')
 

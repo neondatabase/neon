@@ -23,8 +23,15 @@ pub mod defaults {
 }
 
 #[derive(Debug, Clone)]
-pub struct WalAcceptorConf {
-    pub data_dir: PathBuf,
+pub struct SafeKeeperConf {
+    // Repository directory, relative to current working directory.
+    // Normally, the safekeeper changes the current working directory
+    // to the repository, and 'workdir' is always '.'. But we don't do
+    // that during unit testing, because the current directory is global
+    // to the process but different unit tests work on different
+    // data directories to avoid clashing with each other.
+    pub workdir: PathBuf,
+
     pub daemonize: bool,
     pub no_sync: bool,
     pub listen_pg_addr: String,

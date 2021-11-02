@@ -33,7 +33,7 @@ libssl-dev clang pkg-config libpq-dev
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
 To run the integration tests (not required to use the code), install
-Python (3.6 or higher), and install python3 packages with `pipenv` using `pipenv install` in the project directory.
+Python (3.7 or higher), and install python3 packages with `pipenv` using `pipenv install` in the project directory.
 
 2. Build zenith and patched postgres
 ```sh
@@ -47,17 +47,26 @@ make -j5
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/zenith init
+initializing tenantid c03ba6b7ad4c5e9cf556f059ade44229
+created initial timeline 5b014a9e41b4b63ce1a1febc04503636 timeline.lsn 0/169C3C8
+created main branch
 pageserver init succeeded
 
-# start pageserver
+# start pageserver and safekeeper
 > ./target/debug/zenith start
-Starting pageserver at '127.0.0.1:64000' in .zenith
+Starting pageserver at 'localhost:64000' in '.zenith'
 Pageserver started
+initializing for single for 7676
+Starting safekeeper at 'localhost:5454' in '.zenith/safekeepers/single'
+Safekeeper started
 
-# start postgres on top on the pageserver
+# start postgres compute node
 > ./target/debug/zenith pg start main
-Starting postgres node at 'host=127.0.0.1 port=55432 user=stas'
+Starting new postgres main on main...
+Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/c03ba6b7ad4c5e9cf556f059ade44229/main port=55432
+Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
 waiting for server to start.... done
+server started
 
 # check list of running postgres instances
 > ./target/debug/zenith pg list
@@ -108,10 +117,9 @@ postgres=# insert into t values(2,2);
 INSERT 0 1
 ```
 
-6. If you want to run tests afterwards (see below), you have to stop pageserver and all postgres instances you have just started:
+6. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
+   you have just started. You can stop them all with one command:
 ```sh
-> ./target/debug/zenith pg stop migration_check
-> ./target/debug/zenith pg stop main
 > ./target/debug/zenith stop
 ```
 

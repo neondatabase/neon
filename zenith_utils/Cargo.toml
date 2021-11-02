@@ -11,7 +11,6 @@ byteorder = "1.4.3"
 bytes = "1.0.1"
 hyper = { version = "0.14.7", features = ["full"] }
 lazy_static = "1.4.0"
-log = "0.4.14"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 routerify = "2"
 serde = { version = "1.0", features = ["derive"] }
@@ -19,8 +18,8 @@ serde_json = "1"
 thiserror = "1.0"
 tokio = "1.11"
 tracing = "0.1"
-tracing-log = "0.1"
-tracing-subscriber = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nix = "0.23.0"
 
 zenith_metrics = { path = "../zenith_metrics" }
 workspace_hack = { path = "../workspace_hack" }

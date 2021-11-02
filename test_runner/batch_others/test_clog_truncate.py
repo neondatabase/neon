@@ -3,7 +3,7 @@ import os
 
 from contextlib import closing
 
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -12,9 +12,10 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test compute node start after clog truncation
 #
-def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin):
+def test_clog_truncate(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
     # Create a branch for us
-    zenith_cli.run(["branch", "test_clog_truncate", "empty"])
+    env.zenith_cli(["branch", "test_clog_truncate", "empty"])
 
     # set agressive autovacuum to make sure that truncation will happen
     config = [
@@ -27,7 +28,7 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
         'autovacuum_freeze_max_age=100000'
     ]
 
-    pg = postgres.create_start('test_clog_truncate', config_lines=config)
+    pg = env.postgres.create_start('test_clog_truncate', config_lines=config)
     log.info('postgres is running on test_clog_truncate branch')
 
     # Install extension containing function needed for test
@@ -64,10 +65,10 @@ def test_clog_truncate(zenith_cli, pageserver: ZenithPageserver, postgres: Postg
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f'create branch at lsn_after_truncation {lsn_after_truncation}')
-    zenith_cli.run(
+    env.zenith_cli(
         ["branch", "test_clog_truncate_new", "test_clog_truncate@" + lsn_after_truncation])
 
-    pg2 = postgres.create_start('test_clog_truncate_new')
+    pg2 = env.postgres.create_start('test_clog_truncate_new')
     log.info('postgres is running on test_clog_truncate_new branch')
 
     # check that new node doesn't contain truncated segment

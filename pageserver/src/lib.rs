@@ -1,3 +1,4 @@
+use layered_repository::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -17,6 +18,7 @@ pub mod relish_storage;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod tenant_mgr;
+pub mod tenant_threads;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
@@ -91,7 +93,7 @@ impl PageServerConf {
     //
 
     fn tenants_path(&self) -> PathBuf {
-        self.workdir.join("tenants")
+        self.workdir.join(TENANTS_SEGMENT_NAME)
     }
 
     fn tenant_path(&self, tenantid: &ZTenantId) -> PathBuf {
@@ -115,7 +117,7 @@ impl PageServerConf {
     }
 
     fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenant_path(tenantid).join("timelines")
+        self.tenant_path(tenantid).join(TIMELINES_SEGMENT_NAME)
     }
 
     fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
@@ -161,6 +163,15 @@ impl PageServerConf {
             relish_storage_config: None,
         }
     }
+}
+
+/// Config for the Repository checkpointer
+#[derive(Debug, Clone, Copy)]
+pub enum CheckpointConfig {
+    // Flush in-memory data that is older than this
+    Distance(u64),
+    // Flush all in-memory data
+    Forced,
 }
 
 /// External relish storage configuration, enough for creating a client for that storage.

@@ -104,8 +104,8 @@ impl JwtAuth {
     }
 
     pub fn from_key_path(key_path: &Path) -> Result<Self> {
-        let public_key = fs::read_to_string(key_path)?;
-        Ok(Self::new(DecodingKey::from_rsa_pem(public_key.as_bytes())?))
+        let public_key = fs::read(key_path)?;
+        Ok(Self::new(DecodingKey::from_rsa_pem(&public_key)?))
     }
 
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
@@ -114,8 +114,7 @@ impl JwtAuth {
 }
 
 // this function is used only for testing purposes in CLI e g generate tokens during init
-pub fn encode_from_key_path(claims: &Claims, key_path: &Path) -> Result<String> {
-    let key_data = fs::read_to_string(key_path)?;
-    let key = EncodingKey::from_rsa_pem(key_data.as_bytes())?;
+pub fn encode_from_key_file(claims: &Claims, key_data: &[u8]) -> Result<String> {
+    let key = EncodingKey::from_rsa_pem(key_data)?;
     Ok(encode(&Header::new(JWT_ALGORITHM), claims, &key)?)
 }

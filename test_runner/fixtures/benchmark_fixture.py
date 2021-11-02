@@ -31,11 +31,11 @@ To use, declare the 'zenbenchmark' fixture in the test function. Run the
 bencmark, and then record the result by calling zenbenchmark.record. For example:
 
 import timeit
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import ZenithEnv
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
-def test_mybench(postgres: PostgresFactory, pageserver: ZenithPageserver, zenbenchmark):
+def test_mybench(zenith_simple_env: env, zenbenchmark):
 
     # Initialize the test
     ...
@@ -54,16 +54,10 @@ in the test initialization, or measure disk usage after the test query.
 
 """
 
-# All the results are collected in this list, as a tuple:
-# (test_name: str, metric_name: str, metric_value: float, unit: str)
-#
+
 # TODO: It would perhaps be better to store the results as additional
 # properties in the pytest TestReport objects, to make them visible to
 # other pytest tools.
-global zenbenchmark_results
-zenbenchmark_results = []
-
-
 class ZenithBenchmarkResults:
     """ An object for recording benchmark results. """
     def __init__(self):
@@ -75,6 +69,10 @@ class ZenithBenchmarkResults:
         """
 
         self.results.append((test_name, metric_name, metric_value, unit))
+
+
+# Will be recreated in each session.
+zenbenchmark_results: ZenithBenchmarkResults = ZenithBenchmarkResults()
 
 
 # Session scope fixture that initializes the results object
@@ -137,6 +135,7 @@ class ZenithBenchmarker:
         matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$',
                             all_metrics,
                             re.MULTILINE)
+        assert matches
         return int(round(float(matches.group(1))))
 
     def get_peak_mem(self, pageserver) -> int:
@@ -147,6 +146,7 @@ class ZenithBenchmarker:
         all_metrics = pageserver.http_client().get_metrics()
         # See comment in get_io_writes()
         matches = re.search(r'^pageserver_maxrss_kb (\S+)$', all_metrics, re.MULTILINE)
+        assert matches
         return int(round(float(matches.group(1))))
 
     def get_timeline_size(self, repo_dir: str, tenantid: str, timelineid: str):

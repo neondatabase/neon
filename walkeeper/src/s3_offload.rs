@@ -18,9 +18,9 @@ use tokio::runtime;
 use tokio::time::sleep;
 use walkdir::WalkDir;
 
-use crate::WalAcceptorConf;
+use crate::SafeKeeperConf;
 
-pub fn thread_main(conf: WalAcceptorConf) {
+pub fn thread_main(conf: SafeKeeperConf) {
     // Create a new thread pool
     //
     // FIXME: keep it single-threaded for now, make it easier to debug with gdb,
@@ -42,7 +42,7 @@ async fn offload_files(
     bucket: &Bucket,
     listing: &HashSet<String>,
     dir_path: &Path,
-    conf: &WalAcceptorConf,
+    conf: &SafeKeeperConf,
 ) -> Result<u64> {
     let horizon = SystemTime::now() - conf.ttl.unwrap();
     let mut n: u64 = 0;
@@ -54,7 +54,7 @@ async fn offload_files(
             && IsXLogFileName(entry.file_name().to_str().unwrap())
             && entry.metadata().unwrap().created().unwrap() <= horizon
         {
-            let relpath = path.strip_prefix(&conf.data_dir).unwrap();
+            let relpath = path.strip_prefix(&conf.workdir).unwrap();
             let s3path = String::from("walarchive/") + relpath.to_str().unwrap();
             if !listing.contains(&s3path) {
                 let mut file = File::open(&path)?;
@@ -70,7 +70,7 @@ async fn offload_files(
     Ok(n)
 }
 
-async fn main_loop(conf: &WalAcceptorConf) -> Result<()> {
+async fn main_loop(conf: &SafeKeeperConf) -> Result<()> {
     let region = Region::Custom {
         region: env::var("S3_REGION").unwrap(),
         endpoint: env::var("S3_ENDPOINT").unwrap(),
@@ -97,7 +97,7 @@ async fn main_loop(conf: &WalAcceptorConf) -> Result<()> {
             .flat_map(|b| b.contents.iter().map(|o| o.key.clone()))
             .collect();
 
-        let n = offload_files(&bucket, &listing, &conf.data_dir, conf).await?;
+        let n = offload_files(&bucket, &listing, &conf.workdir, conf).await?;
         info!("Offload {} files to S3", n);
         sleep(conf.ttl.unwrap()).await;
     }

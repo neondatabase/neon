@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::{io, result, thread};
 
 use anyhow::{anyhow, bail};
+use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use pageserver::http::models::{BranchCreateRequest, TenantCreateRequest};
@@ -20,6 +21,7 @@ use zenith_utils::zid::ZTenantId;
 use crate::local_env::LocalEnv;
 use crate::read_pidfile;
 use pageserver::branches::BranchInfo;
+use pageserver::tenant_mgr::TenantInfo;
 use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
@@ -62,7 +64,6 @@ impl ResponseErrorMessageExt for Response {
 //
 #[derive(Debug)]
 pub struct PageServerNode {
-    pub kill_on_exit: bool,
     pub pg_connection_config: Config,
     pub env: LocalEnv,
     pub http_client: Client,
@@ -71,34 +72,34 @@ pub struct PageServerNode {
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let password = if env.auth_type == AuthType::ZenithJWT {
-            &env.auth_token
+        let password = if env.pageserver.auth_type == AuthType::ZenithJWT {
+            &env.pageserver.auth_token
         } else {
             ""
         };
 
         PageServerNode {
-            kill_on_exit: false,
             pg_connection_config: Self::pageserver_connection_config(
                 password,
-                env.pageserver_pg_port,
+                env.pageserver.pg_port,
             ),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: format!("http://localhost:{}/v1", env.pageserver_http_port),
+            http_base_url: format!("http://localhost:{}/v1", env.pageserver.http_port),
         }
     }
 
+    /// Construct libpq connection string for connecting to the pageserver.
     fn pageserver_connection_config(password: &str, port: u16) -> Config {
         format!("postgresql://no_user:{}@localhost:{}/no_db", password, port)
             .parse()
             .unwrap()
     }
 
-    pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool) -> anyhow::Result<()> {
+    pub fn init(&self, create_tenant: Option<&str>) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        let listen_pg = format!("localhost:{}", self.env.pageserver_pg_port);
-        let listen_http = format!("localhost:{}", self.env.pageserver_http_port);
+        let listen_pg = format!("localhost:{}", self.env.pageserver.pg_port);
+        let listen_http = format!("localhost:{}", self.env.pageserver.http_port);
         let mut args = vec![
             "--init",
             "-D",
@@ -111,10 +112,11 @@ impl PageServerNode {
             &listen_http,
         ];
 
-        if enable_auth {
+        let auth_type_str = &self.env.pageserver.auth_type.to_string();
+        if self.env.pageserver.auth_type != AuthType::Trust {
             args.extend(&["--auth-validation-public-key-path", "auth_public_key.pem"]);
-            args.extend(&["--auth-type", "ZenithJWT"]);
         }
+        args.extend(&["--auth-type", auth_type_str]);
 
         if let Some(tenantid) = create_tenant {
             args.extend(&["--create-tenant", tenantid])
@@ -152,7 +154,7 @@ impl PageServerNode {
 
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         cmd.args(&["-D", self.repo_path().to_str().unwrap()])
-            .arg("-d")
+            .arg("--daemonize")
             .env_clear()
             .env("RUST_BACKTRACE", "1");
 
@@ -199,19 +201,43 @@ impl PageServerNode {
         bail!("pageserver failed to start in {} seconds", RETRIES);
     }
 
+    ///
+    /// Stop the server.
+    ///
+    /// If 'immediate' is true, we use SIGQUIT, killing the process immediately.
+    /// Otherwise we use SIGTERM, triggering a clean shutdown
+    ///
+    /// If the server is not running, returns success
+    ///
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
-        let pid = read_pidfile(&self.pid_file())?;
-        let pid = Pid::from_raw(pid);
-        if immediate {
+        let pid_file = self.pid_file();
+        if !pid_file.exists() {
+            println!("Pageserver is already stopped");
+            return Ok(());
+        }
+        let pid = Pid::from_raw(read_pidfile(&pid_file)?);
+
+        let sig = if immediate {
             println!("Stop pageserver immediately");
-            if kill(pid, Signal::SIGQUIT).is_err() {
-                bail!("Failed to kill pageserver with pid {}", pid);
-            }
+            Signal::SIGQUIT
         } else {
             println!("Stop pageserver gracefully");
-            if kill(pid, Signal::SIGTERM).is_err() {
-                bail!("Failed to stop pageserver with pid {}", pid);
+            Signal::SIGTERM
+        };
+        match kill(pid, sig) {
+            Ok(_) => (),
+            Err(Errno::ESRCH) => {
+                println!(
+                    "Pageserver with pid {} does not exist, but a PID file was found",
+                    pid
+                );
+                return Ok(());
             }
+            Err(err) => bail!(
+                "Failed to send signal to pageserver with pid {}: {}",
+                pid,
+                err.desc()
+            ),
         }
 
         let address = connection_address(&self.pg_connection_config);
@@ -256,8 +282,8 @@ impl PageServerNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         let mut builder = self.http_client.request(method, url);
-        if self.env.auth_type == AuthType::ZenithJWT {
-            builder = builder.bearer_auth(&self.env.auth_token)
+        if self.env.pageserver.auth_type == AuthType::ZenithJWT {
+            builder = builder.bearer_auth(&self.env.pageserver.auth_token)
         }
         builder
     }
@@ -269,7 +295,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    pub fn tenant_list(&self) -> Result<Vec<String>> {
+    pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
             .http_request(Method::GET, format!("{}/{}", self.http_base_url, "tenant"))
             .send()?
@@ -330,14 +356,5 @@ impl PageServerNode {
             .send()?
             .error_for_status()?
             .json()?)
-    }
-}
-
-impl Drop for PageServerNode {
-    fn drop(&mut self) {
-        // TODO Looks like this flag is never set
-        if self.kill_on_exit {
-            let _ = self.stop(true);
-        }
     }
 }

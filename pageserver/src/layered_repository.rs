@@ -16,13 +16,11 @@ use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use postgres_ffi::pg_constants::BLCKSZ;
-use serde::{Deserialize, Serialize};
 use tracing::*;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use std::convert::TryInto;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -30,9 +28,9 @@ use std::ops::{Bound::Included, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use self::metadata::{metadata_path, TimelineMetadata};
 use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
@@ -40,6 +38,7 @@ use crate::tenant_mgr;
 use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
+use crate::CheckpointConfig;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
@@ -47,7 +46,6 @@ use zenith_metrics::{
     register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
 };
 use zenith_metrics::{register_histogram_vec, HistogramVec};
-use zenith_utils::bin_ser::BeSer;
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
@@ -55,10 +53,12 @@ use zenith_utils::seqwait::SeqWait;
 mod blob;
 mod delta_layer;
 mod filename;
+mod global_layer_map;
 mod image_layer;
 mod inmemory_layer;
 mod interval_tree;
 mod layer_map;
+pub mod metadata;
 mod page_versions;
 mod storage_layer;
 
@@ -111,8 +111,9 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
-/// The name of the metadata file pageserver creates per timeline.
-pub const METADATA_FILE_NAME: &str = "metadata";
+/// Parts of the `.zenith/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
+pub const TENANTS_SEGMENT_NAME: &str = "tenants";
+pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 ///
 /// Repository consists of multiple timelines. Keep them in a hash table.
@@ -142,12 +143,7 @@ impl Repository for LayeredRepository {
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
-        let metadata = TimelineMetadata {
-            disk_consistent_lsn: Lsn(0),
-            prev_record_lsn: None,
-            ancestor_timeline: None,
-            ancestor_lsn: Lsn(0),
-        };
+        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0));
         Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
@@ -186,12 +182,7 @@ impl Repository for LayeredRepository {
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
         // into the ancestor.
-        let metadata = TimelineMetadata {
-            disk_consistent_lsn: start_lsn,
-            prev_record_lsn: dst_prev,
-            ancestor_timeline: Some(src),
-            ancestor_lsn: start_lsn,
-        };
+        let metadata = TimelineMetadata::new(start_lsn, dst_prev, Some(src), start_lsn);
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
         Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
 
@@ -216,6 +207,22 @@ impl Repository for LayeredRepository {
             })
     }
 
+    fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()> {
+        {
+            let timelines = self.timelines.lock().unwrap();
+
+            for (timelineid, timeline) in timelines.iter() {
+                let _entered =
+                    info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid)
+                        .entered();
+
+                timeline.checkpoint(cconf)?;
+            }
+        }
+
+        Ok(())
+    }
+
     // Wait for all threads to complete and persist repository data before pageserver shutdown.
     fn shutdown(&self) -> Result<()> {
         trace!("LayeredRepository shutdown for tenant {}", self.tenantid);
@@ -225,7 +232,7 @@ impl Repository for LayeredRepository {
             walreceiver::stop_wal_receiver(*timelineid);
             // Wait for syncing data to disk
             trace!("repo shutdown. checkpoint timeline {}", timelineid);
-            timeline.checkpoint()?;
+            timeline.checkpoint(CheckpointConfig::Forced)?;
 
             //TODO Wait for walredo process to shutdown too
         }
@@ -247,14 +254,14 @@ impl LayeredRepository {
             Some(timeline) => Ok(timeline.clone()),
             None => {
                 let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
-                let disk_consistent_lsn = metadata.disk_consistent_lsn;
+                let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
                 // Recurse to look up the ancestor timeline.
                 //
                 // TODO: If you have a very deep timeline history, this could become
                 // expensive. Perhaps delay this until we need to look up a page in
                 // ancestor.
-                let ancestor = if let Some(ancestor_timelineid) = metadata.ancestor_timeline {
+                let ancestor = if let Some(ancestor_timelineid) = metadata.ancestor_timeline() {
                     Some(self.get_timeline_locked(ancestor_timelineid, timelines)?)
                 } else {
                     None
@@ -266,7 +273,7 @@ impl LayeredRepository {
 
                 let mut timeline = LayeredTimeline::new(
                     self.conf,
-                    metadata,
+                    metadata.clone(),
                     ancestor,
                     timelineid,
                     self.tenantid,
@@ -276,15 +283,9 @@ impl LayeredRepository {
                 )?;
 
                 // List the layers on disk, and load them into the layer map
-                let _loaded_layers = timeline.load_layer_map(disk_consistent_lsn)?;
+                let loaded_layers = timeline.load_layer_map(disk_consistent_lsn)?;
                 if self.upload_relishes {
-                    schedule_timeline_upload(());
-                    // schedule_timeline_upload(
-                    //     self.tenantid,
-                    //     timelineid,
-                    //     loaded_layers,
-                    //     disk_consistent_lsn,
-                    // );
+                    schedule_timeline_upload(self.tenantid, timelineid, loaded_layers, metadata);
                 }
 
                 // needs to be after load_layer_map
@@ -312,90 +313,6 @@ impl LayeredRepository {
         }
     }
 
-    ///
-    /// Launch the checkpointer thread in given repository.
-    ///
-    pub fn launch_checkpointer_thread(
-        conf: &'static PageServerConf,
-        rc: Arc<LayeredRepository>,
-    ) -> JoinHandle<()> {
-        std::thread::Builder::new()
-            .name("Checkpointer thread".into())
-            .spawn(move || {
-                // FIXME: relaunch it? Panic is not good.
-                rc.checkpoint_loop(conf).expect("Checkpointer thread died");
-            })
-            .unwrap()
-    }
-
-    ///
-    /// Checkpointer thread's main loop
-    ///
-    fn checkpoint_loop(&self, conf: &'static PageServerConf) -> Result<()> {
-        while !tenant_mgr::shutdown_requested() {
-            std::thread::sleep(conf.checkpoint_period);
-            info!("checkpointer thread for tenant {} waking up", self.tenantid);
-
-            // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
-            // bytes of WAL since last checkpoint.
-            {
-                let timelines = self.timelines.lock().unwrap();
-                for (timelineid, timeline) in timelines.iter() {
-                    let _entered =
-                        info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid)
-                            .entered();
-
-                    STORAGE_TIME
-                        .with_label_values(&["checkpoint_timed"])
-                        .observe_closure_duration(|| {
-                            timeline.checkpoint_internal(conf.checkpoint_distance, false)
-                        })?
-                }
-                // release lock on 'timelines'
-            }
-        }
-        trace!("Checkpointer thread shut down");
-        Ok(())
-    }
-
-    ///
-    /// Launch the GC thread in given repository.
-    ///
-    pub fn launch_gc_thread(
-        conf: &'static PageServerConf,
-        rc: Arc<LayeredRepository>,
-    ) -> JoinHandle<()> {
-        std::thread::Builder::new()
-            .name("GC thread".into())
-            .spawn(move || {
-                // FIXME: relaunch it? Panic is not good.
-                rc.gc_loop(conf).expect("GC thread died");
-            })
-            .unwrap()
-    }
-
-    ///
-    /// GC thread's main loop
-    ///
-    fn gc_loop(&self, conf: &'static PageServerConf) -> Result<()> {
-        while !tenant_mgr::shutdown_requested() {
-            // Garbage collect old files that are not needed for PITR anymore
-            if conf.gc_horizon > 0 {
-                self.gc_iteration(None, conf.gc_horizon, false).unwrap();
-            }
-
-            // TODO Write it in more adequate way using
-            // condvar.wait_timeout() or something
-            let mut sleep_time = conf.gc_period.as_secs();
-            while sleep_time > 0 && !tenant_mgr::shutdown_requested() {
-                sleep_time -= 1;
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            info!("gc thread for tenant {} waking up", self.tenantid);
-        }
-        Ok(())
-    }
-
     /// Save timeline metadata to file
     fn save_metadata(
         conf: &'static PageServerConf,
@@ -412,13 +329,7 @@ impl LayeredRepository {
             .create_new(first_save)
             .open(&path)?;
 
-        let mut metadata_bytes = TimelineMetadata::ser(data)?;
-
-        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
-        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
-
-        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
-        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
+        let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
 
         if file.write(&metadata_bytes)? != metadata_bytes.len() {
             bail!("Could not write all the metadata bytes in a single call");
@@ -445,20 +356,7 @@ impl LayeredRepository {
     ) -> Result<TimelineMetadata> {
         let path = metadata_path(conf, timelineid, tenantid);
         let metadata_bytes = std::fs::read(&path)?;
-        ensure!(metadata_bytes.len() == METADATA_MAX_SAFE_SIZE);
-
-        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
-        let calculated_checksum = crc32c::crc32c(data);
-
-        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
-            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
-        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
-        ensure!(calculated_checksum == expected_checksum);
-
-        let data = TimelineMetadata::des_prefix(data)?;
-        assert!(data.disk_consistent_lsn.is_aligned());
-
-        Ok(data)
+        TimelineMetadata::from_bytes(&metadata_bytes)
     }
 
     //
@@ -568,7 +466,7 @@ impl LayeredRepository {
                 // so that they too can be garbage collected. That's
                 // used in tests, so we want as deterministic results as possible.
                 if checkpoint_before_gc {
-                    timeline.checkpoint()?;
+                    timeline.checkpoint(CheckpointConfig::Forced)?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
 
@@ -581,29 +479,6 @@ impl LayeredRepository {
         totals.elapsed = now.elapsed();
         Ok(totals)
     }
-}
-
-/// Metadata stored on disk for each timeline
-///
-/// The fields correspond to the values we hold in memory, in LayeredTimeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimelineMetadata {
-    disk_consistent_lsn: Lsn,
-
-    // This is only set if we know it. We track it in memory when the page
-    // server is running, but we only track the value corresponding to
-    // 'last_record_lsn', not 'disk_consistent_lsn' which can lag behind by a
-    // lot. We only store it in the metadata file when we flush *all* the
-    // in-memory data so that 'last_record_lsn' is the same as
-    // 'disk_consistent_lsn'.  That's OK, because after page server restart, as
-    // soon as we reprocess at least one record, we will have a valid
-    // 'prev_record_lsn' value in memory again. This is only really needed when
-    // doing a clean shutdown, so that there is no more WAL beyond
-    // 'disk_consistent_lsn'
-    prev_record_lsn: Option<Lsn>,
-
-    ancestor_timeline: Option<ZTimelineId>,
-    ancestor_lsn: Lsn,
 }
 
 pub struct LayeredTimeline {
@@ -695,8 +570,8 @@ impl Timeline for LayeredTimeline {
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
                 format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive",
-                    lsn
+                    "Timed out while waiting for WAL record at LSN {} to arrive, disk consistent LSN={}",
+                    lsn, self.get_disk_consistent_lsn()
                 )
             })?;
 
@@ -852,11 +727,15 @@ impl Timeline for LayeredTimeline {
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
-    fn checkpoint(&self) -> Result<()> {
-        STORAGE_TIME
-            .with_label_values(&["checkpoint_force"])
-            //pass checkpoint_distance=0 to force checkpoint
-            .observe_closure_duration(|| self.checkpoint_internal(0, true))
+    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
+        match cconf {
+            CheckpointConfig::Forced => STORAGE_TIME
+                .with_label_values(&["forced checkpoint"])
+                .observe_closure_duration(|| self.checkpoint_internal(0)),
+            CheckpointConfig::Distance(distance) => STORAGE_TIME
+                .with_label_values(&["checkpoint"])
+                .observe_closure_duration(|| self.checkpoint_internal(distance)),
+        }
     }
 
     fn get_last_record_lsn(&self) -> Lsn {
@@ -910,6 +789,10 @@ impl Timeline for LayeredTimeline {
         Ok(total_blocks * BLCKSZ as usize)
     }
 
+    fn get_disk_consistent_lsn(&self) -> Lsn {
+        self.disk_consistent_lsn.load()
+    }
+
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
         Box::new(LayeredTimelineWriter {
             tl: self,
@@ -946,13 +829,13 @@ impl LayeredTimeline {
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
-                last: metadata.disk_consistent_lsn,
-                prev: metadata.prev_record_lsn.unwrap_or(Lsn(0)),
+                last: metadata.disk_consistent_lsn(),
+                prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
             }),
-            disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn.0),
+            disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             ancestor_timeline: ancestor,
-            ancestor_lsn: metadata.ancestor_lsn,
+            ancestor_lsn: metadata.ancestor_lsn(),
             current_logical_size: AtomicUsize::new(current_logical_size),
             current_logical_size_gauge,
             upload_relishes,
@@ -1231,7 +1114,7 @@ impl LayeredTimeline {
     /// Flush to disk all data that was written with the put_* functions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    fn checkpoint_internal(&self, checkpoint_distance: u64, forced: bool) -> Result<()> {
+    fn checkpoint_internal(&self, checkpoint_distance: u64) -> Result<()> {
         let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
@@ -1261,10 +1144,6 @@ impl LayeredTimeline {
         let mut layer_uploads = Vec::new();
         while let Some((oldest_layer, oldest_generation)) = layers.peek_oldest_open() {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
-
-            if tenant_mgr::shutdown_requested() && !forced {
-                return Ok(());
-            }
 
             // Does this layer need freezing?
             //
@@ -1364,12 +1243,13 @@ impl LayeredTimeline {
 
             let ancestor_timelineid = self.ancestor_timeline.as_ref().map(|x| x.timelineid);
 
-            let metadata = TimelineMetadata {
+            let metadata = TimelineMetadata::new(
                 disk_consistent_lsn,
-                prev_record_lsn: ondisk_prev_record_lsn,
-                ancestor_timeline: ancestor_timelineid,
-                ancestor_lsn: self.ancestor_lsn,
-            };
+                ondisk_prev_record_lsn,
+                ancestor_timelineid,
+                self.ancestor_lsn,
+            );
+
             LayeredRepository::save_metadata(
                 self.conf,
                 self.timelineid,
@@ -1377,19 +1257,12 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
+            if self.upload_relishes {
+                schedule_timeline_upload(self.tenantid, self.timelineid, layer_uploads, metadata);
+            }
 
             // Also update the in-memory copy
             self.disk_consistent_lsn.store(disk_consistent_lsn);
-
-            if self.upload_relishes {
-                schedule_timeline_upload(())
-                // schedule_timeline_upload(
-                //     self.tenantid,
-                //     self.timelineid,
-                //     layer_uploads,
-                //     disk_consistent_lsn,
-                // });
-            }
         }
 
         Ok(())
@@ -1941,15 +1814,6 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn metadata_path(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-) -> PathBuf {
-    conf.timeline_path(&timelineid, &tenantid)
-        .join(METADATA_FILE_NAME)
 }
 
 /// Add a suffix to a layer file's name: .{num}.old

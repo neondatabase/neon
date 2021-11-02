@@ -1,13 +1,13 @@
 version: 2.1
 
-orbs:
-  python: circleci/python@1.4.0
-
 executors:
   zenith-build-executor:
     resource_class: xlarge
     docker:
       - image: cimg/rust:1.55.0
+  zenith-python-executor:
+    docker:
+      - image: cimg/python:3.7.10  # Oldest available 3.7 with Ubuntu 20.04 (for GLIBC and Rust) at CirlceCI
 
 jobs:
   check-codestyle:
@@ -183,23 +183,26 @@ jobs:
             - "*"
 
   check-python:
-    executor: python/default
+    executor: zenith-python-executor
     steps:
       - checkout
       - run:
-          name: Install pipenv & deps
+          name: Install deps
           working_directory: test_runner
-          command: |
-            pip install pipenv
-            pipenv install --dev
+          command: pipenv --python 3.7 install --dev
       - run:
           name: Run yapf to ensure code format
+          when: always
           working_directory: test_runner
           command: pipenv run yapf --recursive --diff .
+      - run:
+          name: Run mypy to check types
+          when: always
+          working_directory: test_runner
+          command: pipenv run mypy .
 
   run-pytest:
-    #description: "Run pytest"
-    executor: python/default
+    executor: zenith-python-executor
     parameters:
       # pytest args to specify the tests to run.
       #
@@ -234,11 +237,9 @@ jobs:
           steps:
             - run: git submodule update --init --depth 1
       - run:
-          name: Install pipenv & deps
+          name: Install deps
           working_directory: test_runner
-          command: |
-            pip install pipenv
-            pipenv install
+          command: pipenv --python 3.7 install
       - run:
           name: Run pytest
           working_directory: test_runner

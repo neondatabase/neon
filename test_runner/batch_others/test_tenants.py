@@ -2,51 +2,41 @@ from contextlib import closing
 
 import pytest
 
-from fixtures.zenith_fixtures import (
-    TenantFactory,
-    ZenithCli,
-    PostgresFactory,
-)
+from fixtures.zenith_fixtures import ZenithEnvBuilder
 
 
 @pytest.mark.parametrize('with_wal_acceptors', [False, True])
-def test_tenants_normal_work(
-    zenith_cli: ZenithCli,
-    tenant_factory: TenantFactory,
-    postgres: PostgresFactory,
-    wa_factory,
-    with_wal_acceptors: bool,
-):
-    """Tests tenants with and without wal acceptors"""
-    tenant_1 = tenant_factory.create()
-    tenant_2 = tenant_factory.create()
+def test_tenants_normal_work(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptors: bool):
+    if with_wal_acceptors:
+        zenith_env_builder.num_safekeepers = 3
 
-    zenith_cli.run([
+    env = zenith_env_builder.init()
+    """Tests tenants with and without wal acceptors"""
+    tenant_1 = env.create_tenant()
+    tenant_2 = env.create_tenant()
+
+    env.zenith_cli([
         "branch",
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
         "main",
         f"--tenantid={tenant_1}"
     ])
-    zenith_cli.run([
+    env.zenith_cli([
         "branch",
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
         "main",
         f"--tenantid={tenant_2}"
     ])
-    if with_wal_acceptors:
-        wa_factory.start_n_new(3)
 
-    pg_tenant1 = postgres.create_start(
+    pg_tenant1 = env.postgres.create_start(
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
         None,  # branch name, None means same as node name
         tenant_1,
-        wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
     )
-    pg_tenant2 = postgres.create_start(
+    pg_tenant2 = env.postgres.create_start(
         f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
         None,  # branch name, None means same as node name
         tenant_2,
-        wal_acceptors=wa_factory.get_connstrs() if with_wal_acceptors else None,
     )
 
     for pg in [pg_tenant1, pg_tenant2]:

@@ -2,7 +2,7 @@
 //! with the "START_REPLICATION" message.
 
 use crate::send_wal::SendWalHandler;
-use crate::timeline::{Timeline, TimelineTools};
+use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use log::*;
@@ -20,7 +20,7 @@ use std::{str, thread};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeMessage, XLogDataBody};
+use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody};
 use zenith_utils::sock_split::ReadStream;
 
 pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
@@ -32,7 +32,7 @@ const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
 type FullTransactionId = u64;
 
 /// Hot standby feedback received from replica
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct HotStandbyFeedback {
     pub ts: TimestampTz,
     pub xmin: FullTransactionId,
@@ -49,6 +49,16 @@ impl HotStandbyFeedback {
     }
 }
 
+/// Standby status update
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandbyReply {
+    pub write_lsn: Lsn, // disk consistent lSN
+    pub flush_lsn: Lsn, // LSN committedby quorum
+    pub apply_lsn: Lsn, // not used
+    pub reply_ts: TimestampTz,
+    pub reply_requested: bool,
+}
+
 /// A network connection that's speaking the replication protocol.
 pub struct ReplicationConn {
     /// This is an `Option` because we will spawn a background thread that will
@@ -56,16 +66,15 @@ pub struct ReplicationConn {
     stream_in: Option<ReadStream>,
 }
 
-// TODO: move this to crate::timeline when there's more users
-// TODO: design a proper Timeline mock api
-trait HsFeedbackSubscriber {
-    fn add_hs_feedback(&self, _feedback: HotStandbyFeedback) {}
+/// Scope guard to unregister replication connection from timeline
+struct ReplicationConnGuard {
+    replica: usize, // replica internal ID assigned by timeline
+    timeline: Arc<Timeline>,
 }
 
-impl HsFeedbackSubscriber for Arc<Timeline> {
-    #[inline(always)]
-    fn add_hs_feedback(&self, feedback: HotStandbyFeedback) {
-        Timeline::add_hs_feedback(self, feedback);
+impl Drop for ReplicationConnGuard {
+    fn drop(&mut self) {
+        self.timeline.update_replica_state(self.replica, None);
     }
 }
 
@@ -79,26 +88,33 @@ impl ReplicationConn {
 
     /// Handle incoming messages from the network.
     /// This is spawned into the background by `handle_start_replication`.
-    fn background_thread(
-        mut stream_in: impl Read,
-        subscriber: impl HsFeedbackSubscriber,
-    ) -> Result<()> {
+    fn background_thread(mut stream_in: impl Read, timeline: Arc<Timeline>) -> Result<()> {
+        let mut state = ReplicaState::new();
+        let replica = timeline.add_replica(state);
+        let _guard = ReplicationConnGuard {
+            replica,
+            timeline: timeline.clone(),
+        };
         // Wait for replica's feedback.
         while let Some(msg) = FeMessage::read(&mut stream_in)? {
             match &msg {
                 FeMessage::CopyData(m) => {
                     // There's two possible data messages that the client is supposed to send here:
-                    // `HotStandbyFeedback` and `StandbyStatusUpdate`. We only handle hot standby
-                    // feedback.
+                    // `HotStandbyFeedback` and `StandbyStatusUpdate`.
 
                     match m.first().cloned() {
                         Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
                             // Note: deserializing is on m[1..] because we skip the tag byte.
-                            let feedback = HotStandbyFeedback::des(&m[1..])
+                            state.hs_feedback = HotStandbyFeedback::des(&m[1..])
                                 .context("failed to deserialize HotStandbyFeedback")?;
-                            subscriber.add_hs_feedback(feedback);
+                            timeline.update_replica_state(replica, Some(state));
                         }
-                        Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => (),
+                        Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
+                            let reply = StandbyReply::des(&m[1..])
+                                .context("failed to deserialize StandbyReply")?;
+                            state.disk_consistent_lsn = reply.write_lsn;
+                            timeline.update_replica_state(replica, Some(state));
+                        }
                         _ => warn!("unexpected message {:?}", msg),
                     }
                 }
@@ -157,11 +173,14 @@ impl ReplicationConn {
         let bg_timeline = Arc::clone(swh.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();
 
-        thread::spawn(move || {
-            if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline) {
-                error!("Replication background thread failed: {}", err);
-            }
-        });
+        let _ = thread::Builder::new()
+            .name("HotStandbyFeedback thread".into())
+            .spawn(move || {
+                if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline) {
+                    error!("Replication background thread failed: {}", err);
+                }
+            })
+            .unwrap();
 
         let mut start_pos = Self::parse_start(cmd)?;
 
@@ -185,7 +204,7 @@ impl ReplicationConn {
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
-        let mut end_pos: Lsn;
+        let mut end_pos = Lsn(0);
         let mut wal_file: Option<File> = None;
 
         loop {
@@ -200,7 +219,18 @@ impl ReplicationConn {
             } else {
                 /* normal mode */
                 let timeline = swh.timeline.get();
-                end_pos = timeline.wait_for_lsn(start_pos);
+                if let Some(lsn) = timeline.wait_for_lsn(start_pos) {
+                    end_pos = lsn
+                } else {
+                    // timeout expired: request pageserver status
+                    pgb.write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
+                        sent_ptr: end_pos.0,
+                        timestamp: get_current_timestamp(),
+                        request_reply: true,
+                    }))
+                    .context("Failed to send KeepAlive message")?;
+                    continue;
+                }
             }
             if end_pos == END_REPLICATION_MARKER {
                 break;
@@ -214,7 +244,7 @@ impl ReplicationConn {
                     let segno = start_pos.segment_number(wal_seg_size);
                     let wal_file_name = XLogFileName(timeline, segno, wal_seg_size);
                     let timeline_id = swh.timeline.get().timelineid.to_string();
-                    let wal_file_path = swh.conf.data_dir.join(timeline_id).join(wal_file_name);
+                    let wal_file_path = swh.conf.workdir.join(timeline_id).join(wal_file_name);
                     Self::open_wal_file(&wal_file_path)?
                 }
             };
@@ -253,20 +283,5 @@ impl ReplicationConn {
             }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // A no-op impl for tests
-    impl HsFeedbackSubscriber for () {}
-
-    #[test]
-    fn test_replication_conn_background_thread_eof() {
-        // Test that background_thread recognizes EOF
-        let stream: &[u8] = &[];
-        ReplicationConn::background_thread(stream, ()).unwrap();
     }
 }
