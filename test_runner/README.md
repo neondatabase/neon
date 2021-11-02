@@ -17,8 +17,8 @@ The tests are divided into a few batches, such that each batch takes roughly
 the same amount of time. The batches can be run in parallel, to minimize total
 runtime. Currently, there are only two batches:
 
-- test_batch_pg_regress: Runs PostgreSQL regression tests
-- test_others: All other tests
+- `test_batch_pg_regress`: Runs PostgreSQL regression tests
+- `test_others`: All other tests
 
 ### Running the tests
 
@@ -28,38 +28,37 @@ run the tests from within the `test_runner` directory.
 Test state (postgres data, pageserver state, and log files) will
 be stored under a directory `test_output`.
 
-You can run all the tests with:
+* You can run all the tests with:
+  ```bash
+  pipenv run pytest
+  ```
+* If you want to run all the tests in a particular file:
+  ```bash
+  pipenv run pytest test_pgbench.py
+  ```
+* If you want to run all tests that have the string "bench" in their names:
+  ```bash
+  pipenv run pytest -k bench
+  ```
+* To hide logs from livestreaming as tests run, comment `log_cli = true` in `/pytest.ini`.
+* Exit after the first test failure:
+  ```bash
+  pipenv run pytest -x ...
+  ```
 
-`pipenv run pytest`
-
-If you want to run all the tests in a particular file:
-
-`pipenv run pytest test_pgbench.py`
-
-If you want to run all tests that have the string "bench" in their names:
-
-`pipenv run pytest -k bench`
+There are many more pytest options; run `pytest -h` to see them.
 
 Useful environment variables:
 
-`ZENITH_BIN`: The directory where zenith binaries can be found.
-`POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
-`TEST_OUTPUT`: Set the directory where test state and test output files
-should go.
-`TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
-
-Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
-`pytest -s --log-cli-level=INFO ...`
-(Note many tests capture subprocess outputs separately, so this may not
-show much.)
-
-Exit after the first test failure:
-`pytest -x ...`
-(there are many more pytest options; run `pytest -h` to see them.)
+* `ZENITH_BIN`: The directory where zenith binaries can be found.
+* `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
+* `TEST_OUTPUT`: Set the directory where test state and test output files
+  should go.
+* `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 
 ### Writing a test
 
-Every test needs a Zenith Environment, or ZenithEnv to operate in. A Zenith Environment
+Every test needs a Zenith Environment, or `ZenithEnv` to operate in. A Zenith Environment
 is like a little cloud-in-a-box, and consists of a Pageserver, 0-N Safekeepers, and
 compute Postgres nodes. The connections between them can be configured to use JWT
 authentication tokens, and some other configuration options can be tweaked too.
