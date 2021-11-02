@@ -37,6 +37,19 @@ def rustfmt(fix_inplace: bool = False, no_color: bool = False) -> str:
     return cmd
 
 
+def yapf(fix_inplace: bool) -> str:
+    cmd = "pipenv run yapf --recursive"
+    if fix_inplace:
+        cmd += " --in-place"
+    else:
+        cmd += " --diff"
+    return cmd
+
+
+def mypy() -> str:
+    return "pipenv run mypy"
+
+
 def get_commit_files() -> List[str]:
     files = subprocess.check_output("git diff --cached --name-only --diff-filter=ACM".split())
     return files.decode().splitlines()
@@ -53,7 +66,14 @@ def check(name: str, suffix: str, cmd: str, changed_files: List[str], no_color: 
     res = subprocess.run(cmd.split(), capture_output=True)
     if res.returncode != 0:
         print(colorify("[FAILED]", Color.RED, no_color))
-        print("Please inspect the output below and run make fmt to fix automatically\n")
+        if name == "mypy":
+            print("Please inspect the output below and fix type mismatches.")
+        else:
+            print("Please inspect the output below and run make fmt to fix automatically.")
+        if suffix == ".py":
+            print("If the output is empty, ensure that you've installed Python tooling by\n"
+                  "running 'pipenv install --dev' in the current directory (no root needed)")
+        print()
         print(res.stdout.decode())
         exit(1)
 
@@ -77,6 +97,20 @@ if __name__ == "__main__":
         name="rustfmt",
         suffix=".rs",
         cmd=rustfmt(fix_inplace=args.fix_inplace, no_color=args.no_color),
+        changed_files=files,
+        no_color=args.no_color,
+    )
+    check(
+        name="yapf",
+        suffix=".py",
+        cmd=yapf(fix_inplace=args.fix_inplace),
+        changed_files=files,
+        no_color=args.no_color,
+    )
+    check(
+        name="mypy",
+        suffix=".py",
+        cmd=mypy(),
         changed_files=files,
         no_color=args.no_color,
     )
