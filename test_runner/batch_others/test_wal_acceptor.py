@@ -41,6 +41,7 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
 class BranchMetrics:
     name: str
     latest_valid_lsn: int
+    # One entry per each Safekeeper, order is the same
     flush_lsns: List[int] = field(default_factory=list)
     commit_lsns: List[int] = field(default_factory=list)
 
@@ -96,13 +97,11 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
                     assert commit_lsn <= flush_lsn
                 # We only call collect_metrics() after a transaction is confirmed by
                 # the compute node, which only happens after a consensus of safekeepers
-                # has confirmed the transaction. In local tests it's quite often
-                # that all safekeepers has confirmed the transaction, so we ensure that
-                # until it's flaky.
-                for lsn in m.flush_lsns:
-                    assert m.latest_valid_lsn <= lsn
-                for lsn in m.commit_lsns:
-                    assert m.latest_valid_lsn <= lsn
+                # has confirmed the transaction. We assume majority consensus here.
+                assert (2 * sum(m.latest_valid_lsn <= lsn
+                                for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers)
+                assert (2 * sum(m.latest_valid_lsn <= lsn
+                                for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers)
                 branch_metrics.append(m)
         log.info(f"{message}: {branch_metrics}")
         return branch_metrics
