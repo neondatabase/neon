@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, ops::RangeBounds};
+use std::{alloc::Layout, cmp::Ordering, ops::RangeBounds};
 
 use serde::{Deserialize, Serialize};
 
@@ -57,34 +57,39 @@ impl<K: Ord, V> VecMap<K, V> {
     /// Add a key value pair to the map.
     /// If `key` is less than or equal to the current maximum key
     /// the pair will not be added and InvalidKey error will be returned.
-    pub fn append(&mut self, key: K, value: V) -> Result<(), InvalidKey> {
+    pub fn append(&mut self, key: K, value: V) -> Result<usize, InvalidKey> {
         if let Some((last_key, _last_value)) = self.0.last() {
             if &key <= last_key {
                 return Err(InvalidKey);
             }
         }
 
-        self.0.push((key, value));
-        Ok(())
+        let delta_size = self.instrument_vec_op(|vec| vec.push((key, value)));
+        Ok(delta_size)
     }
 
     /// Update the maximum key value pair or add a new key value pair to the map.
     /// If `key` is less than the current maximum key no updates or additions
     /// will occur and InvalidKey error will be returned.
-    pub fn append_or_update_last(&mut self, key: K, mut value: V) -> Result<Option<V>, InvalidKey> {
+    pub fn append_or_update_last(
+        &mut self,
+        key: K,
+        mut value: V,
+    ) -> Result<(Option<V>, usize), InvalidKey> {
         if let Some((last_key, last_value)) = self.0.last_mut() {
             match key.cmp(last_key) {
                 Ordering::Less => return Err(InvalidKey),
                 Ordering::Equal => {
                     std::mem::swap(last_value, &mut value);
-                    return Ok(Some(value));
+                    const DELTA_SIZE: usize = 0;
+                    return Ok((Some(value), DELTA_SIZE));
                 }
                 Ordering::Greater => {}
             }
         }
 
-        self.0.push((key, value));
-        Ok(None)
+        let delta_size = self.instrument_vec_op(|vec| vec.push((key, value)));
+        Ok((None, delta_size))
     }
 
     /// Split the map into two.
@@ -110,7 +115,7 @@ impl<K: Ord, V> VecMap<K, V> {
     /// Move items from `other` to the end of `self`, leaving `other` empty.
     /// If any keys in `other` is less than or equal to any key in `self`,
     /// `InvalidKey` error will be returned and no mutation will occur.
-    pub fn extend(&mut self, other: &mut Self) -> Result<(), InvalidKey> {
+    pub fn extend(&mut self, other: &mut Self) -> Result<usize, InvalidKey> {
         let self_last_opt = self.0.last().map(extract_key);
         let other_first_opt = other.0.last().map(extract_key);
 
@@ -120,9 +125,27 @@ impl<K: Ord, V> VecMap<K, V> {
             }
         }
 
-        self.0.append(&mut other.0);
+        let delta_size = self.instrument_vec_op(|vec| vec.append(&mut other.0));
+        Ok(delta_size)
+    }
 
-        Ok(())
+    /// Instrument an operation on the underlying [`Vec`].
+    /// Will panic if the operation decreases capacity.
+    /// Returns the increase in memory usage caused by the op.
+    fn instrument_vec_op(&mut self, op: impl FnOnce(&mut Vec<(K, V)>)) -> usize {
+        let old_cap = self.0.capacity();
+        op(&mut self.0);
+        let new_cap = self.0.capacity();
+
+        match old_cap.cmp(&new_cap) {
+            Ordering::Less => {
+                let old_size = Layout::array::<(K, V)>(old_cap).unwrap().size();
+                let new_size = Layout::array::<(K, V)>(new_cap).unwrap().size();
+                new_size - old_size
+            }
+            Ordering::Equal => 0,
+            Ordering::Greater => panic!("VecMap capacity shouldn't ever decrease"),
+        }
     }
 }
 
