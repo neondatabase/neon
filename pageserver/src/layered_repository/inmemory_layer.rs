@@ -13,7 +13,7 @@ use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
 use std::path::PathBuf;
@@ -184,21 +184,21 @@ impl Layer for InMemoryLayer {
                 .get_block_lsn_range(blknum, ..=lsn)
                 .iter()
                 .rev();
-            for (entry_lsn, entry) in iter {
-                if let Some(img) = &entry.page_image {
-                    reconstruct_data.page_img = Some(img.clone());
-                    need_image = false;
-                    break;
-                } else if let Some(rec) = &entry.record {
-                    reconstruct_data.records.push((*entry_lsn, rec.clone()));
-                    if rec.will_init {
-                        // This WAL record initializes the page, so no need to go further back
+            for (entry_lsn, pv) in iter {
+                match pv {
+                    PageVersion::Page(img) => {
+                        reconstruct_data.page_img = Some(img.clone());
                         need_image = false;
                         break;
                     }
-                } else {
-                    // No base image, and no WAL record. Huh?
-                    bail!("no page image or WAL record for requested page");
+                    PageVersion::Wal(rec) => {
+                        reconstruct_data.records.push((*entry_lsn, rec.clone()));
+                        if rec.will_init {
+                            // This WAL record initializes the page, so no need to go further back
+                            need_image = false;
+                            break;
+                        }
+                    }
                 }
             }
             // release lock on 'inner'
@@ -286,13 +286,12 @@ impl Layer for InMemoryLayer {
         }
 
         for (blknum, lsn, pv) in inner.page_versions.ordered_page_version_iter(None) {
-            println!(
-                "blk {} at {}: {}/{}\n",
-                blknum,
-                lsn,
-                pv.page_image.is_some(),
-                pv.record.is_some()
-            );
+            let pv_description = match pv {
+                PageVersion::Page(_img) => "page",
+                PageVersion::Wal(_rec) => "wal",
+            };
+
+            println!("blk {} at {}: {}\n", blknum, lsn, pv_description);
         }
 
         Ok(())
@@ -357,26 +356,12 @@ impl InMemoryLayer {
 
     /// Remember new page version, as a WAL record over previous version
     pub fn put_wal_record(&self, lsn: Lsn, blknum: u32, rec: WALRecord) -> u32 {
-        self.put_page_version(
-            blknum,
-            lsn,
-            PageVersion {
-                page_image: None,
-                record: Some(rec),
-            },
-        )
+        self.put_page_version(blknum, lsn, PageVersion::Wal(rec))
     }
 
     /// Remember new page version, as a full page image
     pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> u32 {
-        self.put_page_version(
-            blknum,
-            lsn,
-            PageVersion {
-                page_image: Some(img),
-                record: None,
-            },
-        )
+        self.put_page_version(blknum, lsn, PageVersion::Page(img))
     }
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
@@ -396,11 +381,10 @@ impl InMemoryLayer {
         inner.assert_writeable();
 
         let mut mem_usage = 0;
-        if let Some(img) = &pv.page_image {
-            mem_usage += img.len();
-        } else if let Some(rec) = &pv.record {
-            mem_usage += rec.rec.len();
-        }
+        mem_usage += match &pv {
+            PageVersion::Page(img) => img.len(),
+            PageVersion::Wal(rec) => rec.rec.len(),
+        };
 
         let old = inner.page_versions.append_or_update_last(blknum, lsn, pv);
 
@@ -441,10 +425,7 @@ impl InMemoryLayer {
                 // subsequent call to initialize the gap page.
                 let gapstart = self.seg.segno * RELISH_SEG_SIZE + oldsize;
                 for gapblknum in gapstart..blknum {
-                    let zeropv = PageVersion {
-                        page_image: Some(ZERO_PAGE.clone()),
-                        record: None,
-                    };
+                    let zeropv = PageVersion::Page(ZERO_PAGE.clone());
                     trace!(
                         "filling gap blk {} with zeros for write of {}",
                         gapblknum,
