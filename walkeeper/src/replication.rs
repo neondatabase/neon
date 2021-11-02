@@ -198,8 +198,7 @@ impl ReplicationConn {
         if start_pos == Lsn(0) {
             start_pos = wal_end;
         }
-        let stop_pos = Lsn(0);
-        info!("Start replication from {} till {}", start_pos, stop_pos);
+        info!("Start replication from {}", start_pos);
 
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -209,28 +208,17 @@ impl ReplicationConn {
 
         loop {
             /* Wait until we have some data to stream */
-            if stop_pos != Lsn(0) {
-                /* recovery mode: stream up to the specified LSN (VCL) */
-                if start_pos >= stop_pos {
-                    /* recovery finished */
-                    break;
-                }
-                end_pos = stop_pos;
+            if let Some(lsn) = swh.timeline.get().wait_for_lsn(start_pos) {
+                end_pos = lsn
             } else {
-                /* normal mode */
-                let timeline = swh.timeline.get();
-                if let Some(lsn) = timeline.wait_for_lsn(start_pos) {
-                    end_pos = lsn
-                } else {
-                    // timeout expired: request pageserver status
-                    pgb.write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                        sent_ptr: end_pos.0,
-                        timestamp: get_current_timestamp(),
-                        request_reply: true,
-                    }))
-                    .context("Failed to send KeepAlive message")?;
-                    continue;
-                }
+                // timeout expired: request pageserver status
+                pgb.write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
+                    sent_ptr: end_pos.0,
+                    timestamp: get_current_timestamp(),
+                    request_reply: true,
+                }))
+                .context("Failed to send KeepAlive message")?;
+                continue;
             }
             if end_pos == END_REPLICATION_MARKER {
                 break;
