@@ -386,7 +386,8 @@ impl InMemoryLayer {
             PageVersion::Wal(rec) => rec.rec.len(),
         };
 
-        let old = inner.page_versions.append_or_update_last(blknum, lsn, pv);
+        let (old, delta_size) = inner.page_versions.append_or_update_last(blknum, lsn, pv);
+        mem_usage += delta_size;
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -396,8 +397,7 @@ impl InMemoryLayer {
             );
         }
 
-        inner.mem_usage += mem_usage;
-        GLOBAL_OPEN_MEM_USAGE.fetch_add(mem_usage, Ordering::Relaxed);
+        let mut delta_logical_size = 0;
 
         // Also update the relation size, if this extended the relation.
         if self.seg.rel.is_blocky() {
@@ -431,9 +431,10 @@ impl InMemoryLayer {
                         gapblknum,
                         blknum
                     );
-                    let old = inner
+                    let (old, delta_size) = inner
                         .page_versions
                         .append_or_update_last(gapblknum, lsn, zeropv);
+                    mem_usage += delta_size;
                     // We already had an entry for this LSN. That's odd..
 
                     if old.is_some() {
@@ -444,12 +445,18 @@ impl InMemoryLayer {
                     }
                 }
 
-                inner.segsizes.append_or_update_last(lsn, newsize).unwrap();
-                return newsize - oldsize;
+                let (_old, delta_size) =
+                    inner.segsizes.append_or_update_last(lsn, newsize).unwrap();
+                mem_usage += delta_size;
+
+                delta_logical_size = newsize - oldsize;
             }
         }
 
-        0
+        inner.mem_usage += mem_usage;
+        GLOBAL_OPEN_MEM_USAGE.fetch_add(mem_usage, Ordering::Relaxed);
+
+        delta_logical_size
     }
 
     /// Remember that the relation was truncated at given LSN
@@ -466,7 +473,9 @@ impl InMemoryLayer {
         let oldsize = inner.get_seg_size(lsn);
         assert!(segsize < oldsize);
 
-        let old = inner.segsizes.append_or_update_last(lsn, segsize).unwrap();
+        let (old, delta_size) = inner.segsizes.append_or_update_last(lsn, segsize).unwrap();
+        inner.mem_usage += delta_size;
+        GLOBAL_OPEN_MEM_USAGE.fetch_add(delta_size, Ordering::Relaxed);
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..

@@ -15,7 +15,7 @@ impl PageVersions {
         blknum: u32,
         lsn: Lsn,
         page_version: PageVersion,
-    ) -> Option<PageVersion> {
+    ) -> (Option<PageVersion>, usize) {
         let map = self.0.entry(blknum).or_insert_with(VecMap::default);
         map.append_or_update_last(lsn, page_version).unwrap()
     }
@@ -119,7 +119,7 @@ mod tests {
 
         for blknum in 0..BLOCKS {
             for lsn in 0..LSNS {
-                let old = page_versions.append_or_update_last(
+                let (old, _delta_size) = page_versions.append_or_update_last(
                     blknum,
                     Lsn(lsn),
                     empty_page_version.clone(),
