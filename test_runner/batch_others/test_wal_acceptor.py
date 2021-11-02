@@ -3,6 +3,7 @@ import random
 import time
 import os
 import subprocess
+import sys
 import threading
 import uuid
 
@@ -12,7 +13,7 @@ from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import PgBin, ZenithEnv, ZenithEnvBuilder
 from fixtures.utils import lsn_to_hex, mkdir_if_needed
 from fixtures.log_helper import log
-from typing import List
+from typing import List, Optional
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -118,18 +119,31 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
 
     # Populate data for 2/3 branches
     class MetricsChecker(threading.Thread):
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__(daemon=True)
             self.should_stop = threading.Event()
+            self.exception: Optional[BaseException] = None
 
         def run(self) -> None:
-            while not self.should_stop.is_set():
-                collect_metrics("during INSERT INTO")
-                time.sleep(1)
+            try:
+                while not self.should_stop.is_set():
+                    collect_metrics("during INSERT INTO")
+                    time.sleep(1)
+            except:
+                log.error("MetricsChecker's thread failed, the test will be failed on .stop() call",
+                          exc_info=True)
+                # We want to preserve traceback as well as the exception
+                exc_type, exc_value, exc_tb = sys.exc_info()
+                assert exc_type
+                e = exc_type(exc_value)
+                e.__traceback__ = exc_tb
+                self.exception = e
 
         def stop(self) -> None:
             self.should_stop.set()
             self.join()
+            if self.exception:
+                raise self.exception
 
     metrics_checker = MetricsChecker()
     metrics_checker.start()
