@@ -235,7 +235,6 @@ jobs:
             - run: git submodule update --init --depth 1
       - run:
           name: Install deps
-          working_directory: test_runner
           command: pipenv --python 3.7 install
       - run:
           name: Run pytest
