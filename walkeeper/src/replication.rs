@@ -6,7 +6,9 @@ use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use log::*;
-use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE};
+use postgres_ffi::xlog_utils::{
+    get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
@@ -194,7 +196,7 @@ impl ReplicationConn {
                 break;
             }
         }
-        let (wal_end, timeline) = swh.timeline.get().get_end_of_wal();
+        let wal_end = swh.timeline.get().get_end_of_wal();
         // Walproposer gets special handling: safekeeper must give proposer all
         // local WAL till the end, whether committed or not (walproposer will
         // hang otherwise). That's because walproposer runs the consensus and
@@ -248,7 +250,7 @@ impl ReplicationConn {
                 None => {
                     // Open a new file.
                     let segno = start_pos.segment_number(wal_seg_size);
-                    let wal_file_name = XLogFileName(timeline, segno, wal_seg_size);
+                    let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
                     let timeline_id = swh.timeline.get().timelineid;
                     let wal_file_path = swh.conf.timeline_dir(&timeline_id).join(wal_file_name);
                     Self::open_wal_file(&wal_file_path)?

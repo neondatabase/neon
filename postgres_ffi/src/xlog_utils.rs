@@ -43,6 +43,9 @@ pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
 #[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 
+// PG timeline is always 1, changing it doesn't have useful meaning in Zenith.
+pub const PG_TLI: u32 = 1;
+
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
 pub type TimestampTz = i64;
@@ -421,7 +424,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Bytes {
             XLogPageHeaderData {
                 xlp_magic: XLOG_PAGE_MAGIC as u16,
                 xlp_info: pg_constants::XLP_LONG_HEADER,
-                xlp_tli: 1, // FIXME: always use Postgres timeline 1
+                xlp_tli: PG_TLI,
                 xlp_pageaddr: pageaddr,
                 xlp_rem_len: 0,
                 ..Default::default() // Put 0 in padding fields.
