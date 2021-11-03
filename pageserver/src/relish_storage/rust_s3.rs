@@ -2,13 +2,11 @@
 //! Currently does not allow multiple pageservers to use the same bucket concurrently: relishes are
 //! placed in the root of the bucket.
 
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use s3::{bucket::Bucket, creds::Credentials, region::Region};
+use tokio::io::{self, AsyncWriteExt};
 
 use crate::{
     layered_repository::metadata::METADATA_FILE_NAME,
@@ -107,14 +105,45 @@ impl RelishStorage for S3 {
             .collect())
     }
 
-    async fn download_relish<W: 'static + std::io::Write + Send>(
+    async fn upload_relish(
+        &self,
+        from: &mut (impl io::AsyncRead + Unpin + Send),
+        to: &Self::RelishStoragePath,
+    ) -> anyhow::Result<()> {
+        let mut upload_contents = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        io::copy(from, &mut upload_contents)
+            .await
+            .context("Failed to read the upload contents")?;
+        upload_contents
+            .flush()
+            .await
+            .context("Failed to read the upload contents")?;
+        let upload_contents = upload_contents.into_inner().into_inner();
+
+        let (_, code) = self
+            .bucket
+            .put_object(to.key(), &upload_contents)
+            .await
+            .with_context(|| format!("Failed to create s3 object with key {}", to.key()))?;
+        if code != 200 {
+            Err(anyhow::format_err!(
+                "Received non-200 exit code during creating object with key '{}', code: {}",
+                to.key(),
+                code
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn download_relish(
         &self,
         from: &Self::RelishStoragePath,
-        mut to: std::io::BufWriter<W>,
-    ) -> anyhow::Result<std::io::BufWriter<W>> {
-        let code = self
+        to: &mut (impl io::AsyncWrite + Unpin + Send),
+    ) -> anyhow::Result<()> {
+        let (data, code) = self
             .bucket
-            .get_object_stream(from.key(), &mut to)
+            .get_object(from.key())
             .await
             .with_context(|| format!("Failed to download s3 object with key {}", from.key()))?;
         if code != 200 {
@@ -123,12 +152,10 @@ impl RelishStorage for S3 {
                 code
             ))
         } else {
-            tokio::task::spawn_blocking(move || {
-                to.flush().context("Failed to flush the download buffer")?;
-                Ok::<_, anyhow::Error>(to)
-            })
-            .await
-            .context("Failed to join the download buffer flush task")?
+            io::copy(&mut io::BufReader::new(data.as_slice()), to)
+                .await
+                .context("Failed to write downloaded data into the destination buffer")?;
+            Ok(())
         }
     }
 
@@ -142,27 +169,6 @@ impl RelishStorage for S3 {
             Err(anyhow::format_err!(
                 "Received non-204 exit code during deleting object with key '{}', code: {}",
                 path.key(),
-                code
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn upload_relish<R: tokio::io::AsyncRead + std::marker::Unpin + Send>(
-        &self,
-        from: &mut tokio::io::BufReader<R>,
-        to: &Self::RelishStoragePath,
-    ) -> anyhow::Result<()> {
-        let code = self
-            .bucket
-            .put_object_stream(from, to.key())
-            .await
-            .with_context(|| format!("Failed to create s3 object with key {}", to.key()))?;
-        if code != 200 {
-            Err(anyhow::format_err!(
-                "Received non-200 exit code during creating object with key '{}', code: {}",
-                to.key(),
                 code
             ))
         } else {

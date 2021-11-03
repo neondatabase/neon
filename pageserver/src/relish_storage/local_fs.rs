@@ -7,13 +7,15 @@
 use std::{
     ffi::OsStr,
     future::Future,
-    io::Write,
     path::{Path, PathBuf},
     pin::Pin,
 };
 
 use anyhow::{bail, Context};
-use tokio::{fs, io};
+use tokio::{
+    fs,
+    io::{self, AsyncWriteExt},
+};
 use tracing::*;
 
 use crate::layered_repository::metadata::METADATA_FILE_NAME;
@@ -89,57 +91,9 @@ impl RelishStorage for LocalFs {
         Ok(get_all_files(&self.root).await?.into_iter().collect())
     }
 
-    async fn download_relish<W: 'static + std::io::Write + Send>(
+    async fn upload_relish(
         &self,
-        from: &Self::RelishStoragePath,
-        mut to: std::io::BufWriter<W>,
-    ) -> anyhow::Result<std::io::BufWriter<W>> {
-        let file_path = self.resolve_in_storage(from)?;
-
-        if file_path.exists() && file_path.is_file() {
-            let updated_buffer = tokio::task::spawn_blocking(move || {
-                let mut source = std::io::BufReader::new(
-                    std::fs::OpenOptions::new()
-                        .read(true)
-                        .open(&file_path)
-                        .with_context(|| {
-                            format!(
-                                "Failed to open source file '{}' to use in the download",
-                                file_path.display()
-                            )
-                        })?,
-                );
-                std::io::copy(&mut source, &mut to)
-                    .context("Failed to download the relish file")?;
-                to.flush().context("Failed to flush the download buffer")?;
-                Ok::<_, anyhow::Error>(to)
-            })
-            .await
-            .context("Failed to spawn a blocking task")??;
-            Ok(updated_buffer)
-        } else {
-            bail!(
-                "File '{}' either does not exist or is not a file",
-                file_path.display()
-            )
-        }
-    }
-
-    async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()> {
-        let file_path = self.resolve_in_storage(path)?;
-        if file_path.exists() && file_path.is_file() {
-            Ok(fs::remove_file(file_path).await?)
-        } else {
-            bail!(
-                "File '{}' either does not exist or is not a file",
-                file_path.display()
-            )
-        }
-    }
-
-    async fn upload_relish<R: io::AsyncRead + std::marker::Unpin + Send>(
-        &self,
-        from: &mut io::BufReader<R>,
+        from: &mut (impl io::AsyncRead + Unpin + Send),
         to: &Self::RelishStoragePath,
     ) -> anyhow::Result<()> {
         let target_file_path = self.resolve_in_storage(to)?;
@@ -158,10 +112,58 @@ impl RelishStorage for LocalFs {
                 })?,
         );
 
-        io::copy_buf(from, &mut destination)
+        io::copy(from, &mut destination)
+            .await
+            .context("Failed to upload relish to local storage")?;
+        destination
+            .flush()
             .await
             .context("Failed to upload relish to local storage")?;
         Ok(())
+    }
+
+    async fn download_relish(
+        &self,
+        from: &Self::RelishStoragePath,
+        to: &mut (impl io::AsyncWrite + Unpin + Send),
+    ) -> anyhow::Result<()> {
+        let file_path = self.resolve_in_storage(from)?;
+
+        if file_path.exists() && file_path.is_file() {
+            let mut source = io::BufReader::new(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .open(&file_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to open source file '{}' to use in the download",
+                            file_path.display()
+                        )
+                    })?,
+            );
+            io::copy(&mut source, to)
+                .await
+                .context("Failed to download the relish file")?;
+            Ok(())
+        } else {
+            bail!(
+                "File '{}' either does not exist or is not a file",
+                file_path.display()
+            )
+        }
+    }
+
+    async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()> {
+        let file_path = self.resolve_in_storage(path)?;
+        if file_path.exists() && file_path.is_file() {
+            Ok(fs::remove_file(file_path).await?)
+        } else {
+            bail!(
+                "File '{}' either does not exist or is not a file",
+                file_path.display()
+            )
+        }
     }
 }
 
@@ -406,12 +408,12 @@ mod pure_tests {
 
 #[cfg(test)]
 mod fs_tests {
+    use super::*;
     use crate::{
         relish_storage::test_utils::relative_timeline_path, repository::repo_harness::RepoHarness,
     };
 
-    use super::*;
-
+    use std::io::Write;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -479,11 +481,13 @@ mod fs_tests {
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name).await?;
 
-        let contents_bytes = storage
-            .download_relish(&upload_target, std::io::BufWriter::new(Vec::new()))
-            .await?
-            .into_inner()?;
-        let contents = String::from_utf8(contents_bytes)?;
+        let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        storage
+            .download_relish(&upload_target, &mut content_bytes)
+            .await?;
+        content_bytes.flush().await?;
+
+        let contents = String::from_utf8(content_bytes.into_inner().into_inner())?;
         assert_eq!(
             dummy_contents(upload_name),
             contents,
@@ -492,7 +496,7 @@ mod fs_tests {
 
         let non_existing_path = PathBuf::from("somewhere").join("else");
         match storage
-            .download_relish(&non_existing_path, std::io::BufWriter::new(Vec::new()))
+            .download_relish(&non_existing_path, &mut io::sink())
             .await
         {
             Ok(_) => panic!("Should not allow downloading non-existing storage files"),

@@ -70,7 +70,12 @@ use std::{
 use anyhow::{ensure, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
-use tokio::{sync::Semaphore, time::Instant};
+use tokio::{
+    fs,
+    io::{self, AsyncWriteExt},
+    sync::Semaphore,
+    time::Instant,
+};
 use tracing::*;
 
 use super::{RelishStorage, RemoteRelishInfo};
@@ -305,7 +310,7 @@ fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RelishStorage<RelishStorag
             }
         };
     }
-    log::debug!("Queue based relish storage sync thread shut down");
+    debug!("Queue based relish storage sync thread shut down");
     Ok(())
 }
 
@@ -315,7 +320,7 @@ fn add_to_queue(task: SyncTask) {
 
 fn register_sync_status(sync_start: Instant, sync_name: &str, sync_status: Option<bool>) {
     let secs_elapsed = sync_start.elapsed().as_secs_f64();
-    log::debug!("Processed a sync task in {} seconds", secs_elapsed);
+    debug!("Processed a sync task in {} seconds", secs_elapsed);
     match sync_status {
         Some(true) => IMAGE_SYNC_TIME.with_label_values(&[sync_name, "success"]),
         Some(false) => IMAGE_SYNC_TIME.with_label_values(&[sync_name, "failure"]),
@@ -412,16 +417,23 @@ async fn remote_relish_info<P, S: 'static + RelishStorage<RelishStoragePath = P>
 ) -> anyhow::Result<(RemoteRelishInfo, Option<TimelineMetadata>)> {
     let info = relish_storage.info(remote_path)?;
     let metadata = if info.is_metadata {
-        let metadata_bytes = relish_storage
-            .download_relish(remote_path, std::io::BufWriter::new(Vec::new()))
+        let mut metadata_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        relish_storage
+            .download_relish(remote_path, &mut metadata_bytes)
             .await
-            .and_then(|buf_writer| Ok(buf_writer.into_inner()?))
             .with_context(|| {
                 format!(
                     "Failed to download metadata file contents for tenant {}, timeline {}",
                     info.tenant_id, info.timeline_id
                 )
             })?;
+        metadata_bytes.flush().await.with_context(|| {
+            format!(
+                "Failed to download metadata file contents for tenant {}, timeline {}",
+                info.tenant_id, info.timeline_id
+            )
+        })?;
+        let metadata_bytes = metadata_bytes.into_inner().into_inner();
         Some(TimelineMetadata::from_bytes(&metadata_bytes)?)
     } else {
         None
@@ -735,7 +747,7 @@ async fn sync_metadata<'a, P, S: 'static + RelishStorage<RelishStoragePath = P>>
                         local_metadata_path.display()
                     )
                 })?;
-            let mut bytes = tokio::io::BufReader::new(std::io::Cursor::new(new_metadata_bytes));
+            let mut bytes = io::BufReader::new(new_metadata_bytes.as_slice());
             relish_storage
                 .upload_relish(&mut bytes, &remote_path)
                 .await?;
@@ -754,7 +766,7 @@ async fn upload<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
             source.display()
         )
     })?;
-    let mut source_file = tokio::io::BufReader::new(
+    let mut source_file = io::BufReader::new(
         tokio::fs::OpenOptions::new()
             .read(true)
             .open(source)
@@ -797,11 +809,12 @@ async fn download<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
                     })?;
             }
         }
-        let destination_file = std::io::BufWriter::new(
-            std::fs::OpenOptions::new()
+        let mut destination_file = io::BufWriter::new(
+            fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(destination)
+                .await
                 .with_context(|| {
                     format!(
                         "Failed to open download destination file '{}'",
@@ -811,8 +824,9 @@ async fn download<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
         );
 
         relish_storage
-            .download_relish(&source, destination_file)
+            .download_relish(&source, &mut destination_file)
             .await?;
+        destination_file.flush().await?;
         Ok(())
     }
 }
