@@ -17,6 +17,7 @@ use bytes::Bytes;
 use lazy_static::lazy_static;
 use postgres_ffi::pg_constants::BLCKSZ;
 use tracing::*;
+use zenith_utils::batch_fsync::BatchFsync;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -1145,6 +1146,8 @@ impl LayeredTimeline {
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
 
+        let mut batch_fsync = BatchFsync::default();
+
         let mut layer_uploads = Vec::new();
         while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
@@ -1176,7 +1179,7 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let mut this_layer_uploads = self.evict_layer(oldest_layer_id)?;
+            let mut this_layer_uploads = self.evict_layer(oldest_layer_id, &mut batch_fsync)?;
             layer_uploads.append(&mut this_layer_uploads);
 
             write_guard = self.write_lock.lock().unwrap();
@@ -1198,8 +1201,10 @@ impl LayeredTimeline {
             // new layer files are durable
             let timeline_dir =
                 File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
-            timeline_dir.sync_all()?;
+            batch_fsync.add(timeline_dir)?;
         }
+
+        batch_fsync.done()?;
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
@@ -1246,7 +1251,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn evict_layer(&self, layer_id: LayerId) -> Result<Vec<PathBuf>> {
+    fn evict_layer(&self, layer_id: LayerId, batch_fsync: &mut BatchFsync) -> Result<Vec<PathBuf>> {
         // Mark the layer as no longer accepting writes and record the end_lsn.
         // This happens in-place, no new layers are created now.
         // We call `get_last_record_lsn` again, which may be different from the
@@ -1271,7 +1276,7 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let new_historics = oldest_layer.write_to_disk(self)?;
+            let new_historics = oldest_layer.write_to_disk(self, batch_fsync)?;
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
@@ -1882,9 +1887,13 @@ pub fn evict_layer_if_needed(conf: &PageServerConf) -> Result<()> {
 
         let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
 
+        let mut batch_fsync = BatchFsync::default();
+
         timeline
             .upgrade_to_layered_timeline()
-            .evict_layer(layer_id)?;
+            .evict_layer(layer_id, &mut batch_fsync)?;
+
+        batch_fsync.done()?;
 
         global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
     }

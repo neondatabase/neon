@@ -48,6 +48,7 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
+use zenith_utils::batch_fsync::BatchFsync;
 use zenith_utils::vec_map::VecMap;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
@@ -364,6 +365,7 @@ impl DeltaLayer {
         dropped: bool,
         page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
         relsizes: VecMap<Lsn, u32>,
+        batch_fsync: &mut BatchFsync,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
             assert!(!relsizes.is_empty());
@@ -436,7 +438,8 @@ impl DeltaLayer {
 
         // This flushes the underlying 'buf_writer'.
         let writer = book.close()?;
-        writer.get_ref().sync_all()?;
+        let file = writer.into_inner()?;
+        batch_fsync.add(file)?;
 
         trace!("saved {}", &path.display());
 

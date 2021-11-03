@@ -19,6 +19,7 @@ use log::*;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
+use zenith_utils::batch_fsync::BatchFsync;
 use zenith_utils::vec_map::VecMap;
 
 use zenith_utils::lsn::Lsn;
@@ -601,7 +602,11 @@ impl InMemoryLayer {
     /// WAL records between start and end LSN. (The delta layer is not needed
     /// when a new relish is created with a single LSN, so that the start and
     /// end LSN are the same.)
-    pub fn write_to_disk(&self, timeline: &LayeredTimeline) -> Result<LayersOnDisk> {
+    pub fn write_to_disk(
+        &self,
+        timeline: &LayeredTimeline,
+        batch_fsync: &mut BatchFsync,
+    ) -> Result<LayersOnDisk> {
         trace!(
             "write_to_disk {} get_end_lsn is {}",
             self.filename().display(),
@@ -631,6 +636,7 @@ impl InMemoryLayer {
                 true,
                 inner.page_versions.ordered_page_version_iter(None),
                 inner.segsizes.clone(),
+                batch_fsync,
             )?;
             trace!(
                 "freeze: created delta layer for dropped segment {} {}-{}",
@@ -668,6 +674,7 @@ impl InMemoryLayer {
                 false,
                 page_versions,
                 segsizes,
+                batch_fsync,
             )?;
             delta_layers.push(delta_layer);
             trace!(
@@ -684,7 +691,7 @@ impl InMemoryLayer {
 
         // Write a new base image layer at the cutoff point
         let image_layer =
-            ImageLayer::create_from_src(self.conf, timeline, self, end_lsn_inclusive)?;
+            ImageLayer::create_from_src(self.conf, timeline, self, end_lsn_inclusive, batch_fsync)?;
         trace!(
             "freeze: created image layer {} at {}",
             self.seg,

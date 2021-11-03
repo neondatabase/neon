@@ -43,3 +43,6 @@ pub mod accum;
 
 // Utility for binding TcpListeners with proper socket options.
 pub mod tcp_listener;
+
+// Call fsync for many files at once.
+pub mod batch_fsync;

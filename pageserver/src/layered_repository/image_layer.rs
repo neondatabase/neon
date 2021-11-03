@@ -39,6 +39,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use zenith_utils::batch_fsync::BatchFsync;
 
 use bookfile::{Book, BookWriter};
 
@@ -261,6 +262,7 @@ impl ImageLayer {
         seg: SegmentTag,
         lsn: Lsn,
         base_images: Vec<Bytes>,
+        batch_fsync: &mut BatchFsync,
     ) -> Result<ImageLayer> {
         let image_type = if seg.rel.is_blocky() {
             let num_blocks: u32 = base_images.len().try_into()?;
@@ -320,7 +322,8 @@ impl ImageLayer {
 
         // This flushes the underlying 'buf_writer'.
         let writer = book.close()?;
-        writer.get_ref().sync_all()?;
+        let file = writer.into_inner()?;
+        batch_fsync.add(file)?;
 
         trace!("saved {}", path.display());
 
@@ -336,6 +339,7 @@ impl ImageLayer {
         timeline: &LayeredTimeline,
         src: &dyn Layer,
         lsn: Lsn,
+        batch_fsync: &mut BatchFsync,
     ) -> Result<ImageLayer> {
         let seg = src.get_seg_tag();
         let timelineid = timeline.timelineid;
@@ -364,7 +368,15 @@ impl ImageLayer {
             base_images.push(img);
         }
 
-        Self::create(conf, timelineid, timeline.tenantid, seg, lsn, base_images)
+        Self::create(
+            conf,
+            timelineid,
+            timeline.tenantid,
+            seg,
+            lsn,
+            base_images,
+            batch_fsync,
+        )
     }
 
     ///
