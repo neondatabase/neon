@@ -1,4 +1,4 @@
-use std::{fs::File, io::Write};
+use std::{fs::File, io::Read, io::Write};
 
 use anyhow::Result;
 use bookfile::{BookWriter, BoundedReader, ChapterId, ChapterWriter};
@@ -28,14 +28,14 @@ impl<W: Write> BlobWriter<W> {
         Self { writer, offset: 0 }
     }
 
-    pub fn write_blob(&mut self, blob: &[u8]) -> Result<BlobRange> {
-        self.writer.write_all(blob)?;
+    pub fn write_blob_from_reader(&mut self, r: &mut impl Read) -> Result<BlobRange> {
+        let len = std::io::copy(r, &mut self.writer)?;
 
         let range = BlobRange {
             offset: self.offset,
-            size: blob.len(),
+            size: len as usize,
         };
-        self.offset += blob.len() as u64;
+        self.offset += len as u64;
         Ok(range)
     }
 

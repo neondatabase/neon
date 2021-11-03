@@ -11,6 +11,9 @@ pub mod seqwait;
 /// append only ordered map implemented with a Vec
 pub mod vec_map;
 
+/// expandable byte buffer consisting of fixed-size chunks
+pub mod chunked_buffer;
+
 // Async version of SeqWait. Currently unused.
 // pub mod seqwait_async;
 
