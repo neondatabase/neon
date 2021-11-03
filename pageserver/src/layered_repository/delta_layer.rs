@@ -39,6 +39,7 @@
 //!
 use crate::layered_repository::blob::BlobWriter;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
+use crate::layered_repository::page_versions::PageVersions;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag,
 };
@@ -347,14 +348,14 @@ impl DeltaLayer {
     }
 
     /// Create a new delta file, using the given page versions and relsizes.
-    /// The page versions are passed by an iterator; the iterator must return
-    /// page versions in blknum+lsn order.
+    /// The page versions are passed in a PageVersions struct. If 'cutoff' is
+    /// given, only page versions with LSN < cutoff are included.
     ///
-    /// This is used to write the in-memory layer to disk. The in-memory layer uses the same
-    /// data structure with two btreemaps as we do, so passing the btreemaps is currently
-    /// expedient.
+    /// This is used to write the in-memory layer to disk. The page_versions and
+    /// relsizes are thus passed in the same format as they are in the in-memory
+    /// layer, as that's expedient.
     #[allow(clippy::too_many_arguments)]
-    pub fn create<'a>(
+    pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
@@ -362,7 +363,8 @@ impl DeltaLayer {
         start_lsn: Lsn,
         end_lsn: Lsn,
         dropped: bool,
-        page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
+        page_versions: &PageVersions,
+        cutoff: Option<Lsn>,
         relsizes: VecMap<Lsn, u32>,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
@@ -396,9 +398,10 @@ impl DeltaLayer {
 
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
-        for (blknum, lsn, page_version) in page_versions {
-            let buf = PageVersion::ser(page_version)?;
-            let blob_range = page_version_writer.write_blob(&buf)?;
+        let page_versions_iter = page_versions.ordered_page_version_iter(cutoff);
+        for (blknum, lsn, pos) in page_versions_iter {
+            let blob_range =
+                page_version_writer.write_blob_from_reader(&mut page_versions.reader(pos)?)?;
 
             inner
                 .page_version_metas

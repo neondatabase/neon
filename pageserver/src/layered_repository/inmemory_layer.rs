@@ -184,7 +184,8 @@ impl Layer for InMemoryLayer {
                 .get_block_lsn_range(blknum, ..=lsn)
                 .iter()
                 .rev();
-            for (entry_lsn, entry) in iter {
+            for (entry_lsn, pos) in iter {
+                let entry = inner.page_versions.get_page_version(*pos)?;
                 if let Some(img) = &entry.page_image {
                     reconstruct_data.page_img = Some(img.clone());
                     need_image = false;
@@ -285,7 +286,8 @@ impl Layer for InMemoryLayer {
             println!("segsizes {}: {}", k, v);
         }
 
-        for (blknum, lsn, pv) in inner.page_versions.ordered_page_version_iter(None) {
+        for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
+            let pv = inner.page_versions.get_page_version(pos)?;
             println!(
                 "blk {} at {}: {}/{}\n",
                 blknum,
@@ -629,7 +631,8 @@ impl InMemoryLayer {
                 self.start_lsn,
                 end_lsn_exclusive,
                 true,
-                inner.page_versions.ordered_page_version_iter(None),
+                &inner.page_versions,
+                None,
                 inner.segsizes.clone(),
             )?;
             trace!(
@@ -646,12 +649,8 @@ impl InMemoryLayer {
 
         // Since `end_lsn` is inclusive, subtract 1.
         // We want to make an ImageLayer for the last included LSN,
-        // so the DeltaLayer should exlcude that LSN.
+        // so the DeltaLayer should exclude that LSN.
         let end_lsn_inclusive = Lsn(end_lsn_exclusive.0 - 1);
-
-        let mut page_versions = inner
-            .page_versions
-            .ordered_page_version_iter(Some(end_lsn_inclusive));
 
         let mut delta_layers = Vec::new();
 
@@ -666,7 +665,8 @@ impl InMemoryLayer {
                 self.start_lsn,
                 end_lsn_inclusive,
                 false,
-                page_versions,
+                &inner.page_versions,
+                Some(end_lsn_inclusive),
                 segsizes,
             )?;
             delta_layers.push(delta_layer);
@@ -677,7 +677,11 @@ impl InMemoryLayer {
                 end_lsn_inclusive
             );
         } else {
-            assert!(page_versions.next().is_none());
+            assert!(inner
+                .page_versions
+                .ordered_page_version_iter(None)
+                .next()
+                .is_none());
         }
 
         drop(inner);

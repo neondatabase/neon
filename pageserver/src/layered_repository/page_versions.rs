@@ -1,13 +1,27 @@
 use std::{collections::HashMap, ops::RangeBounds, slice};
 
+use anyhow::Result;
+
+use std::io::{Read, Write};
+
+use zenith_utils::chunked_buffer::{ChunkedBuffer, ChunkedBufferReader};
 use zenith_utils::{lsn::Lsn, vec_map::VecMap};
 
 use super::storage_layer::PageVersion;
 
-const EMPTY_SLICE: &[(Lsn, PageVersion)] = &[];
+use zenith_utils::bin_ser::LeSer;
+
+const EMPTY_SLICE: &[(Lsn, u64)] = &[];
 
 #[derive(Debug, Default)]
-pub struct PageVersions(HashMap<u32, VecMap<Lsn, PageVersion>>);
+pub struct PageVersions {
+    map: HashMap<u32, VecMap<Lsn, u64>>,
+
+    /// The PageVersion structs are stored in a serialized format in this buffer.
+    /// Each serialized PageVersion is preceded by a 'u32' length field.
+    /// The 'map' stores offsets into this buffer.
+    buffer: ChunkedBuffer,
+}
 
 impl PageVersions {
     pub fn append_or_update_last(
@@ -15,26 +29,35 @@ impl PageVersions {
         blknum: u32,
         lsn: Lsn,
         page_version: PageVersion,
-    ) -> Option<PageVersion> {
-        let map = self.0.entry(blknum).or_insert_with(VecMap::default);
-        map.append_or_update_last(lsn, page_version).unwrap()
+    ) -> Option<u64> {
+        // remember starting position
+        let pos = self.buffer.len();
+
+        // make room for the 'length' field by writing zeros as a placeholder.
+        self.buffer.write_all(&[0u8; 4]).unwrap();
+
+        page_version.ser_into(&mut self.buffer).unwrap();
+
+        // write the 'length' field.
+        let len = self.buffer.len() - pos - 4;
+        let lenbuf = u32::to_ne_bytes(len as u32);
+        self.buffer.write_all_at(&lenbuf, pos).unwrap();
+
+        let map = self.map.entry(blknum).or_insert_with(VecMap::default);
+        map.append_or_update_last(lsn, pos as u64).unwrap()
     }
 
     /// Get all [`PageVersion`]s in a block
-    pub fn get_block_slice(&self, blknum: u32) -> &[(Lsn, PageVersion)] {
-        self.0
+    fn get_block_slice(&self, blknum: u32) -> &[(Lsn, u64)] {
+        self.map
             .get(&blknum)
             .map(VecMap::as_slice)
             .unwrap_or(EMPTY_SLICE)
     }
 
     /// Get a range of [`PageVersions`] in a block
-    pub fn get_block_lsn_range<R: RangeBounds<Lsn>>(
-        &self,
-        blknum: u32,
-        range: R,
-    ) -> &[(Lsn, PageVersion)] {
-        self.0
+    pub fn get_block_lsn_range<R: RangeBounds<Lsn>>(&self, blknum: u32, range: R) -> &[(Lsn, u64)] {
+        self.map
             .get(&blknum)
             .map(|vec_map| vec_map.slice_range(range))
             .unwrap_or(EMPTY_SLICE)
@@ -43,7 +66,7 @@ impl PageVersions {
     /// Iterate through [`PageVersion`]s in (block, lsn) order.
     /// If a [`cutoff_lsn`] is set, only show versions with `lsn < cutoff_lsn`
     pub fn ordered_page_version_iter(&self, cutoff_lsn: Option<Lsn>) -> OrderedPageVersionIter<'_> {
-        let mut ordered_blocks: Vec<u32> = self.0.keys().cloned().collect();
+        let mut ordered_blocks: Vec<u32> = self.map.keys().cloned().collect();
         ordered_blocks.sort_unstable();
 
         let slice = ordered_blocks
@@ -59,6 +82,22 @@ impl PageVersions {
             cur_slice_iter: slice.iter(),
         }
     }
+
+    /// Returns a 'Read' that reads the page version at given offset.
+    pub fn reader(&self, pos: u64) -> Result<std::io::Take<ChunkedBufferReader>, std::io::Error> {
+        // read length
+        let mut lenbuf = [0u8; 4];
+        let mut reader = self.buffer.reader(pos);
+        reader.read_exact(&mut lenbuf)?;
+        let len = u32::from_ne_bytes(lenbuf);
+
+        Ok(reader.take(len as u64))
+    }
+
+    pub fn get_page_version(&self, pos: u64) -> Result<PageVersion> {
+        let mut reader = self.reader(pos)?;
+        Ok(PageVersion::des_from(&mut reader)?)
+    }
 }
 
 pub struct OrderedPageVersionIter<'a> {
@@ -69,7 +108,7 @@ pub struct OrderedPageVersionIter<'a> {
 
     cutoff_lsn: Option<Lsn>,
 
-    cur_slice_iter: slice::Iter<'a, (Lsn, PageVersion)>,
+    cur_slice_iter: slice::Iter<'a, (Lsn, u64)>,
 }
 
 impl OrderedPageVersionIter<'_> {
@@ -83,14 +122,14 @@ impl OrderedPageVersionIter<'_> {
 }
 
 impl<'a> Iterator for OrderedPageVersionIter<'a> {
-    type Item = (u32, Lsn, &'a PageVersion);
+    type Item = (u32, Lsn, u64);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some((lsn, page_version)) = self.cur_slice_iter.next() {
+            if let Some((lsn, pos)) = self.cur_slice_iter.next() {
                 if self.is_lsn_before_cutoff(lsn) {
                     let blknum = self.ordered_blocks[self.cur_block_idx];
-                    return Some((blknum, *lsn, page_version));
+                    return Some((blknum, *lsn, *pos));
                 }
             }
 
