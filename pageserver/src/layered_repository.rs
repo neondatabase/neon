@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata};
 use crate::relish::*;
-use crate::relish_storage::schedule_timeline_upload;
+use crate::remote_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
 use crate::tenant_mgr;
 use crate::walreceiver;

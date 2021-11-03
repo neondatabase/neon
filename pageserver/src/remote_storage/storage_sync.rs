@@ -1,4 +1,4 @@
-//! A synchronization logic for the [`RelishStorage`] and the state to ensure the correct synchronizations.
+//! A synchronization logic for the [`RemoteStorage`] and the state to ensure the correct synchronizations.
 //!
 //! The synchronization does not aim to be immediate, instead
 //! doing all the job in a separate thread asynchronously, attempting to fully replicate the
@@ -9,12 +9,12 @@
 //!
 //! During the loop startup, an initial loop state is constructed from all remote storage entries.
 //! It's enough to poll the remote state once on startup only, due to agreement that the pageserver has
-//! an exclusive write access to the relish storage: new files appear in the storage only after the same
+//! an exclusive write access to the remote storage: new files appear in the storage only after the same
 //! pageserver writes them.
 //!
 //! The list construction is currently the only place where the storage sync can return an [`Err`] to the user.
 //! New upload tasks are accepted via [`schedule_timeline_upload`] function disregarding of the corresponding loop startup,
-//! it's up to the caller to avoid uploading of the new relishes, if that caller did not enable the loop.
+//! it's up to the caller to avoid uploading of the new file, if that caller did not enable the loop.
 //! After the initial state is loaded into memory and the loop starts, any further [`Err`] results do not stop the loop, but rather
 //! reschedules the same task, with possibly less files to sync in it.
 //!
@@ -51,7 +51,7 @@
 //! and two files are considered "equal", if their paths match. Such files are uploaded/downloaded over, no real contents checks are done.
 //! NOTE: No real contents or checksum check happens right now and is a subject to improve later.
 //!
-//! After the whole is downloaded, [`crate::tenant_mgr::register_relish_download`] function is used to register the image in pageserver.
+//! After the whole timeline is downloaded, [`crate::tenant_mgr::register_timeline_download`] function is used to register the image in pageserver.
 //!
 //! When pageserver signals shutdown, current sync task gets finished and the loop exists.
 //!
@@ -78,10 +78,10 @@ use tokio::{
 };
 use tracing::*;
 
-use super::{RelishStorage, RemoteRelishInfo};
+use super::{RemoteFileInfo, RemoteStorage};
 use crate::{
     layered_repository::metadata::{metadata_path, TimelineMetadata},
-    tenant_mgr::register_relish_download,
+    tenant_mgr::register_timeline_download,
     PageServerConf,
 };
 use zenith_metrics::{register_histogram_vec, register_int_gauge, HistogramVec, IntGauge};
@@ -92,12 +92,12 @@ use zenith_utils::{
 
 lazy_static! {
     static ref REMAINING_SYNC_ITEMS: IntGauge = register_int_gauge!(
-        "pageserver_backup_remaining_sync_items",
+        "pageserver_remote_storage_remaining_sync_items",
         "Number of storage sync items left in the queue"
     )
-    .expect("failed to register pageserver backup remaining sync items int gauge");
+    .expect("failed to register pageserver remote storage remaining sync items int gauge");
     static ref IMAGE_SYNC_TIME: HistogramVec = register_histogram_vec!(
-        "pageserver_backup_image_sync_time",
+        "pageserver_remote_storage_image_sync_time",
         "Time took to synchronize (download or upload) a whole pageserver image. \
         Grouped by `operation_kind` (upload|download) and `status` (success|failure)",
         &["operation_kind", "status"],
@@ -181,14 +181,14 @@ pub fn schedule_timeline_upload(
         }))
 }
 
-/// Uses a relish storage given to start the storage sync loop.
+/// Uses a remote storage given to start the storage sync loop.
 /// See module docs for loop step description.
 pub(super) fn spawn_storage_sync_thread<
     P: std::fmt::Debug,
-    S: 'static + RelishStorage<RelishStoragePath = P>,
+    S: 'static + RemoteStorage<StoragePath = P>,
 >(
     config: &'static PageServerConf,
-    relish_storage: S,
+    remote_storage: S,
     max_concurrent_sync: usize,
 ) -> anyhow::Result<thread::JoinHandle<anyhow::Result<()>>> {
     ensure!(
@@ -197,10 +197,10 @@ pub(super) fn spawn_storage_sync_thread<
     );
 
     let handle = thread::Builder::new()
-        .name("Queue based relish storage sync".to_string())
+        .name("Queue based remote storage sync".to_string())
         .spawn(move || {
             let concurrent_sync_limit = Semaphore::new(max_concurrent_sync);
-            let thread_result = storage_sync_loop(config, relish_storage, &concurrent_sync_limit);
+            let thread_result = storage_sync_loop(config, remote_storage, &concurrent_sync_limit);
             concurrent_sync_limit.close();
             if let Err(e) = &thread_result {
                 error!("Failed to run storage sync thread: {:#}", e);
@@ -210,16 +210,16 @@ pub(super) fn spawn_storage_sync_thread<
     Ok(handle)
 }
 
-fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RelishStorage<RelishStoragePath = P>>(
+fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RemoteStorage<StoragePath = P>>(
     config: &'static PageServerConf,
-    relish_storage: S,
+    remote_storage: S,
     concurrent_sync_limit: &Semaphore,
 ) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let mut remote_timelines = runtime
-        .block_on(fetch_existing_uploads(&relish_storage))
+        .block_on(fetch_existing_uploads(&remote_storage))
         .context("Failed to determine previously uploaded timelines")?;
 
     let urgent_downloads = latest_timelines(&remote_timelines)
@@ -231,7 +231,7 @@ fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RelishStorage<RelishStorag
             let exists_locally = config.timeline_path(&timeline_id, &tenant_id).exists();
             if exists_locally {
                 debug!(
-                    "Timeline with tenant id {}, relish id {} exists locally, not downloading",
+                    "Timeline with tenant id {}, timeline id {} exists locally, not downloading",
                     tenant_id, timeline_id
                 );
                 false
@@ -271,7 +271,7 @@ fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RelishStorage<RelishStorag
                             let sync_status = download_timeline(
                                 config,
                                 concurrent_sync_limit,
-                                &relish_storage,
+                                &remote_storage,
                                 download_data,
                                 false,
                             )
@@ -282,7 +282,7 @@ fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RelishStorage<RelishStorag
                             let sync_status = download_timeline(
                                 config,
                                 concurrent_sync_limit,
-                                &relish_storage,
+                                &remote_storage,
                                 download_data,
                                 true,
                             )
@@ -294,7 +294,7 @@ fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RelishStorage<RelishStorag
                                 config,
                                 concurrent_sync_limit,
                                 &mut remote_timelines,
-                                &relish_storage,
+                                &remote_storage,
                                 layer_upload,
                             )
                             .await;
@@ -310,7 +310,7 @@ fn storage_sync_loop<P: std::fmt::Debug, S: 'static + RelishStorage<RelishStorag
             }
         };
     }
-    debug!("Queue based relish storage sync thread shut down");
+    debug!("Queue based remote storage sync thread shut down");
     Ok(())
 }
 
@@ -354,33 +354,30 @@ fn latest_timelines(
         .collect()
 }
 
-async fn fetch_existing_uploads<
-    P: std::fmt::Debug,
-    S: 'static + RelishStorage<RelishStoragePath = P>,
->(
-    relish_storage: &S,
+async fn fetch_existing_uploads<P: std::fmt::Debug, S: 'static + RemoteStorage<StoragePath = P>>(
+    remote_storage: &S,
 ) -> anyhow::Result<HashMap<(ZTenantId, ZTimelineId), RemoteTimeline>> {
-    let uploaded_relishes = relish_storage
-        .list_relishes()
+    let uploaded_files = remote_storage
+        .list()
         .await
-        .context("Failed to list relish uploads")?;
+        .context("Failed to list the uploads")?;
 
-    let mut relish_data_fetches = uploaded_relishes
+    let mut data_fetches = uploaded_files
         .into_iter()
         .map(|remote_path| async {
             (
-                remote_relish_info(relish_storage, &remote_path).await,
+                remote_file_info(remote_storage, &remote_path).await,
                 remote_path,
             )
         })
         .collect::<FuturesUnordered<_>>();
 
     let mut fetched = HashMap::new();
-    while let Some((fetch_result, remote_path)) = relish_data_fetches.next().await {
+    while let Some((fetch_result, remote_path)) = data_fetches.next().await {
         match fetch_result {
-            Ok((relish_info, remote_metadata)) => {
-                let tenant_id = relish_info.tenant_id;
-                let timeline_id = relish_info.timeline_id;
+            Ok((file_info, remote_metadata)) => {
+                let tenant_id = file_info.tenant_id;
+                let timeline_id = file_info.timeline_id;
                 let remote_timeline =
                     fetched
                         .entry((tenant_id, timeline_id))
@@ -393,14 +390,12 @@ async fn fetch_existing_uploads<
                 if remote_metadata.is_some() {
                     remote_timeline.metadata = remote_metadata;
                 } else {
-                    remote_timeline
-                        .layers
-                        .push(relish_info.download_destination);
+                    remote_timeline.layers.push(file_info.download_destination);
                 }
             }
             Err(e) => {
                 warn!(
-                    "Failed to fetch relish info for path {:?}, reason: {:#}",
+                    "Failed to fetch file info for path {:?}, reason: {:#}",
                     remote_path, e
                 );
                 continue;
@@ -411,15 +406,15 @@ async fn fetch_existing_uploads<
     Ok(fetched)
 }
 
-async fn remote_relish_info<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
-    relish_storage: &S,
+async fn remote_file_info<P, S: 'static + RemoteStorage<StoragePath = P>>(
+    remote_storage: &S,
     remote_path: &P,
-) -> anyhow::Result<(RemoteRelishInfo, Option<TimelineMetadata>)> {
-    let info = relish_storage.info(remote_path)?;
+) -> anyhow::Result<(RemoteFileInfo, Option<TimelineMetadata>)> {
+    let info = remote_storage.info(remote_path)?;
     let metadata = if info.is_metadata {
         let mut metadata_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        relish_storage
-            .download_relish(remote_path, &mut metadata_bytes)
+        remote_storage
+            .download(remote_path, &mut metadata_bytes)
             .await
             .with_context(|| {
                 format!(
@@ -441,10 +436,10 @@ async fn remote_relish_info<P, S: 'static + RelishStorage<RelishStoragePath = P>
     Ok((info, metadata))
 }
 
-async fn download_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath = P>>(
+async fn download_timeline<'a, P, S: 'static + RemoteStorage<StoragePath = P>>(
     config: &'static PageServerConf,
     concurrent_sync_limit: &'a Semaphore,
-    relish_storage: &'a S,
+    remote_storage: &'a S,
     remote_timeline: RemoteTimeline,
     urgent: bool,
 ) -> Option<bool> {
@@ -463,7 +458,7 @@ async fn download_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath =
     let sync_result = synchronize_layers(
         config,
         concurrent_sync_limit,
-        relish_storage,
+        remote_storage,
         remote_timeline.layers.into_iter(),
         SyncOperation::Download,
         &new_metadata,
@@ -474,7 +469,7 @@ async fn download_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath =
 
     match sync_result {
         SyncResult::Success { .. } => {
-            register_relish_download(config, tenant_id, timeline_id);
+            register_timeline_download(config, tenant_id, timeline_id);
             Some(true)
         }
         SyncResult::MetadataSyncError { .. } => {
@@ -509,11 +504,11 @@ async fn download_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath =
 }
 
 #[allow(clippy::unnecessary_filter_map)]
-async fn upload_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath = P>>(
+async fn upload_timeline<'a, P, S: 'static + RemoteStorage<StoragePath = P>>(
     config: &'static PageServerConf,
     concurrent_sync_limit: &'a Semaphore,
     remote_timelines: &'a mut HashMap<(ZTenantId, ZTimelineId), RemoteTimeline>,
-    relish_storage: &'a S,
+    remote_storage: &'a S,
     mut new_upload: LocalTimeline,
 ) -> Option<bool> {
     let tenant_id = new_upload.tenant_id;
@@ -559,7 +554,7 @@ async fn upload_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath = P
     let sync_result = synchronize_layers(
         config,
         concurrent_sync_limit,
-        relish_storage,
+        remote_storage,
         new_layers.into_iter(),
         SyncOperation::Upload,
         &new_metadata,
@@ -607,9 +602,9 @@ async fn upload_timeline<'a, P, S: 'static + RelishStorage<RelishStoragePath = P
 
 /// Layer sync operation kind.
 ///
-/// This enum allows to unify the logic for image relish uploads and downloads.
+/// This enum allows to unify the logic for image uploads and downloads.
 /// When image's layers are synchronized, the only difference
-/// between downloads and uploads is the [`RelishStorage`] method we need to call.
+/// between downloads and uploads is the [`RemoteStorage`] method we need to call.
 #[derive(Debug, Copy, Clone)]
 enum SyncOperation {
     Download,
@@ -619,13 +614,13 @@ enum SyncOperation {
 /// Image sync result.
 #[derive(Debug)]
 enum SyncResult {
-    /// All relish files are synced (their paths returned).
+    /// All regular files are synced (their paths returned).
     /// Metadata file is synced too (path not returned).
     Success { synced: Vec<PathBuf> },
-    /// All relish files are synced (their paths returned).
+    /// All regular files are synced (their paths returned).
     /// Metadata file is not synced (path not returned).
     MetadataSyncError { synced: Vec<PathBuf> },
-    /// Some relish files are not synced, some are (paths returned).
+    /// Some regular files are not synced, some are (paths returned).
     /// Metadata file is not synced (path not returned).
     LayerSyncError {
         synced: Vec<PathBuf>,
@@ -634,13 +629,13 @@ enum SyncResult {
 }
 
 /// Synchronizes given layers and metadata contents of a certain image.
-/// Relishes are always synced before metadata files are, the latter gets synced only if
+/// Regular files are always synced before metadata files are, the latter gets synced only if
 /// the rest of the files are successfully processed.
 #[allow(clippy::too_many_arguments)]
-async fn synchronize_layers<'a, P, S: 'static + RelishStorage<RelishStoragePath = P>>(
+async fn synchronize_layers<'a, P, S: 'static + RemoteStorage<StoragePath = P>>(
     config: &'static PageServerConf,
     concurrent_sync_limit: &'a Semaphore,
-    relish_storage: &'a S,
+    remote_storage: &'a S,
     layers: impl Iterator<Item = PathBuf>,
     sync_operation: SyncOperation,
     new_metadata: &'a TimelineMetadata,
@@ -655,8 +650,8 @@ async fn synchronize_layers<'a, P, S: 'static + RelishStorage<RelishStoragePath 
                 .await
                 .expect("Semaphore should not be closed yet");
             let sync_result = match sync_operation {
-                SyncOperation::Download => download(relish_storage, &layer_path).await,
-                SyncOperation::Upload => upload(relish_storage, &layer_path).await,
+                SyncOperation::Download => download(remote_storage, &layer_path).await,
+                SyncOperation::Upload => upload(remote_storage, &layer_path).await,
             };
             drop(permit);
             (layer_path, sync_result)
@@ -689,7 +684,7 @@ async fn synchronize_layers<'a, P, S: 'static + RelishStorage<RelishStoragePath 
         trace!("Synced layers: {:?}", synced);
         match sync_metadata(
             config,
-            relish_storage,
+            remote_storage,
             sync_operation,
             new_metadata,
             tenant_id,
@@ -714,9 +709,9 @@ async fn synchronize_layers<'a, P, S: 'static + RelishStorage<RelishStoragePath 
     }
 }
 
-async fn sync_metadata<'a, P, S: 'static + RelishStorage<RelishStoragePath = P>>(
+async fn sync_metadata<'a, P, S: 'static + RemoteStorage<StoragePath = P>>(
     config: &'static PageServerConf,
-    relish_storage: &'a S,
+    remote_storage: &'a S,
     sync_operation: SyncOperation,
     new_metadata: &'a TimelineMetadata,
     tenant_id: ZTenantId,
@@ -739,7 +734,7 @@ async fn sync_metadata<'a, P, S: 'static + RelishStorage<RelishStoragePath = P>>
             .await?;
         }
         SyncOperation::Upload => {
-            let remote_path = relish_storage
+            let remote_path = remote_storage
                 .storage_path(&local_metadata_path)
                 .with_context(|| {
                     format!(
@@ -747,26 +742,28 @@ async fn sync_metadata<'a, P, S: 'static + RelishStorage<RelishStoragePath = P>>
                         local_metadata_path.display()
                     )
                 })?;
-            let mut bytes = io::BufReader::new(new_metadata_bytes.as_slice());
-            relish_storage
-                .upload_relish(&mut bytes, &remote_path)
+            remote_storage
+                .upload(
+                    io::BufReader::new(std::io::Cursor::new(new_metadata_bytes)),
+                    &remote_path,
+                )
                 .await?;
         }
     }
     Ok(())
 }
 
-async fn upload<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
-    relish_storage: &S,
+async fn upload<P, S: 'static + RemoteStorage<StoragePath = P>>(
+    remote_storage: &S,
     source: &Path,
 ) -> anyhow::Result<()> {
-    let destination = relish_storage.storage_path(source).with_context(|| {
+    let destination = remote_storage.storage_path(source).with_context(|| {
         format!(
             "Failed to derive storage destination out of upload path {}",
             source.display()
         )
     })?;
-    let mut source_file = io::BufReader::new(
+    let source_file = io::BufReader::new(
         tokio::fs::OpenOptions::new()
             .read(true)
             .open(source)
@@ -778,19 +775,17 @@ async fn upload<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
                 )
             })?,
     );
-    relish_storage
-        .upload_relish(&mut source_file, &destination)
-        .await
+    remote_storage.upload(source_file, &destination).await
 }
 
-async fn download<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
-    relish_storage: &S,
+async fn download<P, S: 'static + RemoteStorage<StoragePath = P>>(
+    remote_storage: &S,
     destination: &Path,
 ) -> anyhow::Result<()> {
     if destination.exists() {
         Ok(())
     } else {
-        let source = relish_storage.storage_path(destination).with_context(|| {
+        let source = remote_storage.storage_path(destination).with_context(|| {
             format!(
                 "Failed to derive storage source out of download destination '{}'",
                 destination.display()
@@ -823,8 +818,8 @@ async fn download<P, S: 'static + RelishStorage<RelishStoragePath = P>>(
                 })?,
         );
 
-        relish_storage
-            .download_relish(&source, &mut destination_file)
+        remote_storage
+            .download(&source, &mut destination_file)
             .await?;
         destination_file.flush().await?;
         Ok(())
@@ -841,7 +836,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        relish_storage::local_fs::LocalFs,
+        remote_storage::local_fs::LocalFs,
         repository::repo_harness::{RepoHarness, TIMELINE_ID},
     };
     use hex_literal::hex;
@@ -1015,7 +1010,7 @@ mod tests {
         let repo_harness = RepoHarness::create("reupload_missing_metadata")?;
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
         let mut remote_timelines =
-            store_incorrect_metadata_relishes(&repo_harness, &storage).await?;
+            store_timelines_with_incorrect_metadata(&repo_harness, &storage).await?;
         assert_timelines_equal(
             remote_timelines.clone(),
             fetch_existing_uploads(&storage).await?,
@@ -1094,7 +1089,7 @@ mod tests {
         let repo_harness = RepoHarness::create("test_download_timeline")?;
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
         let mut remote_timelines =
-            store_incorrect_metadata_relishes(&repo_harness, &storage).await?;
+            store_timelines_with_incorrect_metadata(&repo_harness, &storage).await?;
         fs::remove_dir_all(repo_harness.timeline_path(&NO_METADATA_TIMELINE_ID))?;
         fs::remove_dir_all(repo_harness.timeline_path(&CORRUPT_METADATA_TIMELINE_ID))?;
 
@@ -1328,20 +1323,20 @@ mod tests {
     async fn ensure_correct_timeline_upload<'a>(
         harness: &RepoHarness,
         remote_timelines: &'a mut HashMap<(ZTenantId, ZTimelineId), RemoteTimeline>,
-        relish_storage: &'a LocalFs,
+        remote_storage: &'a LocalFs,
         new_upload: LocalTimeline,
     ) {
         upload_timeline(
             harness.conf,
             &LIMIT,
             remote_timelines,
-            relish_storage,
+            remote_storage,
             new_upload.clone(),
         )
         .await;
         assert_timelines_equal(
             remote_timelines.clone(),
-            fetch_existing_uploads(relish_storage).await.unwrap(),
+            fetch_existing_uploads(remote_storage).await.unwrap(),
         );
 
         let new_remote_files = remote_timelines
@@ -1451,7 +1446,7 @@ mod tests {
             let actual_remote_paths = fs::read_dir(
                 remote_file
                     .parent()
-                    .expect("Remote relishes are expected to have their timeline dir as parent"),
+                    .expect("Remote files are expected to have their timeline dir as parent"),
             )
             .unwrap()
             .map(|dir| dir.unwrap().path())
@@ -1468,7 +1463,7 @@ mod tests {
         }
     }
 
-    async fn store_incorrect_metadata_relishes(
+    async fn store_timelines_with_incorrect_metadata(
         harness: &RepoHarness,
         storage: &LocalFs,
     ) -> anyhow::Result<HashMap<(ZTenantId, ZTimelineId), RemoteTimeline>> {
@@ -1500,15 +1495,15 @@ mod tests {
         .await;
 
         storage
-            .delete_relish(&storage.storage_path(&metadata_path(
+            .delete(&storage.storage_path(&metadata_path(
                 harness.conf,
                 NO_METADATA_TIMELINE_ID,
                 harness.tenant_id,
             ))?)
             .await?;
         storage
-            .upload_relish(
-                &mut BufReader::new(Cursor::new("corrupt meta".to_string().into_bytes())),
+            .upload(
+                BufReader::new(Cursor::new("corrupt meta".to_string().into_bytes())),
                 &storage.storage_path(&metadata_path(
                     harness.conf,
                     CORRUPT_METADATA_TIMELINE_ID,
@@ -1517,8 +1512,8 @@ mod tests {
             )
             .await?;
 
-        for remote_relish in remote_timelines.values_mut() {
-            remote_relish.metadata = None;
+        for remote_file in remote_timelines.values_mut() {
+            remote_file.metadata = None;
         }
 
         Ok(remote_timelines)
