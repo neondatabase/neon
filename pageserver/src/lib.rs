@@ -14,7 +14,7 @@ pub mod http;
 pub mod layered_repository;
 pub mod page_service;
 pub mod relish;
-pub mod relish_storage;
+pub mod remote_storage;
 pub mod repository;
 pub mod restore_local_repo;
 pub mod tenant_mgr;
@@ -42,7 +42,7 @@ pub mod defaults {
     pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
-    pub const DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
+    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
 
     pub const DEFAULT_OPEN_MEM_LIMIT: usize = 128 * 1024 * 1024;
 }
@@ -88,7 +88,7 @@ pub struct PageServerConf {
     pub auth_type: AuthType,
 
     pub auth_validation_public_key_path: Option<PathBuf>,
-    pub relish_storage_config: Option<RelishStorageConfig>,
+    pub remote_storage_config: Option<RemoteStorageConfig>,
 }
 
 impl PageServerConf {
@@ -165,7 +165,7 @@ impl PageServerConf {
             pg_distrib_dir: "".into(),
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
-            relish_storage_config: None,
+            remote_storage_config: None,
         }
     }
 }
@@ -179,18 +179,18 @@ pub enum CheckpointConfig {
     Forced,
 }
 
-/// External relish storage configuration, enough for creating a client for that storage.
+/// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone)]
-pub struct RelishStorageConfig {
-    /// Limits the number of concurrent sync operations between pageserver and relish storage.
+pub struct RemoteStorageConfig {
+    /// Limits the number of concurrent sync operations between pageserver and the remote storage.
     pub max_concurrent_sync: usize,
     /// The storage connection configuration.
-    pub storage: RelishStorageKind,
+    pub storage: RemoteStorageKind,
 }
 
-/// A kind of a relish storage to connect to, with its connection configuration.
+/// A kind of a remote storage to connect to, with its connection configuration.
 #[derive(Debug, Clone)]
-pub enum RelishStorageKind {
+pub enum RemoteStorageKind {
     /// Storage based on local file system.
     /// Specify a root folder to place all stored relish data into.
     LocalFs(PathBuf),

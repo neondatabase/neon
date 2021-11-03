@@ -129,7 +129,7 @@ There are the following implementations present:
 * local filesystem — to use in tests mainly
 * AWS S3           - to use in production
 
-Implementation details are covered in the [storage readme](./src/relish_storage/README.md) and corresponding Rust file docs.
+Implementation details are covered in the [backup readme](./src/remote_storage/README.md) and corresponding Rust file docs.
 
 The backup service is disabled by default and can be enabled to interact with a single remote storage.
 
@@ -140,18 +140,18 @@ CLI examples:
 For Amazon AWS S3, a key id and secret access key could be located in `~/.aws/credentials` if awscli was ever configured to work with the desired bucket, on the AWS Settings page for a certain user. Also note, that the bucket names does not contain any protocols when used on AWS.
 For local S3 installations, refer to the their documentation for name format and credentials.
 
-Similar to other pageserver settings, toml config file can be used to configure either of the storages as backup backup targets.
+Similar to other pageserver settings, toml config file can be used to configure either of the storages as backup targets.
 Required sections are:
 
 ```toml
-[relish_storage]
+[remote_storage]
 local_path = '/Users/someonetoignore/Downloads/tmp_dir/'
 ```
 
 or
 
 ```toml
-[relish_storage]
+[remote_storage]
 bucket_name = 'some-sample-bucket'
 bucket_region = 'eu-north-1'
 access_key_id = 'SOMEKEYAAAAASADSAH*#'

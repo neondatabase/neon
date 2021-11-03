@@ -104,7 +104,7 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
     tenant.state = TenantState::Idle;
 }
 
-pub fn register_relish_download(
+pub fn register_timeline_download(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,

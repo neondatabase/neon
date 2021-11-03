@@ -1,5 +1,5 @@
-//! AWS S3 relish storage wrapper around `rust_s3` library.
-//! Currently does not allow multiple pageservers to use the same bucket concurrently: relishes are
+//! AWS S3 storage wrapper around `rust_s3` library.
+//! Currently does not allow multiple pageservers to use the same bucket concurrently: objects are
 //! placed in the root of the bucket.
 
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use tokio::io::{self, AsyncWriteExt};
 
 use crate::{
     layered_repository::metadata::METADATA_FILE_NAME,
-    relish_storage::{parse_ids_from_path, strip_path_prefix, RelishStorage, RemoteRelishInfo},
+    remote_storage::{parse_ids_from_path, strip_path_prefix, RemoteFileInfo, RemoteStorage},
     S3Config,
 };
 
@@ -29,14 +29,14 @@ impl S3ObjectKey {
     }
 }
 
-/// AWS S3 relish storage.
+/// AWS S3 storage.
 pub struct S3 {
     pageserver_workdir: &'static Path,
     bucket: Bucket,
 }
 
 impl S3 {
-    /// Creates the relish storage, errors if incorrect AWS S3 configuration provided.
+    /// Creates the storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config, pageserver_workdir: &'static Path) -> anyhow::Result<Self> {
         let region = aws_config
             .bucket_region
@@ -63,10 +63,10 @@ impl S3 {
 }
 
 #[async_trait::async_trait]
-impl RelishStorage for S3 {
-    type RelishStoragePath = S3ObjectKey;
+impl RemoteStorage for S3 {
+    type StoragePath = S3ObjectKey;
 
-    fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::RelishStoragePath> {
+    fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::StoragePath> {
         let relative_path = strip_path_prefix(self.pageserver_workdir, local_path)?;
         let mut key = String::new();
         for segment in relative_path {
@@ -76,14 +76,14 @@ impl RelishStorage for S3 {
         Ok(S3ObjectKey(key))
     }
 
-    fn info(&self, storage_path: &Self::RelishStoragePath) -> anyhow::Result<RemoteRelishInfo> {
+    fn info(&self, storage_path: &Self::StoragePath) -> anyhow::Result<RemoteFileInfo> {
         let storage_path_key = &storage_path.0;
         let is_metadata =
             storage_path_key.ends_with(&format!("{}{}", S3_FILE_SEPARATOR, METADATA_FILE_NAME));
         let download_destination = storage_path.download_destination(self.pageserver_workdir);
         let (tenant_id, timeline_id) =
             parse_ids_from_path(storage_path_key.split(S3_FILE_SEPARATOR), storage_path_key)?;
-        Ok(RemoteRelishInfo {
+        Ok(RemoteFileInfo {
             tenant_id,
             timeline_id,
             download_destination,
@@ -91,7 +91,7 @@ impl RelishStorage for S3 {
         })
     }
 
-    async fn list_relishes(&self) -> anyhow::Result<Vec<Self::RelishStoragePath>> {
+    async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
         let list_response = self
             .bucket
             .list(String::new(), None)
@@ -105,13 +105,13 @@ impl RelishStorage for S3 {
             .collect())
     }
 
-    async fn upload_relish(
+    async fn upload(
         &self,
-        from: &mut (impl io::AsyncRead + Unpin + Send),
-        to: &Self::RelishStoragePath,
+        mut from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        to: &Self::StoragePath,
     ) -> anyhow::Result<()> {
         let mut upload_contents = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        io::copy(from, &mut upload_contents)
+        io::copy(&mut from, &mut upload_contents)
             .await
             .context("Failed to read the upload contents")?;
         upload_contents
@@ -136,10 +136,10 @@ impl RelishStorage for S3 {
         }
     }
 
-    async fn download_relish(
+    async fn download(
         &self,
-        from: &Self::RelishStoragePath,
-        to: &mut (impl io::AsyncWrite + Unpin + Send),
+        from: &Self::StoragePath,
+        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
     ) -> anyhow::Result<()> {
         let (data, code) = self
             .bucket
@@ -159,7 +159,7 @@ impl RelishStorage for S3 {
         }
     }
 
-    async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()> {
         let (_, code) = self
             .bucket
             .delete_object(path.key())
@@ -180,7 +180,7 @@ impl RelishStorage for S3 {
 #[cfg(test)]
 mod tests {
     use crate::{
-        relish_storage::test_utils::{
+        remote_storage::test_utils::{
             custom_tenant_id_path, custom_timeline_id_path, relative_timeline_path,
         },
         repository::repo_harness::{RepoHarness, TIMELINE_ID},
@@ -219,7 +219,7 @@ mod tests {
         let repo_harness = RepoHarness::create("storage_path_positive")?;
 
         let segment_1 = "matching";
-        let segment_2 = "relish";
+        let segment_2 = "file";
         let local_path = &repo_harness.conf.workdir.join(segment_1).join(segment_2);
         let expected_key = S3ObjectKey(format!(
             "{SEPARATOR}{}{SEPARATOR}{}",
@@ -291,7 +291,7 @@ mod tests {
 
         let s3_key = create_s3_key(&relative_timeline_path.join("not a metadata"));
         assert_eq!(
-            RemoteRelishInfo {
+            RemoteFileInfo {
                 tenant_id: repo_harness.tenant_id,
                 timeline_id: TIMELINE_ID,
                 download_destination: s3_key.download_destination(&repo_harness.conf.workdir),
@@ -300,12 +300,12 @@ mod tests {
             storage
                 .info(&s3_key)
                 .expect("For a valid input, valid S3 info should be parsed"),
-            "Should be able to parse metadata out of the correctly named remote delta relish"
+            "Should be able to parse metadata out of the correctly named remote delta file"
         );
 
         let s3_key = create_s3_key(&relative_timeline_path.join(METADATA_FILE_NAME));
         assert_eq!(
-            RemoteRelishInfo {
+            RemoteFileInfo {
                 tenant_id: repo_harness.tenant_id,
                 timeline_id: TIMELINE_ID,
                 download_destination: s3_key.download_destination(&repo_harness.conf.workdir),
@@ -326,7 +326,7 @@ mod tests {
         fn storage_info_error(storage: &S3, s3_key: &S3ObjectKey) -> String {
             match storage.info(s3_key) {
                 Ok(wrong_info) => panic!(
-                    "Expected key {:?} to error, but got relish info: {:?}",
+                    "Expected key {:?} to error, but got file info: {:?}",
                     s3_key, wrong_info,
                 ),
                 Err(e) => e.to_string(),
@@ -387,9 +387,9 @@ mod tests {
         }
     }
 
-    fn create_s3_key(relative_relish_path: &Path) -> S3ObjectKey {
+    fn create_s3_key(relative_file_path: &Path) -> S3ObjectKey {
         S3ObjectKey(
-            relative_relish_path
+            relative_file_path
                 .iter()
                 .fold(String::new(), |mut path_string, segment| {
                     path_string.push(S3_FILE_SEPARATOR);

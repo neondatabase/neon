@@ -1,7 +1,7 @@
 # Non-implementation details
 
 This document describes the current state of the backup system in pageserver, existing limitations and concerns, why some things are done the way they are the future development plans.
-Detailed description on how the synchronization works and how it fits into the rest of the pageserver can be found in the [storage module](./../relish_storage.rs) and its submodules.
+Detailed description on how the synchronization works and how it fits into the rest of the pageserver can be found in the [storage module](./../remote_storage.rs) and its submodules.
 Ideally, this document should disappear after current implementation concerns are mitigated, with the remaining useful knowledge bits moved into rustdocs.
 
 ## Approach
@@ -28,7 +28,7 @@ As mentioned, the backup component is rather new and under development currently
 Here's the list of known compromises with comments:
 
 * Remote storage model is the same as the `tenants/` directory contents of the pageserver's local workdir storage.
-This is relatively simple to implement, but may be costly to use in AWS S3: an initial data image contains ~782 relish file and a metadata file, ~31 MB combined.
+This is relatively simple to implement, but may be costly to use in AWS S3: an initial data image contains ~782 relish files and a metadata file, ~31 MB combined.
 AWS charges per API call and for traffic either, layers are expected to be updated frequently, so this model most probably is ineffective.
 Additionally, pageservers might need to migrate images between tenants, which does not improve the situation.
 

@@ -26,8 +26,8 @@ use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches, defaults::*, http, page_service, relish_storage, tenant_mgr, PageServerConf,
-    RelishStorageConfig, RelishStorageKind, S3Config, LOG_FILE_NAME,
+    branches, defaults::*, http, page_service, remote_storage, tenant_mgr, PageServerConf,
+    RemoteStorageConfig, RemoteStorageKind, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
@@ -47,22 +47,22 @@ struct CfgFileParams {
     pg_distrib_dir: Option<String>,
     auth_validation_public_key_path: Option<String>,
     auth_type: Option<String>,
-    relish_storage_max_concurrent_sync: Option<String>,
+    remote_storage_max_concurrent_sync: Option<String>,
     /////////////////////////////////
     //// Don't put `Option<String>` and other "simple" values below.
     ////
-    /// `Option<RelishStorage>` is a <a href='https://toml.io/en/v1.0.0#table'>table</a> in TOML.
+    /// `Option<RemoteStorage>` is a <a href='https://toml.io/en/v1.0.0#table'>table</a> in TOML.
     /// Values in TOML cannot be defined after tables (other tables can),
     /// and [`toml`] crate serializes all fields in the order of their appearance.
     ////////////////////////////////
-    relish_storage: Option<RelishStorage>,
+    remote_storage: Option<RemoteStorage>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 // Without this attribute, enums with values won't be serialized by the `toml` library (but can be deserialized nonetheless!).
 // See https://github.com/alexcrichton/toml-rs/blob/6c162e6562c3e432bf04c82a3d1d789d80761a86/examples/enum_external.rs for the examples
 #[serde(untagged)]
-enum RelishStorage {
+enum RemoteStorage {
     Local {
         local_path: String,
     },
@@ -83,12 +83,12 @@ impl CfgFileParams {
             arg_matches.value_of(arg_name).map(str::to_owned)
         };
 
-        let relish_storage = if let Some(local_path) = get_arg("relish-storage-local-path") {
-            Some(RelishStorage::Local { local_path })
+        let remote_storage = if let Some(local_path) = get_arg("relish-storage-local-path") {
+            Some(RemoteStorage::Local { local_path })
         } else if let Some((bucket_name, bucket_region)) =
             get_arg("relish-storage-s3-bucket").zip(get_arg("relish-storage-region"))
         {
-            Some(RelishStorage::AwsS3 {
+            Some(RemoteStorage::AwsS3 {
                 bucket_name,
                 bucket_region,
                 access_key_id: get_arg("relish-storage-access-key"),
@@ -109,8 +109,8 @@ impl CfgFileParams {
             pg_distrib_dir: get_arg("postgres-distrib"),
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
             auth_type: get_arg("auth-type"),
-            relish_storage,
-            relish_storage_max_concurrent_sync: get_arg("relish-storage-max-concurrent-sync"),
+            remote_storage,
+            remote_storage_max_concurrent_sync: get_arg("relish-storage-max-concurrent-sync"),
         }
     }
 
@@ -130,10 +130,10 @@ impl CfgFileParams {
                 .auth_validation_public_key_path
                 .or(other.auth_validation_public_key_path),
             auth_type: self.auth_type.or(other.auth_type),
-            relish_storage: self.relish_storage.or(other.relish_storage),
-            relish_storage_max_concurrent_sync: self
-                .relish_storage_max_concurrent_sync
-                .or(other.relish_storage_max_concurrent_sync),
+            remote_storage: self.remote_storage.or(other.remote_storage),
+            remote_storage_max_concurrent_sync: self
+                .remote_storage_max_concurrent_sync
+                .or(other.remote_storage_max_concurrent_sync),
         }
     }
 
@@ -207,30 +207,28 @@ impl CfgFileParams {
             );
         }
 
-        let max_concurrent_sync = match self.relish_storage_max_concurrent_sync.as_deref() {
-            Some(relish_storage_max_concurrent_sync) => {
-                relish_storage_max_concurrent_sync.parse()?
-            }
-            None => DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
+        let max_concurrent_sync = match self.remote_storage_max_concurrent_sync.as_deref() {
+            Some(number_str) => number_str.parse()?,
+            None => DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
         };
-        let relish_storage_config = self.relish_storage.as_ref().map(|storage_params| {
+        let remote_storage_config = self.remote_storage.as_ref().map(|storage_params| {
             let storage = match storage_params.clone() {
-                RelishStorage::Local { local_path } => {
-                    RelishStorageKind::LocalFs(PathBuf::from(local_path))
+                RemoteStorage::Local { local_path } => {
+                    RemoteStorageKind::LocalFs(PathBuf::from(local_path))
                 }
-                RelishStorage::AwsS3 {
+                RemoteStorage::AwsS3 {
                     bucket_name,
                     bucket_region,
                     access_key_id,
                     secret_access_key,
-                } => RelishStorageKind::AwsS3(S3Config {
+                } => RemoteStorageKind::AwsS3(S3Config {
                     bucket_name,
                     bucket_region,
                     access_key_id,
                     secret_access_key,
                 }),
             };
-            RelishStorageConfig {
+            RemoteStorageConfig {
                 max_concurrent_sync,
                 storage,
             }
@@ -255,7 +253,7 @@ impl CfgFileParams {
 
             auth_validation_public_key_path,
             auth_type,
-            relish_storage_config,
+            remote_storage_config,
         })
     }
 }
@@ -526,7 +524,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // don't spawn threads before daemonizing
     let mut join_handles = Vec::new();
 
-    if let Some(handle) = relish_storage::run_storage_sync_thread(conf)? {
+    if let Some(handle) = remote_storage::run_storage_sync_thread(conf)? {
         join_handles.push(handle);
     }
     // Initialize tenant manager.
@@ -622,11 +620,11 @@ mod tests {
                 "auth_validation_public_key_path_VALUE".to_string(),
             ),
             auth_type: Some("auth_type_VALUE".to_string()),
-            relish_storage: Some(RelishStorage::Local {
-                local_path: "relish_storage_local_VALUE".to_string(),
+            remote_storage: Some(RemoteStorage::Local {
+                local_path: "remote_storage_local_VALUE".to_string(),
             }),
-            relish_storage_max_concurrent_sync: Some(
-                "relish_storage_max_concurrent_sync_VALUE".to_string(),
+            remote_storage_max_concurrent_sync: Some(
+                "remote_storage_max_concurrent_sync_VALUE".to_string(),
             ),
         };
 
@@ -644,10 +642,10 @@ open_mem_limit = 'open_mem_limit_VALUE'
 pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
 auth_type = 'auth_type_VALUE'
-relish_storage_max_concurrent_sync = 'relish_storage_max_concurrent_sync_VALUE'
+remote_storage_max_concurrent_sync = 'remote_storage_max_concurrent_sync_VALUE'
 
-[relish_storage]
-local_path = 'relish_storage_local_VALUE'
+[remote_storage]
+local_path = 'remote_storage_local_VALUE'
 "#,
             toml_pretty_string
         );
@@ -681,14 +679,14 @@ local_path = 'relish_storage_local_VALUE'
                 "auth_validation_public_key_path_VALUE".to_string(),
             ),
             auth_type: Some("auth_type_VALUE".to_string()),
-            relish_storage: Some(RelishStorage::AwsS3 {
+            remote_storage: Some(RemoteStorage::AwsS3 {
                 bucket_name: "bucket_name_VALUE".to_string(),
                 bucket_region: "bucket_region_VALUE".to_string(),
                 access_key_id: Some("access_key_id_VALUE".to_string()),
                 secret_access_key: Some("secret_access_key_VALUE".to_string()),
             }),
-            relish_storage_max_concurrent_sync: Some(
-                "relish_storage_max_concurrent_sync_VALUE".to_string(),
+            remote_storage_max_concurrent_sync: Some(
+                "remote_storage_max_concurrent_sync_VALUE".to_string(),
             ),
         };
 
@@ -706,9 +704,9 @@ open_mem_limit = 'open_mem_limit_VALUE'
 pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
 auth_type = 'auth_type_VALUE'
-relish_storage_max_concurrent_sync = 'relish_storage_max_concurrent_sync_VALUE'
+remote_storage_max_concurrent_sync = 'remote_storage_max_concurrent_sync_VALUE'
 
-[relish_storage]
+[remote_storage]
 bucket_name = 'bucket_name_VALUE'
 bucket_region = 'bucket_region_VALUE'
 "#,
@@ -721,7 +719,7 @@ bucket_region = 'bucket_region_VALUE'
             .expect("Failed to deserialize the prettified serialization result of the config");
 
         let mut expected_params = params;
-        expected_params.relish_storage = Some(RelishStorage::AwsS3 {
+        expected_params.remote_storage = Some(RemoteStorage::AwsS3 {
             bucket_name: "bucket_name_VALUE".to_string(),
             bucket_region: "bucket_region_VALUE".to_string(),
             access_key_id: None,

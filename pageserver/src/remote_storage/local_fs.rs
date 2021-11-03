@@ -1,4 +1,4 @@
-//! Local filesystem relish storage.
+//! Local filesystem acting as a remote storage.
 //! Multiple pageservers can use the same "storage" of this kind by using different storage roots.
 //!
 //! This storage used in pageserver tests, but can also be used in cases when a certain persistent
@@ -20,7 +20,7 @@ use tracing::*;
 
 use crate::layered_repository::metadata::METADATA_FILE_NAME;
 
-use super::{parse_ids_from_path, strip_path_prefix, RelishStorage, RemoteRelishInfo};
+use super::{parse_ids_from_path, strip_path_prefix, RemoteFileInfo, RemoteStorage};
 
 pub struct LocalFs {
     pageserver_workdir: &'static Path,
@@ -28,7 +28,7 @@ pub struct LocalFs {
 }
 
 impl LocalFs {
-    /// Attempts to create local FS relish storage, along with the storage root directory.
+    /// Attempts to create local FS storage, along with its root directory.
     pub fn new(root: PathBuf, pageserver_workdir: &'static Path) -> anyhow::Result<Self> {
         if !root.exists() {
             std::fs::create_dir_all(&root).with_context(|| {
@@ -59,17 +59,17 @@ impl LocalFs {
 }
 
 #[async_trait::async_trait]
-impl RelishStorage for LocalFs {
-    type RelishStoragePath = PathBuf;
+impl RemoteStorage for LocalFs {
+    type StoragePath = PathBuf;
 
-    fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::RelishStoragePath> {
+    fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::StoragePath> {
         Ok(self.root.join(
             strip_path_prefix(self.pageserver_workdir, local_path)
                 .context("local path does not belong to this storage")?,
         ))
     }
 
-    fn info(&self, storage_path: &Self::RelishStoragePath) -> anyhow::Result<RemoteRelishInfo> {
+    fn info(&self, storage_path: &Self::StoragePath) -> anyhow::Result<RemoteFileInfo> {
         let is_metadata =
             storage_path.file_name().and_then(OsStr::to_str) == Some(METADATA_FILE_NAME);
         let relative_path = strip_path_prefix(&self.root, storage_path)
@@ -79,7 +79,7 @@ impl RelishStorage for LocalFs {
             relative_path.iter().filter_map(|segment| segment.to_str()),
             &relative_path.display(),
         )?;
-        Ok(RemoteRelishInfo {
+        Ok(RemoteFileInfo {
             tenant_id,
             timeline_id,
             download_destination,
@@ -87,14 +87,14 @@ impl RelishStorage for LocalFs {
         })
     }
 
-    async fn list_relishes(&self) -> anyhow::Result<Vec<Self::RelishStoragePath>> {
+    async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
         Ok(get_all_files(&self.root).await?.into_iter().collect())
     }
 
-    async fn upload_relish(
+    async fn upload(
         &self,
-        from: &mut (impl io::AsyncRead + Unpin + Send),
-        to: &Self::RelishStoragePath,
+        mut from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        to: &Self::StoragePath,
     ) -> anyhow::Result<()> {
         let target_file_path = self.resolve_in_storage(to)?;
         create_target_directory(&target_file_path).await?;
@@ -112,20 +112,20 @@ impl RelishStorage for LocalFs {
                 })?,
         );
 
-        io::copy(from, &mut destination)
+        io::copy(&mut from, &mut destination)
             .await
-            .context("Failed to upload relish to local storage")?;
+            .context("Failed to upload a file to the local storage")?;
         destination
             .flush()
             .await
-            .context("Failed to upload relish to local storage")?;
+            .context("Failed to upload a file to the local storage")?;
         Ok(())
     }
 
-    async fn download_relish(
+    async fn download(
         &self,
-        from: &Self::RelishStoragePath,
-        to: &mut (impl io::AsyncWrite + Unpin + Send),
+        from: &Self::StoragePath,
+        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
     ) -> anyhow::Result<()> {
         let file_path = self.resolve_in_storage(from)?;
 
@@ -144,7 +144,7 @@ impl RelishStorage for LocalFs {
             );
             io::copy(&mut source, to)
                 .await
-                .context("Failed to download the relish file")?;
+                .context("Failed to download a file from the local storage")?;
             Ok(())
         } else {
             bail!(
@@ -154,7 +154,7 @@ impl RelishStorage for LocalFs {
         }
     }
 
-    async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()> {
         let file_path = self.resolve_in_storage(path)?;
         if file_path.exists() && file_path.is_file() {
             Ok(fs::remove_file(file_path).await?)
@@ -204,7 +204,7 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
     let target_dir = match target_file_path.parent() {
         Some(parent_dir) => parent_dir,
         None => bail!(
-            "Relish path '{}' has no parent directory",
+            "File path '{}' has no parent directory",
             target_file_path.display()
         ),
     };
@@ -218,7 +218,7 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
 mod pure_tests {
     use crate::{
         layered_repository::metadata::METADATA_FILE_NAME,
-        relish_storage::test_utils::{
+        remote_storage::test_utils::{
             custom_tenant_id_path, custom_timeline_id_path, relative_timeline_path,
         },
         repository::repo_harness::{RepoHarness, TIMELINE_ID},
@@ -235,13 +235,13 @@ mod pure_tests {
             root: storage_root.clone(),
         };
 
-        let local_path = repo_harness.timeline_path(&TIMELINE_ID).join("relish_name");
+        let local_path = repo_harness.timeline_path(&TIMELINE_ID).join("file_name");
         let expected_path = storage_root.join(local_path.strip_prefix(&repo_harness.conf.workdir)?);
 
         assert_eq!(
             expected_path,
             storage.storage_path(&local_path).expect("Matching path should map to storage path normally"),
-            "Relish paths from pageserver workdir should be stored in local fs storage with the same path they have relative to the workdir"
+            "File paths from pageserver workdir should be stored in local fs storage with the same path they have relative to the workdir"
         );
 
         Ok(())
@@ -299,7 +299,7 @@ mod pure_tests {
         let name = "not a metadata";
         let local_path = repo_harness.timeline_path(&TIMELINE_ID).join(name);
         assert_eq!(
-            RemoteRelishInfo {
+            RemoteFileInfo {
                 tenant_id: repo_harness.tenant_id,
                 timeline_id: TIMELINE_ID,
                 download_destination: local_path.clone(),
@@ -308,7 +308,7 @@ mod pure_tests {
             storage
                 .info(&storage_root.join(local_path.strip_prefix(&repo_harness.conf.workdir)?))
                 .expect("For a valid input, valid S3 info should be parsed"),
-            "Should be able to parse metadata out of the correctly named remote delta relish"
+            "Should be able to parse metadata out of the correctly named remote delta file"
         );
 
         let local_metadata_path = repo_harness
@@ -316,7 +316,7 @@ mod pure_tests {
             .join(METADATA_FILE_NAME);
         let remote_metadata_path = storage.storage_path(&local_metadata_path)?;
         assert_eq!(
-            RemoteRelishInfo {
+            RemoteFileInfo {
                 tenant_id: repo_harness.tenant_id,
                 timeline_id: TIMELINE_ID,
                 download_destination: local_metadata_path,
@@ -338,7 +338,7 @@ mod pure_tests {
         fn storage_info_error(storage: &LocalFs, storage_path: &PathBuf) -> String {
             match storage.info(storage_path) {
                 Ok(wrong_info) => panic!(
-                    "Expected storage path input {:?} to cause an error, but got relish info: {:?}",
+                    "Expected storage path input {:?} to cause an error, but got file info: {:?}",
                     storage_path, wrong_info,
                 ),
                 Err(e) => format!("{:?}", e),
@@ -358,24 +358,23 @@ mod pure_tests {
 
         let relative_timeline_path = relative_timeline_path(&repo_harness)?;
 
-        let relative_relish_path =
-            custom_tenant_id_path(&relative_timeline_path, "wrong_tenant_id")?
-                .join("wrong_tenant_id_name");
-        let wrong_tenant_id_path = storage_root.join(&relative_relish_path);
+        let relative_file_path = custom_tenant_id_path(&relative_timeline_path, "wrong_tenant_id")?
+            .join("wrong_tenant_id_name");
+        let wrong_tenant_id_path = storage_root.join(&relative_file_path);
         let error_message = storage_info_error(&storage, &wrong_tenant_id_path);
         assert!(
-            error_message.contains(relative_relish_path.to_str().unwrap()),
+            error_message.contains(relative_file_path.to_str().unwrap()),
             "Error message '{}' does not contain the expected substring",
             error_message
         );
 
-        let relative_relish_path =
+        let relative_file_path =
             custom_timeline_id_path(&relative_timeline_path, "wrong_timeline_id")?
                 .join("wrong_timeline_id_name");
-        let wrong_timeline_id_path = storage_root.join(&relative_relish_path);
+        let wrong_timeline_id_path = storage_root.join(&relative_file_path);
         let error_message = storage_info_error(&storage, &wrong_timeline_id_path);
         assert!(
-            error_message.contains(relative_relish_path.to_str().unwrap()),
+            error_message.contains(relative_file_path.to_str().unwrap()),
             "Error message '{}' does not contain the expected substring",
             error_message
         );
@@ -410,24 +409,24 @@ mod pure_tests {
 mod fs_tests {
     use super::*;
     use crate::{
-        relish_storage::test_utils::relative_timeline_path, repository::repo_harness::RepoHarness,
+        remote_storage::test_utils::relative_timeline_path, repository::repo_harness::RepoHarness,
     };
 
     use std::io::Write;
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn upload_relish() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("upload_relish")?;
+    async fn upload_file() -> anyhow::Result<()> {
+        let repo_harness = RepoHarness::create("upload_file")?;
         let storage = create_storage()?;
 
-        let mut source = create_file_for_upload(
+        let source = create_file_for_upload(
             &storage.pageserver_workdir.join("whatever"),
             "whatever_contents",
         )
         .await?;
         let target_path = PathBuf::from("/").join("somewhere").join("else");
-        match storage.upload_relish(&mut source, &target_path).await {
+        match storage.upload(source, &target_path).await {
             Ok(()) => panic!("Should not allow storing files with wrong target path"),
             Err(e) => {
                 let message = format!("{:?}", e);
@@ -435,23 +434,23 @@ mod fs_tests {
                 assert!(message.contains("does not belong to the current storage"));
             }
         }
-        assert!(storage.list_relishes().await?.is_empty());
+        assert!(storage.list().await?.is_empty());
 
         let target_path_1 = upload_dummy_file(&repo_harness, &storage, "upload_1").await?;
         assert_eq!(
-            storage.list_relishes().await?,
+            storage.list().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
 
         let target_path_2 = upload_dummy_file(&repo_harness, &storage, "upload_2").await?;
         assert_eq!(
-            list_relishes_sorted(&storage).await?,
+            list_files_sorted(&storage).await?,
             vec![target_path_1.clone(), target_path_2.clone()],
             "Should list a two different files after second upload"
         );
 
-        // match storage.upload_relish(&mut source, &target_path_1).await {
+        // match storage.upload_file(&mut source, &target_path_1).await {
         //     Ok(()) => panic!("Should not allow reuploading storage files"),
         //     Err(e) => {
         //         let message = format!("{:?}", e);
@@ -460,7 +459,7 @@ mod fs_tests {
         //     }
         // }
         assert_eq!(
-            list_relishes_sorted(&storage).await?,
+            list_files_sorted(&storage).await?,
             vec![target_path_1, target_path_2],
             "Should list a two different files after all upload attempts"
         );
@@ -475,16 +474,14 @@ mod fs_tests {
     }
 
     #[tokio::test]
-    async fn download_relish() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_relish")?;
+    async fn download_file() -> anyhow::Result<()> {
+        let repo_harness = RepoHarness::create("download_file")?;
         let storage = create_storage()?;
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name).await?;
 
         let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        storage
-            .download_relish(&upload_target, &mut content_bytes)
-            .await?;
+        storage.download(&upload_target, &mut content_bytes).await?;
         content_bytes.flush().await?;
 
         let contents = String::from_utf8(content_bytes.into_inner().into_inner())?;
@@ -495,10 +492,7 @@ mod fs_tests {
         );
 
         let non_existing_path = PathBuf::from("somewhere").join("else");
-        match storage
-            .download_relish(&non_existing_path, &mut io::sink())
-            .await
-        {
+        match storage.download(&non_existing_path, &mut io::sink()).await {
             Ok(_) => panic!("Should not allow downloading non-existing storage files"),
             Err(e) => {
                 let error_string = e.to_string();
@@ -510,16 +504,16 @@ mod fs_tests {
     }
 
     #[tokio::test]
-    async fn delete_relish() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("delete_relish")?;
+    async fn delete_file() -> anyhow::Result<()> {
+        let repo_harness = RepoHarness::create("delete_file")?;
         let storage = create_storage()?;
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name).await?;
 
-        storage.delete_relish(&upload_target).await?;
-        assert!(storage.list_relishes().await?.is_empty());
+        storage.delete(&upload_target).await?;
+        assert!(storage.list().await?.is_empty());
 
-        match storage.delete_relish(&upload_target).await {
+        match storage.delete(&upload_target).await {
             Ok(()) => panic!("Should not allow deleting non-existing storage files"),
             Err(e) => {
                 let error_string = e.to_string();
@@ -540,8 +534,8 @@ mod fs_tests {
             .join(relative_timeline_path(harness)?)
             .join(name);
         storage
-            .upload_relish(
-                &mut create_file_for_upload(
+            .upload(
+                create_file_for_upload(
                     &storage.pageserver_workdir.join(name),
                     &dummy_contents(name),
                 )
@@ -572,9 +566,9 @@ mod fs_tests {
         format!("contents for {}", name)
     }
 
-    async fn list_relishes_sorted(storage: &LocalFs) -> anyhow::Result<Vec<PathBuf>> {
-        let mut relishes = storage.list_relishes().await?;
-        relishes.sort();
-        Ok(relishes)
+    async fn list_files_sorted(storage: &LocalFs) -> anyhow::Result<Vec<PathBuf>> {
+        let mut files = storage.list().await?;
+        files.sort();
+        Ok(files)
     }
 }
