@@ -59,6 +59,13 @@ const METADATA_MAX_SAFE_SIZE: usize = 512;
 const METADATA_CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 const METADATA_MAX_DATA_SIZE: usize = METADATA_MAX_SAFE_SIZE - METADATA_CHECKSUM_SIZE;
 
+const ZERO_TAG: RelTag = RelTag {
+    spcnode: 0,
+    dbnode: 0,
+    relnode: 0,
+    forknum: 0,
+};
+
 // Metrics collected on operations on the storage repository.
 lazy_static! {
     static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
@@ -279,6 +286,12 @@ impl Repository for BufferedRepository {
 
 /// Private functions
 impl BufferedRepository {
+    fn get_buffered_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<BufferedTimeline>> {
+        let mut timelines = self.timelines.lock().unwrap();
+
+        Ok(self.get_timeline_locked(timelineid, &mut timelines)?)
+    }
+
     // Implementation of the public `get_timeline` function. This differs from the public
     // interface in that the caller must already hold the mutex on the 'timelines' hashmap.
     fn get_timeline_locked(
@@ -374,12 +387,19 @@ impl BufferedRepository {
     fn checkpoint_loop(&self, conf: &'static PageServerConf) -> Result<()> {
         while !tenant_mgr::shutdown_requested() {
             std::thread::sleep(conf.checkpoint_period);
-            trace!("checkpointer thread for tenant {} waking up", self.tenantid);
+            info!("checkpointer thread for tenant {} waking up", self.tenantid);
 
             // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
             // bytes of WAL since last checkpoint.
             {
-                let timelines = self.timelines.lock().unwrap();
+                let timelines: Vec<(ZTimelineId, Arc<BufferedTimeline>)> = self
+                    .timelines
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|pair| (pair.0.clone(), pair.1.clone()))
+                    .collect();
+                //let timelines = self.timelines.lock().unwrap();
                 for (timelineid, timeline) in timelines.iter() {
                     let _entered =
                         info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid)
@@ -421,7 +441,8 @@ impl BufferedRepository {
         while !tenant_mgr::shutdown_requested() {
             // Garbage collect old files that are not needed for PITR anymore
             if conf.gc_horizon > 0 {
-                self.gc_iteration(None, conf.gc_horizon, false).unwrap();
+                let result = self.gc_iteration(None, conf.gc_horizon, false)?;
+                info!("GC result: {:?}", result);
             }
 
             // TODO Write it in more adequate way using
@@ -536,7 +557,7 @@ impl BufferedRepository {
 
         // grab mutex to prevent new timelines from being created here.
         // TODO: We will hold it for a long time
-        let mut timelines = self.timelines.lock().unwrap();
+        //let mut timelines = self.timelines.lock().unwrap();
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
@@ -560,7 +581,7 @@ impl BufferedRepository {
         //Now collect info about branchpoints
         let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
         for timelineid in &timelineids {
-            let timeline = self.get_timeline_locked(*timelineid, &mut *timelines)?;
+            let timeline = self.get_buffered_timeline(*timelineid)?;
 
             if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
                 // If target_timeline is specified, we only need to know branchpoints of its childs
@@ -582,7 +603,7 @@ impl BufferedRepository {
         for timelineid in timelineids {
             // We have already loaded all timelines above
             // so this operation is just a quick map lookup.
-            let timeline = self.get_timeline_locked(timelineid, &mut *timelines)?;
+            let timeline = self.get_buffered_timeline(timelineid)?;
 
             // If target_timeline is specified, only GC it
             if let Some(target_timelineid) = target_timelineid {
@@ -1163,12 +1184,7 @@ impl BufferedTimeline {
     fn checkpoint_internal(&self, checkpoint_distance: u64, _forced: bool) -> Result<()> {
         // From boundary is constant and till boundary is changed at each iteration.
         let from = StoreKey::Data(DataKey {
-            rel: RelishTag::Relation(RelTag {
-                spcnode: 0,
-                dbnode: 0,
-                relnode: 0,
-                forknum: 0,
-            }),
+            rel: RelishTag::Relation(ZERO_TAG),
             blknum: 0,
             lsn: Lsn(0),
         })
@@ -1194,6 +1210,7 @@ impl BufferedTimeline {
             if let Some(entry) = iter.next_back() {
                 let pair = entry?;
                 let key = pair.0;
+                debug_assert!(key < till);
                 if let StoreKey::Data(dk) = StoreKey::des(&key)? {
                     let ver = PageVersion::des(&pair.1)?;
                     if let PageVersion::Delta(rec) = ver {
@@ -1277,7 +1294,7 @@ impl BufferedTimeline {
             &metadata,
             false,
         )?;
-        trace!("Checkpoint {} records", n_checkpointed_records);
+        info!("Checkpoint {} records", n_checkpointed_records);
 
         if self.upload_relishes {
             schedule_timeline_upload(())
@@ -1322,108 +1339,160 @@ impl BufferedTimeline {
 
         info!("GC starting");
 
-        let mut from_rel = RelishTag::Relation(RelTag {
-            spcnode: 0,
-            dbnode: 0,
-            relnode: 0,
-            forknum: 0,
-        });
+        let mut from_rel = RelishTag::Relation(ZERO_TAG);
         let mut from = StoreKey::Metadata(MetadataKey {
             rel: from_rel,
             lsn: Lsn(0),
         });
-
-        // We can not remove deteriorated version immediately, we need to check first that successor exists
-        let mut last_key: Option<yakv::storage::Key> = None;
+        // Keep tracked dropped relish
+        let mut dropped: HashSet<RelishTag> = HashSet::new();
 
         'meta: loop {
             let store = self.store.read().unwrap();
             let mut iter = store.data.range(&from.ser()?..);
+            // We can not remove deteriorated version immediately, we need to check first that successor exists
+            let mut last_key: Option<yakv::storage::Key> = None;
+
             while let Some(entry) = iter.next() {
-                let raw_key = entry?.0;
+                let pair = entry?;
+                let raw_key = pair.0;
                 let key = StoreKey::des(&raw_key)?;
                 if let StoreKey::Metadata(dk) = key {
+                    // processing metadata
+                    let same_rel = from_rel == dk.rel;
+                    if !same_rel {
+                        // we jumped to the next relation
+                        result.meta_total += 1;
+                        from_rel = dk.rel;
+                        from = StoreKey::Metadata(MetadataKey {
+                            rel: from_rel,
+                            lsn: Lsn(0),
+                        });
+                    }
                     if dk.lsn < cutoff {
                         // we have something deteriorated
+                        // Has previos version
                         if let Some(prev_key) = last_key {
-                            // We are still on the same relish...
-                            if from_rel == dk.rel {
+                            // If we are still on the same relish...
+                            if same_rel {
+                                // then drop previus version as it is not needed any more
                                 drop(store);
                                 let mut store = self.store.write().unwrap();
                                 store.data.remove(&prev_key)?;
-                                last_key = None;
+                                result.meta_removed += 1;
                                 // We should reset iterator and start from the current point
                                 continue 'meta;
                             }
                         }
-                        from_rel = dk.rel;
-                        from = key;
-                        // Remember key as candidate for deletion
-                        last_key = Some(raw_key);
+                        let meta = MetadataValue::des(&pair.1)?;
+                        if meta.size.is_none() {
+                            // object was dropped, so we can immediately remove deteriorated version
+                            drop(store);
+                            let mut store = self.store.write().unwrap();
+                            store.data.remove(&raw_key)?;
+                            dropped.insert(dk.rel);
+                            result.meta_dropped += 1;
+                            // We should reset iterator and start from the current point
+                            continue 'meta;
+                        } else {
+                            // Remember key as candidate for deletion and contiune iteration
+                            last_key = Some(raw_key);
+                        }
                     } else {
-                        from_rel = dk.rel;
+                        // We reached version which should be preserved to enable PITR, so jump to the next object
                         from = StoreKey::Metadata(MetadataKey {
                             rel: from_rel,
                             lsn: Lsn::MAX,
                         });
-                        last_key = None;
+                        continue 'meta;
                     }
                 } else {
+                    // End of metadata
                     break 'meta;
                 }
             }
             break;
         }
 
-        // Array to accumulate keys we can remove
+        from_rel = RelishTag::Relation(ZERO_TAG);
+        from = StoreKey::Data(DataKey {
+            rel: from_rel,
+            blknum: 0,
+            lsn: Lsn(0),
+        });
+
+        // Array to accumulate keys we can remove.
+        // Place it outside main loop to reduce number of dynamic memory allocations
         let mut deteriorated: Vec<yakv::storage::Key> = Vec::new();
         // currently proceed block number
         let mut from_blknum = 0;
-
-        'data: loop {
+        'pages: loop {
             let store = self.store.read().unwrap();
             let mut iter = store.data.range(&from.ser()?..);
+            deteriorated.clear();
             while let Some(entry) = iter.next() {
                 let pair = entry?;
                 let raw_key = pair.0;
                 let key = StoreKey::des(&raw_key)?;
                 if let StoreKey::Data(dk) = key {
-                    if dk.lsn < cutoff {
-                        // we have something deteriorated
-                        let ver = PageVersion::des(&pair.1)?;
-                        // We are still on the same page...
-                        if from_rel == dk.rel && from_blknum == dk.blknum {
-                            if let PageVersion::Image(_) = ver {
-                                // We have full page image: remove all preceding deteriorated records
-                                drop(store);
-                                let mut store = self.store.write().unwrap();
-                                for key in deteriorated.iter() {
-                                    store.data.remove(key)?;
-                                }
-                                deteriorated.clear();
-                                // We should reset iterator and start from the current point
-                                continue 'data;
-                            }
-                            // No full page image, so we can't remove deteriorated stuff
-                            deteriorated.clear();
-                        }
-                        // Remember key as candidate for deletion
-                        deteriorated.push(raw_key);
+                    let same_page = from_rel == dk.rel && from_blknum == dk.blknum;
+                    if !same_page {
+                        result.pages_total += 1;
                         from_rel = dk.rel;
                         from_blknum = dk.blknum;
-                        from = key;
+                        from = StoreKey::Data(DataKey {
+                            rel: from_rel,
+                            blknum: from_blknum,
+                            lsn: Lsn(0),
+                        });
+                    }
+                    if dk.lsn < cutoff {
+                        // we have something deteriorated
+                        // If we still on the same page...
+                        if same_page {
+                            if !deteriorated.is_empty() {
+                                // .. and have something to remove
+                                // ... and have page image
+                                let ver = PageVersion::des(&pair.1)?;
+                                if let PageVersion::Image(_) = ver {
+                                    // ... then remove all previously accumulated deltas and images, as them are not needed any more
+                                    drop(store);
+                                    let mut store = self.store.write().unwrap();
+                                    for key in deteriorated.iter() {
+                                        store.data.remove(key)?;
+                                    }
+                                    result.pages_removed += deteriorated.len() as u64;
+                                    // We should reset iterator and start from the current point
+                                    continue 'pages;
+                                }
+                            }
+                        } else {
+                            // we jumped to the next relation
+                            deteriorated.clear();
+                        }
+                        if dropped.contains(&dk.rel) {
+                            // This relations was dropped beyond PITR interval:
+                            // we can remove all its pages
+                            assert!(deteriorated.is_empty()); // we should not append anything to `deteriorated` for dropped relation
+                            drop(store);
+                            let mut store = self.store.write().unwrap();
+                            // We should reset iterator and start from the current point
+                            store.data.remove(&raw_key)?;
+                            result.pages_dropped += 1;
+                            continue 'pages;
+                        }
+                        // Remember key as candidate for deletion and continue iteration
+                        deteriorated.push(raw_key);
                     } else {
-                        // Jump to next page
-                        from_rel = dk.rel;
+                        // We reached version which should be preserved to enable PITR, so jump to the next object
                         from = StoreKey::Data(DataKey {
                             rel: from_rel,
                             blknum: from_blknum + 1,
                             lsn: Lsn(0),
                         });
-                        deteriorated.clear();
                     }
                 } else {
-                    break 'data;
+                    break 'pages;
                 }
             }
             break;

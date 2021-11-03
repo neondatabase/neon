@@ -3,7 +3,9 @@ use lz4_flex;
 use std::convert::TryInto;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
+use tracing::*;
 use yakv::storage::{Key, Storage, StorageIterator, Value};
+
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CHECKPOINT_INTERVAL: u64 = 1u64 * 1024 * 1024 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
@@ -70,6 +72,7 @@ impl<'a> DoubleEndedIterator for ToastIterator<'a> {
         let mut next_segno = 0u16;
         while let Some(elem) = self.iter.next_back() {
             if let Ok((key, value)) = elem {
+                assert!(value.len() != 0);
                 let key_len = key.len();
                 let n_segments =
                     u16::from_be_bytes(key[key_len - 4..key_len - 2].try_into().unwrap());
@@ -90,7 +93,12 @@ impl<'a> DoubleEndedIterator for ToastIterator<'a> {
                     }
                     next_segno = segno;
                     if next_segno == 0 {
-                        let res = lz4_flex::decompress_size_prepended(&toast.unwrap());
+                        let toast = toast.unwrap();
+                        if toast.len() == 0 {
+                            warn!("n_segments={}", n_segments);
+                        }
+                        assert!(toast.len() != 0);
+                        let res = lz4_flex::decompress_size_prepended(&toast);
                         return Some(if let Ok(decompressed_data) = res {
                             Ok((key, decompressed_data))
                         } else {

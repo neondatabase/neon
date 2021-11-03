@@ -44,45 +44,27 @@ pub trait Repository: Send + Sync {
 ///
 /// Result of performing GC
 ///
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct GcResult {
-    pub ondisk_relfiles_total: u64,
-    pub ondisk_relfiles_needed_by_cutoff: u64,
-    pub ondisk_relfiles_needed_by_branches: u64,
-    pub ondisk_relfiles_not_updated: u64,
-    pub ondisk_relfiles_needed_as_tombstone: u64,
-    pub ondisk_relfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
-    pub ondisk_relfiles_dropped: u64, // # of layer files removed because the relation was dropped
+    pub meta_removed: u64, // removed versions beyond PITR interval for which new page image exists
+    pub meta_dropped: u64, // removed versions beyond PITR interval of dropped relations
+    pub meta_total: u64,   // total number of metaobject version histories
 
-    pub ondisk_nonrelfiles_total: u64,
-    pub ondisk_nonrelfiles_needed_by_cutoff: u64,
-    pub ondisk_nonrelfiles_needed_by_branches: u64,
-    pub ondisk_nonrelfiles_not_updated: u64,
-    pub ondisk_nonrelfiles_needed_as_tombstone: u64,
-    pub ondisk_nonrelfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
-    pub ondisk_nonrelfiles_dropped: u64, // # of layer files removed because the relation was dropped
+    pub pages_removed: u64, // removed versions beyond PITR interval for which new page image exists
+    pub pages_dropped: u64, // removed versions beyond PITR interval of dropped relations
+    pub pages_total: u64,   // total number of page vaersion histories
 
     pub elapsed: Duration,
 }
 
 impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
-        self.ondisk_relfiles_total += other.ondisk_relfiles_total;
-        self.ondisk_relfiles_needed_by_cutoff += other.ondisk_relfiles_needed_by_cutoff;
-        self.ondisk_relfiles_needed_by_branches += other.ondisk_relfiles_needed_by_branches;
-        self.ondisk_relfiles_not_updated += other.ondisk_relfiles_not_updated;
-        self.ondisk_relfiles_needed_as_tombstone += other.ondisk_relfiles_needed_as_tombstone;
-        self.ondisk_relfiles_removed += other.ondisk_relfiles_removed;
-        self.ondisk_relfiles_dropped += other.ondisk_relfiles_dropped;
-
-        self.ondisk_nonrelfiles_total += other.ondisk_nonrelfiles_total;
-        self.ondisk_nonrelfiles_needed_by_cutoff += other.ondisk_nonrelfiles_needed_by_cutoff;
-        self.ondisk_nonrelfiles_needed_by_branches += other.ondisk_nonrelfiles_needed_by_branches;
-        self.ondisk_nonrelfiles_not_updated += other.ondisk_nonrelfiles_not_updated;
-        self.ondisk_nonrelfiles_needed_as_tombstone += other.ondisk_nonrelfiles_needed_as_tombstone;
-        self.ondisk_nonrelfiles_removed += other.ondisk_nonrelfiles_removed;
-        self.ondisk_nonrelfiles_dropped += other.ondisk_nonrelfiles_dropped;
-
+        self.meta_total += other.meta_total;
+        self.meta_removed += other.meta_removed;
+        self.meta_dropped += other.meta_dropped;
+        self.pages_total += other.pages_total;
+        self.pages_removed += other.pages_removed;
+        self.pages_dropped += other.pages_dropped;
         self.elapsed += other.elapsed;
     }
 }
