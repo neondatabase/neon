@@ -59,7 +59,6 @@ pub struct ServerInfo {
     pub tenant_id: ZTenantId,
     /// Zenith timelineid
     pub ztli: ZTimelineId,
-    pub tli: TimeLineID,
     pub wal_seg_size: u32,
 }
 
@@ -98,7 +97,6 @@ impl SafeKeeperState {
                 system_id: 0,                       /* Postgres system identifier */
                 tenant_id: ZTenantId::from([0u8; 16]),
                 ztli: ZTimelineId::from([0u8; 16]),
-                tli: 0,
                 wal_seg_size: 0,
             },
             proposer_uuid: [0; 16],
@@ -353,7 +351,6 @@ pub struct SafeKeeper<ST: Storage> {
     /// Locally flushed part of WAL with full records (end_lsn of last record).
     /// Established by reading wal.
     pub flush_lsn: Lsn,
-    pub tli: u32,
     // Cached metrics so we don't have to recompute labels on each update.
     metrics: SafeKeeperMetrics,
     /// not-yet-flushed pairs of same named fields in s.*
@@ -370,10 +367,9 @@ where
     ST: Storage,
 {
     // constructor
-    pub fn new(flush_lsn: Lsn, tli: u32, storage: ST, state: SafeKeeperState) -> SafeKeeper<ST> {
+    pub fn new(flush_lsn: Lsn, storage: ST, state: SafeKeeperState) -> SafeKeeper<ST> {
         SafeKeeper {
             flush_lsn,
-            tli,
             metrics: SafeKeeperMetrics::new_noname(),
             commit_lsn: state.commit_lsn,
             truncate_lsn: state.truncate_lsn,
@@ -422,7 +418,6 @@ where
         self.s.server.system_id = msg.system_id;
         self.s.server.tenant_id = msg.tenant_id;
         self.s.server.ztli = msg.ztli;
-        self.s.server.tli = msg.tli;
         self.s.server.wal_seg_size = msg.wal_seg_size;
         self.storage
             .persist(&self.s, true)
@@ -643,7 +638,7 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: SafeKeeperState::new(),
         };
-        let mut sk = SafeKeeper::new(Lsn(0), 0, storage, SafeKeeperState::new());
+        let mut sk = SafeKeeper::new(Lsn(0), storage, SafeKeeperState::new());
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -658,7 +653,7 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: state.clone(),
         };
-        sk = SafeKeeper::new(Lsn(0), 0, storage, state);
+        sk = SafeKeeper::new(Lsn(0), storage, state);
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -673,7 +668,7 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: SafeKeeperState::new(),
         };
-        let mut sk = SafeKeeper::new(Lsn(0), 0, storage, SafeKeeperState::new());
+        let mut sk = SafeKeeper::new(Lsn(0), storage, SafeKeeperState::new());
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,

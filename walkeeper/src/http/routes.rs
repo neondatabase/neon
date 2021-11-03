@@ -66,7 +66,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     )
     .map_err(ApiError::from_err)?;
     let sk_state = tli.get_info();
-    let (flush_lsn, _) = tli.get_end_of_wal();
+    let flush_lsn = tli.get_end_of_wal();
 
     let status = TimelineStatus {
         tenant_id,

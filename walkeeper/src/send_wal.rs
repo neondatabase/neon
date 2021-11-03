@@ -9,6 +9,7 @@ use crate::timeline::{Timeline, TimelineTools};
 use crate::SafeKeeperConf;
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
+use postgres_ffi::xlog_utils::PG_TLI;
 use std::str::FromStr;
 use std::sync::Arc;
 use zenith_utils::postgres_backend;
@@ -101,11 +102,11 @@ impl SendWalHandler {
     /// Handle IDENTIFY_SYSTEM replication command
     ///
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
-        let (start_pos, timeline) = self.timeline.get().get_end_of_wal();
+        let start_pos = self.timeline.get().get_end_of_wal();
         let lsn = start_pos.to_string();
-        let tli = timeline.to_string();
         let sysid = self.timeline.get().get_info().server.system_id.to_string();
         let lsn_bytes = lsn.as_bytes();
+        let tli = PG_TLI.to_string();
         let tli_bytes = tli.as_bytes();
         let sysid_bytes = sysid.as_bytes();
 

@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use fs2::FileExt;
 use lazy_static::lazy_static;
 use log::*;
-use postgres_ffi::xlog_utils::find_end_of_wal;
+use postgres_ffi::xlog_utils::{find_end_of_wal, PG_TLI};
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -136,7 +136,7 @@ impl SharedState {
     ) -> Result<Self> {
         let (file_storage, state) = SharedState::load_from_control_file(conf, timelineid, create)
             .with_context(|| "failed to load from control file")?;
-        let (flush_lsn, tli) = if state.server.wal_seg_size != 0 {
+        let flush_lsn = if state.server.wal_seg_size != 0 {
             let wal_dir = conf.timeline_dir(&timelineid);
             find_end_of_wal(
                 &wal_dir,
@@ -144,13 +144,14 @@ impl SharedState {
                 true,
                 state.wal_start_lsn,
             )?
+            .0
         } else {
-            (0, 0)
+            0
         };
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(Lsn(flush_lsn), tli, file_storage, state),
+            sk: SafeKeeper::new(Lsn(flush_lsn), file_storage, state),
             replicas: Vec::new(),
         })
     }
@@ -352,9 +353,9 @@ impl Timeline {
         shared_state.replicas[id] = state;
     }
 
-    pub fn get_end_of_wal(&self) -> (Lsn, u32) {
+    pub fn get_end_of_wal(&self) -> Lsn {
         let shared_state = self.mutex.lock().unwrap();
-        (shared_state.sk.flush_lsn, shared_state.sk.tli)
+        shared_state.sk.flush_lsn
     }
 }
 
@@ -533,7 +534,7 @@ impl Storage for FileStorage {
             /* Open file */
             let segno = start_pos.segment_number(wal_seg_size);
             // note: we basically don't support changing pg timeline
-            let wal_file_name = XLogFileName(server.tli, segno, wal_seg_size);
+            let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
             let wal_file_path = self.conf.timeline_dir(&ztli).join(wal_file_name.clone());
             let wal_file_partial_path = self
                 .conf

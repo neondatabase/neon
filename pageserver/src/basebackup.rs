@@ -285,11 +285,7 @@ impl<'a> Basebackup<'a> {
 
         //send wal segment
         let segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-        let wal_file_name = XLogFileName(
-            1, // FIXME: always use Postgres timeline 1
-            segno,
-            pg_constants::WAL_SEGMENT_SIZE,
-        );
+        let wal_file_name = XLogFileName(PG_TLI, segno, pg_constants::WAL_SEGMENT_SIZE);
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
         let wal_seg = generate_wal_segment(segno, pg_control.system_identifier);
