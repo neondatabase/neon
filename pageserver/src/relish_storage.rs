@@ -79,6 +79,7 @@ use std::{
 };
 
 use anyhow::{anyhow, ensure, Context};
+use tokio::io;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 pub use self::storage_sync::schedule_timeline_upload;
@@ -132,23 +133,21 @@ trait RelishStorage: Send + Sync {
     /// Lists all items the storage has right now.
     async fn list_relishes(&self) -> anyhow::Result<Vec<Self::RelishStoragePath>>;
 
-    /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
-    async fn download_relish<W: 'static + std::io::Write + Send>(
-        &self,
-        from: &Self::RelishStoragePath,
-        // rust_s3 `get_object_stream` method requires `std::io::BufWriter` for some reason, not the async counterpart
-        // that forces us to consume and return the writer to satisfy the blocking operation async wrapper requirements
-        to: std::io::BufWriter<W>,
-    ) -> anyhow::Result<std::io::BufWriter<W>>;
-
-    async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()>;
-
     /// Streams the local file contents into remote into the remote storage entry.
-    async fn upload_relish<R: tokio::io::AsyncRead + std::marker::Unpin + Send>(
+    async fn upload_relish(
         &self,
-        from: &mut tokio::io::BufReader<R>,
+        from: &mut (impl io::AsyncRead + Unpin + Send),
         to: &Self::RelishStoragePath,
     ) -> anyhow::Result<()>;
+
+    /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
+    async fn download_relish(
+        &self,
+        from: &Self::RelishStoragePath,
+        to: &mut (impl io::AsyncWrite + Unpin + Send),
+    ) -> anyhow::Result<()>;
+
+    async fn delete_relish(&self, path: &Self::RelishStoragePath) -> anyhow::Result<()>;
 }
 
 /// Information about a certain remote storage entry.
