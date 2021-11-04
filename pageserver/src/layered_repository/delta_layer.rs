@@ -230,7 +230,7 @@ impl Layer for DeltaLayer {
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
-            Ok(PageReconstructResult::Continue(self.start_lsn))
+            Ok(PageReconstructResult::Continue(Lsn(self.start_lsn.0 - 1)))
         } else {
             Ok(PageReconstructResult::Complete)
         }

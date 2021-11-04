@@ -1534,6 +1534,15 @@ impl LayeredTimeline {
                 PageReconstructResult::Continue(cont_lsn) => {
                     // Fetch base image / more WAL from the returned predecessor layer
                     if let Some((cont_layer, cont_lsn)) = self.get_layer_for_read(seg, cont_lsn)? {
+                        if cont_lsn == curr_lsn {
+                            // We landed on the same layer again. Shouldn't happen, but if it does,
+                            // don't get stuck in an infinite loop.
+                            bail!(
+                                "could not find predecessor layer of segment {} at {}",
+                                seg.rel,
+                                cont_lsn
+                            );
+                        }
                         layer_arc = cont_layer;
                         layer_ref = &*layer_arc;
                         curr_lsn = cont_lsn;
