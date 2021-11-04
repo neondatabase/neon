@@ -38,7 +38,7 @@ class SuitRun:
 class SuitRuns:
     platform: str
     suit: str
-    common_columns: List[str]
+    common_columns: List[Tuple[str, str]]
     value_columns: List[str]
     runs: List[SuitRun]
 
@@ -50,7 +50,7 @@ class RowValue:
     ratio: str
 
 
-def get_columns(values: List[Dict]) -> Tuple[List[Tuple[str, str]], List[str]]:
+def get_columns(values: List[Dict[Any, Any]]) -> Tuple[List[Tuple[str, str]], List[str]]:
     value_columns = []
     common_columns = []
     for item in values:
@@ -59,8 +59,7 @@ def get_columns(values: List[Dict]) -> Tuple[List[Tuple[str, str]], List[str]]:
         if item['report'] != 'test_param':
             value_columns.append(cast(str, item['name']))
         else:
-            common_columns.append(
-                (cast(str, item['name']), cast(str, item['value'])))
+            common_columns.append((cast(str, item['name']), cast(str, item['value'])))
     value_columns.sort()
     common_columns.sort(key=lambda x: x[0])  # sort by name
     return common_columns, value_columns
@@ -95,7 +94,7 @@ def format_ratio(ratio: float, report: str) -> Tuple[str, str]:
 def extract_value(name: str, suit_run: SuitRun) -> Optional[Dict[str, Any]]:
     for item in suit_run.values['data']:
         if item['name'] == name:
-            return item
+            return cast(Dict[str, Any], item)
     return None
 
 
@@ -122,8 +121,7 @@ def get_row_values(columns: List[str], run_result: SuitRun,
             # let this be here, TODO add proper handling when this actually happens
             raise ValueError(f'{column} not found in previous result')
         ratio = float(value) / float(prev_value['value']) - 1
-        ratio_display, color = format_ratio(ratio,
-                                            current_value['report'])
+        ratio_display, color = format_ratio(ratio, current_value['report'])
         row_values.append(RowValue(value, color, ratio_display))
     return row_values
 
@@ -134,15 +132,13 @@ class SuiteRunTableRow:
     values: List[RowValue]
 
 
-def prepare_rows_from_runs(value_columns: List[str],
-                           runs: List[SuitRun]) -> List[SuiteRunTableRow]:
+def prepare_rows_from_runs(value_columns: List[str], runs: List[SuitRun]) -> List[SuiteRunTableRow]:
     rows = []
     prev_run = None
     for run in runs:
         rows.append(
             SuiteRunTableRow(revision=run.revision,
-                             values=get_row_values(value_columns, run,
-                                                   prev_run)))
+                             values=get_row_values(value_columns, run, prev_run)))
         prev_run = run
 
     return rows
@@ -150,12 +146,11 @@ def prepare_rows_from_runs(value_columns: List[str],
 
 def main(args: argparse.Namespace) -> None:
     input_dir = Path(args.input_dir)
-    grouped_runs = {}
+    grouped_runs: Dict[str, SuitRuns] = {}
     # we have files in form: <ctr>_<rev>.json
     # fill them in the hashmap so we have grouped items for the
     # same run configuration (scale, duration etc.) ordered by counter.
-    for item in sorted(input_dir.iterdir(),
-                       key=lambda x: int(x.name.split('_')[0])):
+    for item in sorted(input_dir.iterdir(), key=lambda x: int(x.name.split('_')[0])):
         run_data = json.loads(item.read_text())
         revision = run_data['revision']
 
@@ -182,22 +177,16 @@ def main(args: argparse.Namespace) -> None:
                 ),
             )
 
-            grouped_runs[key].runs.append(
-                SuitRun(revision=revision, values=suit_result))
+            grouped_runs[key].runs.append(SuitRun(revision=revision, values=suit_result))
     context = {}
     for result in grouped_runs.values():
         suit = result.suit
         context[suit] = {
-            'common_columns':
-            result.common_columns,
-            'value_columns':
-            result.value_columns,
-            'platform':
-            result.platform,
+            'common_columns': result.common_columns,
+            'value_columns': result.value_columns,
+            'platform': result.platform,
             # reverse the order so newest results are on top of the table
-            'rows':
-            reversed(prepare_rows_from_runs(result.value_columns,
-                                            result.runs)),
+            'rows': reversed(prepare_rows_from_runs(result.value_columns, result.runs)),
         }
 
     template = Template((Path(__file__).parent / 'perf_report_template.html').read_text())
