@@ -184,8 +184,8 @@ impl Layer for InMemoryLayer {
                 .get_block_lsn_range(blknum, ..=lsn)
                 .iter()
                 .rev();
-            for (entry_lsn, pos) in iter {
-                match inner.page_versions.get_page_version(*pos)? {
+            for (entry_lsn, token) in iter {
+                match inner.page_versions.get_page_version(token)? {
                     PageVersion::Page(img) => {
                         reconstruct_data.page_img = Some(img);
                         need_image = false;
@@ -285,8 +285,8 @@ impl Layer for InMemoryLayer {
             println!("segsizes {}: {}", k, v);
         }
 
-        for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
-            let pv_description = match inner.page_versions.get_page_version(pos)? {
+        for (blknum, lsn, token) in inner.page_versions.ordered_page_version_iter(None) {
+            let pv_description = match inner.page_versions.get_page_version(token)? {
                 PageVersion::Page(_img) => "page",
                 PageVersion::Wal(_rec) => "wal",
             };

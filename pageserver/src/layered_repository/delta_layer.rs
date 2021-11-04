@@ -402,9 +402,9 @@ impl DeltaLayer {
         let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
 
         let page_versions_iter = page_versions.ordered_page_version_iter(cutoff);
-        for (blknum, lsn, pos) in page_versions_iter {
-            let blob_range =
-                page_version_writer.write_blob_from_reader(&mut page_versions.reader(pos)?)?;
+        for (blknum, lsn, token) in page_versions_iter {
+            let blob_range = page_version_writer
+                .write_blob(page_versions.get_page_version_bytes(token).as_slice())?;
 
             inner
                 .page_version_metas
