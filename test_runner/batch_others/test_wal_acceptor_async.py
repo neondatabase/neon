@@ -147,6 +147,9 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_w
     period_time = 10
     iterations = 6
 
+    test_timeout = 15 * 60  # 15 minutes
+    started_at = time.time()
+
     pg_conn = await pg.connect_async()
     tenant_id = await pg_conn.fetchval("show zenith.zenith_tenant")
     timeline_id = await pg_conn.fetchval("show zenith.zenith_timeline")
@@ -162,6 +165,9 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_w
         workers.append(asyncio.create_task(worker))
 
     for it in range(iterations):
+        if time.time() - started_at > test_timeout:
+            raise RuntimeError('test timed out')
+
         victim_idx = it % len(acceptors)
         victim = acceptors[victim_idx]
         victim.stop()
