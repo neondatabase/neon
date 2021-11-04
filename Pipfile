@@ -5,13 +5,14 @@ name = "pypi"
 
 [packages]
 pytest = ">=6.0.0"
-psycopg2 = "*"
 typing-extensions = "*"
 pyjwt = {extras = ["crypto"], version = "*"}
 requests = "*"
 pytest-xdist = "*"
 asyncpg = "*"
 cached-property = "*"
+psycopg2-binary = "*"
+jinja2 = "*"
 
 [dev-packages]
 # Behavior may change slightly between versions. These are run continuously,

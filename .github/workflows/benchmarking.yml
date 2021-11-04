@@ -1,0 +1,158 @@
+name: benchmarking
+
+on:
+  # uncomment to run on push for debugging your PR
+  # push:
+  #   branches: [ mybranch ]
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:  '36 7 * * *' # run once a day, timezone is utc
+
+env:
+  BASE_URL: "https://console.zenith.tech"
+
+jobs:
+  bench:
+    # this workflow runs on self hosteed runner
+    # it's environment is quite different from usual guthub runner
+    # probably the most important difference is that it doesnt start from clean workspace each time
+    # e g if you install system packages they are not cleaned up since you install them directly in host machine
+    # not a container or something
+    # See documentation for more info: https://docs.github.com/en/actions/hosting-your-own-runners/about-self-hosted-runners
+    runs-on: [self-hosted, zenith-benchmarker]
+
+    steps:
+    - name: Checkout zenith repo
+      uses: actions/checkout@v2
+
+    - name: Checkout zenith-perf-data repo
+      uses: actions/checkout@v2
+      with:
+        repository: zenithdb/zenith-perf-data
+        token: ${{ secrets.VIP_VAP_ACCESS_TOKEN }}
+        ref: testing # TODO replace with master once everything is ready
+        path: zenith-perf-data
+
+    # actions/setup-python@v2 is not working correctly on self-hosted runners
+    # see https://github.com/actions/setup-python/issues/162
+    # and probably https://github.com/actions/setup-python/issues/162#issuecomment-865387976 in particular
+    # so the simplest solution to me is to use already installed system python and spin virtualenvs for job runs.
+    # there is Python 3.7.10 already installed on the machine so use it to install pipenv and then use pipenv's virtuealenvs
+    - name: Install pipenv & deps
+      run: |
+        python3 -m pip install --upgrade pipenv wheel
+        # since pip/pipenv caches are reused there shouldn't be any troubles with install every time
+        pipenv install
+
+    - name: Show versions
+      run: |
+        echo Python
+        python3 --version
+        pipenv run python3 --version
+        echo Pipenv
+        pipenv --version
+        echo Pgbench
+        pgbench --version
+
+    # FIXME cluster setup is skipped due to various changes in console API
+    # for now pre created cluster is used. When API gain some stability
+    # after massive changes dynamic cluster setup will be revived.
+    # So use pre created cluster. It needs to be started manually, but stop is automatic after 5 minutes of inactivity
+    - name: Setup cluster
+      env:
+        BENCHMARK_CONSOLE_USER_PASSWORD: "${{ secrets.BENCHMARK_CONSOLE_USER_PASSWORD }}"
+        BENCHMARK_CONSOLE_ACCESS_TOKEN: "${{ secrets.BENCHMARK_CONSOLE_ACCESS_TOKEN }}"
+        # USERNAME: "benchmark"
+      shell: bash
+      run: |
+        set -e
+        # echo "Creating cluster"
+
+        # CLUSTER=$(curl -s --fail --show-error $BASE_URL/api/v1/clusters.json \
+        #     -H 'Content-Type: application/json; charset=utf-8' \
+        #     -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN" \
+        #     --data-binary @- << EOF
+        # {
+        #     "cluster": {
+        #         "name": "default_cluster",
+        #         "region_id": "2",
+        #         "instance_type_id": 7,
+        #         "settings": {}
+        #     },
+        #     "database": {"name": "benchmark"},
+        #     "role": {"name": "$USERNAME", "password": "$BENCHMARK_CONSOLE_USER_PASSWORD"}
+        # }
+        # EOF
+        # )
+
+        # echo "Created cluster"
+
+        echo "Starting cluster"
+        CLUSTER_ID=285
+        CLUSTER=$(curl -s --fail --show-error -X POST $BASE_URL/api/v1/clusters/$CLUSTER_ID/start \
+            -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN")
+        echo $CLUSTER | python -m json.tool
+
+        echo "Waiting for cluster to become ready"
+        sleep 10
+
+        # # note that jq is installed on host system
+        # CLUSTER_ID=$(echo $CLUSTER| jq ".id")
+        echo "CLUSTER_ID=$CLUSTER_ID" >> $GITHUB_ENV
+        # echo "Constructing connstr"
+        # CLUSTER=$(curl -s --fail --show-error -X GET $BASE_URL/api/v1/clusters/$CLUSTER_ID.json \
+        #     -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN")
+
+        # echo $CLUSTER | python -m json.tool
+        # CONNSTR=$(echo $CLUSTER | jq -r ".| \"postgresql://$USERNAME:$BENCHMARK_CONSOLE_USER_PASSWORD@\(.public_ip_address):\(.public_pg_port)/benchmark\"")
+        # echo "BENCHMARK_CONNSTR=$CONNSTR" >> $GITHUB_ENV
+
+    - name: Run benchmark
+      # pgbench is installed system wide from official repo
+      # https://download.postgresql.org/pub/repos/yum/13/redhat/rhel-7-x86_64/
+      # via
+      # sudo tee /etc/yum.repos.d/pgdg.repo<<EOF
+      # [pgdg13]
+      # name=PostgreSQL 13 for RHEL/CentOS 7 - x86_64
+      # baseurl=https://download.postgresql.org/pub/repos/yum/13/redhat/rhel-7-x86_64/
+      # enabled=1
+      # gpgcheck=0
+      # EOF
+      # sudo yum makecache
+      # sudo yum install postgresql13-contrib
+      # actual binaries are located in /usr/pgsql-13/bin/
+      env:
+        PG_BIN: "/usr/pgsql-13/bin/"
+        TEST_PG_BENCH_TRANSACTIONS_MATRIX: "5000,10000,20000"
+        TEST_PG_BENCH_SCALES_MATRIX: "10,15"
+        PLATFORM: "zenith-staging"
+        BENCHMARK_CONSOLE_ACCESS_TOKEN: "${{ secrets.BENCHMARK_CONSOLE_ACCESS_TOKEN }}"
+        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
+        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+      run: |
+        mkdir -p zenith-perf-data/data/staging
+        pipenv run pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir zenith-perf-data/data/staging
+
+    - name: Submit result
+      env:
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+      run: |
+        cd zenith-perf-data
+        git add data
+        git commit --author="vipvap <vipvap@zenith.tech>" -m "add performance test result for $GITHUB_SHA zenith revision"
+        git push https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-perf-data.git main
+
+    # FIXME see comment above Setup cluster job
+    # change to delete cluster after switching to creating a cluster for every run
+    - name: Stop cluster
+      if: ${{ always() }}
+      env:
+        BENCHMARK_CONSOLE_ACCESS_TOKEN: "${{ secrets.BENCHMARK_CONSOLE_ACCESS_TOKEN }}"
+      run: |
+        curl -s --fail --show-error -X POST $BASE_URL/api/v1/clusters/$CLUSTER_ID/stop \
+            -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN"

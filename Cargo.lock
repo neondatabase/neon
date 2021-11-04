@@ -1195,6 +1195,7 @@ dependencies = [
  "hyper",
  "lazy_static",
  "log",
+ "nix",
  "postgres",
  "postgres-protocol",
  "postgres-types",

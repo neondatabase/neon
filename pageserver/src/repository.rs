@@ -1,7 +1,7 @@
 use crate::relish::*;
 use crate::CheckpointConfig;
 use anyhow::Result;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::{AddAssign, Deref};
@@ -202,28 +202,9 @@ pub struct WALRecord {
     pub main_data_offset: u32,
 }
 
-impl WALRecord {
-    pub fn pack(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.will_init as u8);
-        buf.put_u32(self.main_data_offset);
-        buf.put_u32(self.rec.len() as u32);
-        buf.put_slice(&self.rec[..]);
-    }
-    pub fn unpack(buf: &mut Bytes) -> WALRecord {
-        let will_init = buf.get_u8() != 0;
-        let main_data_offset = buf.get_u32();
-        let rec_len = buf.get_u32() as usize;
-        let rec = buf.split_to(rec_len);
-        WALRecord {
-            will_init,
-            rec,
-            main_data_offset,
-        }
-    }
-}
-
 #[cfg(test)]
 pub mod repo_harness {
+    use bytes::BytesMut;
     use std::{fs, path::PathBuf};
 
     use crate::{
