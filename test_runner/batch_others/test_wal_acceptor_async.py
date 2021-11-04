@@ -109,7 +109,7 @@ async def wait_for_lsn(safekeeper: Safekeeper,
                        timeline_id: str,
                        wait_lsn: str,
                        polling_interval=1,
-                       timeout=600):
+                       timeout=200):
     """
     Poll flush_lsn from safekeeper until it's greater or equal than
     provided wait_lsn. To do that, timeline_status is fetched from
@@ -147,6 +147,10 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_w
     period_time = 10
     iterations = 6
 
+    # Set timeout for this test at 15 minutes. It should be enough for
+    # test to complete and less than CircleCI's no_output_timeout.
+    test_timeout_at = time.monotonic() + 15 * 60
+
     pg_conn = await pg.connect_async()
     tenant_id = await pg_conn.fetchval("show zenith.zenith_tenant")
     timeline_id = await pg_conn.fetchval("show zenith.zenith_timeline")
@@ -162,6 +166,8 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_w
         workers.append(asyncio.create_task(worker))
 
     for it in range(iterations):
+        assert time.monotonic() < test_timeout_at, 'test timed out'
+
         victim_idx = it % len(acceptors)
         victim = acceptors[victim_idx]
         victim.stop()
