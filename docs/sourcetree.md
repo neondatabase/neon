@@ -89,13 +89,12 @@ A single virtual environment with all dependencies is described in the single `P
 ### Prerequisites
 - Install Python 3.7 (the minimal supported version)
     - Later version (e.g. 3.8) is ok if you don't write Python code
-    - Development headers may also be needed to build `psycopg2` from source.
-    - You can install Python 3.7 and its headers (for `psycopg2`) separately, e.g.:
+    - You can install Python 3.7 separately, e.g.:
       ```bash
       # In Ubuntu
       sudo add-apt-repository ppa:deadsnakes/ppa
       sudo apt update
-      sudo apt install python3.7 python3.7-dev
+      sudo apt install python3.7
       ```
 - Install `pipenv`
     - Exact version of `pipenv` is not important, you can use Debian/Ubuntu package `pipenv`.
