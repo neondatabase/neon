@@ -12,14 +12,13 @@ import json
 import psycopg2
 import pytest
 import shutil
-import signal
 import socket
 import subprocess
 import time
 import filecmp
 import tempfile
 
-from contextlib import closing, suppress
+from contextlib import closing
 from pathlib import Path
 from dataclasses import dataclass
 
