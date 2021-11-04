@@ -431,7 +431,28 @@ jobs:
           name: Build and push Docker image
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
-            docker build --build-arg GIT_VERSION=$CIRCLE_SHA1 -t zenithdb/zenith:latest . && docker push zenithdb/zenith:latest
+            DOCKER_TAG=${CIRCLE_SHA1:0:7} # or DOCKER_TAG=${CIRCLE_BUILD_NUM} or DOCKER_TAG=$(git log --oneline|wc -l)
+            docker build --build-arg GIT_VERSION=$CIRCLE_SHA1 -t zenithdb/zenith:latest . # && docker push zenithdb/zenith:latest
+            docker tag zenithdb/zenith:latest zenithdb/zenith:${DOCKER_TAG} # && docker push zenithdb/zenith:${DOCKER_TAG}
+
+  # Build zenithdb/compute-node:latest image and push it to Docker hub
+  docker-image-compute:
+    docker:
+      - image: cimg/base:2021.04
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Init postgres submodule
+          command: git submodule update --init --depth 1
+      - run:
+          name: Build and push Docker image
+          command: |
+            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            DOCKER_TAG=${CIRCLE_SHA1:0:7} # or DOCKER_TAG=${CIRCLE_BUILD_NUM} or DOCKER_TAG=$(git log --oneline|wc -l)
+            docker build -t zenithdb/compute-node:latest vendor/postgres # && docker push zenithdb/compute-node:latest
+            docker tag zenithdb/compute-node:latest zenithdb/compute-node:${DOCKER_TAG} # && docker push zenithdb/compute-node:${DOCKER_TAG}
 
   # Trigger a new remote CI job
   remote-ci-trigger:
@@ -533,6 +554,19 @@ workflows:
             branches:
               only:
                 - main
+                - feature/tag-docker-images
+          requires:
+            - pg_regress-tests-release
+            - other-tests-release
+      - docker-image-compute:
+          # Context gives an ability to login
+          context: Docker Hub
+          # Build image only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+                - feature/tag-docker-images
           requires:
             - pg_regress-tests-release
             - other-tests-release
