@@ -24,10 +24,11 @@ class PgBenchRunner:
     pgbench_bin_path: str = "pgbench"
 
     def invoke(self, args: List[str]) -> 'subprocess.CompletedProcess[str]':
-        return subprocess.run([self.pgbench_bin_path, *args],
-                              check=True,
-                              text=True,
-                              capture_output=True)
+        res = subprocess.run([self.pgbench_bin_path, *args], text=True, capture_output=True)
+
+        if res.returncode != 0:
+            raise RuntimeError(f"pgbench failed. stdout: {res.stdout} stderr: {res.stderr}")
+        return res
 
     def init(self, vacuum: bool = True) -> 'subprocess.CompletedProcess[str]':
         args = []
