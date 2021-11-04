@@ -95,8 +95,8 @@ mod tests {
 
     fn gen_bytes(len: usize) -> Vec<u8> {
         let mut buf = vec![0u8; len];
-        for idx in 0..len {
-            buf[idx] = idx as u8;
+        for (idx, val) in buf.iter_mut().enumerate() {
+            *val = idx as u8;
         }
 
         buf
@@ -151,7 +151,7 @@ mod tests {
             expected.push((token, data.to_vec()));
 
             for (token, expected_data) in &expected {
-                let buf = chunked_buffer.read(&token);
+                let buf = chunked_buffer.read(token);
                 assert_eq!(expected_data, buf.as_slice());
             }
 
