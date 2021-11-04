@@ -47,6 +47,7 @@ use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
+use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 use zenith_utils::vec_map::VecMap;
@@ -204,7 +205,8 @@ impl Layer for DeltaLayer {
                 .iter()
                 .rev();
             for ((_blknum, pv_lsn), blob_range) in iter {
-                let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
+                let pv_bytes = read_blob(&page_version_reader, blob_range)?;
+                let pv = PageVersion::from_bytes(pv_bytes);
 
                 match pv {
                     PageVersion::Page(img) => {
@@ -214,7 +216,7 @@ impl Layer for DeltaLayer {
                         break;
                     }
                     PageVersion::Wal(rec) => {
-                        let will_init = rec.will_init;
+                        let will_init = rec.will_init();
                         reconstruct_data.records.push((*pv_lsn, rec));
                         if will_init {
                             // This WAL record initializes the page, so no need to go further back
@@ -310,19 +312,20 @@ impl Layer for DeltaLayer {
             let mut desc = String::new();
 
             let buf = read_blob(&chapter, blob_range)?;
-            let pv = PageVersion::des(&buf)?;
+            let pv = PageVersion::from_bytes(buf);
 
             match pv {
-                PageVersion::Page(img) => {
-                    write!(&mut desc, " img {} bytes", img.len())?;
+                PageVersion::Page(page) => {
+                    write!(&mut desc, " img {} bytes", page.image().len())?;
                 }
                 PageVersion::Wal(rec) => {
-                    let wal_desc = waldecoder::describe_wal_record(&rec.rec);
+                    let wal_desc =
+                        waldecoder::describe_wal_record(&Bytes::from(rec.rec().to_vec()));
                     write!(
                         &mut desc,
                         " rec {} bytes will_init: {} {}",
-                        rec.rec.len(),
-                        rec.will_init,
+                        rec.rec().len(),
+                        rec.will_init(),
                         wal_desc
                     )?;
                 }

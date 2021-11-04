@@ -3,10 +3,9 @@
 //!
 
 use crate::relish::RelishTag;
-use crate::repository::WALRecord;
+use crate::repository::{WALRecord, WAL_BIT};
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
@@ -51,10 +50,50 @@ impl SegmentTag {
 ///
 /// A page version can be stored as a full page image, or as WAL record that needs
 /// to be applied over the previous page version to reconstruct this version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum PageVersion {
-    Page(Bytes),
+    Page(Page),
     Wal(WALRecord),
+}
+
+impl PageVersion {
+    pub fn from_bytes(bytes: Box<[u8]>) -> Self {
+        if bytes[0] & WAL_BIT != 0 {
+            Self::Wal(WALRecord::from_bytes(bytes))
+        } else {
+            Self::Page(Page(bytes))
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Page(page) => page.bytes(),
+            Self::Wal(wal) => wal.bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Page(Box<[u8]>);
+
+impl Page {
+    pub fn zero_page() -> Self {
+        // TODO optimize this
+        Self(vec![0u8; 1 + 8192].into_boxed_slice())
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let mut buf = vec![0u8; 1 + bytes.len()];
+        buf[1..].copy_from_slice(bytes);
+        Self(buf.into_boxed_slice())
+    }
+
+    pub fn image(&self) -> &[u8] {
+        &self.0[1..]
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 ///
@@ -66,7 +105,7 @@ pub enum PageVersion {
 ///
 pub struct PageReconstructData {
     pub records: Vec<(Lsn, WALRecord)>,
-    pub page_img: Option<Bytes>,
+    pub page_img: Option<Page>,
 }
 
 /// Return value from Layer::get_page_reconstruct_data

@@ -2,8 +2,8 @@ use crate::relish::*;
 use crate::CheckpointConfig;
 use anyhow::Result;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::convert::TryInto;
 use std::ops::{AddAssign, Deref};
 use std::sync::Arc;
 use std::time::Duration;
@@ -192,14 +192,45 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
     fn advance_last_record_lsn(&self, lsn: Lsn);
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WALRecord {
-    pub will_init: bool,
-    pub rec: Bytes,
+#[derive(Debug, Clone)]
+pub struct WALRecord(Box<[u8]>);
+
+pub const WAL_BIT: u8 = 0b1;
+const WILL_INIT_BIT: u8 = 0b10;
+
+impl WALRecord {
+    pub fn new(will_init: bool, main_data_offset: u32, rec: &[u8]) -> Self {
+        // TODO avoid init
+        let mut buf = vec![0u8; 1 + 4 + rec.len()];
+        buf[0] = WAL_BIT | if will_init { WILL_INIT_BIT } else { 0 };
+        let mdo = u32::to_le_bytes(main_data_offset);
+        buf[1..5].copy_from_slice(&mdo);
+        buf[5..].copy_from_slice(rec);
+        Self(buf.into_boxed_slice())
+    }
+
+    pub fn from_bytes(bytes: Box<[u8]>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn will_init(&self) -> bool {
+        self.0[0] & WILL_INIT_BIT != 0
+    }
+
     // Remember the offset of main_data in rec,
     // so that we don't have to parse the record again.
     // If record has no main_data, this offset equals rec.len().
-    pub main_data_offset: u32,
+    pub fn main_data_offset(&self) -> u32 {
+        u32::from_le_bytes(self.0[1..5].try_into().unwrap())
+    }
+
+    pub fn rec(&self) -> &[u8] {
+        &self.0[5..]
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.0[..]
+    }
 }
 
 #[cfg(test)]

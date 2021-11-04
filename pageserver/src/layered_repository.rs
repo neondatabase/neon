@@ -1601,7 +1601,7 @@ impl LayeredTimeline {
                     rel,
                     request_lsn
                 );
-                Ok(img.clone())
+                Ok(Bytes::from(img.image().to_vec()))
             } else {
                 // FIXME: this ought to be an error?
                 warn!("Page {} blk {} at {} not found", rel, blknum, request_lsn);
@@ -1612,7 +1612,7 @@ impl LayeredTimeline {
             //
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
-            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init {
+            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init() {
                 // FIXME: this ought to be an error?
                 warn!(
                     "Base image for page {}/{} at {} not found, but got {} WAL records",
@@ -1632,7 +1632,7 @@ impl LayeredTimeline {
                     rel,
                     blknum,
                     request_lsn,
-                    data.page_img.clone(),
+                    data.page_img.map(|page| Bytes::from(page.image().to_vec())), // FIXME
                     data.records,
                 )?;
 

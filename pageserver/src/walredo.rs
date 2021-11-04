@@ -317,7 +317,7 @@ impl PostgresRedoManager {
         }
         // Apply all collected WAL records
         for (_lsn, record) in records {
-            let mut buf = record.rec.clone();
+            let mut buf = Bytes::from(record.rec().to_vec());
 
             WAL_REDO_RECORD_COUNTER.inc();
 
@@ -328,7 +328,7 @@ impl PostgresRedoManager {
             //move to main data
             // TODO probably, we should store some records in our special format
             // to avoid this weird parsing on replay
-            let skip = (record.main_data_offset - pg_constants::SIZEOF_XLOGRECORD) as usize;
+            let skip = (record.main_data_offset() - pg_constants::SIZEOF_XLOGRECORD) as usize;
             if buf.remaining() > skip {
                 buf.advance(skip);
             }
@@ -574,7 +574,7 @@ impl PostgresRedoProcess {
             build_push_page_msg(tag, &img, &mut writebuf);
         }
         for (lsn, rec) in records.iter() {
-            build_apply_record_msg(*lsn, &rec.rec, &mut writebuf);
+            build_apply_record_msg(*lsn, rec.rec(), &mut writebuf);
         }
         build_get_page_msg(tag, &mut writebuf);
         WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);

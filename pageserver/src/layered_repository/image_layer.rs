@@ -23,7 +23,7 @@
 //!
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, SegmentTag,
+    Layer, Page, PageReconstructData, PageReconstructResult, SegmentTag,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
@@ -177,7 +177,7 @@ impl Layer for ImageLayer {
             }
         };
 
-        reconstruct_data.page_img = Some(Bytes::from(buf));
+        reconstruct_data.page_img = Some(Page::from_bytes(&buf));
         Ok(PageReconstructResult::Complete)
     }
 

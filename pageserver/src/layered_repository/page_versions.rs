@@ -7,8 +7,6 @@ use zenith_utils::{lsn::Lsn, vec_map::VecMap};
 
 use super::storage_layer::PageVersion;
 
-use zenith_utils::bin_ser::LeSer;
-
 const EMPTY_SLICE: &[(Lsn, ChunkToken)] = &[];
 
 #[derive(Debug, Default)]
@@ -28,7 +26,7 @@ impl PageVersions {
         lsn: Lsn,
         page_version: PageVersion,
     ) -> Option<ChunkToken> {
-        let token = self.buffer.write(page_version.ser().unwrap().as_slice());
+        let token = self.buffer.write(page_version.bytes());
 
         let map = self.map.entry(blknum).or_insert_with(VecMap::default);
         map.append_or_update_last(lsn, token).unwrap()
@@ -79,8 +77,8 @@ impl PageVersions {
     }
 
     pub fn get_page_version(&self, token: &ChunkToken) -> Result<PageVersion> {
-        let buf = self.get_page_version_bytes(token);
-        Ok(PageVersion::des(buf.as_slice())?) // TODO unwrap
+        let buf = self.get_page_version_bytes(token).into_boxed_slice();
+        Ok(PageVersion::from_bytes(buf))
     }
 }
 
@@ -127,7 +125,7 @@ impl<'a> Iterator for OrderedPageVersionIter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
+    use crate::layered_repository::storage_layer::Page;
 
     use super::*;
 
@@ -137,8 +135,7 @@ mod tests {
         const BLOCKS: u32 = 1000;
         const LSNS: u64 = 50;
 
-        let empty_page = Bytes::from_static(&[0u8; 8192]);
-        let empty_page_version = PageVersion::Page(empty_page);
+        let empty_page_version = PageVersion::Page(Page::zero_page());
 
         for blknum in 0..BLOCKS {
             for lsn in 0..LSNS {

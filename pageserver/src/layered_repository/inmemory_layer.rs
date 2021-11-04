@@ -8,7 +8,6 @@ use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
-use crate::layered_repository::ZERO_PAGE;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
 use crate::PageServerConf;
@@ -24,6 +23,7 @@ use zenith_utils::vec_map::VecMap;
 use zenith_utils::lsn::Lsn;
 
 use super::page_versions::PageVersions;
+use super::storage_layer::Page;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -186,14 +186,15 @@ impl Layer for InMemoryLayer {
                 .rev();
             for (entry_lsn, token) in iter {
                 match inner.page_versions.get_page_version(token)? {
-                    PageVersion::Page(img) => {
-                        reconstruct_data.page_img = Some(img);
+                    PageVersion::Page(page) => {
+                        reconstruct_data.page_img = Some(page);
                         need_image = false;
                         break;
                     }
                     PageVersion::Wal(rec) => {
-                        reconstruct_data.records.push((*entry_lsn, rec.clone()));
-                        if rec.will_init {
+                        let will_init = rec.will_init();
+                        reconstruct_data.records.push((*entry_lsn, rec));
+                        if will_init {
                             // This WAL record initializes the page, so no need to go further back
                             need_image = false;
                             break;
@@ -361,7 +362,7 @@ impl InMemoryLayer {
 
     /// Remember new page version, as a full page image
     pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> u32 {
-        self.put_page_version(blknum, lsn, PageVersion::Page(img))
+        self.put_page_version(blknum, lsn, PageVersion::Page(Page::from_bytes(&img)))
     }
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
@@ -382,8 +383,8 @@ impl InMemoryLayer {
 
         let mut mem_usage = 0;
         mem_usage += match &pv {
-            PageVersion::Page(img) => img.len(),
-            PageVersion::Wal(rec) => rec.rec.len(),
+            PageVersion::Page(page) => page.image().len(),
+            PageVersion::Wal(rec) => rec.rec().len(),
         };
 
         let old = inner.page_versions.append_or_update_last(blknum, lsn, pv);
@@ -425,7 +426,7 @@ impl InMemoryLayer {
                 // subsequent call to initialize the gap page.
                 let gapstart = self.seg.segno * RELISH_SEG_SIZE + oldsize;
                 for gapblknum in gapstart..blknum {
-                    let zeropv = PageVersion::Page(ZERO_PAGE.clone());
+                    let zeropv = PageVersion::Page(Page::zero_page());
                     trace!(
                         "filling gap blk {} with zeros for write of {}",
                         gapblknum,

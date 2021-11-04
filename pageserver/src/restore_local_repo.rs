@@ -427,11 +427,11 @@ pub fn save_decoded_record(
             forknum: blk.forknum as u8,
         });
 
-        let rec = WALRecord {
-            will_init: blk.will_init || blk.apply_image,
-            rec: recdata.clone(),
-            main_data_offset: decoded.main_data_offset as u32,
-        };
+        let rec = WALRecord::new(
+            blk.will_init || blk.apply_image,
+            decoded.main_data_offset as u32,
+            &recdata[..],
+        );
 
         timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
     }
@@ -770,11 +770,7 @@ fn save_xact_record(
 
     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-    let rec = WALRecord {
-        will_init: false,
-        rec: decoded.record.clone(),
-        main_data_offset: decoded.main_data_offset as u32,
-    };
+    let rec = WALRecord::new(false, decoded.main_data_offset as u32, &decoded.record[..]);
     timeline.put_wal_record(
         lsn,
         RelishTag::Slru {
@@ -886,11 +882,7 @@ fn save_multixact_create_record(
     xlrec: &XlMultiXactCreate,
     decoded: &DecodedWALRecord,
 ) -> Result<()> {
-    let rec = WALRecord {
-        will_init: false,
-        rec: decoded.record.clone(),
-        main_data_offset: decoded.main_data_offset as u32,
-    };
+    let rec = WALRecord::new(false, decoded.main_data_offset as u32, &decoded.record[..]);
     let pageno = xlrec.mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;

@@ -10,10 +10,10 @@ pub struct BlobRange {
     size: usize,
 }
 
-pub fn read_blob(reader: &BoundedReader<&'_ File>, range: &BlobRange) -> Result<Vec<u8>> {
+pub fn read_blob(reader: &BoundedReader<&'_ File>, range: &BlobRange) -> Result<Box<[u8]>> {
     let mut buf = vec![0u8; range.size];
     reader.read_exact_at(&mut buf, range.offset)?;
-    Ok(buf)
+    Ok(buf.into_boxed_slice())
 }
 
 pub struct BlobWriter<W> {
