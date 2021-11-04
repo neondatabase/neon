@@ -13,6 +13,8 @@ on:
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     - cron:  '36 7 * * *' # run once a day, timezone is utc
 
+  workflow_dispatch: # adds ability to run this manually
+
 env:
   BASE_URL: "https://console.zenith.tech"
 
@@ -26,6 +28,9 @@ jobs:
     # See documentation for more info: https://docs.github.com/en/actions/hosting-your-own-runners/about-self-hosted-runners
     runs-on: [self-hosted, zenith-benchmarker]
 
+    env:
+      PG_BIN: "/usr/pgsql-13/bin"
+
     steps:
     - name: Checkout zenith repo
       uses: actions/checkout@v2
@@ -35,7 +40,7 @@ jobs:
       with:
         repository: zenithdb/zenith-perf-data
         token: ${{ secrets.VIP_VAP_ACCESS_TOKEN }}
-        ref: testing # TODO replace with master once everything is ready
+        ref: main
         path: zenith-perf-data
 
     # actions/setup-python@v2 is not working correctly on self-hosted runners
@@ -57,7 +62,7 @@ jobs:
         echo Pipenv
         pipenv --version
         echo Pgbench
-        pgbench --version
+        $PG_BIN/pgbench --version
 
     # FIXME cluster setup is skipped due to various changes in console API
     # for now pre created cluster is used. When API gain some stability
@@ -67,50 +72,23 @@ jobs:
       env:
         BENCHMARK_CONSOLE_USER_PASSWORD: "${{ secrets.BENCHMARK_CONSOLE_USER_PASSWORD }}"
         BENCHMARK_CONSOLE_ACCESS_TOKEN: "${{ secrets.BENCHMARK_CONSOLE_ACCESS_TOKEN }}"
-        # USERNAME: "benchmark"
+        BENCHMARK_CLUSTER_ID: "${{ secrets.BENCHMARK_CLUSTER_ID }}"
       shell: bash
       run: |
         set -e
-        # echo "Creating cluster"
-
-        # CLUSTER=$(curl -s --fail --show-error $BASE_URL/api/v1/clusters.json \
-        #     -H 'Content-Type: application/json; charset=utf-8' \
-        #     -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN" \
-        #     --data-binary @- << EOF
-        # {
-        #     "cluster": {
-        #         "name": "default_cluster",
-        #         "region_id": "2",
-        #         "instance_type_id": 7,
-        #         "settings": {}
-        #     },
-        #     "database": {"name": "benchmark"},
-        #     "role": {"name": "$USERNAME", "password": "$BENCHMARK_CONSOLE_USER_PASSWORD"}
-        # }
-        # EOF
-        # )
-
-        # echo "Created cluster"
 
         echo "Starting cluster"
-        CLUSTER_ID=285
-        CLUSTER=$(curl -s --fail --show-error -X POST $BASE_URL/api/v1/clusters/$CLUSTER_ID/start \
+        CLUSTER=$(curl -s --fail --show-error -X POST $BASE_URL/api/v1/clusters/$BENCHMARK_CLUSTER_ID/start \
             -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN")
         echo $CLUSTER | python -m json.tool
 
         echo "Waiting for cluster to become ready"
         sleep 10
 
-        # # note that jq is installed on host system
-        # CLUSTER_ID=$(echo $CLUSTER| jq ".id")
-        echo "CLUSTER_ID=$CLUSTER_ID" >> $GITHUB_ENV
-        # echo "Constructing connstr"
-        # CLUSTER=$(curl -s --fail --show-error -X GET $BASE_URL/api/v1/clusters/$CLUSTER_ID.json \
-        #     -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN")
-
-        # echo $CLUSTER | python -m json.tool
-        # CONNSTR=$(echo $CLUSTER | jq -r ".| \"postgresql://$USERNAME:$BENCHMARK_CONSOLE_USER_PASSWORD@\(.public_ip_address):\(.public_pg_port)/benchmark\"")
-        # echo "BENCHMARK_CONNSTR=$CONNSTR" >> $GITHUB_ENV
+        echo "CLUSTER_ID=$BENCHMARK_CLUSTER_ID" >> $GITHUB_ENV
+        CLUSTER=$(curl -s --fail --show-error -X GET $BASE_URL/api/v1/clusters/$BENCHMARK_CLUSTER_ID.json \
+            -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN")
+        echo $CLUSTER | python -m json.tool
 
     - name: Run benchmark
       # pgbench is installed system wide from official repo
@@ -127,7 +105,6 @@ jobs:
       # sudo yum install postgresql13-contrib
       # actual binaries are located in /usr/pgsql-13/bin/
       env:
-        PG_BIN: "/usr/pgsql-13/bin/"
         TEST_PG_BENCH_TRANSACTIONS_MATRIX: "5000,10000,20000"
         TEST_PG_BENCH_SCALES_MATRIX: "10,15"
         PLATFORM: "zenith-staging"
@@ -146,13 +123,3 @@ jobs:
         git add data
         git commit --author="vipvap <vipvap@zenith.tech>" -m "add performance test result for $GITHUB_SHA zenith revision"
         git push https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-perf-data.git main
-
-    # FIXME see comment above Setup cluster job
-    # change to delete cluster after switching to creating a cluster for every run
-    - name: Stop cluster
-      if: ${{ always() }}
-      env:
-        BENCHMARK_CONSOLE_ACCESS_TOKEN: "${{ secrets.BENCHMARK_CONSOLE_ACCESS_TOKEN }}"
-      run: |
-        curl -s --fail --show-error -X POST $BASE_URL/api/v1/clusters/$CLUSTER_ID/stop \
-            -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN"
