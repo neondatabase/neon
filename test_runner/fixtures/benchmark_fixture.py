@@ -16,7 +16,7 @@ import warnings
 from contextlib import contextmanager
 
 # Type-related stuff
-from typing import Iterator, Optional
+from typing import Iterator
 """
 This file contains fixtures for micro-benchmarks.
 
@@ -312,6 +312,14 @@ def zenbenchmark(record_property) -> Iterator[ZenithBenchmarker]:
     """
     benchmarker = ZenithBenchmarker(record_property)
     yield benchmarker
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--out-dir",
+        dest="out_dir",
+        help="Directory to ouput performance tests results to.",
+    )
 
 
 def get_out_path(target_dir: Path, revision: str) -> Path:
