@@ -147,6 +147,15 @@ trait RemoteStorage: Send + Sync {
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
     ) -> anyhow::Result<()>;
 
+    /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
+    async fn download_range(
+        &self,
+        from: &Self::StoragePath,
+        start_inclusive: u64,
+        end_exclusive: Option<u64>,
+        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
+    ) -> anyhow::Result<()>;
+
     async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()>;
 }
 
