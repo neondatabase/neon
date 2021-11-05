@@ -74,22 +74,29 @@ impl ComputeControlPlane {
     }
 
     // FIXME: see also parse_point_in_time in branches.rs.
-    fn parse_point_in_time(
+    fn parse_timeline_spec(
         &self,
         tenantid: ZTenantId,
         s: &str,
-    ) -> Result<(ZTimelineId, Option<Lsn>)> {
+        replica_of: Option<&str>,
+    ) -> Result<(ZTimelineId, Replication)> {
         let mut strings = s.split('@');
         let name = strings.next().unwrap();
 
-        let lsn: Option<Lsn>;
-        if let Some(lsnstr) = strings.next() {
-            lsn = Some(
-                Lsn::from_str(lsnstr)
+        let target;
+
+        if let Some(replspec) = strings.next() {
+            target = Replication::Static(
+                Lsn::from_str(replspec)
                     .with_context(|| "invalid LSN in point-in-time specification")?,
             );
+        } else if let Some(name) = replica_of {
+            return Ok((
+                ZTimelineId::from_str(s)?,
+                Replication::Replica(name.to_string()),
+            ));
         } else {
-            lsn = None
+            target = Replication::Primary
         }
 
         // Resolve the timeline ID, given the human-readable branch name
@@ -98,18 +105,20 @@ impl ComputeControlPlane {
             .branch_get_by_name(&tenantid, name)?
             .timeline_id;
 
-        Ok((timeline_id, lsn))
+        Ok((timeline_id, target))
     }
 
     pub fn new_node(
         &mut self,
         tenantid: ZTenantId,
         name: &str,
-        timeline_spec: &str,
+        timeline_name: &str,
         port: Option<u16>,
+        replica_of: Option<&str>,
     ) -> Result<Arc<PostgresNode>> {
         // Resolve the human-readable timeline spec into timeline ID and LSN
-        let (timelineid, lsn) = self.parse_point_in_time(tenantid, timeline_spec)?;
+        let (timelineid, replication) =
+            self.parse_timeline_spec(tenantid, timeline_name, replica_of)?;
 
         let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {
@@ -119,9 +128,9 @@ impl ComputeControlPlane {
             pageserver: Arc::clone(&self.pageserver),
             is_test: false,
             timelineid,
-            lsn,
+            replication,
             tenantid,
-            uses_wal_proposer: false,
+            uses_wal_proposer: !self.env.safekeepers.is_empty(),
         });
 
         node.create_pgdata()?;
@@ -135,6 +144,12 @@ impl ComputeControlPlane {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Replication {
+    Primary,
+    Static(Lsn),
+    Replica(String),
+}
 
 #[derive(Debug)]
 pub struct PostgresNode {
@@ -144,7 +159,7 @@ pub struct PostgresNode {
     pageserver: Arc<PageServerNode>,
     is_test: bool,
     pub timelineid: ZTimelineId,
-    pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
+    pub replication: Replication,
     pub tenantid: ZTenantId,
     uses_wal_proposer: bool,
 }
@@ -181,9 +196,23 @@ impl PostgresNode {
         let tenantid: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
         let uses_wal_proposer = conf.get("wal_acceptors").is_some();
 
-        // parse recovery_target_lsn, if any
-        let recovery_target_lsn: Option<Lsn> =
-            conf.parse_field_optional("recovery_target_lsn", &context)?;
+        // parse recovery_target_lsn and primary_conninfo into Recovery Target, if any
+        let replication;
+
+        if let Some(_) = conf.get("recovery_target_lsn") {
+            let lsn = conf
+                .parse_field_optional("recovery_target_lsn", &context)?
+                .with_context(|| "Unreadable recovery target LSN")?;
+            replication = Replication::Static(lsn);
+        } else if let Some(slot_name) = conf.get("primary_slot_name") {
+            let slot_name = slot_name.to_string();
+            println!("{}", conf.to_string());
+            let prefix = format!("repl_{}_{}_", timelineid, name);
+            assert!(slot_name.starts_with(&prefix));
+            replication = Replication::Replica(slot_name[prefix.len()..].to_owned());
+        } else {
+            replication = Replication::Primary;
+        }
 
         // ok now
         Ok(PostgresNode {
@@ -193,7 +222,7 @@ impl PostgresNode {
             pageserver: Arc::clone(pageserver),
             is_test: false,
             timelineid,
-            lsn: recovery_target_lsn,
+            replication,
             tenantid,
             uses_wal_proposer,
         })
@@ -294,12 +323,6 @@ impl PostgresNode {
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
 
-        // Never clean up old WAL. TODO: We should use a replication
-        // slot or something proper, to prevent the compute node
-        // from removing WAL that hasn't been streamed to the safekeeper or
-        // page server yet. (gh issue #349)
-        conf.append("wal_keep_size", "10TB");
-
         // Configure the node to fetch pages from pageserver
         let pageserver_connstr = {
             let (host, port) = connection_host_port(&self.pageserver.pg_connection_config);
@@ -323,29 +346,59 @@ impl PostgresNode {
         conf.append("zenith.page_server_connstring", &pageserver_connstr);
         conf.append("zenith.zenith_tenant", &self.tenantid.to_string());
         conf.append("zenith.zenith_timeline", &self.timelineid.to_string());
-        if let Some(lsn) = self.lsn {
-            conf.append("recovery_target_lsn", &lsn.to_string());
-        }
+
         conf.append_line("");
 
-        if !self.env.safekeepers.is_empty() {
-            // Configure the node to connect to the safekeepers
-            conf.append("synchronous_standby_names", "walproposer");
+        // Replication-related configurations, such as WAL sending
+        match &self.replication {
+            Replication::Primary => {
+                if !self.env.safekeepers.is_empty() {
+                    // Configure the node to connect to the safekeepers
+                    conf.append("synchronous_standby_names", "walproposer");
 
-            let wal_acceptors = self
-                .env
-                .safekeepers
-                .iter()
-                .map(|sk| format!("localhost:{}", sk.pg_port))
-                .collect::<Vec<String>>()
-                .join(",");
-            conf.append("wal_acceptors", &wal_acceptors);
-        } else {
-            // Configure the node to stream WAL directly to the pageserver
-            // This isn't really a supported configuration, but can be useful for
-            // testing.
-            conf.append("synchronous_standby_names", "pageserver");
-            conf.append("zenith.callmemaybe_connstring", &self.connstr());
+                    let wal_acceptors = self
+                        .env
+                        .safekeepers
+                        .iter()
+                        .map(|sk| format!("localhost:{}", sk.pg_port))
+                        .collect::<Vec<String>>()
+                        .join(",");
+                    conf.append("wal_acceptors", &wal_acceptors);
+                } else {
+                    // On the primary, never clean up old WAL.
+                    // slot or something proper, to prevent the compute node
+                    // from removing WAL that hasn't been streamed to the page server yet.
+                    // Safekeeper is configured with a replication slot, so there this
+                    // wal_keep_size is actively harmful in preventing local WAL cleanup.
+                    // (gh issue #349)
+                    conf.append("wal_keep_size", "10TB");
+
+                    // Configure the node to stream WAL directly to the pageserver
+                    // This isn't really a supported configuration, but can be useful for
+                    // testing.
+                    conf.append("synchronous_standby_names", "pageserver");
+                    conf.append("zenith.callmemaybe_connstring", &self.connstr());
+                }
+            }
+            Replication::Static(lsn) => {
+                conf.append("recovery_target_lsn", &lsn.to_string());
+            }
+            Replication::Replica(of) => {
+                assert!(self.env.safekeepers.len() > 0);
+
+                // TODO: use future host field from safekeeper spec
+                let connstr = format!(
+                    "host=localhost port={} options='-c ztimelineid={} ztenantid={}' application_name=replica replication=true",
+                    self.env.safekeepers[0].pg_port,
+                    &self.timelineid.to_string(),
+                    &self.tenantid.to_string(),
+                );
+                let slot_name =
+                    format!("repl_{}_{}_{}", self.timelineid.to_string(), self.name, of);
+                conf.append("primary_conninfo", connstr.as_str());
+                conf.append("primary_slot_name", slot_name.as_str());
+                conf.append("hot_standby", "on");
+            }
         }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
@@ -355,21 +408,23 @@ impl PostgresNode {
     }
 
     fn load_basebackup(&self) -> Result<()> {
-        let backup_lsn = if let Some(lsn) = self.lsn {
-            Some(lsn)
-        } else if self.uses_wal_proposer {
-            // LSN 0 means that it is bootstrap and we need to download just
-            // latest data from the pageserver. That is a bit clumsy but whole bootstrap
-            // procedure evolves quite actively right now, so let's think about it again
-            // when things would be more stable (TODO).
-            let lsn = self.sync_safekeepers()?;
-            if lsn == Lsn(0) {
-                None
-            } else {
-                Some(lsn)
+        let backup_lsn = match &self.replication {
+            Replication::Primary => {
+                if self.uses_wal_proposer {
+                    let lsn = self.sync_safekeepers()?;
+                    if lsn == Lsn(0) {
+                        None
+                    } else {
+                        Some(lsn)
+                    }
+                } else {
+                    None
+                }
             }
-        } else {
-            None
+            Replication::Static(lsn) => Some(*lsn),
+            Replication::Replica(..) => {
+                None // Take the latest snapshot available to start with
+            }
         };
 
         self.do_basebackup(backup_lsn)?;
@@ -449,7 +504,7 @@ impl PostgresNode {
         // 3. Load basebackup
         self.load_basebackup()?;
 
-        if self.lsn.is_some() {
+        if self.replication != Replication::Primary {
             File::create(self.pgdata().join("standby.signal"))?;
         }
 

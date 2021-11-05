@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail};
 use anyhow::{Context, Result};
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
+use control_plane::compute::Replication::Replica;
 use control_plane::local_env;
 use control_plane::local_env::LocalEnv;
 use control_plane::safekeeper::SafekeeperNode;
@@ -11,6 +12,7 @@ use pageserver::defaults::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
 use std::collections::HashMap;
+use std::option::Option::None;
 use std::process::exit;
 use std::str::FromStr;
 use walkeeper::defaults::{
@@ -102,6 +104,13 @@ fn main() -> Result<()> {
         .required(false)
         .value_name("stop-mode");
 
+    let replicates_arg = Arg::with_name("replicates")
+        .short("r")
+        .takes_value(true)
+        .help("If configured, the node will be a hot replica of the node identified by the name")
+        .long("replicates")
+        .required(false);
+
     let matches = App::new("Zenith CLI")
         .setting(AppSettings::ArgRequiredElseHelp)
         .version(GIT_VERSION)
@@ -168,6 +177,7 @@ fn main() -> Result<()> {
                     .arg(timeline_arg.clone())
                     .arg(tenantid_arg.clone())
                     .arg(port_arg.clone())
+                    .arg(replicates_arg.clone())
                     .arg(
                         Arg::with_name("config-only")
                             .help("Don't do basebackup, create compute node with only config files")
@@ -179,7 +189,8 @@ fn main() -> Result<()> {
                     .arg(pg_node_arg.clone())
                     .arg(timeline_arg.clone())
                     .arg(tenantid_arg.clone())
-                    .arg(port_arg.clone()))
+                    .arg(port_arg.clone())
+                    .arg(replicates_arg.clone()))
                 .subcommand(
                     SubCommand::with_name("stop")
                         .arg(pg_node_arg.clone())
@@ -502,16 +513,18 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
         "create" => {
             let node_name = sub_args.value_of("node").unwrap_or("main");
             let timeline_name = sub_args.value_of("timeline").unwrap_or(node_name);
+            let replica = sub_args.value_of("replicates");
 
             let port: Option<u16> = match sub_args.value_of("port") {
                 Some(p) => Some(p.parse()?),
                 None => None,
             };
-            cplane.new_node(tenantid, node_name, timeline_name, port)?;
+            cplane.new_node(tenantid, node_name, timeline_name, port, replica)?;
         }
         "start" => {
             let node_name = sub_args.value_of("node").unwrap_or("main");
             let timeline_name = sub_args.value_of("timeline");
+            let replica = sub_args.value_of("replicates");
 
             let port: Option<u16> = match sub_args.value_of("port") {
                 Some(p) => Some(p.parse()?),
@@ -532,6 +545,17 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 if timeline_name.is_some() {
                     println!("timeline name ignored because node exists already");
                 }
+                if let Some(repl) = replica {
+                    if let Replica(source) = &node.replication {
+                        if source != repl {
+                            println!("replication ignored: node already has replica configured")
+                        }
+                    } else {
+                        println!(
+                            "replication ignored: pre-existing node was not configured as replica"
+                        )
+                    }
+                }
                 println!("Starting existing postgres {}...", node_name);
                 node.start(&auth_token)?;
             } else {
@@ -540,12 +564,29 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 // start --port X
                 // stop
                 // start <-- will also use port X even without explicit port argument
-                let timeline_name = timeline_name.unwrap_or(node_name);
+                let shadow: String; // used exclusively to ensure the lifetime of effective_timeline_name
+                let effective_timeline_name: &str;
+                if let Some(repl) = replica {
+                    if timeline_name.is_some() {
+                        println!("timeline name ignored because replication is configured");
+                    }
+
+                    let node = cplane
+                        .nodes
+                        .get(&(tenantid, repl.to_owned()))
+                        .ok_or("Failed to find the upstream node");
+
+                    shadow = node.unwrap().timelineid.to_string();
+                    effective_timeline_name = shadow.as_str();
+                } else {
+                    effective_timeline_name = timeline_name.unwrap_or(node_name);
+                }
                 println!(
                     "Starting new postgres {} on {}...",
-                    node_name, timeline_name
+                    node_name, effective_timeline_name
                 );
-                let node = cplane.new_node(tenantid, node_name, timeline_name, port)?;
+                let node =
+                    cplane.new_node(tenantid, node_name, effective_timeline_name, port, replica)?;
                 node.start(&auth_token)?;
             }
         }
