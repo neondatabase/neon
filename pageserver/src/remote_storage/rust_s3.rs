@@ -148,13 +148,45 @@ impl RemoteStorage for S3 {
             .with_context(|| format!("Failed to download s3 object with key {}", from.key()))?;
         if code != 200 {
             Err(anyhow::format_err!(
-                "Received non-200 exit code during downloading object from directory, code: {}",
+                "Received non-200 exit code during downloading object, code: {}",
                 code
             ))
         } else {
-            io::copy(&mut io::BufReader::new(data.as_slice()), to)
+            // we don't have to write vector into the destination this way, `to_write_all` would be enough.
+            // but we want to prepare for migration on `rusoto`, that has a streaming HTTP body instead here, with
+            // which it makes more sense to use `io::copy`.
+            io::copy(&mut data.as_slice(), to)
                 .await
                 .context("Failed to write downloaded data into the destination buffer")?;
+            Ok(())
+        }
+    }
+
+    async fn download_range(
+        &self,
+        from: &Self::StoragePath,
+        start_inclusive: u64,
+        end_exclusive: Option<u64>,
+        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
+    ) -> anyhow::Result<()> {
+        // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
+        // and needs both ends to be exclusive
+        let end_inclusive = end_exclusive.map(|end| end.saturating_sub(1));
+        let (data, code) = self
+            .bucket
+            .get_object_range(from.key(), start_inclusive, end_inclusive)
+            .await
+            .with_context(|| format!("Failed to download s3 object with key {}", from.key()))?;
+        if code != 206 {
+            Err(anyhow::format_err!(
+                "Received non-206 exit code during downloading object range, code: {}",
+                code
+            ))
+        } else {
+            // see `download` function above for the comment on why `Vec<u8>` buffer is copied this way
+            io::copy(&mut data.as_slice(), to)
+                .await
+                .context("Failed to write downloaded range into the destination buffer")?;
             Ok(())
         }
     }
