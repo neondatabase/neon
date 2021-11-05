@@ -7,7 +7,8 @@ use std::fmt::Display;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 
-use crate::safekeeper::AcceptorState;
+use crate::safekeeper::Term;
+use crate::safekeeper::TermHistory;
 use crate::timeline::CreateControlFile;
 use crate::timeline::GlobalTimelines;
 use crate::SafeKeeperConf;
@@ -29,12 +30,21 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .as_ref()
 }
 
+/// Serialize through Display trait.
 fn display_serialize<S, F>(z: &F, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
     F: Display,
 {
     s.serialize_str(&format!("{}", z))
+}
+
+/// Augment AcceptorState with epoch for convenience
+#[derive(Debug, Serialize)]
+struct AcceptorStateStatus {
+    term: Term,
+    epoch: Term,
+    term_history: TermHistory,
 }
 
 /// Info about timeline on safekeeper ready for reporting.
@@ -44,7 +54,7 @@ struct TimelineStatus {
     tenant_id: ZTenantId,
     #[serde(serialize_with = "display_serialize")]
     timeline_id: ZTimelineId,
-    acceptor_state: AcceptorState,
+    acceptor_state: AcceptorStateStatus,
     #[serde(serialize_with = "display_serialize")]
     commit_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
@@ -68,10 +78,16 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     let sk_state = tli.get_info();
     let flush_lsn = tli.get_end_of_wal();
 
+    let acc_state = AcceptorStateStatus {
+        term: sk_state.acceptor_state.term,
+        epoch: sk_state.acceptor_state.get_epoch(flush_lsn),
+        term_history: sk_state.acceptor_state.term_history,
+    };
+
     let status = TimelineStatus {
         tenant_id,
         timeline_id,
-        acceptor_state: sk_state.acceptor_state,
+        acceptor_state: acc_state,
         commit_lsn: sk_state.commit_lsn,
         truncate_lsn: sk_state.truncate_lsn,
         flush_lsn,

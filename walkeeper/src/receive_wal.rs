@@ -4,6 +4,7 @@
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
+use bytes::BytesMut;
 use log::*;
 use postgres::{Client, Config, NoTls};
 
@@ -98,7 +99,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 
     // Send message to the postgres
     fn write_msg(&mut self, msg: &AcceptorProposerMessage) -> Result<()> {
-        let mut buf = Vec::new();
+        let mut buf = BytesMut::with_capacity(128);
         msg.serialize(&mut buf)?;
         self.pg_backend.write_message(&BeMessage::CopyData(&buf))?;
         Ok(())
@@ -147,7 +148,9 @@ impl<'pg> ReceiveWalConn<'pg> {
                 .get()
                 .process_msg(&msg)
                 .with_context(|| "failed to process ProposerAcceptorMessage")?;
-            self.write_msg(&reply)?;
+            if let Some(reply) = reply {
+                self.write_msg(&reply)?;
+            }
             msg = self.read_msg()?;
         }
     }
