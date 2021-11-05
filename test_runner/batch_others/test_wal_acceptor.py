@@ -392,6 +392,7 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder, pg_bin: PgBin):
                 "lm_prefix": "prefix",
                 "lm_message": "message",
                 "set_commit_lsn": True,
+                "send_proposer_elected": True,
                 "term": 2,
                 "begin_lsn": begin_lsn,
                 "epoch_start_lsn": epoch_start_lsn,
