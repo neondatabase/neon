@@ -15,7 +15,7 @@ use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::*;
 
 static PGBACKEND_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -44,6 +44,12 @@ pub trait Handler {
     /// Check auth jwt
     fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
         bail!("JWT auth failed")
+    }
+
+    /// How long to wait for next query before cancelling connection.
+    /// None means no timeout.
+    fn idle_session_timeout(&self) -> Option<Duration> {
+        None
     }
 }
 
@@ -263,14 +269,17 @@ impl PostgresBackend {
 
         let mut unnamed_query_string = Bytes::new();
 
+        let mut idle_timer = Instant::now();
+
         while !PGBACKEND_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
             match self.read_message() {
                 Ok(message) => {
                     if let Some(msg) = message {
-                        trace!("got message {:?}", msg);
-
                         match self.process_message(handler, msg, &mut unnamed_query_string)? {
-                            ProcessMsgResult::Continue => continue,
+                            ProcessMsgResult::Continue => {
+                                idle_timer = Instant::now();
+                                continue;
+                            }
                             ProcessMsgResult::Break => break,
                         }
                     } else {
@@ -278,9 +287,18 @@ impl PostgresBackend {
                     }
                 }
                 Err(e) => {
-                    // If it is a timeout error, continue the loop
+                    // If it is a timeout error, continue the loop till timeout
                     if !is_socket_read_timed_out(&e) {
+                        debug!("run_message_loop backend to {:?} exited", self.peer_addr);
                         return Err(e);
+                    } else if let Some(timeout) = handler.idle_session_timeout() {
+                        if idle_timer.elapsed() > timeout {
+                            debug!(
+                                "run_message_loop backend to {:?} timed out ",
+                                self.peer_addr
+                            );
+                            return Err(e);
+                        }
                     }
                 }
             }

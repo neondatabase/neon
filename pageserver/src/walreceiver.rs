@@ -82,6 +82,7 @@ pub fn drop_wal_receiver(timelineid: ZTimelineId, tenantid: ZTenantId) {
         }
     }
 
+    trace!("No more WAL receivers for tenant {}", tenantid);
     // When last walreceiver of the tenant is gone, change state to Idle
     tenant_mgr::set_tenant_state(tenantid, TenantState::Idle).unwrap();
 }
@@ -155,6 +156,11 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
         let res = walreceiver_main(conf, timelineid, &wal_producer_connstr, tenantid);
 
         if let Err(e) = res {
+            if e.to_string().contains("no more WAL") {
+                trace!("No more WAL, exiting WAL receiver thread: {}", e);
+                break;
+            }
+
             info!(
                 "WAL streaming connection failed ({}), retrying in 1 second",
                 e
@@ -328,7 +334,7 @@ fn walreceiver_main(
             // TODO: More thought should go into what values are sent here.
             let last_lsn = PgLsn::from(u64::from(last_lsn));
             // We are using disk consistent LSN as `write_lsn`, i.e. LSN at which page server
-            // may guarantee persistence of all received data. Safekeeper is not free to remove
+            // may guarantee persistence of all received data. Safekeeper is free to remove
             // WAL preceding `write_lsn`: it should not be requested by this page server.
             let write_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
             let flush_lsn = last_lsn;

@@ -30,7 +30,7 @@ lazy_static! {
     static ref TENANT_THREADS_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "tenant_threads_count",
         "Number of live tenant threads",
-        &["tenant_thread_type"]
+        &["tenant_id", "tenant_thread_type"]
     )
     .expect("failed to define a metric");
 }
@@ -47,7 +47,12 @@ pub fn start_tenant_threads(conf: &'static PageServerConf, tenantid: ZTenantId) 
             gc_handle: None,
         });
 
-    if h.checkpointer_handle.is_none() {
+    let checkpointer = TENANT_THREADS_COUNT
+        .get_metric_with_label_values(&[&tenantid.to_string(), "checkpointer"])
+        .unwrap()
+        .get();
+
+    if checkpointer == 0 {
         h.checkpointer_handle = std::thread::Builder::new()
             .name("Checkpointer thread".into())
             .spawn(move || {
@@ -56,7 +61,12 @@ pub fn start_tenant_threads(conf: &'static PageServerConf, tenantid: ZTenantId) 
             .ok();
     }
 
-    if h.gc_handle.is_none() {
+    let gc = TENANT_THREADS_COUNT
+        .get_metric_with_label_values(&[&tenantid.to_string(), "gc"])
+        .unwrap()
+        .get();
+
+    if gc == 0 {
         h.gc_handle = std::thread::Builder::new()
             .name("GC thread".into())
             .spawn(move || {
@@ -81,7 +91,7 @@ pub fn wait_for_tenant_threads_to_stop(tenantid: ZTenantId) {
 /// Checkpointer thread's main loop
 ///
 fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
-    let gauge = TENANT_THREADS_COUNT.with_label_values(&["checkpointer"]);
+    let gauge = TENANT_THREADS_COUNT.with_label_values(&[&tenantid.to_string(), "checkpointer"]);
     gauge.inc();
     scopeguard::defer! {
         gauge.dec();
@@ -113,7 +123,7 @@ fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result
 /// GC thread's main loop
 ///
 fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
-    let gauge = TENANT_THREADS_COUNT.with_label_values(&["gc"]);
+    let gauge = TENANT_THREADS_COUNT.with_label_values(&[&tenantid.to_string(), "gc"]);
     gauge.inc();
     scopeguard::defer! {
         gauge.dec();

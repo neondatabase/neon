@@ -23,7 +23,7 @@ pub fn thread_main(conf: SafeKeeperConf, listener: TcpListener) -> Result<()> {
                     .name("WAL service thread".into())
                     .spawn(move || {
                         if let Err(err) = handle_socket(socket, conf) {
-                            error!("connection handler exited: {}", err);
+                            error!("connection {} handler exited: {}", peer_addr, err);
                         }
                     })
                     .unwrap();
@@ -39,7 +39,7 @@ fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<()> {
     socket.set_nodelay(true)?;
 
     let mut conn_handler = SendWalHandler::new(conf);
-    let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, false)?;
+    let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, true)?;
     // libpq replication protocol between safekeeper and replicas/pagers
     pgbackend.run(&mut conn_handler)?;
 

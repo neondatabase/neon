@@ -8,6 +8,7 @@ use log::*;
 use postgres::{Client, Config, NoTls};
 
 use std::net::SocketAddr;
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::thread::sleep;
 
@@ -15,9 +16,11 @@ use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::send_wal::SendWalHandler;
-use crate::timeline::TimelineTools;
+use crate::timeline::{Timeline, TimelineTools};
 use crate::SafeKeeperConf;
+use std::sync::Arc;
 use zenith_utils::connstring::connection_host_port;
+use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
@@ -27,13 +30,20 @@ pub struct ReceiveWalConn<'pg> {
     pg_backend: &'pg mut PostgresBackend,
     /// The cached result of `pg_backend.socket().peer_addr()` (roughly)
     peer_addr: SocketAddr,
+    callmemeybe_sender: Option<Sender<()>>,
 }
 
 ///
 /// Periodically request pageserver to call back.
 /// If pageserver already has replication channel, it will just ignore this request
 ///
-fn request_callback(conf: SafeKeeperConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
+fn request_callback(
+    conf: SafeKeeperConf,
+    rx: Receiver<()>,
+    timeline: Arc<Timeline>,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
+) {
     let ps_addr = conf.pageserver_addr.unwrap();
     let ps_connstr = format!(
         "postgresql://no_user:{}@{}/no_db",
@@ -50,18 +60,29 @@ fn request_callback(conf: SafeKeeperConf, timelineid: ZTimelineId, tenantid: ZTe
         tenantid, timelineid, host, port, timelineid, tenantid,
     );
 
+    let mut start_pos = Lsn(0);
     loop {
-        info!(
-            "requesting page server to connect to us: start {} {}",
-            ps_connstr, callme
-        );
-        match Client::connect(&ps_connstr, NoTls) {
-            Ok(mut client) => {
-                if let Err(e) = client.simple_query(&callme) {
-                    error!("Failed to send callme request to pageserver: {}", e);
+        if let Err(TryRecvError::Disconnected) = rx.try_recv() {
+            trace!("Walstream disconnected. Exiting request_callback thread");
+            break;
+        }
+
+        // Request callback only at start or
+        // if we have some new WAL to stream
+        if let Some(lsn) = timeline.wait_for_lsn(start_pos) {
+            start_pos = lsn;
+            info!(
+                " requesting page server to connect to us: start {} {}",
+                ps_connstr, callme
+            );
+            match Client::connect(&ps_connstr, NoTls) {
+                Ok(mut client) => {
+                    if let Err(e) = client.simple_query(&callme) {
+                        error!("Failed to send callme request to pageserver: {}", e);
+                    }
                 }
+                Err(e) => error!("Failed to connect to pageserver {}: {}", &ps_connstr, e),
             }
-            Err(e) => error!("Failed to connect to pageserver {}: {}", &ps_connstr, e),
         }
 
         if let Some(period) = conf.recall_period {
@@ -78,6 +99,7 @@ impl<'pg> ReceiveWalConn<'pg> {
         Ok(ReceiveWalConn {
             pg_backend: pg,
             peer_addr,
+            callmemeybe_sender: None,
         })
     }
 
@@ -126,17 +148,23 @@ impl<'pg> ReceiveWalConn<'pg> {
             _ => bail!("unexpected message {:?} instead of greeting", msg),
         }
 
+        //Use channel to shutdown the callback thread
+        let (tx, rx) = channel();
+        self.callmemeybe_sender = Some(tx);
+
         // if requested, ask pageserver to fetch wal from us
         // xxx: this place seems not really fitting
         if swh.conf.pageserver_addr.is_some() {
             // Need to establish replication channel with page server.
             // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
             let conf = swh.conf.clone();
+            let bg_timeline = Arc::clone(swh.timeline.get());
+
             let timelineid = swh.timeline.get().timelineid;
             let _ = thread::Builder::new()
                 .name("request_callback thread".into())
                 .spawn(move || {
-                    request_callback(conf, timelineid, tenant_id);
+                    request_callback(conf, rx, bg_timeline, timelineid, tenant_id);
                 })
                 .unwrap();
         }

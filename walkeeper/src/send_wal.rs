@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor, INT4_OID, TEXT_OID};
@@ -81,6 +82,10 @@ impl postgres_backend::Handler for SendWalHandler {
             bail!("Unexpected command {:?}", query_string);
         }
         Ok(())
+    }
+
+    fn idle_session_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(30))
     }
 }
 

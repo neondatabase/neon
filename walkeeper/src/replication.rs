@@ -13,6 +13,7 @@ use std::cmp::min;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
@@ -88,7 +89,11 @@ impl ReplicationConn {
 
     /// Handle incoming messages from the network.
     /// This is spawned into the background by `handle_start_replication`.
-    fn background_thread(mut stream_in: impl Read, timeline: Arc<Timeline>) -> Result<()> {
+    fn background_thread(
+        s: Sender<Lsn>,
+        mut stream_in: impl Read,
+        timeline: Arc<Timeline>,
+    ) -> Result<()> {
         let mut state = ReplicaState::new();
         let replica = timeline.add_replica(state);
         let _guard = ReplicationConnGuard {
@@ -113,6 +118,16 @@ impl ReplicationConn {
                             let reply = StandbyReply::des(&m[1..])
                                 .context("failed to deserialize StandbyReply")?;
                             state.disk_consistent_lsn = reply.write_lsn;
+                            // Meaning of `flush_lsn` and `write_lsn`
+                            // is far from obvious, but it is what walreceiver returns.
+                            // write_lsn is the disk_consistent_lsn, durably saved at pageserver
+                            // and `flush_lsn` is the last lsn received by walreceiver.
+                            // TODO: fix usage of these fields.
+                            debug!(
+                                "standby reply.write_lsn {} flush_lsn {}",
+                                reply.write_lsn, reply.flush_lsn
+                            );
+                            s.send(reply.flush_lsn)?;
                             timeline.update_replica_state(replica, Some(state));
                         }
                         _ => warn!("unexpected message {:?}", msg),
@@ -173,12 +188,15 @@ impl ReplicationConn {
         let bg_timeline = Arc::clone(swh.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();
 
+        let (tx, rx) = channel();
+
         let _ = thread::Builder::new()
             .name("HotStandbyFeedback thread".into())
             .spawn(move || {
-                if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline) {
+                if let Err(err) = Self::background_thread(tx, bg_stream_in, bg_timeline) {
                     error!("Replication background thread failed: {}", err);
-                }
+                };
+                trace!("HotStandbyFeedback background thread exited");
             })
             .unwrap();
 
@@ -202,10 +220,30 @@ impl ReplicationConn {
 
         let mut end_pos = Lsn(0);
         let mut wal_file: Option<File> = None;
+        let mut retry_count = 0;
 
         loop {
+            if let Ok(lsn) = rx.try_recv() {
+                // If pageserver is caught up or nothing was sent at all,
+                // we can stop the replication.
+                if end_pos == lsn || end_pos == Lsn(0) {
+                    // Don't give up too soon.
+                    // TODO: should we use a timeout here?
+                    retry_count += 1;
+                    if retry_count > 30 {
+                        // ReplicationIter on pageserver side
+                        // doesn't handle ErrorResponse messages,
+                        // so we check the message text to distinguish
+                        // the reason of the disconnection.
+                        pgb.write_message(&BeMessage::ErrorResponse("no more WAL".to_string()))?;
+                        break;
+                    }
+                }
+            }
+
             /* Wait until we have some data to stream */
             if let Some(lsn) = swh.timeline.get().wait_for_lsn(start_pos) {
+                retry_count = 0;
                 end_pos = lsn
             } else {
                 // timeout expired: request pageserver status
@@ -267,6 +305,8 @@ impl ReplicationConn {
                 wal_file = Some(file);
             }
         }
+
+        trace!("ReplicationConn exited");
         Ok(())
     }
 }
