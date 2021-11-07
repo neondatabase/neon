@@ -2,16 +2,17 @@
 //! Global registry of open layers.
 //!
 //! Whenever a new in-memory layer is created to hold incoming WAL, it is registered
-//! in [`GLOBAL_LAYER_MAP`], so that we can keep track of the total number of
-//! in-memory layers in the system, and know when we need to evict some to release
-//! memory.
+//! in [`GLOBAL_LAYER_MAP`]. This view across all in-memory layers in the system allows
+//! global optimization of memory resources. We keep track of the total memory used by
+//! all the in-memory layers [`GLOBAL_OPEN_MEM_USAGE`], and whenever that becomes too
+//! high, we evict an in-memory layer to disk. See [`find_victim_if_needed`].
 //!
 //! Each layer is assigned a unique ID when it's registered in the global registry.
 //! The ID can be used to relocate the layer later, without having to hold locks.
 //!
-
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use tracing::error;
 
 use super::inmemory_layer::InMemoryLayer;
 
@@ -40,7 +41,8 @@ pub struct LayerId {
 }
 
 enum SlotData {
-    Occupied(Arc<InMemoryLayer>),
+    /// The second element is the (approximate) amount of memory used by the layer.
+    Occupied(Arc<InMemoryLayer>, usize),
     /// Vacant slots form a linked list, the value is the index
     /// of the next vacant slot in the list.
     Vacant(Option<usize>),
@@ -49,14 +51,17 @@ enum SlotData {
 struct Slot {
     tag: u64,
     data: SlotData,
-    usage_count: AtomicU8, // for clock algorithm
+    /// Tracks how frequently this layer has been accessed recently. TODO: This is
+    /// intended for a clock algorithm, but currently the eviction is based purely
+    /// on memory usage, not how recently a layer has been accessed. So currently
+    /// this is unused.
+    usage_count: AtomicU8,
 }
 
 #[derive(Default)]
 pub struct OpenLayers {
     slots: Vec<Slot>,
     num_occupied: usize,
-    next_victim: AtomicUsize,
 
     // Head of free-slot list.
     next_empty_slot_idx: Option<usize>,
@@ -81,7 +86,7 @@ impl OpenLayers {
         let slot = &mut self.slots[slot_idx];
 
         match slot.data {
-            SlotData::Occupied(_) => {
+            SlotData::Occupied(_, _) => {
                 panic!("an occupied slot was in the free list");
             }
             SlotData::Vacant(next_empty_slot_idx) => {
@@ -89,16 +94,20 @@ impl OpenLayers {
             }
         }
 
-        slot.data = SlotData::Occupied(layer);
+        let layer_id = LayerId {
+            index: slot_idx,
+            tag: slot.tag,
+        };
+
+        layer.register_layer_id(layer_id);
+
+        slot.data = SlotData::Occupied(layer, 0);
         slot.usage_count.store(1, Ordering::Relaxed);
 
         self.num_occupied += 1;
         assert!(self.num_occupied <= slots_len);
 
-        LayerId {
-            index: slot_idx,
-            tag: slot.tag,
-        }
+        layer_id
     }
 
     pub fn get(&self, layer_id: &LayerId) -> Option<Arc<InMemoryLayer>> {
@@ -107,7 +116,7 @@ impl OpenLayers {
             return None;
         }
 
-        if let SlotData::Occupied(layer) = &slot.data {
+        if let SlotData::Occupied(layer, _mem_usage) = &slot.data {
             let _ = slot.usage_count.fetch_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
@@ -137,50 +146,47 @@ impl OpenLayers {
         }
     }
 
-    pub fn find_victim(&self) -> Option<(LayerId, Arc<InMemoryLayer>)> {
+    /// Find a layer to evict, to release memory.
+    fn find_victim(&self) -> Option<(LayerId, Arc<InMemoryLayer>)> {
         if self.num_occupied == 0 {
             return None;
         }
 
-        // Run the clock algorithm.
+        // Currently, we choose the in-memory layer that uses most memory as the victim.
         //
-        // FIXME: It's theoretically possible that a constant stream of get() requests
-        // comes in faster than we advance the clock hand, so that this never finishes.
-        loop {
-            // FIXME: Because we interpret the clock hand variable modulo slots.len(), the
-            // hand effectively jumps to a more or less random place whenever the array is
-            // expanded. That's relatively harmless, it just leads to a non-optimal choice
-            // of victim. Also, in a server that runs for long enough, the array should reach
-            // a steady-state size and not grow anymore.
-            let next_victim = self.next_victim.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+        // TODO: An optimal algorithm would laso take into account how frequently or recently
+        // each layer has been accessed, but we don't do that now. (To be pedentic, an optimal
+        // algorithm would take into account when a layer is *next* going to be accessed, but
+        // the best we can do in practice is to guess based on history.)
+        let mut best_slot = 0;
+        let mut best_mem_usage = 0;
 
-            let slot = &self.slots[next_victim];
+        for i in 0..self.slots.len() {
+            let slot = &self.slots[i];
 
-            if let SlotData::Occupied(data) = &slot.data {
-                fn update_fn(old_usage_count: u8) -> Option<u8> {
-                    if old_usage_count > 0 {
-                        Some(old_usage_count - 1)
-                    } else {
-                        None
-                    }
-                }
-
-                if slot
-                    .usage_count
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, update_fn)
-                    .is_err()
-                {
-                    // Found a slot with usage_count == 0. Return it.
-                    return Some((
-                        LayerId {
-                            index: next_victim,
-                            tag: slot.tag,
-                        },
-                        Arc::clone(data),
-                    ));
+            if let SlotData::Occupied(_data, mem_usage) = &slot.data {
+                if *mem_usage > best_mem_usage {
+                    best_slot = i;
+                    best_mem_usage = *mem_usage;
                 }
             }
         }
+
+        if best_mem_usage > 0 {
+            let slot = &self.slots[best_slot];
+
+            if let SlotData::Occupied(data, _mem_usage) = &slot.data {
+                return Some((
+                    LayerId {
+                        index: best_slot,
+                        tag: slot.tag,
+                    },
+                    Arc::clone(data),
+                ));
+            }
+        }
+
+        None
     }
 
     // TODO this won't be a public API in the future
@@ -192,8 +198,9 @@ impl OpenLayers {
         }
 
         match &slot.data {
-            SlotData::Occupied(_layer) => {
-                // TODO evict the layer
+            SlotData::Occupied(layer, mem_usage) => {
+                layer.unregister();
+                GLOBAL_OPEN_MEM_USAGE.fetch_sub(*mem_usage, Ordering::Relaxed);
             }
             SlotData::Vacant(_) => unimplemented!(),
         }
@@ -205,5 +212,25 @@ impl OpenLayers {
         self.num_occupied -= 1;
 
         slot.tag = slot.tag.wrapping_add(1);
+    }
+
+    /// In-memory layers call this function whenever the memory consumption of layer
+    /// changes significantly.
+    pub fn update_layer_memory_stats(&mut self, layer_id: LayerId, mem_usage: usize) {
+        let slot = &mut self.slots[layer_id.index];
+
+        if slot.tag != layer_id.tag {
+            return;
+        }
+
+        match &mut slot.data {
+            SlotData::Occupied(_layer, m) => {
+                *m = mem_usage;
+            }
+            SlotData::Vacant(_) => {
+                // Shouldn't happen.
+                error!("update_layer_memory_stats called for a layer that was already evicted");
+            }
+        }
     }
 }

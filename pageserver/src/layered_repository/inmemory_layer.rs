@@ -3,10 +3,11 @@
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
 use crate::layered_repository::filename::DeltaFileName;
-use crate::layered_repository::global_layer_map::GLOBAL_OPEN_MEM_USAGE;
+use crate::layered_repository::global_layer_map::GLOBAL_LAYER_MAP;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
+use crate::layered_repository::LayerId;
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
@@ -17,7 +18,6 @@ use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use zenith_utils::vec_map::VecMap;
 
@@ -49,6 +49,8 @@ pub struct InMemoryLayer {
 }
 
 pub struct InMemoryLayerInner {
+    layer_id: Option<LayerId>,
+
     /// Frozen in-memory layers have an exclusive end LSN.
     /// Writes are only allowed when this is None
     end_lsn: Option<Lsn>,
@@ -78,7 +80,7 @@ pub struct InMemoryLayerInner {
     /// overhead, memory fragmentation, memory used by the VecMaps, nor many other things.
     /// Just the actual # of bytes of a page image (8 kB) or the size of a WAL record.
     ///
-    /// Whenever this is changed, you must also modify GLOBAL_OPEN_MEM_USAGE accordingly!
+    /// Whenever this is changed, you must also modify GLOBAL_OPEN_MEM_USAGE accordingly! FIXME
     mem_usage: usize,
 }
 
@@ -96,15 +98,6 @@ impl InMemoryLayerInner {
             *entry
         } else {
             panic!("could not find seg size in in-memory layer");
-        }
-    }
-}
-
-impl Drop for InMemoryLayerInner {
-    fn drop(&mut self) {
-        if self.mem_usage > 0 {
-            GLOBAL_OPEN_MEM_USAGE.fetch_sub(self.mem_usage, Ordering::Relaxed);
-            self.mem_usage = 0;
         }
     }
 }
@@ -310,6 +303,24 @@ impl InMemoryLayer {
         self.oldest_pending_lsn
     }
 
+    /// Callback to notify when this layer is inserted to the global layer map.
+    /// From this point on, we need to keep the global layer map informed whenever
+    /// the memory consumption of this layer increases, by calling
+    /// [`update_layer_memory_stats`].
+    pub fn register_layer_id(&self, layer_id: LayerId) {
+        let mut inner = self.inner.write().unwrap();
+
+        inner.layer_id = Some(layer_id);
+    }
+
+    /// Callback from the global layer map, when this layer is removed from global
+    /// layer map.
+    pub fn unregister(&self) {
+        let mut inner = self.inner.write().unwrap();
+
+        inner.layer_id = None;
+    }
+
     ///
     /// Create a new, empty, in-memory layer
     ///
@@ -343,6 +354,7 @@ impl InMemoryLayer {
             oldest_pending_lsn,
             incremental: false,
             inner: RwLock::new(InMemoryLayerInner {
+                layer_id: None,
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::default(),
@@ -397,7 +409,6 @@ impl InMemoryLayer {
         }
 
         inner.mem_usage += mem_usage;
-        GLOBAL_OPEN_MEM_USAGE.fetch_add(mem_usage, Ordering::Relaxed);
 
         // Also update the relation size, if this extended the relation.
         if self.seg.rel.is_blocky() {
@@ -527,6 +538,7 @@ impl InMemoryLayer {
             oldest_pending_lsn,
             incremental: true,
             inner: RwLock::new(InMemoryLayerInner {
+                layer_id: None,
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::default(),
@@ -545,7 +557,15 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is inclusive
     pub fn freeze(&self, end_lsn: Lsn) {
+        let filename = self.filename();
+
         let mut inner = self.inner.write().unwrap();
+
+        trace!(
+            "freezing {} which was consuming {} kB of memory",
+            filename.display(),
+            inner.mem_usage / 1024
+        );
 
         if inner.end_lsn.is_some() {
             assert!(inner.dropped);
@@ -568,7 +588,12 @@ impl InMemoryLayer {
             // too many open layers, and from that point of view this should no longer be
             // counted against the global mem usage.
             if inner.mem_usage > 0 {
-                GLOBAL_OPEN_MEM_USAGE.fetch_sub(inner.mem_usage, Ordering::Relaxed);
+                if let Some(layer_id) = inner.layer_id {
+                    GLOBAL_LAYER_MAP
+                        .write()
+                        .unwrap()
+                        .update_layer_memory_stats(layer_id, 0);
+                }
                 inner.mem_usage = 0;
             }
         }
