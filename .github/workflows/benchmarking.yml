@@ -40,7 +40,7 @@ jobs:
       with:
         repository: zenithdb/zenith-perf-data
         token: ${{ secrets.VIP_VAP_ACCESS_TOKEN }}
-        ref: main
+        ref: master
         path: zenith-perf-data
 
     # actions/setup-python@v2 is not working correctly on self-hosted runners
@@ -122,4 +122,4 @@ jobs:
         cd zenith-perf-data
         git add data
         git commit --author="vipvap <vipvap@zenith.tech>" -m "add performance test result for $GITHUB_SHA zenith revision"
-        git push https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-perf-data.git main
+        git push https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-perf-data.git master
