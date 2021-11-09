@@ -321,14 +321,24 @@ fn walreceiver_main(
         };
 
         if let Some(last_lsn) = status_update {
-            // TODO: More thought should go into what values are sent here.
             let last_lsn = PgLsn::from(u64::from(last_lsn));
-            // We are using disk consistent LSN as `write_lsn`, i.e. LSN at which page server
-            // may guarantee persistence of all received data. Safekeeper is not free to remove
-            // WAL preceding `write_lsn`: it should not be requested by this page server.
-            let write_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
-            let flush_lsn = last_lsn;
-            let apply_lsn = PgLsn::from(0);
+
+            // The last LSN we processed. It is not guaranteed to survive pageserver crash.
+            let write_lsn = last_lsn;
+            // This value doesn't guarantee data durability, but it's ok.
+            // In setup with WAL service, pageserver durability is guaranteed by safekeepers.
+            // In setup without WAL service, we just don't care.
+            let flush_lsn = write_lsn;
+            // `disk_consistent_lsn` is the LSN at which page server guarantees persistence of all received data
+            // Depending on the setup we recieve WAL directly from Compute Node or
+            // from a WAL service.
+            //
+            // Senders use the feedback to determine if we are caught up:
+            // - Safekeepers are free to remove WAL preceding `apply_lsn`,
+            // as it will never be requested by this page server.
+            // - Compute Node uses 'apply_lsn' to calculate a lag for back pressure mechanism
+            // (delay WAL inserts to avoid lagging pageserver responses and WAL overflow).
+            let apply_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
             let ts = SystemTime::now();
             const NO_REPLY: u8 = 0;
             physical_stream.standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)?;
