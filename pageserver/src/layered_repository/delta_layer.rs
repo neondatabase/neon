@@ -42,6 +42,7 @@ use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag,
 };
+use crate::virtual_file::VirtualFile;
 use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
@@ -53,7 +54,6 @@ use zenith_utils::vec_map::VecMap;
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::fs;
-use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
 use std::path::{Path, PathBuf};
@@ -139,6 +139,8 @@ pub struct DeltaLayerInner {
     /// loaded into memory yet.
     loaded: bool,
 
+    book: Option<Book<VirtualFile>>,
+
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
     page_version_metas: VecMap<(u32, Lsn), BlobRange>,
@@ -189,10 +191,12 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            // TODO: avoid opening the file for each read
-            let (_path, book) = self.open_book()?;
-            let page_version_reader = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
             let inner = self.load()?;
+            let page_version_reader = inner
+                .book
+                .as_ref()
+                .unwrap()
+                .chapter_reader(PAGE_VERSIONS_CHAPTER)?;
 
             // Scan the metadata BTreeMap backwards, starting from the given entry.
             let minkey = (blknum, Lsn(0));
@@ -303,7 +307,11 @@ impl Layer for DeltaLayer {
             println!("  {}: {}", k, v);
         }
         println!("--- page versions ---");
-        let (_path, book) = self.open_book()?;
+
+        let path = self.path();
+        let file = std::fs::File::open(&path)?;
+        let book = Book::new(file)?;
+
         let chapter = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
         for ((blk, lsn), blob_range) in inner.page_version_metas.as_slice() {
             let mut desc = String::new();
@@ -382,18 +390,23 @@ impl DeltaLayer {
             dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: true,
+                book: None,
                 page_version_metas: VecMap::default(),
                 relsizes,
             }),
         };
         let mut inner = delta_layer.inner.lock().unwrap();
 
-        // Write the in-memory btreemaps into a file
-        let path = delta_layer.path();
-
+        // Write the data into a file
+        //
+        // Note: Because we open the file in write-only mode, we cannot
+        // reuse the same VirtualFile for reading later. That's why we don't
+        // set inner.book here. The first read will have to re-open it.
+        //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let file = File::create(&path)?;
+        let path = delta_layer.path();
+        let file = VirtualFile::create(&path)?;
         let buf_writer = BufWriter::new(file);
         let book = BookWriter::new(buf_writer, DELTA_FILE_MAGIC)?;
 
@@ -448,15 +461,6 @@ impl DeltaLayer {
         Ok(delta_layer)
     }
 
-    fn open_book(&self) -> Result<(PathBuf, Book<File>)> {
-        let path = self.path();
-
-        let file = File::open(&path)?;
-        let book = Book::new(file)?;
-
-        Ok((path, book))
-    }
-
     ///
     /// Load the contents of the file into memory
     ///
@@ -468,7 +472,9 @@ impl DeltaLayer {
             return Ok(inner);
         }
 
-        let (path, book) = self.open_book()?;
+        let path = self.path();
+        let file = VirtualFile::open(&path)?;
+        let book = Book::new(file)?;
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
@@ -505,6 +511,7 @@ impl DeltaLayer {
 
         *inner = DeltaLayerInner {
             loaded: true,
+            book: None,
             page_version_metas,
             relsizes,
         };
@@ -529,6 +536,7 @@ impl DeltaLayer {
             dropped: filename.dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
+                book: None,
                 page_version_metas: VecMap::default(),
                 relsizes: VecMap::default(),
             }),
@@ -538,7 +546,10 @@ impl DeltaLayer {
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
-    pub fn new_for_path(path: &Path, book: &Book<File>) -> Result<Self> {
+    pub fn new_for_path<F>(path: &Path, book: &Book<F>) -> Result<Self>
+    where
+        F: std::os::unix::prelude::FileExt,
+    {
         let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
         let summary = Summary::des(&chapter)?;
 
@@ -552,6 +563,7 @@ impl DeltaLayer {
             dropped: summary.dropped,
             inner: Mutex::new(DeltaLayerInner {
                 loaded: false,
+                book: None,
                 page_version_metas: VecMap::default(),
                 relsizes: VecMap::default(),
             }),

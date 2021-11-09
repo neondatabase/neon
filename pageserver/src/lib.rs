@@ -19,6 +19,7 @@ pub mod repository;
 pub mod restore_local_repo;
 pub mod tenant_mgr;
 pub mod tenant_threads;
+pub mod virtual_file;
 pub mod waldecoder;
 pub mod walreceiver;
 pub mod walredo;
@@ -45,6 +46,7 @@ pub mod defaults {
     pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
 
     pub const DEFAULT_OPEN_MEM_LIMIT: usize = 128 * 1024 * 1024;
+    pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
 }
 
 lazy_static! {
@@ -74,6 +76,7 @@ pub struct PageServerConf {
     pub superuser: String,
 
     pub open_mem_limit: usize,
+    pub max_file_descriptors: usize,
 
     // Repository directory, relative to current working directory.
     // Normally, the page server changes the current working directory
@@ -158,6 +161,7 @@ impl PageServerConf {
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             open_mem_limit: defaults::DEFAULT_OPEN_MEM_LIMIT,
+            max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             superuser: "zenith_admin".to_string(),

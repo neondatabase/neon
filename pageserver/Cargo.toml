@@ -5,7 +5,7 @@ authors = ["Stas Kelvich <stas@zenith.tech>"]
 edition = "2018"
 
 [dependencies]
-bookfile = "^0.3"
+bookfile = { git = "https://github.com/zenithdb/bookfile.git", branch="generic-readext" }
 chrono = "0.4.19"
 rand = "0.8.3"
 regex = "1.4.5"
@@ -39,6 +39,7 @@ tracing = "0.1.27"
 signal-hook = {version = "0.3.10", features = ["extended-siginfo"] }
 url = "2"
 nix = "0.23"
+once_cell = "1.8.0"
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }

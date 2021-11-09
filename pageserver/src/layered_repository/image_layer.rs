@@ -27,6 +27,7 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
+use crate::virtual_file::VirtualFile;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{anyhow, bail, ensure, Result};
@@ -35,7 +36,6 @@ use log::*;
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs;
-use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -104,9 +104,8 @@ enum ImageType {
 }
 
 pub struct ImageLayerInner {
-    /// If false, the 'image_type' has not been
-    /// loaded into memory yet.
-    loaded: bool,
+    /// If None, the 'image_type' has not been loaded into memory yet.
+    book: Option<Book<VirtualFile>>,
 
     /// Derived from filename and bookfile chapter metadata
     image_type: ImageType,
@@ -155,8 +154,6 @@ impl Layer for ImageLayer {
 
         let base_blknum = blknum % RELISH_SEG_SIZE;
 
-        let (_path, book) = self.open_book()?;
-
         let buf = match &inner.image_type {
             ImageType::Blocky { num_blocks } => {
                 if base_blknum >= *num_blocks {
@@ -166,14 +163,23 @@ impl Layer for ImageLayer {
                 let mut buf = vec![0u8; BLOCK_SIZE];
                 let offset = BLOCK_SIZE as u64 * base_blknum as u64;
 
-                let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
+                let chapter = inner
+                    .book
+                    .as_ref()
+                    .unwrap()
+                    .chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
                 chapter.read_exact_at(&mut buf, offset)?;
 
                 buf
             }
             ImageType::NonBlocky => {
                 ensure!(base_blknum == 0);
-                book.read_chapter(NONBLOCKY_IMAGE_CHAPTER)?.into_vec()
+                inner
+                    .book
+                    .as_ref()
+                    .unwrap()
+                    .read_chapter(NONBLOCKY_IMAGE_CHAPTER)?
+                    .into_vec()
             }
         };
 
@@ -195,14 +201,7 @@ impl Layer for ImageLayer {
         Ok(true)
     }
 
-    ///
-    /// Release most of the memory used by this layer. If it's accessed again later,
-    /// it will need to be loaded back.
-    ///
     fn unload(&self) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.image_type = ImageType::Blocky { num_blocks: 0 };
-        inner.loaded = false;
         Ok(())
     }
 
@@ -228,8 +227,11 @@ impl Layer for ImageLayer {
         match inner.image_type {
             ImageType::Blocky { num_blocks } => println!("({}) blocks ", num_blocks),
             ImageType::NonBlocky => {
-                let (_path, book) = self.open_book()?;
-                let chapter = book.read_chapter(NONBLOCKY_IMAGE_CHAPTER)?;
+                let chapter = inner
+                    .book
+                    .as_ref()
+                    .unwrap()
+                    .read_chapter(NONBLOCKY_IMAGE_CHAPTER)?;
                 println!("non-blocky ({} bytes)", chapter.len());
             }
         }
@@ -277,17 +279,22 @@ impl ImageLayer {
             seg,
             lsn,
             inner: Mutex::new(ImageLayerInner {
-                loaded: true,
+                book: None,
                 image_type: image_type.clone(),
             }),
         };
         let inner = layer.inner.lock().unwrap();
 
         // Write the images into a file
-        let path = layer.path();
+        //
+        // Note: Because we open the file in write-only mode, we cannot
+        // reuse the same VirtualFile for reading later. That's why we don't
+        // set inner.book here. The first read will have to re-open it.
+        //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let file = File::create(&path)?;
+        let path = layer.path();
+        let file = VirtualFile::create(&path)?;
         let buf_writer = BufWriter::new(file);
         let book = BookWriter::new(buf_writer, IMAGE_FILE_MAGIC)?;
 
@@ -374,11 +381,13 @@ impl ImageLayer {
         // quick exit if already loaded
         let mut inner = self.inner.lock().unwrap();
 
-        if inner.loaded {
+        if inner.book.is_some() {
             return Ok(inner);
         }
 
-        let (path, book) = self.open_book()?;
+        let path = self.path();
+        let file = VirtualFile::open(&path)?;
+        let book = Book::new(file)?;
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
@@ -419,20 +428,11 @@ impl ImageLayer {
         debug!("loaded from {}", &path.display());
 
         *inner = ImageLayerInner {
-            loaded: true,
+            book: Some(book),
             image_type,
         };
 
         Ok(inner)
-    }
-
-    fn open_book(&self) -> Result<(PathBuf, Book<File>)> {
-        let path = self.path();
-
-        let file = File::open(&path)?;
-        let book = Book::new(file)?;
-
-        Ok((path, book))
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
@@ -449,7 +449,7 @@ impl ImageLayer {
             seg: filename.seg,
             lsn: filename.lsn,
             inner: Mutex::new(ImageLayerInner {
-                loaded: false,
+                book: None,
                 image_type: ImageType::Blocky { num_blocks: 0 },
             }),
         }
@@ -458,7 +458,10 @@ impl ImageLayer {
     /// Create an ImageLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
-    pub fn new_for_path(path: &Path, book: &Book<File>) -> Result<ImageLayer> {
+    pub fn new_for_path<F>(path: &Path, book: &Book<F>) -> Result<ImageLayer>
+    where
+        F: std::os::unix::prelude::FileExt,
+    {
         let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
         let summary = Summary::des(&chapter)?;
 
@@ -469,7 +472,7 @@ impl ImageLayer {
             seg: summary.seg,
             lsn: summary.lsn,
             inner: Mutex::new(ImageLayerInner {
-                loaded: false,
+                book: None,
                 image_type: ImageType::Blocky { num_blocks: 0 },
             }),
         })
