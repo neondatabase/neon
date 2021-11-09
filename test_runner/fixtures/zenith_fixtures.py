@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from cached_property import cached_property
 import asyncpg
 import os
@@ -11,6 +11,7 @@ import jwt
 import json
 import psycopg2
 import pytest
+import re
 import shutil
 import socket
 import subprocess
@@ -715,7 +716,7 @@ class ZenithPageserver(PgProtocol):
     def __exit__(self, exc_type, exc, tb):
         self.stop(True)
 
-    def http_client(self, auth_token: Optional[str] = None):
+    def http_client(self, auth_token: Optional[str] = None) -> ZenithPageserverHttpClient:
         return ZenithPageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
@@ -1084,7 +1085,7 @@ class Safekeeper:
                 assert isinstance(res, dict)
                 return res
 
-    def http_client(self):
+    def http_client(self) -> SafekeeperHttpClient:
         return SafekeeperHttpClient(port=self.port.http)
 
 
@@ -1092,6 +1093,14 @@ class Safekeeper:
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
+
+
+@dataclass
+class SafekeeperMetrics:
+    # These are metrics from Prometheus which uses float64 internally.
+    # As a consequence, values may differ from real original int64s.
+    flush_lsn_inexact: Dict[str, int] = field(default_factory=dict)
+    commit_lsn_inexact: Dict[str, int] = field(default_factory=dict)
 
 
 class SafekeeperHttpClient(requests.Session):
@@ -1108,6 +1117,22 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
                                         flush_lsn=resj['flush_lsn'])
+
+    def get_metrics(self) -> SafekeeperMetrics:
+        request_result = self.get(f"http://localhost:{self.port}/metrics")
+        request_result.raise_for_status()
+        all_metrics_text = request_result.text
+
+        metrics = SafekeeperMetrics()
+        for match in re.finditer(r'^safekeeper_flush_lsn{ztli="([0-9a-f]+)"} (\S+)$',
+                                 all_metrics_text,
+                                 re.MULTILINE):
+            metrics.flush_lsn_inexact[match.group(1)] = int(match.group(2))
+        for match in re.finditer(r'^safekeeper_commit_lsn{ztli="([0-9a-f]+)"} (\S+)$',
+                                 all_metrics_text,
+                                 re.MULTILINE):
+            metrics.commit_lsn_inexact[match.group(1)] = int(match.group(2))
+        return metrics
 
 
 def get_test_output_dir(request: Any) -> str:
