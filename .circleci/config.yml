@@ -10,7 +10,7 @@ executors:
       - image: cimg/python:3.7.10  # Oldest available 3.7 with Ubuntu 20.04 (for GLIBC and Rust) at CirlceCI
 
 jobs:
-  check-codestyle:
+  check-codestyle-rust:
     executor: zenith-build-executor
     steps:
       - checkout
@@ -182,23 +182,20 @@ jobs:
           paths:
             - "*"
 
-  check-python:
+  check-codestyle-python:
     executor: zenith-python-executor
     steps:
       - checkout
       - run:
           name: Install deps
-          working_directory: test_runner
           command: pipenv --python 3.7 install --dev
       - run:
           name: Run yapf to ensure code format
           when: always
-          working_directory: test_runner
           command: pipenv run yapf --recursive --diff .
       - run:
           name: Run mypy to check types
           when: always
-          working_directory: test_runner
           command: pipenv run mypy .
 
   run-pytest:
@@ -238,7 +235,6 @@ jobs:
             - run: git submodule update --init --depth 1
       - run:
           name: Install deps
-          working_directory: test_runner
           command: pipenv --python 3.7 install
       - run:
           name: Run pytest
@@ -351,8 +347,8 @@ jobs:
 workflows:
   build_and_test:
     jobs:
-      - check-codestyle
-      - check-python
+      - check-codestyle-rust
+      - check-codestyle-python
       - build-postgres:
           name: build-postgres-<< matrix.build_type >>
           matrix:

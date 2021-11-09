@@ -3,21 +3,13 @@
 This directory contains integration tests.
 
 Prerequisites:
-- Python 3.7 or later
-    - Development headers may also be needed to build `psycopg2` from source.
-    - Python 3.7 is recommended if you want to update tests.
-- Dependencies: install them via `pipenv install`. Note that Debian/Ubuntu
-  packages are stale, as it commonly happens, so manual installation is not
-  recommended.
-  Exact version of `pipenv` is not important unless you change dependencies.
-  Run `pipenv shell` to activate the venv or use `pipenv run` to run a single
-  command in the venv, e.g. `pipenv run pytest`.
+- Correctly configured Python, see [`/docs/sourcetree.md`](/docs/sourcetree.md#using-python)
 - Zenith and Postgres binaries
-    - See the root README.md for build directions
+    - See the root [README.md](/README.md) for build directions
     - Tests can be run from the git tree; or see the environment variables
       below to run from other directories.
 - The zenith git repo, including the postgres submodule
-  (for some tests, e.g. pg_regress)
+  (for some tests, e.g. `pg_regress`)
 
 ### Test Organization
 
@@ -38,15 +30,15 @@ be stored under a directory `test_output`.
 
 You can run all the tests with:
 
-`pytest`
+`pipenv run pytest`
 
 If you want to run all the tests in a particular file:
 
-`pytest test_pgbench.py`
+`pipenv run pytest test_pgbench.py`
 
 If you want to run all tests that have the string "bench" in their names:
 
-`pytest -k bench`
+`pipenv run pytest -k bench`
 
 Useful environment variables:
 
@@ -105,47 +97,11 @@ don't need to worry about cleaning up. Logs and test data are preserved for the 
 in a directory under `../test_output/<testname>`
 
 ### Before submitting a patch
-#### Obligatory checks
-Install dev dependencies via `pipenv --python 3.7 install --dev` (better)
-or `pipenv install --dev` (if you don't have Python 3.7 and don't need to change dependencies).
+Ensure that you pass all [obligatory checks](/docs/sourcetree.md#obligatory-checks).
 
-We force code formatting via yapf and type hints via mypy.
-Run the following commands in the `test_runner/` directory:
+Also consider:
 
-```bash
-pipenv run yapf -ri .  # All code is reformatted
-pipenv run mypy .  # Ensure there are no typing errors
-```
-
-#### Advisable actions
 * Writing a couple of docstrings to clarify the reasoning behind a new test.
-* Running `flake8` (or a linter of your choice, e.g. `pycodestyle`) and fixing possible defects, if any.
 * Adding more type hints to your code to avoid `Any`, especially:
   * For fixture parameters, they are not automatically deduced.
   * For function arguments and return values.
-
-#### Changing dependencies
-You have to update `Pipfile.lock` if you have changed `Pipfile`:
-
-```bash
-pipenv --python 3.7 install --dev  # Re-create venv for Python 3.7 and install recent pipenv inside
-pipenv run pipenv --version  # Should be at least 2021.5.29
-pipenv run pipenv lock  # Regenerate Pipfile.lock
-```
-
-As the minimal supported version is Python 3.7 and we use it in CI,
-you have to use a Python 3.7 environment when updating `Pipfile.lock`.
-Otherwise some back-compatibility packages will be missing.
-
-It is also important to run recent `pipenv`.
-Older versions remove markers from `Pipfile.lock`.
-
-If you don't have Python 3.7, you should install it and its headers (for `psycopg2`)
-separately, e.g.:
-
-```bash
-# In Ubuntu
-sudo add-apt-repository ppa:deadsnakes/ppa
-sudo apt update
-sudo apt install python3.7 python3.7-dev
-```

@@ -32,8 +32,8 @@ libssl-dev clang pkg-config libpq-dev
 
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
-To run the integration tests (not required to use the code), install
-Python (3.7 or higher), and install python3 packages with `pipenv` using `pipenv install` in the project directory.
+To run the integration tests or Python scripts (not required to use the code), install
+Python (3.7 or higher), and install python3 packages using `pipenv install` in the project directory.
 
 2. Build zenith and patched postgres
 ```sh
@@ -129,7 +129,7 @@ INSERT 0 1
 git clone --recursive https://github.com/zenithdb/zenith.git
 make # builds also postgres and installs it to ./tmp_install
 cd test_runner
-pytest
+pipenv run pytest
 ```
 
 ## Documentation
