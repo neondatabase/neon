@@ -16,6 +16,9 @@ use zenith_utils::zid::ZTimelineId;
 pub trait Repository: Send + Sync {
     fn shutdown(&self) -> Result<()>;
 
+    /// Stops all timeline-related process in the repository and removes the timeline data from memory.
+    fn unload_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
+
     /// Get Timeline handle for given zenith timeline ID.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 

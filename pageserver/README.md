@@ -134,8 +134,8 @@ Implementation details are covered in the [backup readme](./src/remote_storage/R
 The backup service is disabled by default and can be enabled to interact with a single remote storage.
 
 CLI examples:
-* Local FS: `${PAGESERVER_BIN} --relish-storage-local-path="/some/local/path/"`
-* AWS S3  : `${PAGESERVER_BIN} --relish-storage-s3-bucket="some-sample-bucket" --relish-storage-region="eu-north-1" --relish-storage-access-key="SOMEKEYAAAAASADSAH*#" --relish-storage-secret-access-key="SOMEsEcReTsd292v"`
+* Local FS: `${PAGESERVER_BIN} --remote-storage-local-path="/some/local/path/"`
+* AWS S3  : `${PAGESERVER_BIN} --remote-storage-s3-bucket="some-sample-bucket" --remote-storage-region="eu-north-1" --remote-storage-access-key="SOMEKEYAAAAASADSAH*#" --remote-storage-secret-access-key="SOMEsEcReTsd292v"`
 
 For Amazon AWS S3, a key id and secret access key could be located in `~/.aws/credentials` if awscli was ever configured to work with the desired bucket, on the AWS Settings page for a certain user. Also note, that the bucket names does not contain any protocols when used on AWS.
 For local S3 installations, refer to the their documentation for name format and credentials.

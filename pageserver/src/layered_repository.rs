@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use self::metadata::{metadata_path, TimelineMetadata};
 use crate::page_cache;
 use crate::relish::*;
-use crate::remote_storage::schedule_timeline_upload;
+use crate::remote_storage::schedule_timeline_checkpoint_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
 use crate::tenant_mgr;
 use crate::walreceiver;
@@ -259,16 +259,37 @@ impl Repository for LayeredRepository {
 
         let timelines = self.timelines.lock().unwrap();
         for (timelineid, timeline) in timelines.iter() {
-            walreceiver::stop_wal_receiver(*timelineid);
-            // Wait for syncing data to disk
-            trace!("repo shutdown. checkpoint timeline {}", timelineid);
-            timeline.checkpoint(CheckpointConfig::Forced)?;
-
-            //TODO Wait for walredo process to shutdown too
+            shutdown_timeline(*timelineid, timeline.as_ref())?;
         }
 
         Ok(())
     }
+
+    fn unload_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
+        let mut timelines = self.timelines.lock().unwrap();
+        let removed_timeline = match timelines.remove(&timeline_id) {
+            Some(timeline) => timeline,
+            None => {
+                warn!("Timeline {} not found, nothing to remove", timeline_id);
+                return Ok(());
+            }
+        };
+        drop(timelines);
+        shutdown_timeline(timeline_id, removed_timeline.as_ref())?;
+
+        Ok(())
+    }
+}
+
+fn shutdown_timeline(
+    timelineid: ZTimelineId,
+    timeline: &LayeredTimeline,
+) -> Result<(), anyhow::Error> {
+    walreceiver::stop_wal_receiver(timelineid);
+    trace!("repo shutdown. checkpoint timeline {}", timelineid);
+    timeline.checkpoint(CheckpointConfig::Forced)?;
+    //TODO Wait for walredo process to shutdown too
+    Ok(())
 }
 
 /// Private functions
@@ -318,7 +339,12 @@ impl LayeredRepository {
                     .load_layer_map(disk_consistent_lsn)
                     .context("failed to load layermap")?;
                 if self.upload_relishes {
-                    schedule_timeline_upload(self.tenantid, timelineid, loaded_layers, metadata);
+                    schedule_timeline_checkpoint_upload(
+                        self.tenantid,
+                        timelineid,
+                        loaded_layers,
+                        metadata,
+                    );
                 }
 
                 // needs to be after load_layer_map
@@ -1332,7 +1358,12 @@ impl LayeredTimeline {
                 false,
             )?;
             if self.upload_relishes {
-                schedule_timeline_upload(self.tenantid, self.timelineid, layer_uploads, metadata);
+                schedule_timeline_checkpoint_upload(
+                    self.tenantid,
+                    self.timelineid,
+                    layer_uploads,
+                    metadata,
+                );
             }
 
             // Also update the in-memory copy

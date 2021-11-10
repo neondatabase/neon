@@ -9,7 +9,7 @@ use crate::walredo::PostgresRedoManager;
 use crate::PageServerConf;
 use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
-use log::{debug, info};
+use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -47,6 +47,17 @@ pub enum TenantState {
     // The local disk might have some newer files that don't exist in cloud storage yet.
     // The tenant cannot be accessed anymore for any reason, but graceful shutdown.
     Stopping,
+}
+
+/// A remote storage timeline synchronization event, that needs another step
+/// to be fully completed.
+#[derive(Debug)]
+pub enum PostTimelineSyncStep {
+    /// The timeline cannot be synchronized anymore due to some sync issues.
+    /// Needs to be removed from pageserver, to avoid further data diverging.
+    Evict,
+    /// A new timeline got downloaded and needs to be loaded into pageserver.
+    RegisterDownload,
 }
 
 impl fmt::Display for TenantState {
@@ -104,39 +115,57 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
     tenant.state = TenantState::Idle;
 }
 
-pub fn register_timeline_download(
+pub fn perform_post_timeline_sync_steps(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    post_sync_steps: HashMap<(ZTenantId, ZTimelineId), PostTimelineSyncStep>,
 ) {
-    log::info!(
-        "Registering new download, tenant id {}, timeline id: {}",
-        tenant_id,
-        timeline_id
-    );
+    if post_sync_steps.is_empty() {
+        return;
+    }
+
+    info!("Performing {} post-sync steps", post_sync_steps.len());
+    trace!("Steps: {:?}", post_sync_steps);
 
     {
         let mut m = access_tenants();
-        let tenant = m.entry(tenant_id).or_insert_with(|| Tenant {
-            state: TenantState::Downloading,
-            repo: None,
-        });
-        tenant.state = TenantState::Downloading;
-        match &tenant.repo {
-            Some(repo) => {
-                init_timeline(repo.as_ref(), timeline_id);
-                tenant.state = TenantState::Idle;
-                return;
+        for &(tenant_id, timeline_id) in post_sync_steps.keys() {
+            let tenant = m.entry(tenant_id).or_insert_with(|| Tenant {
+                state: TenantState::Downloading,
+                repo: None,
+            });
+            tenant.state = TenantState::Downloading;
+            match &tenant.repo {
+                Some(repo) => {
+                    init_timeline(repo.as_ref(), timeline_id);
+                    tenant.state = TenantState::Idle;
+                    return;
+                }
+                None => log::warn!("Initialize new repo"),
             }
-            None => log::warn!("Initialize new repo"),
+            tenant.state = TenantState::Idle;
         }
-        tenant.state = TenantState::Idle;
     }
 
-    // init repo updates Tenant state
-    init_repo(conf, tenant_id);
-    let new_repo = get_repository_for_tenant(tenant_id).unwrap();
-    init_timeline(new_repo.as_ref(), timeline_id);
+    for ((tenant_id, timeline_id), post_sync_step) in post_sync_steps {
+        match post_sync_step {
+            PostTimelineSyncStep::Evict => {
+                if let Err(e) = get_repository_for_tenant(tenant_id)
+                    .and_then(|repo| repo.unload_timeline(timeline_id))
+                {
+                    error!(
+                        "Failed to remove repository for tenant {}, timeline {}: {:#}",
+                        tenant_id, timeline_id, e
+                    )
+                }
+            }
+            PostTimelineSyncStep::RegisterDownload => {
+                // init repo updates Tenant state
+                init_repo(conf, tenant_id);
+                let new_repo = get_repository_for_tenant(tenant_id).unwrap();
+                init_timeline(new_repo.as_ref(), timeline_id);
+            }
+        }
+    }
 }
 
 fn init_timeline(repo: &dyn Repository, timeline_id: ZTimelineId) {

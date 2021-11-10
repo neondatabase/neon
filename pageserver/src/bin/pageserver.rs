@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     env,
+    num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     str::FromStr,
     thread,
@@ -50,6 +51,7 @@ struct CfgFileParams {
     auth_validation_public_key_path: Option<String>,
     auth_type: Option<String>,
     remote_storage_max_concurrent_sync: Option<String>,
+    remote_storage_max_sync_errors: Option<String>,
     /////////////////////////////////
     //// Don't put `Option<String>` and other "simple" values below.
     ////
@@ -115,6 +117,7 @@ impl CfgFileParams {
             auth_type: get_arg("auth-type"),
             remote_storage,
             remote_storage_max_concurrent_sync: get_arg("remote-storage-max-concurrent-sync"),
+            remote_storage_max_sync_errors: get_arg("remote-storage-max-sync-errors"),
         }
     }
 
@@ -140,6 +143,9 @@ impl CfgFileParams {
             remote_storage_max_concurrent_sync: self
                 .remote_storage_max_concurrent_sync
                 .or(other.remote_storage_max_concurrent_sync),
+            remote_storage_max_sync_errors: self
+                .remote_storage_max_sync_errors
+                .or(other.remote_storage_max_sync_errors),
         }
     }
 
@@ -225,7 +231,11 @@ impl CfgFileParams {
 
         let max_concurrent_sync = match self.remote_storage_max_concurrent_sync.as_deref() {
             Some(number_str) => number_str.parse()?,
-            None => DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC_LIMITS,
+            None => NonZeroUsize::new(DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC).unwrap(),
+        };
+        let max_sync_errors = match self.remote_storage_max_sync_errors.as_deref() {
+            Some(number_str) => number_str.parse()?,
+            None => NonZeroU32::new(DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS).unwrap(),
         };
         let remote_storage_config = self.remote_storage.as_ref().map(|storage_params| {
             let storage = match storage_params.clone() {
@@ -246,6 +256,7 @@ impl CfgFileParams {
             };
             RemoteStorageConfig {
                 max_concurrent_sync,
+                max_sync_errors,
                 storage,
             }
         });
@@ -667,6 +678,9 @@ mod tests {
             remote_storage_max_concurrent_sync: Some(
                 "remote_storage_max_concurrent_sync_VALUE".to_string(),
             ),
+            remote_storage_max_sync_errors: Some(
+                "remote_storage_max_sync_errors_VALUE".to_string(),
+            ),
         };
 
         let toml_string = toml::to_string(&params).expect("Failed to serialize correct config");
@@ -686,6 +700,7 @@ pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
 auth_type = 'auth_type_VALUE'
 remote_storage_max_concurrent_sync = 'remote_storage_max_concurrent_sync_VALUE'
+remote_storage_max_sync_errors = 'remote_storage_max_sync_errors_VALUE'
 
 [remote_storage]
 local_path = 'remote_storage_local_VALUE'
@@ -733,6 +748,9 @@ local_path = 'remote_storage_local_VALUE'
             remote_storage_max_concurrent_sync: Some(
                 "remote_storage_max_concurrent_sync_VALUE".to_string(),
             ),
+            remote_storage_max_sync_errors: Some(
+                "remote_storage_max_sync_errors_VALUE".to_string(),
+            ),
         };
 
         let toml_string = toml::to_string(&params).expect("Failed to serialize correct config");
@@ -752,6 +770,7 @@ pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
 auth_type = 'auth_type_VALUE'
 remote_storage_max_concurrent_sync = 'remote_storage_max_concurrent_sync_VALUE'
+remote_storage_max_sync_errors = 'remote_storage_max_sync_errors_VALUE'
 
 [remote_storage]
 bucket_name = 'bucket_name_VALUE'

@@ -2,6 +2,7 @@ use layered_repository::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -44,7 +45,8 @@ pub mod defaults {
     pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
-    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
+    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 100;
+    pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 
     pub const DEFAULT_OPEN_MEM_LIMIT: usize = 128 * 1024 * 1024;
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
@@ -186,8 +188,10 @@ pub enum CheckpointConfig {
 /// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone)]
 pub struct RemoteStorageConfig {
-    /// Limits the number of concurrent sync operations between pageserver and the remote storage.
-    pub max_concurrent_sync: usize,
+    /// Max allowed number of concurrent sync operations between pageserver and the remote storage.
+    pub max_concurrent_sync: NonZeroUsize,
+    /// Max allowed errors before the sync task is considered failed and evicted.
+    pub max_sync_errors: NonZeroU32,
     /// The storage connection configuration.
     pub storage: RemoteStorageKind,
 }
