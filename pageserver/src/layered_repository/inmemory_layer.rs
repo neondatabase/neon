@@ -1,9 +1,8 @@
-//!
+//! FIXME
 //! An in-memory layer stores recently received page versions in memory. The page versions
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
 use crate::layered_repository::filename::DeltaFileName;
-use crate::layered_repository::global_layer_map::GLOBAL_OPEN_MEM_USAGE;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
@@ -11,21 +10,21 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
+use crate::virtual_file::VirtualFile;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
-use zenith_utils::vec_map::VecMap;
-
 use zenith_utils::lsn::Lsn;
+use zenith_utils::vec_map::VecMap;
 
 use super::page_versions::PageVersions;
 
-pub struct InMemoryLayer {
+pub struct OpenLayer {
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
@@ -42,14 +41,14 @@ pub struct InMemoryLayer {
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
-    inner: RwLock<InMemoryLayerInner>,
+    inner: RwLock<OpenLayerInner>,
 
     /// Predecessor layer might be needed?
     incremental: bool,
 }
 
-pub struct InMemoryLayerInner {
-    /// Frozen in-memory layers have an exclusive end LSN.
+pub struct OpenLayerInner {
+    /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is None
     end_lsn: Option<Lsn>,
 
@@ -71,18 +70,9 @@ pub struct InMemoryLayerInner {
     /// a non-blocky rel, 'segsizes' is not used and is always empty.
     ///
     segsizes: VecMap<Lsn, u32>,
-
-    /// Approximate amount of memory used by this layer.
-    ///
-    /// TODO: This is currently a very crude metric, we don't take into account allocator
-    /// overhead, memory fragmentation, memory used by the VecMaps, nor many other things.
-    /// Just the actual # of bytes of a page image (8 kB) or the size of a WAL record.
-    ///
-    /// Whenever this is changed, you must also modify GLOBAL_OPEN_MEM_USAGE accordingly!
-    mem_usage: usize,
 }
 
-impl InMemoryLayerInner {
+impl OpenLayerInner {
     fn assert_writeable(&self) {
         assert!(self.end_lsn.is_none());
     }
@@ -100,17 +90,9 @@ impl InMemoryLayerInner {
     }
 }
 
-impl Drop for InMemoryLayerInner {
-    fn drop(&mut self) {
-        if self.mem_usage > 0 {
-            GLOBAL_OPEN_MEM_USAGE.fetch_sub(self.mem_usage, Ordering::Relaxed);
-            self.mem_usage = 0;
-        }
-    }
-}
-
-impl Layer for InMemoryLayer {
-    // An in-memory layer doesn't really have a filename as it's not stored on disk,
+impl Layer for OpenLayer {
+    // FIXME
+    // An open layer doesn't really have a filename as it's not stored on disk,
     // but we construct a filename as if it was a delta layer
     fn filename(&self) -> PathBuf {
         let inner = self.inner.read().unwrap();
@@ -185,7 +167,7 @@ impl Layer for InMemoryLayer {
                 .get_block_lsn_range(blknum, ..=lsn)
                 .iter()
                 .rev();
-            for (entry_lsn, pv) in iter {
+            for (entry_lsn, pos) in iter {
                 match &cached_img_lsn {
                     Some(cached_lsn) if entry_lsn <= cached_lsn => {
                         return Ok(PageReconstructResult::Cached)
@@ -193,9 +175,10 @@ impl Layer for InMemoryLayer {
                     _ => {}
                 }
 
+                let pv = inner.page_versions.get_page_version(*pos)?;
                 match pv {
                     PageVersion::Page(img) => {
-                        reconstruct_data.page_img = Some(img.clone());
+                        reconstruct_data.page_img = Some(img);
                         need_image = false;
                         break;
                     }
@@ -301,7 +284,8 @@ impl Layer for InMemoryLayer {
             println!("segsizes {}: {}", k, v);
         }
 
-        for (blknum, lsn, pv) in inner.page_versions.ordered_page_version_iter(None) {
+        for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
+            let pv = inner.page_versions.get_page_version(pos)?;
             let pv_description = match pv {
                 PageVersion::Page(_img) => "page",
                 PageVersion::Wal(_rec) => "wal",
@@ -320,7 +304,7 @@ pub struct LayersOnDisk {
     pub image_layers: Vec<ImageLayer>,
 }
 
-impl InMemoryLayer {
+impl OpenLayer {
     /// Return the oldest page version that's stored in this layer
     pub fn get_oldest_pending_lsn(&self) -> Lsn {
         self.oldest_pending_lsn
@@ -336,7 +320,7 @@ impl InMemoryLayer {
         seg: SegmentTag,
         start_lsn: Lsn,
         oldest_pending_lsn: Lsn,
-    ) -> Result<InMemoryLayer> {
+    ) -> Result<OpenLayer> {
         trace!(
             "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
             seg,
@@ -350,7 +334,23 @@ impl InMemoryLayer {
             segsizes.append(start_lsn, 0).unwrap();
         }
 
-        Ok(InMemoryLayer {
+        let delta_filename = DeltaFileName {
+            seg,
+            start_lsn,
+            end_lsn: Lsn(u64::MAX),
+            dropped: false,
+        }
+        .to_string();
+        let filename = conf
+            .timeline_path(&timelineid, &tenantid)
+            .join(PathBuf::from(format!("open-{}", delta_filename)));
+
+        let file = VirtualFile::open_with_options(
+            &filename,
+            OpenOptions::new().read(true).write(true).create(true),
+        )?;
+
+        Ok(OpenLayer {
             conf,
             timelineid,
             tenantid,
@@ -358,12 +358,11 @@ impl InMemoryLayer {
             start_lsn,
             oldest_pending_lsn,
             incremental: false,
-            inner: RwLock::new(InMemoryLayerInner {
+            inner: RwLock::new(OpenLayerInner {
                 end_lsn: None,
                 dropped: false,
-                page_versions: PageVersions::default(),
+                page_versions: PageVersions::new(file),
                 segsizes,
-                mem_usage: 0,
             }),
         })
     }
@@ -371,18 +370,18 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, lsn: Lsn, blknum: u32, rec: WALRecord) -> u32 {
+    pub fn put_wal_record(&self, lsn: Lsn, blknum: u32, rec: WALRecord) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Wal(rec))
     }
 
     /// Remember new page version, as a full page image
-    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> u32 {
+    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Page(img))
     }
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> u32 {
+    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<u32> {
         assert!(self.seg.blknum_in_seg(blknum));
 
         trace!(
@@ -396,14 +395,7 @@ impl InMemoryLayer {
 
         inner.assert_writeable();
 
-        let mut mem_usage = 0;
-        mem_usage += match &pv {
-            PageVersion::Page(img) => img.len(),
-            PageVersion::Wal(rec) => rec.rec.len(),
-        };
-
-        let (old, delta_size) = inner.page_versions.append_or_update_last(blknum, lsn, pv);
-        mem_usage += delta_size;
+        let old = inner.page_versions.append_or_update_last(blknum, lsn, pv)?;
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -412,8 +404,6 @@ impl InMemoryLayer {
                 self.seg.rel, blknum, lsn
             );
         }
-
-        let mut delta_logical_size = 0;
 
         // Also update the relation size, if this extended the relation.
         if self.seg.rel.is_blocky() {
@@ -447,10 +437,9 @@ impl InMemoryLayer {
                         gapblknum,
                         blknum
                     );
-                    let (old, delta_size) = inner
+                    let old = inner
                         .page_versions
-                        .append_or_update_last(gapblknum, lsn, zeropv);
-                    mem_usage += delta_size;
+                        .append_or_update_last(gapblknum, lsn, zeropv)?;
                     // We already had an entry for this LSN. That's odd..
 
                     if old.is_some() {
@@ -461,18 +450,12 @@ impl InMemoryLayer {
                     }
                 }
 
-                let (_old, delta_size) =
-                    inner.segsizes.append_or_update_last(lsn, newsize).unwrap();
-                mem_usage += delta_size;
-
-                delta_logical_size = newsize - oldsize;
+                inner.segsizes.append_or_update_last(lsn, newsize).unwrap();
+                return Ok(newsize - oldsize);
             }
         }
 
-        inner.mem_usage += mem_usage;
-        GLOBAL_OPEN_MEM_USAGE.fetch_add(mem_usage, Ordering::Relaxed);
-
-        delta_logical_size
+        Ok(0)
     }
 
     /// Remember that the relation was truncated at given LSN
@@ -489,9 +472,7 @@ impl InMemoryLayer {
         let oldsize = inner.get_seg_size(lsn);
         assert!(segsize < oldsize);
 
-        let (old, delta_size) = inner.segsizes.append_or_update_last(lsn, segsize).unwrap();
-        inner.mem_usage += delta_size;
-        GLOBAL_OPEN_MEM_USAGE.fetch_add(delta_size, Ordering::Relaxed);
+        let (old, _delta_size) = inner.segsizes.append_or_update_last(lsn, segsize).unwrap();
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -513,7 +494,7 @@ impl InMemoryLayer {
     }
 
     ///
-    /// Initialize a new InMemoryLayer for, by copying the state at the given
+    /// Initialize a new OpenLayer for, by copying the state at the given
     /// point in time from given existing layer.
     ///
     pub fn create_successor_layer(
@@ -523,14 +504,14 @@ impl InMemoryLayer {
         tenantid: ZTenantId,
         start_lsn: Lsn,
         oldest_pending_lsn: Lsn,
-    ) -> Result<InMemoryLayer> {
+    ) -> Result<OpenLayer> {
         let seg = src.get_seg_tag();
 
         assert!(oldest_pending_lsn.is_aligned());
         assert!(oldest_pending_lsn >= start_lsn);
 
         trace!(
-            "initializing new InMemoryLayer for writing {} on timeline {} at {}",
+            "initializing new OpenLayer for writing {} on timeline {} at {}",
             seg,
             timelineid,
             start_lsn,
@@ -543,7 +524,23 @@ impl InMemoryLayer {
             segsizes.append(start_lsn, size).unwrap();
         }
 
-        Ok(InMemoryLayer {
+        let delta_filename = DeltaFileName {
+            seg,
+            start_lsn,
+            end_lsn: Lsn(u64::MAX),
+            dropped: false,
+        }
+        .to_string();
+        let filename = conf
+            .timeline_path(&timelineid, &tenantid)
+            .join(PathBuf::from(format!("open-{}", delta_filename)));
+
+        let file = VirtualFile::open_with_options(
+            &filename,
+            OpenOptions::new().read(true).write(true).create(true),
+        )?;
+
+        Ok(OpenLayer {
             conf,
             timelineid,
             tenantid,
@@ -551,12 +548,11 @@ impl InMemoryLayer {
             start_lsn,
             oldest_pending_lsn,
             incremental: true,
-            inner: RwLock::new(InMemoryLayerInner {
+            inner: RwLock::new(OpenLayerInner {
                 end_lsn: None,
                 dropped: false,
-                page_versions: PageVersions::default(),
+                page_versions: PageVersions::new(file),
                 segsizes,
-                mem_usage: 0,
             }),
         })
     }
@@ -585,16 +581,6 @@ impl InMemoryLayer {
 
             for (_blk, lsn, _pv) in inner.page_versions.ordered_page_version_iter(None) {
                 assert!(lsn <= end_lsn);
-            }
-
-            // It's a bit premature to subtract the global mem usage here already.
-            // This layer consumes memory until it's written out to disk and dropped.
-            // But GLOBAL_OPEN_MEM_USAGE is used to trigger layer eviction, if there are
-            // too many open layers, and from that point of view this should no longer be
-            // counted against the global mem usage.
-            if inner.mem_usage > 0 {
-                GLOBAL_OPEN_MEM_USAGE.fetch_sub(inner.mem_usage, Ordering::Relaxed);
-                inner.mem_usage = 0;
             }
         }
     }
@@ -635,7 +621,8 @@ impl InMemoryLayer {
                 self.start_lsn,
                 end_lsn_exclusive,
                 true,
-                inner.page_versions.ordered_page_version_iter(None),
+                &inner.page_versions,
+                None,
                 inner.segsizes.clone(),
             )?;
             trace!(
@@ -652,12 +639,8 @@ impl InMemoryLayer {
 
         // Since `end_lsn` is inclusive, subtract 1.
         // We want to make an ImageLayer for the last included LSN,
-        // so the DeltaLayer should exlcude that LSN.
+        // so the DeltaLayer should exclude that LSN.
         let end_lsn_inclusive = Lsn(end_lsn_exclusive.0 - 1);
-
-        let mut page_versions = inner
-            .page_versions
-            .ordered_page_version_iter(Some(end_lsn_inclusive));
 
         let mut delta_layers = Vec::new();
 
@@ -672,7 +655,8 @@ impl InMemoryLayer {
                 self.start_lsn,
                 end_lsn_inclusive,
                 false,
-                page_versions,
+                &inner.page_versions,
+                Some(end_lsn_inclusive),
                 segsizes,
             )?;
             delta_layers.push(delta_layer);
@@ -683,7 +667,11 @@ impl InMemoryLayer {
                 end_lsn_inclusive
             );
         } else {
-            assert!(page_versions.next().is_none());
+            assert!(inner
+                .page_versions
+                .ordered_page_version_iter(None)
+                .next()
+                .is_none());
         }
 
         drop(inner);
@@ -701,5 +689,29 @@ impl InMemoryLayer {
             delta_layers,
             image_layers: vec![image_layer],
         })
+    }
+}
+
+impl Drop for OpenLayer {
+    fn drop(&mut self) {
+        let delta_filename = DeltaFileName {
+            seg: self.seg,
+            start_lsn: self.start_lsn,
+            end_lsn: Lsn(u64::MAX),
+            dropped: false, // even if it dropped now, that's not reflected in the filename
+        }
+        .to_string();
+        let filename = self
+            .conf
+            .timeline_path(&self.timelineid, &self.tenantid)
+            .join(PathBuf::from(format!("open-{}", delta_filename)));
+
+        if let Err(err) = std::fs::remove_file(&filename) {
+            error!(
+                "could not unlink open layer file {}: {}",
+                filename.display(),
+                err
+            );
+        }
     }
 }
