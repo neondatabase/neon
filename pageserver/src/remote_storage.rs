@@ -9,7 +9,7 @@
 //!
 //! * synchronization logic at [`storage_sync`] module that keeps pageserver state (both runtime one and the workdir files) and storage state in sync.
 //!
-//! * public API via to interact with the external world: [`run_storage_sync_thread`] and [`schedule_timeline_upload`]
+//! * public API via to interact with the external world: [`run_storage_sync_thread`] and [`schedule_timeline_checkpoint_upload`]
 //!
 //! Here's a schematic overview of all interactions backup and the rest of the pageserver perform:
 //!
@@ -17,7 +17,7 @@
 //! |                        |  - - - (init async loop) - - - ->  |                 |
 //! |                        |                                    |                 |
 //! |                        |  ------------------------------->  |      async      |
-//! |       pageserver       |   (schedule frozen layer upload)   | upload/download |
+//! |       pageserver       |    (schedule checkpoint upload)    | upload/download |
 //! |                        |                                    |      loop       |
 //! |                        |  <-------------------------------  |                 |
 //! |                        |    (register downloaded layers)    |                 |
@@ -80,10 +80,16 @@ use std::{
 
 use anyhow::Context;
 use tokio::io;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
-pub use self::storage_sync::schedule_timeline_upload;
+pub use self::storage_sync::schedule_timeline_checkpoint_upload;
 use self::{local_fs::LocalFs, rust_s3::S3};
 use crate::{PageServerConf, RemoteStorageKind};
+
+/// Any timeline has its own id and its own tenant it belongs to,
+/// the sync processes group timelines by both for simplicity.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
+pub struct TimelineSyncId(ZTenantId, ZTimelineId);
 
 /// Based on the config, initiates the remote storage connection and starts a separate thread
 /// that ensures that pageserver and the remote storage are in sync with each other.
@@ -94,16 +100,19 @@ pub fn run_storage_sync_thread(
     match &config.remote_storage_config {
         Some(storage_config) => {
             let max_concurrent_sync = storage_config.max_concurrent_sync;
+            let max_sync_errors = storage_config.max_sync_errors;
             let handle = match &storage_config.storage {
                 RemoteStorageKind::LocalFs(root) => storage_sync::spawn_storage_sync_thread(
                     config,
                     LocalFs::new(root.clone(), &config.workdir)?,
                     max_concurrent_sync,
+                    max_sync_errors,
                 ),
                 RemoteStorageKind::AwsS3(s3_config) => storage_sync::spawn_storage_sync_thread(
                     config,
                     S3::new(s3_config, &config.workdir)?,
                     max_concurrent_sync,
+                    max_sync_errors,
                 ),
             };
             handle.map(Some)

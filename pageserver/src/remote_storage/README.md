@@ -43,13 +43,6 @@ AWS S3 returns file checksums during the `list` operation, so that can be used t
 
 For now, due to this, we consider local workdir files as source of truth, not removing them ever and adjusting remote files instead, if image files mismatch.
 
-* no proper retry management
-
-Now, the storage sync attempts to redo the upload/download operation for the image files that failed.
-No proper task eviction or backpressure is implemented currently: the tasks will stay in the queue forever, reattempting the downloads.
-
-This will be fixed when more details on the file consistency model will be agreed on.
-
 * sad rust-s3 api
 
 rust-s3 is not very pleasant to use:
