@@ -42,6 +42,7 @@ pub struct TimelineMetadata {
     prev_record_lsn: Option<Lsn>,
     ancestor_timeline: Option<ZTimelineId>,
     ancestor_lsn: Lsn,
+    latest_gc_horizon: Lsn,
 }
 
 /// Points to a place in pageserver's local directory,
@@ -61,12 +62,14 @@ impl TimelineMetadata {
         prev_record_lsn: Option<Lsn>,
         ancestor_timeline: Option<ZTimelineId>,
         ancestor_lsn: Lsn,
+        gc_horizon: Lsn,
     ) -> Self {
         Self {
             disk_consistent_lsn,
             prev_record_lsn,
             ancestor_timeline,
             ancestor_lsn,
+            latest_gc_horizon: gc_horizon,
         }
     }
 
@@ -121,6 +124,10 @@ impl TimelineMetadata {
     pub fn ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
     }
+
+    pub fn latest_gc_horizon(&self) -> Lsn {
+        self.latest_gc_horizon
+    }
 }
 
 /// This module is for direct conversion of metadata to bytes and back.
@@ -139,6 +146,7 @@ mod serialize {
         prev_record_lsn: &'a Option<Lsn>,
         ancestor_timeline: &'a Option<ZTimelineId>,
         ancestor_lsn: &'a Lsn,
+        latest_gc_horizon: &'a Lsn,
     }
 
     impl<'a> From<&'a TimelineMetadata> for SeTimelineMetadata<'a> {
@@ -148,6 +156,7 @@ mod serialize {
                 prev_record_lsn: &other.prev_record_lsn,
                 ancestor_timeline: &other.ancestor_timeline,
                 ancestor_lsn: &other.ancestor_lsn,
+                latest_gc_horizon: &other.latest_gc_horizon,
             }
         }
     }
@@ -158,6 +167,7 @@ mod serialize {
         prev_record_lsn: Option<Lsn>,
         ancestor_timeline: Option<ZTimelineId>,
         ancestor_lsn: Lsn,
+        latest_gc_horizon: Lsn,
     }
 
     impl From<DeTimelineMetadata> for TimelineMetadata {
@@ -167,6 +177,7 @@ mod serialize {
                 prev_record_lsn: other.prev_record_lsn,
                 ancestor_timeline: other.ancestor_timeline,
                 ancestor_lsn: other.ancestor_lsn,
+                latest_gc_horizon: other.latest_gc_horizon,
             }
         }
     }
@@ -185,6 +196,7 @@ mod tests {
             prev_record_lsn: Some(Lsn(0x100)),
             ancestor_timeline: Some(TIMELINE_ID),
             ancestor_lsn: Lsn(0),
+            latest_gc_horizon: Lsn(0),
         };
 
         let metadata_bytes = original_metadata

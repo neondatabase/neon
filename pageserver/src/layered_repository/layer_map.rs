@@ -199,6 +199,21 @@ impl LayerMap {
         }
     }
 
+    pub fn print_segment_layers(&self, seg: SegmentTag) {
+        let segentry = self.segs.get(&seg).unwrap();
+        println!("dbg layers seg: {}", seg);
+        for l in segentry.historic.iter() {
+            println!(
+                "{} {}-{} is_dropped: {} is_incremental: {}",
+                l.get_seg_tag(),
+                l.get_start_lsn(),
+                l.get_end_lsn(),
+                l.is_dropped(),
+                l.is_incremental(),
+            );
+        }
+    }
+
     /// Is there any layer for given segment that is alive at the lsn?
     ///
     /// This is a public wrapper for SegEntry fucntion,

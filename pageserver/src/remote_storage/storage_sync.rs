@@ -1562,6 +1562,6 @@ mod tests {
     }
 
     fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
-        TimelineMetadata::new(disk_consistent_lsn, None, None, Lsn(0))
+        TimelineMetadata::new(disk_consistent_lsn, None, None, Lsn(0), Lsn(0))
     }
 }

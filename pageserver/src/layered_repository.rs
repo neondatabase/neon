@@ -144,7 +144,7 @@ impl Repository for LayeredRepository {
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
-        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0));
+        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), Lsn(0));
         Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
@@ -166,7 +166,18 @@ impl Repository for LayeredRepository {
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
-        let src_timeline = self.get_timeline(src)?;
+        // TODO test properly
+        // hacky locking to avoid wrong behaviour in gc thread
+        let mut timelines = self.timelines.lock().unwrap();
+        let src_timeline = self.get_timeline_locked(src, &mut timelines)?;
+
+        let latest_gc_horizon = src_timeline.latest_gc_horizon.load();
+        ensure!(
+            start_lsn >= latest_gc_horizon,
+            "Branch start LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
+            start_lsn,
+            latest_gc_horizon,
+        );
 
         let RecordLsn {
             last: src_last,
@@ -183,7 +194,13 @@ impl Repository for LayeredRepository {
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
         // into the ancestor.
-        let metadata = TimelineMetadata::new(start_lsn, dst_prev, Some(src), start_lsn);
+        let metadata = TimelineMetadata::new(
+            start_lsn,
+            dst_prev,
+            Some(src),
+            start_lsn,
+            src_timeline.latest_gc_horizon.load(),
+        );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
         Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
 
@@ -550,6 +567,9 @@ pub struct LayeredTimeline {
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
     write_lock: Mutex<()>,
+
+    // Needed to ensure that we cant create branch at a point that was already garbage collected
+    latest_gc_horizon: AtomicLsn,
 }
 
 /// Public interface functions
@@ -846,6 +866,8 @@ impl LayeredTimeline {
             upload_relishes,
 
             write_lock: Mutex::new(()),
+
+            latest_gc_horizon: AtomicLsn::from(metadata.latest_gc_horizon()),
         };
         Ok(timeline)
     }
@@ -1226,6 +1248,7 @@ impl LayeredTimeline {
                 ondisk_prev_record_lsn,
                 ancestor_timelineid,
                 self.ancestor_lsn,
+                self.latest_gc_horizon.load(),
             );
 
             LayeredRepository::save_metadata(
@@ -1323,6 +1346,11 @@ impl LayeredTimeline {
 
         let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
 
+        // we need to ensure that no one branches at a point before latest_gc_horizon.
+        // FIXME how to reason about layers uploaded to s3?
+        // latest_gc_horizon should take into account layers located in s3
+        self.latest_gc_horizon.store(cutoff);
+
         info!("GC starting");
 
         debug!("retain_lsns: {:?}", retain_lsns);
@@ -1339,6 +1367,7 @@ impl LayeredTimeline {
         //
         let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
+            layers.print_segment_layers(l.get_seg_tag());
             let seg = l.get_seg_tag();
 
             if seg.rel.is_relation() {
@@ -1365,15 +1394,21 @@ impl LayeredTimeline {
             }
 
             // 2. Is it needed by a child branch?
+            // NOTE this is the first part of the solution, with that wee would keep data
+            // that might be referenced by child branches forever.
+            // TODO: durinng gc in child timeline detect which layers can be deleted in parent branch
+            // (might not be ideal, in case e.g. long inheritance chain)
+            warn!("retain lsns: {:?}", retain_lsns);
             for retain_lsn in &retain_lsns {
-                // start_lsn is inclusive and end_lsn is exclusive
-                if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
+                if &l.get_start_lsn() <= retain_lsn {
                     info!(
-                        "keeping {} {}-{} because it's needed by branch point {}",
+                        "keeping {} {}-{} because it still might be referenced by child branch {} is_dropped: {} is_incremental: {}",
                         seg,
                         l.get_start_lsn(),
                         l.get_end_lsn(),
-                        *retain_lsn
+                        retain_lsn,
+                        l.is_dropped(),
+                        l.is_incremental(),
                     );
                     if seg.rel.is_relation() {
                         result.ondisk_relfiles_needed_by_branches += 1;
@@ -1474,11 +1509,12 @@ impl LayeredTimeline {
 
             // We didn't find any reason to keep this file, so remove it.
             info!(
-                "garbage collecting {} {}-{} {}",
+                "garbage collecting {} {}-{} is_dropped: {} is_incremental: {}",
                 l.get_seg_tag(),
                 l.get_start_lsn(),
                 l.get_end_lsn(),
-                l.is_dropped()
+                l.is_dropped(),
+                l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));
         }
@@ -1529,7 +1565,18 @@ impl LayeredTimeline {
         let mut layer_ref = layer;
         let mut curr_lsn = lsn;
         loop {
-            match layer_ref.get_page_reconstruct_data(blknum, curr_lsn, &mut data)? {
+            let result = layer_ref
+                .get_page_reconstruct_data(blknum, curr_lsn, &mut data)
+                .with_context(|| {
+                    format!(
+                        "Failed to get reconstruct data {} {:?} {} {}",
+                        layer_ref.get_seg_tag(),
+                        layer_ref.filename(),
+                        blknum,
+                        curr_lsn
+                    )
+                })?;
+            match result {
                 PageReconstructResult::Complete => break,
                 PageReconstructResult::Continue(cont_lsn) => {
                     // Fetch base image / more WAL from the returned predecessor layer
