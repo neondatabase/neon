@@ -4,12 +4,13 @@ use std::convert::TryInto;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 use tracing::*;
-use yakv::storage::{Key, Storage, StorageIterator, Value};
+use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Value};
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CHECKPOINT_INTERVAL: u64 = 1u64 * 1024 * 1024 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
-const COMMIT_THRESHOLD: usize = CACHE_SIZE / 2;
+const COMMIT_THRESHOLD: usize = CACHE_SIZE / 4;
+const WAL_FLUSH_THRESHOLD: u32 = 128; // 1Mb
 
 ///
 /// Toast storage consistof two KV databases: one for storing main index
@@ -125,9 +126,12 @@ impl ToastStore {
         Ok(ToastStore {
             db: Storage::open(
                 &path.join("pageserver.db"),
-                None, //Some(&path.join("pageserver.log")),
-                CACHE_SIZE,
-                CHECKPOINT_INTERVAL,
+                Some(&path.join("pageserver.log")),
+                StorageConfig {
+                    cache_size: CACHE_SIZE,
+                    checkpoint_interval: CHECKPOINT_INTERVAL,
+                    wal_flush_threshold: WAL_FLUSH_THRESHOLD,
+                },
             )?,
             committed: false,
         })

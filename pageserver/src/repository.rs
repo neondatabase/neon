@@ -99,6 +99,12 @@ pub trait Timeline: Send + Sync {
     /// Get a list of all existing non-relational objects
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
+    ///
+    /// Export data as delats and image layers between 'start_lsn' to 'end_lsn'. The
+    /// start is inclusive, and end is exclusive.
+    ///
+    fn export_timeline(&self, start_lsn: Lsn, end_lsn: Lsn) -> Result<()>;
+
     /// Get the LSN where this branch was created
     fn get_ancestor_lsn(&self) -> Lsn;
 
@@ -166,6 +172,11 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
     /// Complete all delayed commits and advance disk_consistent_lsn
     ///
     fn checkpoint(&self) -> Result<()>;
+
+    ///
+    /// Import data from layer files
+    ///
+    fn import_timeline(&self, snapshot_lsn: Lsn) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,6 +207,39 @@ impl WALRecord {
             main_data_offset,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PageVersion {
+    /// an 8kb page image
+    Page(Bytes),
+    /// WAL record to get from previous page version to this one.
+    Wal(WALRecord),
+}
+
+///
+/// Data needed to reconstruct a page version
+///
+/// 'page_img' is the old base image of the page to start the WAL replay with.
+/// It can be None, if the first WAL record initializes the page (will_init)
+/// 'records' contains the records to apply over the base image.
+///
+pub struct PageReconstructData {
+    pub records: Vec<(Lsn, WALRecord)>,
+    pub page_img: Option<Bytes>,
+}
+
+/// Return value from Layer::get_page_reconstruct_data
+pub enum PageReconstructResult {
+    /// Got all the data needed to reconstruct the requested page
+    Complete,
+    /// This layer didn't contain all the required data, the caller should look up
+    /// the predecessor layer at the returned LSN and collect more data from there.
+    Continue(Lsn),
+    /// This layer didn't contain data needed to reconstruct the page version at
+    /// the returned LSN. This is usually considered an error, but might be OK
+    /// in some circumstances.
+    Missing(Lsn),
 }
 
 ///

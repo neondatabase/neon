@@ -2571,7 +2571,9 @@ checksum = "b07db065a5cf61a7e4ba64f29e67db906fb1787316516c4e6e5ff0fea1efcd8a"
 
 [[package]]
 name = "yakv"
-version = "0.1.8"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9e0d4aaa804d3b7acae0ee0e3c28999dd590a99391f784e18cd037ed9191655"
 dependencies = [
  "anyhow",
  "crc32c",

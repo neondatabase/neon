@@ -87,6 +87,10 @@ impl<K: Ord, V> VecMap<K, V> {
         Ok(None)
     }
 
+    pub fn last(&self) -> Option<&(K, V)> {
+        self.0.last()
+    }
+
     /// Split the map into two.
     ///
     /// The left map contains everything before `cutoff` (exclusive).

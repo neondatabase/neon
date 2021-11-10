@@ -22,11 +22,8 @@
 //! For non-blocky relishes, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
 //!
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
-use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, SegmentTag,
-};
-use crate::layered_repository::LayeredTimeline;
-use crate::layered_repository::RELISH_SEG_SIZE;
+use crate::layered_repository::storage_layer::{Layer, SegmentTag, RELISH_SEG_SIZE};
+use crate::repository::{PageReconstructData, PageReconstructResult};
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{anyhow, bail, ensure, Result};
@@ -115,6 +112,10 @@ pub struct ImageLayerInner {
 impl Layer for ImageLayer {
     fn filename(&self) -> PathBuf {
         PathBuf::from(self.layer_name().to_string())
+    }
+
+    fn get_tenant_id(&self) -> ZTenantId {
+        self.tenantid
     }
 
     fn get_timeline_id(&self) -> ZTimelineId {
@@ -250,7 +251,7 @@ impl ImageLayer {
     }
 
     /// Create a new image file, using the given array of pages.
-    fn create(
+    pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
@@ -325,6 +326,7 @@ impl ImageLayer {
         Ok(layer)
     }
 
+    /*
     // Create a new image file by materializing every page in a source layer
     // at given LSN.
     pub fn create_from_src(
@@ -362,6 +364,7 @@ impl ImageLayer {
 
         Self::create(conf, timelineid, timeline.tenantid, seg, lsn, base_images)
     }
+    */
 
     ///
     /// Load the contents of the file into memory

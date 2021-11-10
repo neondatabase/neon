@@ -39,9 +39,8 @@
 //!
 use crate::layered_repository::blob::BlobWriter;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
-use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag,
-};
+use crate::layered_repository::storage_layer::{Layer, SegmentTag};
+use crate::repository::{PageReconstructData, PageReconstructResult, PageVersion};
 use crate::waldecoder;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
@@ -148,6 +147,10 @@ pub struct DeltaLayerInner {
 }
 
 impl Layer for DeltaLayer {
+    fn get_tenant_id(&self) -> ZTenantId {
+        self.tenantid
+    }
+
     fn get_timeline_id(&self) -> ZTimelineId {
         self.timelineid
     }
@@ -201,22 +204,22 @@ impl Layer for DeltaLayer {
             for ((_blknum, pv_lsn), blob_range) in iter {
                 let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
 
-                if let Some(img) = pv.page_image {
-                    // Found a page image, return it
-                    reconstruct_data.page_img = Some(img);
-                    need_image = false;
-                    break;
-                } else if let Some(rec) = pv.record {
-                    let will_init = rec.will_init;
-                    reconstruct_data.records.push((*pv_lsn, rec));
-                    if will_init {
-                        // This WAL record initializes the page, so no need to go further back
+                match pv {
+                    PageVersion::Page(img) => {
+                        // Found a page image, return it
+                        reconstruct_data.page_img = Some(img);
                         need_image = false;
                         break;
                     }
-                } else {
-                    // No base image, and no WAL record. Huh?
-                    bail!("no page image or WAL record for requested page");
+                    PageVersion::Wal(rec) => {
+                        let will_init = rec.will_init;
+                        reconstruct_data.records.push((*pv_lsn, rec));
+                        if will_init {
+                            // This WAL record initializes the page, so no need to go further back
+                            need_image = false;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -226,7 +229,7 @@ impl Layer for DeltaLayer {
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
-            Ok(PageReconstructResult::Continue(self.start_lsn))
+            Ok(PageReconstructResult::Continue(Lsn(self.start_lsn.0 - 1)))
         } else {
             Ok(PageReconstructResult::Complete)
         }
@@ -307,19 +310,22 @@ impl Layer for DeltaLayer {
             let buf = read_blob(&chapter, blob_range)?;
             let pv = PageVersion::des(&buf)?;
 
-            if let Some(img) = pv.page_image.as_ref() {
-                write!(&mut desc, " img {} bytes", img.len())?;
+            match pv {
+                PageVersion::Page(img) => {
+                    write!(&mut desc, " img {} bytes", img.len())?;
+                }
+                PageVersion::Wal(rec) => {
+                    let wal_desc = waldecoder::describe_wal_record(&rec.rec);
+                    write!(
+                        &mut desc,
+                        " rec {} bytes will_init: {} {}",
+                        rec.rec.len(),
+                        rec.will_init,
+                        wal_desc
+                    )?;
+                }
             }
-            if let Some(rec) = pv.record.as_ref() {
-                let wal_desc = waldecoder::describe_wal_record(&rec.rec);
-                write!(
-                    &mut desc,
-                    " rec {} bytes will_init: {} {}",
-                    rec.rec.len(),
-                    rec.will_init,
-                    wal_desc
-                )?;
-            }
+
             println!("  blk {} at {}: {}", blk, lsn, desc);
         }
 
@@ -328,6 +334,19 @@ impl Layer for DeltaLayer {
 }
 
 impl DeltaLayer {
+    /// debugging function to print out the contents of the layer
+    pub fn versions(&self) -> Result<Vec<(u32, Lsn, PageVersion)>> {
+        let mut versions: Vec<(u32, Lsn, PageVersion)> = Vec::new();
+        let inner = self.load()?;
+        let (_path, book) = self.open_book()?;
+        let chapter = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
+        for ((blk, lsn), blob_range) in inner.page_version_metas.as_slice() {
+            let buf = read_blob(&chapter, blob_range)?;
+            versions.push((*blk, *lsn, PageVersion::des(&buf)?));
+        }
+        Ok(versions)
+    }
+
     fn path_for(
         path_or_conf: &PathOrConf,
         timelineid: ZTimelineId,
@@ -442,12 +461,7 @@ impl DeltaLayer {
     }
 
     fn open_book(&self) -> Result<(PathBuf, Book<File>)> {
-        let path = Self::path_for(
-            &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
-            &self.layer_name(),
-        );
+        let path = self.path();
 
         let file = File::open(&path)?;
         let book = Book::new(file)?;

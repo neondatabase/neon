@@ -33,7 +33,10 @@ use std::time::{Duration, Instant};
 
 use crate::relish::*;
 use crate::relish_storage::schedule_timeline_upload;
-use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
+use crate::repository::{
+    GcResult, PageReconstructData, PageReconstructResult, PageVersion, Repository, Timeline,
+    TimelineWriter, WALRecord,
+};
 use crate::tenant_mgr;
 use crate::toast_store::ToastStore;
 use crate::walreceiver;
@@ -42,12 +45,18 @@ use crate::walredo::WalRedoManager;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
+use crate::layered_repository::delta_layer::DeltaLayer;
+use crate::layered_repository::filename;
+use crate::layered_repository::image_layer::ImageLayer;
+use crate::layered_repository::storage_layer::{Layer, SegmentTag, RELISH_SEG_SIZE};
+
 use zenith_metrics::{register_histogram, register_int_gauge_vec, Histogram, IntGaugeVec};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
+use zenith_utils::vec_map::VecMap;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -164,18 +173,6 @@ struct MetadataSnapshot {
 struct RelishStore {
     data: ToastStore,
     meta: Option<HashMap<RelishTag, MetadataSnapshot>>,
-}
-
-///
-/// Data needed to reconstruct a page version
-///
-/// 'page_img' is the old base image of the page to start the WAL replay with.
-/// It can be None, if the first WAL record initializes the page (will_init)
-/// 'records' contains the records to apply over the base image.
-///
-struct PageReconstructData {
-    records: Vec<(Lsn, WALRecord)>,
-    page_img: Option<Bytes>,
 }
 
 /// Public interface
@@ -787,8 +784,8 @@ impl Timeline for BufferedTimeline {
                 if let StoreKey::Data(dk) = key {
                     let ver = PageVersion::des(&pair.1)?;
                     match ver {
-                        PageVersion::Image(img) => Ok(img), // already materialized: we are done
-                        PageVersion::Delta(rec) => {
+                        PageVersion::Page(img) => Ok(img), // already materialized: we are done
+                        PageVersion::Wal(rec) => {
                             let mut will_init = rec.will_init;
                             let mut data = PageReconstructData {
                                 records: Vec::new(),
@@ -806,11 +803,11 @@ impl Timeline for BufferedTimeline {
                                     if let StoreKey::Data(dk) = key {
                                         assert!(dk.rel == rel); // check that we don't jump to previous relish before locating full image
                                         match ver {
-                                            PageVersion::Image(img) => {
+                                            PageVersion::Page(img) => {
                                                 data.page_img = Some(img);
                                                 break;
                                             }
-                                            PageVersion::Delta(rec) => {
+                                            PageVersion::Wal(rec) => {
                                                 will_init = rec.will_init;
                                                 data.records.push((dk.lsn, rec));
                                             }
@@ -924,6 +921,191 @@ impl Timeline for BufferedTimeline {
             .with_label_values(&["checkpoint_force"])
             //pass checkpoint_distance=0 to force checkpoint
             .observe_closure_duration(|| self.checkpoint_internal(0, true))
+    }
+
+    ///
+    /// Export data as delats and image layers between 'start_lsn' to 'end_lsn'. The
+    /// start is inclusive, and end is exclusive.
+    ///
+    fn export_timeline(&self, start_lsn: Lsn, end_lsn: Lsn) -> Result<()> {
+        let now = Instant::now();
+        let _enter = info_span!("export timeline", timeline = %self.timelineid, tenant = %self.tenantid, start_lsn = %start_lsn, end_lsn = %end_lsn).entered();
+
+        info!("exporting timeline");
+        let zero_rel = RelishTag::Relation(ZERO_TAG);
+        let mut from_rel = zero_rel;
+        let mut from = StoreKey::Metadata(MetadataKey {
+            rel: from_rel,
+            lsn: start_lsn,
+        });
+        let mut relsizes: HashMap<RelishTag, VecMap<Lsn, u32>> = HashMap::new();
+        let mut dropped: HashSet<RelishTag> = HashSet::new();
+        let store = self.store.read().unwrap();
+        'meta: loop {
+            let mut iter = store.data.range(&from.ser()?..);
+
+            while let Some(entry) = iter.next() {
+                let pair = entry?;
+                if let StoreKey::Metadata(dk) = StoreKey::des(&pair.0)? {
+                    // processing metadata
+                    from_rel = dk.rel;
+                    if dk.lsn < start_lsn {
+                        from = StoreKey::Metadata(MetadataKey {
+                            rel: from_rel,
+                            lsn: start_lsn,
+                        });
+                        continue 'meta;
+                    } else if dk.lsn >= end_lsn {
+                        from = StoreKey::Metadata(MetadataKey {
+                            rel: from_rel,
+                            lsn: Lsn::MAX,
+                        });
+                        continue 'meta;
+                    } else {
+                        let meta = MetadataValue::des(&pair.1)?;
+                        if let Some(size) = meta.size {
+                            if let Some(sizes) = relsizes.get_mut(&dk.rel) {
+                                sizes.append(dk.lsn, size).unwrap();
+                            } else {
+                                let mut sizes = VecMap::default();
+                                sizes.append(dk.lsn, size).unwrap();
+                                relsizes.insert(dk.rel, sizes);
+                            }
+                        } else {
+                            dropped.insert(dk.rel);
+                        }
+                    }
+                } else {
+                    // End of metadata
+                    break 'meta;
+                }
+            }
+            break;
+        }
+
+        from_rel = zero_rel;
+        from = StoreKey::Data(DataKey {
+            rel: from_rel,
+            blknum: 0,
+            lsn: Lsn(0),
+        });
+
+        // currently proceed block number
+        let mut from_blknum = 0;
+        let mut page_versions: Vec<(u32, Lsn, PageVersion)> = Vec::new();
+        'pages: loop {
+            let mut iter = store.data.range(&from.ser()?..);
+            while let Some(entry) = iter.next() {
+                let pair = entry?;
+                if let StoreKey::Data(dk) = StoreKey::des(&pair.0)? {
+                    let same_seg = from_rel == dk.rel
+                        && dk.blknum / RELISH_SEG_SIZE < from_blknum / RELISH_SEG_SIZE;
+                    if !same_seg && from_rel != zero_rel {
+                        let is_dropped = dropped.contains(&from_rel);
+                        let segtag = SegmentTag::from_blknum(from_rel, from_blknum);
+                        if !page_versions.is_empty() {
+                            DeltaLayer::create(
+                                self.conf,
+                                self.timelineid,
+                                self.tenantid,
+                                segtag,
+                                start_lsn,
+                                end_lsn,
+                                is_dropped,
+                                page_versions.iter().map(|t| (t.0, t.1, &t.2)),
+                                relsizes[&from_rel].clone(),
+                            )?;
+                            page_versions.clear();
+                        }
+                        if !is_dropped {
+                            let mut images: Vec<Bytes> =
+                                Vec::with_capacity(RELISH_SEG_SIZE as usize);
+                            let first_blknum = from_blknum & !RELISH_SEG_SIZE;
+                            let last_blknum = u32::min(
+                                first_blknum + RELISH_SEG_SIZE,
+                                relsizes[&from_rel].last().map(|p| p.1).unwrap_or(0),
+                            );
+                            if first_blknum < last_blknum {
+                                for blk in first_blknum..last_blknum {
+                                    images.push(self.get_page_at_lsn(from_rel, blk, end_lsn)?);
+                                }
+                                ImageLayer::create(
+                                    self.conf,
+                                    self.timelineid,
+                                    self.tenantid,
+                                    segtag,
+                                    end_lsn,
+                                    images,
+                                )?;
+                            }
+                        }
+                    }
+                    from_rel = dk.rel;
+                    from_blknum = dk.blknum;
+                    if dk.lsn < start_lsn {
+                        from = StoreKey::Data(DataKey {
+                            rel: from_rel,
+                            blknum: from_blknum,
+                            lsn: start_lsn,
+                        });
+                    } else if dk.lsn >= start_lsn {
+                        from_blknum += 1;
+                        from = StoreKey::Data(DataKey {
+                            rel: from_rel,
+                            blknum: from_blknum,
+                            lsn: start_lsn,
+                        });
+                    } else {
+                        page_versions.push((dk.blknum, dk.lsn, PageVersion::des(&pair.1)?));
+                        continue;
+                    }
+                    continue 'pages;
+                } else {
+                    break 'pages;
+                }
+            }
+            break;
+        }
+        if from_rel != zero_rel {
+            let is_dropped = dropped.contains(&from_rel);
+            let segtag = SegmentTag::from_blknum(from_rel, from_blknum);
+            if !page_versions.is_empty() {
+                DeltaLayer::create(
+                    self.conf,
+                    self.timelineid,
+                    self.tenantid,
+                    segtag,
+                    start_lsn,
+                    end_lsn,
+                    is_dropped,
+                    page_versions.iter().map(|t| (t.0, t.1, &t.2)),
+                    relsizes[&from_rel].clone(),
+                )?;
+            }
+            if !is_dropped {
+                let mut images: Vec<Bytes> = Vec::with_capacity(RELISH_SEG_SIZE as usize);
+                let first_blknum = from_blknum & !RELISH_SEG_SIZE;
+                let last_blknum = u32::min(
+                    first_blknum + RELISH_SEG_SIZE,
+                    relsizes[&from_rel].last().map(|p| p.1).unwrap_or(0),
+                );
+                if first_blknum < last_blknum {
+                    for blk in first_blknum..last_blknum {
+                        images.push(self.get_page_at_lsn(from_rel, blk, end_lsn)?);
+                    }
+                    ImageLayer::create(
+                        self.conf,
+                        self.timelineid,
+                        self.tenantid,
+                        segtag,
+                        end_lsn,
+                        images,
+                    )?;
+                }
+            }
+        }
+        info!("Export time line in {:?}", now.elapsed());
+        Ok(())
     }
 
     fn get_last_record_lsn(&self) -> Lsn {
@@ -1213,7 +1395,7 @@ impl BufferedTimeline {
                 debug_assert!(key < till);
                 if let StoreKey::Data(dk) = StoreKey::des(&key)? {
                     let ver = PageVersion::des(&pair.1)?;
-                    if let PageVersion::Delta(rec) = ver {
+                    if let PageVersion::Wal(rec) = ver {
                         // ignore already materialized pages
                         let mut will_init = rec.will_init;
                         let mut data = PageReconstructData {
@@ -1233,11 +1415,11 @@ impl BufferedTimeline {
                                 if let StoreKey::Data(dk2) = key {
                                     assert!(dk.rel == dk2.rel); // check that we don't jump to previous relish before locating full image
                                     match ver {
-                                        PageVersion::Image(img) => {
+                                        PageVersion::Page(img) => {
                                             data.page_img = Some(img);
                                             break;
                                         }
-                                        PageVersion::Delta(rec) => {
+                                        PageVersion::Wal(rec) => {
                                             will_init = rec.will_init;
                                             history_len += rec.rec.len();
                                             data.records.push((dk2.lsn, rec));
@@ -1260,7 +1442,7 @@ impl BufferedTimeline {
                             });
 
                             let mut store = self.store.write().unwrap();
-                            store.data.put(&key, &PageVersion::Image(img?).ser()?)?;
+                            store.data.put(&key, &PageVersion::Page(img?).ser()?)?;
                             n_checkpointed_records += 1;
                         }
                     }
@@ -1339,7 +1521,8 @@ impl BufferedTimeline {
 
         info!("GC starting");
 
-        let mut from_rel = RelishTag::Relation(ZERO_TAG);
+        let zero_rel = RelishTag::Relation(ZERO_TAG);
+        let mut from_rel = zero_rel;
         let mut from = StoreKey::Metadata(MetadataKey {
             rel: from_rel,
             lsn: Lsn(0),
@@ -1414,7 +1597,7 @@ impl BufferedTimeline {
             break;
         }
 
-        from_rel = RelishTag::Relation(ZERO_TAG);
+        from_rel = zero_rel;
         from = StoreKey::Data(DataKey {
             rel: from_rel,
             blknum: 0,
@@ -1454,7 +1637,7 @@ impl BufferedTimeline {
                                 // .. and have something to remove
                                 // ... and have page image
                                 let ver = PageVersion::des(&pair.1)?;
-                                if let PageVersion::Image(_) = ver {
+                                if let PageVersion::Page(_) = ver {
                                     // ... then remove all previously accumulated deltas and images, as them are not needed any more
                                     drop(store);
                                     let mut store = self.store.write().unwrap();
@@ -1578,14 +1761,6 @@ impl Deref for BufferedTimelineWriter<'_> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PageVersion {
-    /// an 8kb page image
-    Image(Bytes),
-    /// WAL record to get from previous page version to this one.
-    Delta(WALRecord),
-}
-
 impl<'a> BufferedTimelineWriter<'a> {
     fn put_page_version(
         &self,
@@ -1645,12 +1820,63 @@ impl<'a> BufferedTimelineWriter<'a> {
 }
 
 impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
+    ///
+    /// Import data from layer files
+    ///
+    fn import_timeline(&self, snapshot_lsn: Lsn) -> Result<()> {
+        let now = Instant::now();
+        let (imgfilenames, deltafilenames) =
+            filename::list_files(self.tl.conf, self.tl.timelineid, self.tl.tenantid)?;
+
+        let mut data = PageReconstructData {
+            records: Vec::new(),
+            page_img: None,
+        };
+
+        for filename in &imgfilenames {
+            if filename.lsn == snapshot_lsn {
+                let layer =
+                    ImageLayer::new(self.tl.conf, self.tl.timelineid, self.tl.tenantid, filename);
+                let seg_size = layer.get_seg_size(snapshot_lsn)?;
+                for blknum in 0..seg_size {
+                    match layer.get_page_reconstruct_data(blknum, snapshot_lsn, &mut data)? {
+                        PageReconstructResult::Complete => {
+                            if let Some(page) = data.page_img.take() {
+                                self.put_page_image(
+                                    filename.seg.rel,
+                                    filename.seg.segno * RELISH_SEG_SIZE + blknum,
+                                    snapshot_lsn,
+                                    page,
+                                )?;
+                            }
+                        }
+                        PageReconstructResult::Continue(_) => bail!("Branches not supported"),
+                        PageReconstructResult::Missing(_) => bail!("Failed to extract page image"),
+                    }
+                }
+            }
+        }
+
+        for filename in &deltafilenames {
+            ensure!(filename.start_lsn < filename.end_lsn);
+            if filename.start_lsn >= snapshot_lsn {
+                let layer =
+                    DeltaLayer::new(self.tl.conf, self.tl.timelineid, self.tl.tenantid, filename);
+                for (blk, lsn, ver) in layer.versions()? {
+                    self.put_page_version(filename.seg.rel, blk, lsn, ver)?;
+                }
+            }
+        }
+        info!("Import timeline completed in {:?}", now.elapsed());
+        Ok(())
+    }
+
     fn put_wal_record(&self, lsn: Lsn, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
-        self.put_page_version(rel, blknum, lsn, PageVersion::Delta(rec))
+        self.put_page_version(rel, blknum, lsn, PageVersion::Wal(rec))
     }
 
     fn put_page_image(&self, rel: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
-        self.put_page_version(rel, blknum, lsn, PageVersion::Image(img))
+        self.put_page_version(rel, blknum, lsn, PageVersion::Page(img))
     }
 
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: u32) -> Result<()> {

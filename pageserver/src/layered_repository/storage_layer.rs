@@ -3,10 +3,9 @@
 //!
 
 use crate::relish::RelishTag;
-use crate::repository::WALRecord;
-use crate::ZTimelineId;
+use crate::repository::{PageReconstructData, PageReconstructResult};
+use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
@@ -46,56 +45,6 @@ impl SegmentTag {
 }
 
 ///
-/// Represents a version of a page at a specific LSN. The LSN is the key of the
-/// entry in the 'page_versions' hash, it is not duplicated here.
-///
-/// A page version can be stored as a full page image, or as WAL record that needs
-/// to be applied over the previous page version to reconstruct this version.
-///
-/// It's also possible to have both a WAL record and a page image in the same
-/// PageVersion. That happens if page version is originally stored as a WAL record
-/// but it is later reconstructed by a GetPage@LSN request by performing WAL
-/// redo. The get_page_at_lsn() code will store the reconstructed pag image next to
-/// the WAL record in that case. TODO: That's pretty accidental, not the result
-/// of any grand design. If we want to keep reconstructed page versions around, we
-/// probably should have a separate buffer cache so that we could control the
-/// replacement policy globally. Or if we keep a reconstructed page image, we
-/// could throw away the WAL record.
-///
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PageVersion {
-    /// an 8kb page image
-    pub page_image: Option<Bytes>,
-    /// WAL record to get from previous page version to this one.
-    pub record: Option<WALRecord>,
-}
-
-///
-/// Data needed to reconstruct a page version
-///
-/// 'page_img' is the old base image of the page to start the WAL replay with.
-/// It can be None, if the first WAL record initializes the page (will_init)
-/// 'records' contains the records to apply over the base image.
-///
-pub struct PageReconstructData {
-    pub records: Vec<(Lsn, WALRecord)>,
-    pub page_img: Option<Bytes>,
-}
-
-/// Return value from Layer::get_page_reconstruct_data
-pub enum PageReconstructResult {
-    /// Got all the data needed to reconstruct the requested page
-    Complete,
-    /// This layer didn't contain all the required data, the caller should look up
-    /// the predecessor layer at the returned LSN and collect more data from there.
-    Continue(Lsn),
-    /// This layer didn't contain data needed to reconstruct the page version at
-    /// the returned LSN. This is usually considered an error, but might be OK
-    /// in some circumstances.
-    Missing(Lsn),
-}
-
-///
 /// A Layer corresponds to one RELISH_SEG_SIZE slice of a relish in a range of LSNs.
 /// There are two kinds of layers, in-memory and on-disk layers. In-memory
 /// layers are used to ingest incoming WAL, and provide fast access
@@ -104,6 +53,8 @@ pub enum PageReconstructResult {
 /// in-memory and on-disk layers.
 ///
 pub trait Layer: Send + Sync {
+    fn get_tenant_id(&self) -> ZTenantId;
+
     /// Identify the timeline this relish belongs to
     fn get_timeline_id(&self) -> ZTimelineId;
 
