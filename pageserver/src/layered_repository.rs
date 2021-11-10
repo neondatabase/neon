@@ -54,6 +54,7 @@ use zenith_utils::seqwait::SeqWait;
 
 mod blob;
 mod delta_layer;
+mod ephemeral_file;
 mod filename;
 mod global_layer_map;
 mod image_layer;
@@ -73,6 +74,8 @@ use layer_map::LayerMap;
 use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
 };
+
+pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -1615,8 +1618,9 @@ impl LayeredTimeline {
     }
 
     fn lookup_cached_page(&self, seg: &SegmentTag, blknum: u32, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+        let cache = page_cache::get();
         if let RelishTag::Relation(rel_tag) = &seg.rel {
-            let (lsn, read_guard) = page_cache::get().lookup_materialized_page(
+            let (lsn, read_guard) = cache.lookup_materialized_page(
                 self.tenantid,
                 self.timelineid,
                 *rel_tag,
@@ -1803,7 +1807,8 @@ impl LayeredTimeline {
                 )?;
 
                 if let RelishTag::Relation(rel_tag) = &rel {
-                    page_cache::get().memorize_materialized_page(
+                    let cache = page_cache::get();
+                    cache.memorize_materialized_page(
                         self.tenantid,
                         self.timelineid,
                         *rel_tag,
@@ -1879,7 +1884,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
 
         let seg = SegmentTag::from_blknum(rel, blknum);
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_wal_record(lsn, blknum, rec);
+        let delta_size = layer.put_wal_record(lsn, blknum, rec)?;
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
@@ -1898,7 +1903,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         let seg = SegmentTag::from_blknum(rel, blknum);
 
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_page_image(blknum, lsn, img);
+        let delta_size = layer.put_page_image(blknum, lsn, img)?;
 
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
@@ -2047,33 +2052,4 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
         "couldn't find an unused backup number for {:?}",
         path
     ))
-}
-
-//----- Global layer management
-
-/// Check if too much memory is being used by open layers. If so, evict
-pub fn evict_layer_if_needed(conf: &PageServerConf) -> Result<()> {
-    // Keep evicting layers until we are below the memory threshold.
-    let mut global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
-    while let Some((layer_id, layer)) = global_layer_map.find_victim_if_needed(conf.open_mem_limit)
-    {
-        drop(global_layer_map);
-        let tenantid = layer.get_tenant_id();
-        let timelineid = layer.get_timeline_id();
-
-        let _entered =
-            info_span!("global evict", timeline = %timelineid, tenant = %tenantid).entered();
-        info!("evicting {}", layer.filename().display());
-        drop(layer);
-
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
-
-        timeline
-            .upgrade_to_layered_timeline()
-            .evict_layer(layer_id)?;
-
-        global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
-    }
-
-    Ok(())
 }

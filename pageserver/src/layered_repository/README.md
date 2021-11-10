@@ -82,12 +82,14 @@ A layer can be in different states:
 
 - Open - a layer where new WAL records can be appended to.
 - Closed - a layer that is read-only, no new WAL records can be appended to it
-- Historical: synonym for closed
-- InMemory: A layer that is kept only in memory, and needs to be rebuilt from WAL
-  on pageserver start
+- Historic: synonym for closed
+- InMemory: A layer that needs to be rebuilt from WAL on pageserver start.
+To avoid OOM errors, InMemory layers can be spilled to disk into ephemeral file.
 - OnDisk: A layer that is stored on disk. If its end-LSN is older than
   disk_consistent_lsn, it is known to be fully flushed and fsync'd to local disk.
 - Frozen layer: an in-memory layer that is Closed.
+
+TODO: Clarify the difference between Closed, Historic and Frozen.
 
 There are two kinds of OnDisk layers:
 - ImageLayer represents an image or a snapshot of a 10 MB relish segment, at one particular LSN.
