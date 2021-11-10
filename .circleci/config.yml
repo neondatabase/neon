@@ -239,9 +239,11 @@ jobs:
       - run:
           name: Run pytest
           working_directory: test_runner
-          # pytest doesn't output test logs in real time, so CI job may fail
-          # with `Too long with no output` error, if a test is running for a long time.
-          no_output_timeout: 20m
+          # pytest doesn't output test logs in real time, so CI job may fail with
+          # `Too long with no output` error, if a test is running for a long time.
+          # In that case, tests should have internal timeouts that are less than 
+          # no_output_timeout, specified here.
+          no_output_timeout: 10m
           environment:
             - ZENITH_BIN: /tmp/zenith/bin
             - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
