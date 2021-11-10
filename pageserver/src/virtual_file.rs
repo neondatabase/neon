@@ -49,7 +49,7 @@ pub struct VirtualFile {
     /// if a new file is created, we only pass the create flag when it's initially
     /// opened, in the VirtualFile::create() function, and strip the flag before
     /// storing it here.
-    path: PathBuf,
+    pub path: PathBuf,
     open_options: OpenOptions,
 }
 

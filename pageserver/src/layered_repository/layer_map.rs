@@ -414,6 +414,13 @@ mod tests {
         forknum: 0,
     });
 
+    lazy_static! {
+        static ref DUMMY_TIMELINEID: ZTimelineId =
+            ZTimelineId::from_str("00000000000000000000000000000000").unwrap();
+        static ref DUMMY_TENANTID: ZTenantId =
+            ZTenantId::from_str("00000000000000000000000000000000").unwrap();
+    }
+
     /// Construct a dummy InMemoryLayer for testing
     fn dummy_inmem_layer(
         conf: &'static PageServerConf,
@@ -424,8 +431,8 @@ mod tests {
         Arc::new(
             InMemoryLayer::create(
                 conf,
-                ZTimelineId::from_str("00000000000000000000000000000000").unwrap(),
-                ZTenantId::from_str("00000000000000000000000000000000").unwrap(),
+                *DUMMY_TIMELINEID,
+                *DUMMY_TENANTID,
                 SegmentTag {
                     rel: TESTREL_A,
                     segno,
@@ -441,6 +448,7 @@ mod tests {
     fn test_open_layers() -> Result<()> {
         let conf = PageServerConf::dummy_conf(PageServerConf::test_repo_dir("dummy_inmem_layer"));
         let conf = Box::leak(Box::new(conf));
+        std::fs::create_dir_all(conf.timeline_path(&DUMMY_TIMELINEID, &DUMMY_TENANTID))?;
 
         let mut layers = LayerMap::default();
 
