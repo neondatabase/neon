@@ -1,40 +1,78 @@
+//!
+//! Data structure to ingest incoming WAL into an append-only file.
+//!
+//! - The file is considered temporary, and will be discarded on crash
+//! - based on a B-tree
+//!
+
+use std::os::unix::fs::FileExt;
 use std::{collections::HashMap, ops::RangeBounds, slice};
+
+use anyhow::Result;
+
+use std::cmp::min;
+use std::io::Seek;
 
 use zenith_utils::{lsn::Lsn, vec_map::VecMap};
 
 use super::storage_layer::PageVersion;
+use crate::virtual_file::VirtualFile;
 
-const EMPTY_SLICE: &[(Lsn, PageVersion)] = &[];
+use zenith_utils::bin_ser::LeSer;
 
-#[derive(Debug, Default)]
-pub struct PageVersions(HashMap<u32, VecMap<Lsn, PageVersion>>);
+const EMPTY_SLICE: &[(Lsn, u64)] = &[];
+
+pub struct PageVersions {
+    map: HashMap<u32, VecMap<Lsn, u64>>,
+
+    /// The PageVersion structs are stored in a serialized format in this file.
+    /// Each serialized PageVersion is preceded by a 'u32' length field.
+    /// The 'map' stores offsets into this file.
+    file: VirtualFile,
+}
 
 impl PageVersions {
+    pub fn new(file: VirtualFile) -> PageVersions {
+        PageVersions {
+            map: HashMap::new(),
+            file,
+        }
+    }
+
     pub fn append_or_update_last(
         &mut self,
         blknum: u32,
         lsn: Lsn,
         page_version: PageVersion,
-    ) -> (Option<PageVersion>, usize) {
-        let map = self.0.entry(blknum).or_insert_with(VecMap::default);
-        map.append_or_update_last(lsn, page_version).unwrap()
+    ) -> Result<Option<u64>> {
+        // remember starting position
+        let pos = self.file.stream_position()?;
+
+        // make room for the 'length' field by writing zeros as a placeholder.
+        self.file.seek(std::io::SeekFrom::Start(pos + 4)).unwrap();
+
+        page_version.ser_into(&mut self.file).unwrap();
+
+        // write the 'length' field.
+        let len = self.file.stream_position()? - pos - 4;
+        let lenbuf = u32::to_ne_bytes(len as u32);
+        self.file.write_all_at(&lenbuf, pos)?;
+
+        let map = self.map.entry(blknum).or_insert_with(VecMap::default);
+        Ok(map.append_or_update_last(lsn, pos as u64).unwrap().0)
     }
 
     /// Get all [`PageVersion`]s in a block
-    pub fn get_block_slice(&self, blknum: u32) -> &[(Lsn, PageVersion)] {
-        self.0
+    fn get_block_slice(&self, blknum: u32) -> &[(Lsn, u64)] {
+        self.map
             .get(&blknum)
             .map(VecMap::as_slice)
             .unwrap_or(EMPTY_SLICE)
     }
 
     /// Get a range of [`PageVersions`] in a block
-    pub fn get_block_lsn_range<R: RangeBounds<Lsn>>(
-        &self,
-        blknum: u32,
-        range: R,
-    ) -> &[(Lsn, PageVersion)] {
-        self.0
+    pub fn get_block_lsn_range<R: RangeBounds<Lsn>>(&self, blknum: u32, range: R) -> &[(Lsn, u64)] {
+        self.map
             .get(&blknum)
             .map(|vec_map| vec_map.slice_range(range))
             .unwrap_or(EMPTY_SLICE)
@@ -43,7 +81,7 @@ impl PageVersions {
     /// Iterate through [`PageVersion`]s in (block, lsn) order.
     /// If a [`cutoff_lsn`] is set, only show versions with `lsn < cutoff_lsn`
     pub fn ordered_page_version_iter(&self, cutoff_lsn: Option<Lsn>) -> OrderedPageVersionIter<'_> {
-        let mut ordered_blocks: Vec<u32> = self.0.keys().cloned().collect();
+        let mut ordered_blocks: Vec<u32> = self.map.keys().cloned().collect();
         ordered_blocks.sort_unstable();
 
         let slice = ordered_blocks
@@ -59,6 +97,40 @@ impl PageVersions {
             cur_slice_iter: slice.iter(),
         }
     }
+
+    /// Returns a 'Read' that reads the page version at given offset.
+    pub fn reader(&self, pos: u64) -> Result<PageVersionReader, std::io::Error> {
+        // read length
+        let mut lenbuf = [0u8; 4];
+        self.file.read_exact_at(&mut lenbuf, pos)?;
+        let len = u32::from_ne_bytes(lenbuf);
+
+        Ok(PageVersionReader {
+            file: &self.file,
+            pos: pos + 4,
+            end_pos: pos + 4 + len as u64,
+        })
+    }
+
+    pub fn get_page_version(&self, pos: u64) -> Result<PageVersion> {
+        let mut reader = self.reader(pos)?;
+        Ok(PageVersion::des_from(&mut reader)?)
+    }
+}
+
+pub struct PageVersionReader<'a> {
+    file: &'a VirtualFile,
+    pos: u64,
+    end_pos: u64,
+}
+
+impl<'a> std::io::Read for PageVersionReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        let len = min(buf.len(), (self.end_pos - self.pos) as usize);
+        let n = self.file.read_at(&mut buf[..len], self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
 }
 
 pub struct OrderedPageVersionIter<'a> {
@@ -69,7 +141,7 @@ pub struct OrderedPageVersionIter<'a> {
 
     cutoff_lsn: Option<Lsn>,
 
-    cur_slice_iter: slice::Iter<'a, (Lsn, PageVersion)>,
+    cur_slice_iter: slice::Iter<'a, (Lsn, u64)>,
 }
 
 impl OrderedPageVersionIter<'_> {
@@ -83,14 +155,14 @@ impl OrderedPageVersionIter<'_> {
 }
 
 impl<'a> Iterator for OrderedPageVersionIter<'a> {
-    type Item = (u32, Lsn, &'a PageVersion);
+    type Item = (u32, Lsn, u64);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some((lsn, page_version)) = self.cur_slice_iter.next() {
+            if let Some((lsn, pos)) = self.cur_slice_iter.next() {
                 if self.is_lsn_before_cutoff(lsn) {
                     let blknum = self.ordered_blocks[self.cur_block_idx];
-                    return Some((blknum, *lsn, page_version));
+                    return Some((blknum, *lsn, *pos));
                 }
             }
 
@@ -109,8 +181,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ordered_iter() {
-        let mut page_versions = PageVersions::default();
+    fn test_ordered_iter() -> Result<()> {
+        let test_file_path = crate::PageServerConf::test_repo_dir("test_ordered_iter");
+        let file = VirtualFile::create(&test_file_path)?;
+
+        let mut page_versions = PageVersions::new(file);
+
         const BLOCKS: u32 = 1000;
         const LSNS: u64 = 50;
 
@@ -119,11 +195,11 @@ mod tests {
 
         for blknum in 0..BLOCKS {
             for lsn in 0..LSNS {
-                let (old, _delta_size) = page_versions.append_or_update_last(
+                let old = page_versions.append_or_update_last(
                     blknum,
                     Lsn(lsn),
                     empty_page_version.clone(),
-                );
+                )?;
                 assert!(old.is_none());
             }
         }
@@ -150,5 +226,7 @@ mod tests {
         }
         assert!(iter.next().is_none());
         assert!(iter.next().is_none()); // should be robust against excessive next() calls
+
+        Ok(())
     }
 }

@@ -11,7 +11,7 @@
 
 use crate::layered_repository::interval_tree::{IntervalItem, IntervalIter, IntervalTree};
 use crate::layered_repository::storage_layer::{Layer, SegmentTag};
-use crate::layered_repository::InMemoryLayer;
+use crate::layered_repository::OpenLayer;
 use crate::relish::*;
 use anyhow::Result;
 use lazy_static::lazy_static;
@@ -67,7 +67,7 @@ impl LayerMap {
     /// Get the open layer for given segment for writing. Or None if no open
     /// layer exists.
     ///
-    pub fn get_open(&self, tag: &SegmentTag) -> Option<Arc<InMemoryLayer>> {
+    pub fn get_open(&self, tag: &SegmentTag) -> Option<Arc<OpenLayer>> {
         let segentry = self.segs.get(tag)?;
 
         segentry
@@ -78,7 +78,7 @@ impl LayerMap {
     ///
     /// Insert an open in-memory layer
     ///
-    pub fn insert_open(&mut self, layer: Arc<InMemoryLayer>) {
+    pub fn insert_open(&mut self, layer: Arc<OpenLayer>) {
         let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
 
         let layer_id = segentry.update_open(Arc::clone(&layer));
@@ -214,7 +214,7 @@ impl LayerMap {
     }
 
     /// Return the oldest in-memory layer, along with its generation number.
-    pub fn peek_oldest_open(&mut self) -> Option<(LayerId, Arc<InMemoryLayer>, u64)> {
+    pub fn peek_oldest_open(&mut self) -> Option<(LayerId, Arc<OpenLayer>, u64)> {
         let global_map = GLOBAL_LAYER_MAP.read().unwrap();
 
         while let Some(oldest_entry) = self.open_layers.peek() {
@@ -279,7 +279,7 @@ impl IntervalItem for dyn Layer {
 /// Per-segment entry in the LayerMap::segs hash map. Holds all the layers
 /// associated with the segment.
 ///
-/// The last layer that is open for writes is always an InMemoryLayer,
+/// The last layer that is open for writes is always an OpenLayer,
 /// and is kept in a separate field, because there can be only one for
 /// each segment. The older layers, stored on disk, are kept in an
 /// IntervalTree.
@@ -323,7 +323,7 @@ impl SegEntry {
     // Set new open layer for a SegEntry.
     // It's ok to rewrite previous open layer,
     // but only if it is not writeable anymore.
-    pub fn update_open(&mut self, layer: Arc<InMemoryLayer>) -> LayerId {
+    pub fn update_open(&mut self, layer: Arc<OpenLayer>) -> LayerId {
         if let Some(prev_open_layer_id) = &self.open_layer_id {
             if let Some(prev_open_layer) = GLOBAL_LAYER_MAP.read().unwrap().get(prev_open_layer_id)
             {
@@ -414,15 +414,15 @@ mod tests {
         forknum: 0,
     });
 
-    /// Construct a dummy InMemoryLayer for testing
-    fn dummy_inmem_layer(
+    /// Construct a dummy OpenLayer for testing
+    fn dummy_open_layer(
         conf: &'static PageServerConf,
         segno: u32,
         start_lsn: Lsn,
         oldest_pending_lsn: Lsn,
-    ) -> Arc<InMemoryLayer> {
+    ) -> Arc<OpenLayer> {
         Arc::new(
-            InMemoryLayer::create(
+            OpenLayer::create(
                 conf,
                 ZTimelineId::from_str("00000000000000000000000000000000").unwrap(),
                 ZTenantId::from_str("00000000000000000000000000000000").unwrap(),
@@ -439,20 +439,20 @@ mod tests {
 
     #[test]
     fn test_open_layers() -> Result<()> {
-        let conf = PageServerConf::dummy_conf(PageServerConf::test_repo_dir("dummy_inmem_layer"));
+        let conf = PageServerConf::dummy_conf(PageServerConf::test_repo_dir("dummy_open_layer"));
         let conf = Box::leak(Box::new(conf));
 
         let mut layers = LayerMap::default();
 
         let gen1 = layers.increment_generation();
-        layers.insert_open(dummy_inmem_layer(conf, 0, Lsn(0x100), Lsn(0x100)));
-        layers.insert_open(dummy_inmem_layer(conf, 1, Lsn(0x100), Lsn(0x200)));
-        layers.insert_open(dummy_inmem_layer(conf, 2, Lsn(0x100), Lsn(0x120)));
-        layers.insert_open(dummy_inmem_layer(conf, 3, Lsn(0x100), Lsn(0x110)));
+        layers.insert_open(dummy_open_layer(conf, 0, Lsn(0x100), Lsn(0x100)));
+        layers.insert_open(dummy_open_layer(conf, 1, Lsn(0x100), Lsn(0x200)));
+        layers.insert_open(dummy_open_layer(conf, 2, Lsn(0x100), Lsn(0x120)));
+        layers.insert_open(dummy_open_layer(conf, 3, Lsn(0x100), Lsn(0x110)));
 
         let gen2 = layers.increment_generation();
-        layers.insert_open(dummy_inmem_layer(conf, 4, Lsn(0x100), Lsn(0x110)));
-        layers.insert_open(dummy_inmem_layer(conf, 5, Lsn(0x100), Lsn(0x100)));
+        layers.insert_open(dummy_open_layer(conf, 4, Lsn(0x100), Lsn(0x110)));
+        layers.insert_open(dummy_open_layer(conf, 5, Lsn(0x100), Lsn(0x100)));
 
         // A helper function (closure) to pop the next oldest open entry from the layer map,
         // and assert that it is what we'd expect

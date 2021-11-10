@@ -68,7 +68,7 @@ use delta_layer::DeltaLayer;
 use image_layer::ImageLayer;
 
 use global_layer_map::{LayerId, GLOBAL_LAYER_MAP};
-use inmemory_layer::InMemoryLayer;
+use inmemory_layer::OpenLayer;
 use layer_map::LayerMap;
 use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
@@ -1025,7 +1025,7 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<OpenLayer>> {
         let mut layers = self.layers.lock().unwrap();
 
         assert!(lsn.is_aligned());
@@ -1056,14 +1056,8 @@ impl LayeredTimeline {
                     lsn
                 );
 
-                layer = InMemoryLayer::create(
-                    self.conf,
-                    self.timelineid,
-                    self.tenantid,
-                    seg,
-                    lsn,
-                    lsn,
-                )?;
+                layer =
+                    OpenLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
             } else {
                 return Ok(open_layer);
             }
@@ -1099,7 +1093,7 @@ impl LayeredTimeline {
                 prev_layer.get_start_lsn(),
                 prev_layer.get_end_lsn()
             );
-            layer = InMemoryLayer::create_successor_layer(
+            layer = OpenLayer::create_successor_layer(
                 self.conf,
                 prev_layer,
                 self.timelineid,
@@ -1116,11 +1110,10 @@ impl LayeredTimeline {
                 lsn
             );
 
-            layer =
-                InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
+            layer = OpenLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
         }
 
-        let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
+        let layer_rc: Arc<OpenLayer> = Arc::new(layer);
         layers.insert_open(Arc::clone(&layer_rc));
 
         Ok(layer_rc)
@@ -1774,7 +1767,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
 
         let seg = SegmentTag::from_blknum(rel, blknum);
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_wal_record(lsn, blknum, rec);
+        let delta_size = layer.put_wal_record(lsn, blknum, rec)?;
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
@@ -1793,7 +1786,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         let seg = SegmentTag::from_blknum(rel, blknum);
 
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_page_image(blknum, lsn, img);
+        let delta_size = layer.put_page_image(blknum, lsn, img)?;
 
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
@@ -1942,33 +1935,4 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
         "couldn't find an unused backup number for {:?}",
         path
     ))
-}
-
-//----- Global layer management
-
-/// Check if too much memory is being used by open layers. If so, evict
-pub fn evict_layer_if_needed(conf: &PageServerConf) -> Result<()> {
-    // Keep evicting layers until we are below the memory threshold.
-    let mut global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
-    while let Some((layer_id, layer)) = global_layer_map.find_victim_if_needed(conf.open_mem_limit)
-    {
-        drop(global_layer_map);
-        let tenantid = layer.get_tenant_id();
-        let timelineid = layer.get_timeline_id();
-
-        let _entered =
-            info_span!("global evict", timeline = %timelineid, tenant = %tenantid).entered();
-        info!("evicting {}", layer.filename().display());
-        drop(layer);
-
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
-
-        timeline
-            .upgrade_to_layered_timeline()
-            .evict_layer(layer_id)?;
-
-        global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
-    }
-
-    Ok(())
 }
