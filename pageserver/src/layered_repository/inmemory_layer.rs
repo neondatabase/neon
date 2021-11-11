@@ -2,6 +2,7 @@
 //! An in-memory layer stores recently received page versions in memory. The page versions
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
+use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::filename::DeltaFileName;
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
@@ -10,13 +11,11 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
-use crate::virtual_file::VirtualFile;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
-use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use zenith_utils::lsn::Lsn;
@@ -334,21 +333,7 @@ impl OpenLayer {
             segsizes.append(start_lsn, 0).unwrap();
         }
 
-        let delta_filename = DeltaFileName {
-            seg,
-            start_lsn,
-            end_lsn: Lsn(u64::MAX),
-            dropped: false,
-        }
-        .to_string();
-        let filename = conf
-            .timeline_path(&timelineid, &tenantid)
-            .join(PathBuf::from(format!("open-{}", delta_filename)));
-
-        let file = VirtualFile::open_with_options(
-            &filename,
-            OpenOptions::new().read(true).write(true).create(true),
-        )?;
+        let file = EphemeralFile::create(conf, tenantid, timelineid)?;
 
         Ok(OpenLayer {
             conf,
@@ -524,21 +509,7 @@ impl OpenLayer {
             segsizes.append(start_lsn, size).unwrap();
         }
 
-        let delta_filename = DeltaFileName {
-            seg,
-            start_lsn,
-            end_lsn: Lsn(u64::MAX),
-            dropped: false,
-        }
-        .to_string();
-        let filename = conf
-            .timeline_path(&timelineid, &tenantid)
-            .join(PathBuf::from(format!("open-{}", delta_filename)));
-
-        let file = VirtualFile::open_with_options(
-            &filename,
-            OpenOptions::new().read(true).write(true).create(true),
-        )?;
+        let file = EphemeralFile::create(conf, tenantid, timelineid)?;
 
         Ok(OpenLayer {
             conf,
@@ -689,29 +660,5 @@ impl OpenLayer {
             delta_layers,
             image_layers: vec![image_layer],
         })
-    }
-}
-
-impl Drop for OpenLayer {
-    fn drop(&mut self) {
-        let delta_filename = DeltaFileName {
-            seg: self.seg,
-            start_lsn: self.start_lsn,
-            end_lsn: Lsn(u64::MAX),
-            dropped: false, // even if it dropped now, that's not reflected in the filename
-        }
-        .to_string();
-        let filename = self
-            .conf
-            .timeline_path(&self.timelineid, &self.tenantid)
-            .join(PathBuf::from(format!("open-{}", delta_filename)));
-
-        if let Err(err) = std::fs::remove_file(&filename) {
-            error!(
-                "could not unlink open layer file {}: {}",
-                filename.display(),
-                err
-            );
-        }
     }
 }

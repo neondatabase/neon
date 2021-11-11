@@ -16,7 +16,7 @@ use std::io::Seek;
 use zenith_utils::{lsn::Lsn, vec_map::VecMap};
 
 use super::storage_layer::PageVersion;
-use crate::virtual_file::VirtualFile;
+use crate::layered_repository::ephemeral_file::EphemeralFile;
 
 use zenith_utils::bin_ser::LeSer;
 
@@ -28,11 +28,11 @@ pub struct PageVersions {
     /// The PageVersion structs are stored in a serialized format in this file.
     /// Each serialized PageVersion is preceded by a 'u32' length field.
     /// The 'map' stores offsets into this file.
-    file: VirtualFile,
+    file: EphemeralFile,
 }
 
 impl PageVersions {
-    pub fn new(file: VirtualFile) -> PageVersions {
+    pub fn new(file: EphemeralFile) -> PageVersions {
         PageVersions {
             map: HashMap::new(),
             file,
@@ -119,7 +119,7 @@ impl PageVersions {
 }
 
 pub struct PageVersionReader<'a> {
-    file: &'a VirtualFile,
+    file: &'a EphemeralFile,
     pos: u64,
     end_pos: u64,
 }
@@ -179,11 +179,31 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::PageServerConf;
+    use std::fs;
+    use std::str::FromStr;
+    use zenith_utils::zid::{ZTenantId, ZTimelineId};
+
+    fn repo_harness(test_name: &str) -> Result<(&'static PageServerConf, ZTenantId, ZTimelineId)> {
+        let repo_dir = PageServerConf::test_repo_dir(test_name);
+        let _ = fs::remove_dir_all(&repo_dir);
+        let conf = PageServerConf::dummy_conf(repo_dir);
+        // Make a static copy of the config. This can never be free'd, but that's
+        // OK in a test.
+        let conf: &'static PageServerConf = Box::leak(Box::new(conf));
+
+        let tenantid = ZTenantId::from_str("11000000000000000000000000000000").unwrap();
+        let timelineid = ZTimelineId::from_str("22000000000000000000000000000000").unwrap();
+        fs::create_dir_all(conf.timeline_path(&timelineid, &tenantid))?;
+
+        Ok((conf, tenantid, timelineid))
+    }
 
     #[test]
     fn test_ordered_iter() -> Result<()> {
-        let test_file_path = crate::PageServerConf::test_repo_dir("test_ordered_iter");
-        let file = VirtualFile::create(&test_file_path)?;
+        let (conf, tenantid, timelineid) = repo_harness("test_ordered_iter")?;
+
+        let file = EphemeralFile::create(conf, tenantid, timelineid)?;
 
         let mut page_versions = PageVersions::new(file);
 
