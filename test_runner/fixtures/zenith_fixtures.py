@@ -1219,7 +1219,17 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
          | tar -x -C {restored_dir_path}
     """
 
-    subprocess.check_call(cmd, shell=True)
+    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
+    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
+    psql_env = {'LD_LIBRARY_PATH': os.path.join(str(pg_distrib_dir), 'lib')}
+    result = subprocess.run(cmd, env=psql_env, capture_output=True, text=True, shell=True)
+
+    # Print captured stdout/stderr if basebackup cmd failed.
+    if result.returncode != 0:
+        log.error('Basebackup shell command failed with:')
+        log.error(result.stdout)
+        log.error(result.stderr)
+    assert result.returncode == 0
 
     # list files we're going to compare
     assert pg.pgdata_dir
