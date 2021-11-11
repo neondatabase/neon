@@ -46,11 +46,13 @@ use std::{
 };
 
 use once_cell::sync::OnceCell;
+use tracing::error;
 use zenith_utils::{
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };
 
+use crate::layered_repository::writeback_ephemeral_file;
 use crate::{relish::RelTag, PageServerConf};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
@@ -84,23 +86,25 @@ pub fn get() -> &'static PageCache {
     }
 }
 
-const PAGE_SZ: usize = postgres_ffi::pg_constants::BLCKSZ as usize;
+pub const PAGE_SZ: usize = postgres_ffi::pg_constants::BLCKSZ as usize;
 const MAX_USAGE_COUNT: u8 = 5;
 
 ///
 /// CacheKey uniquely identifies a "thing" to cache in the page cache.
 ///
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum CacheKey {
     MaterializedPage {
         hash_key: MaterializedPageHashKey,
         lsn: Lsn,
     },
-    // Currently, we only store materialized page versions in the page cache.
-    // To cache another kind of "thing", add enum variant here.
+    EphemeralPage {
+        file_id: u64,
+        blkno: u32,
+    },
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct MaterializedPageHashKey {
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
@@ -122,6 +126,7 @@ struct Slot {
 struct SlotInner {
     key: Option<CacheKey>,
     buf: &'static mut [u8; PAGE_SZ],
+    dirty: bool,
 }
 
 impl Slot {
@@ -169,6 +174,8 @@ pub struct PageCache {
     /// If you add support for caching different kinds of objects, each object kind
     /// can have a separate mapping map, next to this field.
     materialized_page_map: RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
+
+    ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -232,6 +239,9 @@ impl PageWriteGuard<'_> {
         );
         self.valid = true;
     }
+    pub fn mark_dirty(&mut self) {
+        self.inner.dirty = true;
+    }
 }
 
 impl Drop for PageWriteGuard<'_> {
@@ -250,20 +260,20 @@ impl Drop for PageWriteGuard<'_> {
 }
 
 /// lock_for_read() return value
-enum ReadBufResult<'a> {
+pub enum ReadBufResult<'a> {
     Found(PageReadGuard<'a>),
     NotFound(PageWriteGuard<'a>),
 }
 
 /// lock_for_write() return value
-enum WriteBufResult<'a> {
+pub enum WriteBufResult<'a> {
     Found(PageWriteGuard<'a>),
     NotFound(PageWriteGuard<'a>),
 }
 
 impl PageCache {
     //
-    // Section 1: Public interface functions for looking up and memorizing materialized page
+    // Section 1.1: Public interface functions for looking up and memorizing materialized page
     // versions in the page cache
     //
 
@@ -291,8 +301,11 @@ impl PageCache {
         };
 
         if let Some(guard) = self.try_lock_for_read(&mut cache_key) {
-            let CacheKey::MaterializedPage { hash_key: _, lsn } = cache_key;
-            Some((lsn, guard))
+            if let CacheKey::MaterializedPage { hash_key: _, lsn } = cache_key {
+                Some((lsn, guard))
+            } else {
+                panic!("unexpected key type in slot");
+            }
         } else {
             None
         }
@@ -330,6 +343,37 @@ impl PageCache {
             WriteBufResult::NotFound(mut write_guard) => {
                 write_guard.copy_from_slice(img);
                 write_guard.mark_valid();
+            }
+        }
+    }
+
+    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
+        let mut cache_key = CacheKey::EphemeralPage { file_id, blkno };
+
+        self.lock_for_read(&mut cache_key)
+    }
+
+    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> WriteBufResult {
+        let cache_key = CacheKey::EphemeralPage { file_id, blkno };
+
+        self.lock_for_write(&cache_key)
+    }
+
+    /// Immediately drop all buffers belonging to given file, without writeback
+    pub fn drop_buffers_for_ephemeral(&self, drop_file_id: u64) {
+        for slot_idx in 0..self.slots.len() {
+            let slot = &self.slots[slot_idx];
+
+            let mut inner = slot.inner.write().unwrap();
+            if let Some(key) = &inner.key {
+                match key {
+                    CacheKey::EphemeralPage { file_id, blkno: _ } if *file_id == drop_file_id => {
+                        // remove mapping for old buffer
+                        self.remove_mapping(key);
+                        inner.key = None;
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -400,7 +444,6 @@ impl PageCache {
     /// }
     /// ```
     ///
-    #[allow(unused)] // this is currently unused
     fn lock_for_read(&self, cache_key: &mut CacheKey) -> ReadBufResult {
         loop {
             // First check if the key already exists in the cache.
@@ -527,6 +570,10 @@ impl PageCache {
                 *lsn = version.lsn;
                 Some(version.slot_idx)
             }
+            CacheKey::EphemeralPage { file_id, blkno } => {
+                let map = self.ephemeral_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
         }
     }
 
@@ -545,6 +592,10 @@ impl PageCache {
                 } else {
                     None
                 }
+            }
+            CacheKey::EphemeralPage { file_id, blkno } => {
+                let map = self.ephemeral_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
             }
         }
     }
@@ -569,8 +620,13 @@ impl PageCache {
                         }
                     }
                 } else {
-                    panic!()
+                    panic!("could not find old key in mapping")
                 }
+            }
+            CacheKey::EphemeralPage { file_id, blkno } => {
+                let mut map = self.ephemeral_page_map.write().unwrap();
+                map.remove(&(*file_id, *blkno))
+                    .expect("could not find old key in mapping");
             }
         }
     }
@@ -602,6 +658,16 @@ impl PageCache {
                     }
                 }
             }
+            CacheKey::EphemeralPage { file_id, blkno } => {
+                let mut map = self.ephemeral_page_map.write().unwrap();
+                match map.entry((*file_id, *blkno)) {
+                    Entry::Occupied(entry) => Some(*entry.get()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(slot_idx);
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -624,17 +690,45 @@ impl PageCache {
                 let mut inner = slot.inner.write().unwrap();
 
                 if let Some(old_key) = &inner.key {
-                    // TODO: if we supported storing dirty pages, this is where
-                    // we'd need to write it disk
+                    if inner.dirty {
+                        if let Err(err) = Self::writeback(old_key, inner.buf) {
+                            // Writing the page to disk failed.
+                            //
+                            // FIXME: What to do here, when? We could propagate the error to the
+                            // caller, but victim buffer is generally unrelated to the original
+                            // call. It can even belong to a different tenant. Currently, we
+                            // report the error to the log and continue the clock sweep to find
+                            // a different victim. But if the problem persists, the page cache
+                            // could fill up with dirty pages that we cannot evict, and we will
+                            // loop retrying the writebacks indefinitely.
+                            error!("writeback of buffer {:?} failed: {}", old_key, err);
+                            continue;
+                        }
+                    }
 
                     // remove mapping for old buffer
                     self.remove_mapping(old_key);
+                    inner.dirty = false;
                     inner.key = None;
                 }
                 return (slot_idx, inner);
             }
 
             iters += 1;
+        }
+    }
+
+    fn writeback(cache_key: &CacheKey, buf: &[u8]) -> Result<(), std::io::Error> {
+        match cache_key {
+            CacheKey::MaterializedPage {
+                hash_key: _,
+                lsn: _,
+            } => {
+                panic!("unexpected dirty materialize page");
+            }
+            CacheKey::EphemeralPage { file_id, blkno } => {
+                writeback_ephemeral_file(*file_id, *blkno, buf)
+            }
         }
     }
 
@@ -652,7 +746,11 @@ impl PageCache {
                 let buf: &mut [u8; PAGE_SZ] = chunk.try_into().unwrap();
 
                 Slot {
-                    inner: RwLock::new(SlotInner { key: None, buf }),
+                    inner: RwLock::new(SlotInner {
+                        key: None,
+                        buf,
+                        dirty: false,
+                    }),
                     usage_count: AtomicU8::new(0),
                 }
             })
@@ -660,6 +758,7 @@ impl PageCache {
 
         Self {
             materialized_page_map: Default::default(),
+            ephemeral_page_map: Default::default(),
             slots,
             next_evict_slot: AtomicUsize::new(0),
         }

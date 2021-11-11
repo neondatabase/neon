@@ -54,6 +54,7 @@ use zenith_utils::seqwait::SeqWait;
 
 mod blob;
 mod delta_layer;
+mod ephemeral_file;
 mod filename;
 mod global_layer_map;
 mod image_layer;
@@ -73,6 +74,8 @@ use layer_map::LayerMap;
 use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
 };
+
+pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -1510,8 +1513,9 @@ impl LayeredTimeline {
     }
 
     fn lookup_cached_page(&self, seg: &SegmentTag, blknum: u32, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+        let cache = page_cache::get();
         if let RelishTag::Relation(rel_tag) = &seg.rel {
-            let (lsn, read_guard) = page_cache::get().lookup_materialized_page(
+            let (lsn, read_guard) = cache.lookup_materialized_page(
                 self.tenantid,
                 self.timelineid,
                 *rel_tag,
@@ -1691,7 +1695,8 @@ impl LayeredTimeline {
                 )?;
 
                 if let RelishTag::Relation(rel_tag) = &rel {
-                    page_cache::get().memorize_materialized_page(
+                    let cache = page_cache::get();
+                    cache.memorize_materialized_page(
                         self.tenantid,
                         self.timelineid,
                         *rel_tag,
