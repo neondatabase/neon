@@ -5,7 +5,6 @@
 //! volume is mounted to the local FS.
 
 use std::{
-    ffi::OsStr,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -18,8 +17,7 @@ use tokio::{
 };
 use tracing::*;
 
-use super::{parse_ids_from_path, strip_path_prefix, RemoteFileInfo, RemoteStorage};
-use crate::layered_repository::metadata::METADATA_FILE_NAME;
+use super::{strip_path_prefix, RemoteStorage};
 
 pub struct LocalFs {
     pageserver_workdir: &'static Path,
@@ -68,22 +66,10 @@ impl RemoteStorage for LocalFs {
         ))
     }
 
-    fn info(&self, storage_path: &Self::StoragePath) -> anyhow::Result<RemoteFileInfo> {
-        let is_metadata =
-            storage_path.file_name().and_then(OsStr::to_str) == Some(METADATA_FILE_NAME);
+    fn local_path(&self, storage_path: &Self::StoragePath) -> anyhow::Result<PathBuf> {
         let relative_path = strip_path_prefix(&self.root, storage_path)
             .context("local path does not belong to this storage")?;
-        let download_destination = self.pageserver_workdir.join(relative_path);
-        let (tenant_id, timeline_id) = parse_ids_from_path(
-            relative_path.iter().filter_map(|segment| segment.to_str()),
-            &relative_path.display(),
-        )?;
-        Ok(RemoteFileInfo {
-            tenant_id,
-            timeline_id,
-            download_destination,
-            is_metadata,
-        })
+        Ok(self.pageserver_workdir.join(relative_path))
     }
 
     async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
@@ -113,11 +99,18 @@ impl RemoteStorage for LocalFs {
 
         io::copy(&mut from, &mut destination)
             .await
-            .context("Failed to upload a file to the local storage")?;
-        destination
-            .flush()
-            .await
-            .context("Failed to upload a file to the local storage")?;
+            .with_context(|| {
+                format!(
+                    "Failed to upload file to the local storage at '{}'",
+                    target_file_path.display()
+                )
+            })?;
+        destination.flush().await.with_context(|| {
+            format!(
+                "Failed to upload file to the local storage at '{}'",
+                target_file_path.display()
+            )
+        })?;
         Ok(())
     }
 
@@ -141,9 +134,13 @@ impl RemoteStorage for LocalFs {
                         )
                     })?,
             );
-            io::copy(&mut source, to)
-                .await
-                .context("Failed to download a file from the local storage")?;
+            io::copy(&mut source, to).await.with_context(|| {
+                format!(
+                    "Failed to download file '{}' from the local storage",
+                    file_path.display()
+                )
+            })?;
+            source.flush().await?;
             Ok(())
         } else {
             bail!(
@@ -275,9 +272,6 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
 mod pure_tests {
     use crate::{
         layered_repository::metadata::METADATA_FILE_NAME,
-        remote_storage::test_utils::{
-            custom_tenant_id_path, custom_timeline_id_path, relative_timeline_path,
-        },
         repository::repo_harness::{RepoHarness, TIMELINE_ID},
     };
 
@@ -345,8 +339,8 @@ mod pure_tests {
     }
 
     #[test]
-    fn info_positive() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("info_positive")?;
+    fn local_path_positive() -> anyhow::Result<()> {
+        let repo_harness = RepoHarness::create("local_path_positive")?;
         let storage_root = PathBuf::from("somewhere").join("else");
         let storage = LocalFs {
             pageserver_workdir: &repo_harness.conf.workdir,
@@ -356,14 +350,11 @@ mod pure_tests {
         let name = "not a metadata";
         let local_path = repo_harness.timeline_path(&TIMELINE_ID).join(name);
         assert_eq!(
-            RemoteFileInfo {
-                tenant_id: repo_harness.tenant_id,
-                timeline_id: TIMELINE_ID,
-                download_destination: local_path.clone(),
-                is_metadata: false,
-            },
+            local_path,
             storage
-                .info(&storage_root.join(local_path.strip_prefix(&repo_harness.conf.workdir)?))
+                .local_path(
+                    &storage_root.join(local_path.strip_prefix(&repo_harness.conf.workdir)?)
+                )
                 .expect("For a valid input, valid S3 info should be parsed"),
             "Should be able to parse metadata out of the correctly named remote delta file"
         );
@@ -373,15 +364,10 @@ mod pure_tests {
             .join(METADATA_FILE_NAME);
         let remote_metadata_path = storage.storage_path(&local_metadata_path)?;
         assert_eq!(
-            RemoteFileInfo {
-                tenant_id: repo_harness.tenant_id,
-                timeline_id: TIMELINE_ID,
-                download_destination: local_metadata_path,
-                is_metadata: true,
-            },
+            local_metadata_path,
             storage
-                .info(&remote_metadata_path)
-                .expect("For a valid input, valid S3 info should be parsed"),
+                .local_path(&remote_metadata_path)
+                .expect("For a valid input, valid local path should be parsed"),
             "Should be able to parse metadata out of the correctly named remote metadata file"
         );
 
@@ -389,52 +375,29 @@ mod pure_tests {
     }
 
     #[test]
-    fn info_negatives() -> anyhow::Result<()> {
+    fn local_path_negatives() -> anyhow::Result<()> {
         #[track_caller]
-        #[allow(clippy::ptr_arg)] // have to use &PathBuf due to `storage.info` parameter requirements
-        fn storage_info_error(storage: &LocalFs, storage_path: &PathBuf) -> String {
-            match storage.info(storage_path) {
-                Ok(wrong_info) => panic!(
-                    "Expected storage path input {:?} to cause an error, but got file info: {:?}",
-                    storage_path, wrong_info,
+        #[allow(clippy::ptr_arg)] // have to use &PathBuf due to `storage.local_path` parameter requirements
+        fn local_path_error(storage: &LocalFs, storage_path: &PathBuf) -> String {
+            match storage.local_path(storage_path) {
+                Ok(wrong_path) => panic!(
+                    "Expected local path input {:?} to cause an error, but got file path: {:?}",
+                    storage_path, wrong_path,
                 ),
                 Err(e) => format!("{:?}", e),
             }
         }
 
-        let repo_harness = RepoHarness::create("info_negatives")?;
+        let repo_harness = RepoHarness::create("local_path_negatives")?;
         let storage_root = PathBuf::from("somewhere").join("else");
         let storage = LocalFs {
             pageserver_workdir: &repo_harness.conf.workdir,
-            root: storage_root.clone(),
+            root: storage_root,
         };
 
         let totally_wrong_path = "wrong_wrong_wrong";
-        let error_message = storage_info_error(&storage, &PathBuf::from(totally_wrong_path));
+        let error_message = local_path_error(&storage, &PathBuf::from(totally_wrong_path));
         assert!(error_message.contains(totally_wrong_path));
-
-        let relative_timeline_path = relative_timeline_path(&repo_harness)?;
-
-        let relative_file_path = custom_tenant_id_path(&relative_timeline_path, "wrong_tenant_id")?
-            .join("wrong_tenant_id_name");
-        let wrong_tenant_id_path = storage_root.join(&relative_file_path);
-        let error_message = storage_info_error(&storage, &wrong_tenant_id_path);
-        assert!(
-            error_message.contains(relative_file_path.to_str().unwrap()),
-            "Error message '{}' does not contain the expected substring",
-            error_message
-        );
-
-        let relative_file_path =
-            custom_timeline_id_path(&relative_timeline_path, "wrong_timeline_id")?
-                .join("wrong_timeline_id_name");
-        let wrong_timeline_id_path = storage_root.join(&relative_file_path);
-        let error_message = storage_info_error(&storage, &wrong_timeline_id_path);
-        assert!(
-            error_message.contains(relative_file_path.to_str().unwrap()),
-            "Error message '{}' does not contain the expected substring",
-            error_message
-        );
 
         Ok(())
     }
@@ -451,7 +414,7 @@ mod pure_tests {
         };
 
         let storage_path = dummy_storage.storage_path(&original_path)?;
-        let download_destination = dummy_storage.info(&storage_path)?.download_destination;
+        let download_destination = dummy_storage.local_path(&storage_path)?;
 
         assert_eq!(
             original_path, download_destination,
@@ -465,9 +428,7 @@ mod pure_tests {
 #[cfg(test)]
 mod fs_tests {
     use super::*;
-    use crate::{
-        remote_storage::test_utils::relative_timeline_path, repository::repo_harness::RepoHarness,
-    };
+    use crate::repository::repo_harness::{RepoHarness, TIMELINE_ID};
 
     use std::io::Write;
     use tempfile::tempdir;
@@ -684,10 +645,9 @@ mod fs_tests {
         storage: &LocalFs,
         name: &str,
     ) -> anyhow::Result<PathBuf> {
-        let storage_path = storage
-            .root
-            .join(relative_timeline_path(harness)?)
-            .join(name);
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+        let relative_timeline_path = timeline_path.strip_prefix(&harness.conf.workdir)?;
+        let storage_path = storage.root.join(relative_timeline_path).join(name);
         storage
             .upload(
                 create_file_for_upload(

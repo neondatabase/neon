@@ -67,7 +67,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{ensure, Context};
+use anyhow::{anyhow, ensure, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
 use tokio::{
@@ -78,9 +78,12 @@ use tokio::{
 };
 use tracing::*;
 
-use super::{RemoteFileInfo, RemoteStorage};
+use super::RemoteStorage;
 use crate::{
-    layered_repository::metadata::{metadata_path, TimelineMetadata},
+    layered_repository::{
+        metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
+        TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME,
+    },
     tenant_mgr::register_timeline_download,
     PageServerConf,
 };
@@ -365,19 +368,41 @@ async fn fetch_existing_uploads<P: std::fmt::Debug, S: 'static + RemoteStorage<S
     let mut data_fetches = uploaded_files
         .into_iter()
         .map(|remote_path| async {
-            (
-                remote_file_info(remote_storage, &remote_path).await,
-                remote_path,
-            )
+            let local_path = match remote_storage.local_path(&remote_path) {
+                Ok(path) => path,
+                Err(e) => return Err((e, remote_path)),
+            };
+            let metadata = if local_path
+                .file_name()
+                .and_then(|os_str| os_str.to_str())
+                .unwrap_or_default()
+                == METADATA_FILE_NAME
+            {
+                let mut metadata_bytes = Vec::new();
+                if let Err(e) = remote_storage
+                    .download(&remote_path, &mut metadata_bytes)
+                    .await
+                {
+                    return Err((e, remote_path));
+                };
+                let metadata = match TimelineMetadata::from_bytes(&metadata_bytes) {
+                    Ok(metadata) => metadata,
+                    Err(e) => return Err((e, remote_path)),
+                };
+                Some(metadata)
+            } else {
+                None
+            };
+            let (tenant_id, timeline_id) =
+                parse_ids_from_path(&local_path).map_err(|e| (e, remote_path))?;
+            Ok::<_, (anyhow::Error, P)>((local_path, tenant_id, timeline_id, metadata))
         })
         .collect::<FuturesUnordered<_>>();
 
     let mut fetched = HashMap::new();
-    while let Some((fetch_result, remote_path)) = data_fetches.next().await {
+    while let Some(fetch_result) = data_fetches.next().await {
         match fetch_result {
-            Ok((file_info, remote_metadata)) => {
-                let tenant_id = file_info.tenant_id;
-                let timeline_id = file_info.timeline_id;
+            Ok((local_path, tenant_id, timeline_id, remote_metadata)) => {
                 let remote_timeline =
                     fetched
                         .entry((tenant_id, timeline_id))
@@ -390,10 +415,10 @@ async fn fetch_existing_uploads<P: std::fmt::Debug, S: 'static + RemoteStorage<S
                 if remote_metadata.is_some() {
                     remote_timeline.metadata = remote_metadata;
                 } else {
-                    remote_timeline.layers.push(file_info.download_destination);
+                    remote_timeline.layers.push(local_path);
                 }
             }
-            Err(e) => {
+            Err((e, remote_path)) => {
                 warn!(
                     "Failed to fetch file info for path {:?}, reason: {:#}",
                     remote_path, e
@@ -406,34 +431,70 @@ async fn fetch_existing_uploads<P: std::fmt::Debug, S: 'static + RemoteStorage<S
     Ok(fetched)
 }
 
-async fn remote_file_info<P, S: 'static + RemoteStorage<StoragePath = P>>(
-    remote_storage: &S,
-    remote_path: &P,
-) -> anyhow::Result<(RemoteFileInfo, Option<TimelineMetadata>)> {
-    let info = remote_storage.info(remote_path)?;
-    let metadata = if info.is_metadata {
-        let mut metadata_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        remote_storage
-            .download(remote_path, &mut metadata_bytes)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to download metadata file contents for tenant {}, timeline {}",
-                    info.tenant_id, info.timeline_id
-                )
-            })?;
-        metadata_bytes.flush().await.with_context(|| {
+fn parse_ids_from_path(path: &Path) -> anyhow::Result<(ZTenantId, ZTimelineId)> {
+    let mut segments = path
+        .iter()
+        .flat_map(|segment| segment.to_str())
+        .skip_while(|&segment| segment != TENANTS_SEGMENT_NAME);
+    let tenants_segment = segments.next().ok_or_else(|| {
+        anyhow!(
+            "Found no '{}' segment in the storage path '{}'",
+            TENANTS_SEGMENT_NAME,
+            path.display()
+        )
+    })?;
+    ensure!(
+        tenants_segment == TENANTS_SEGMENT_NAME,
+        "Failed to extract '{}' segment from storage path '{}'",
+        TENANTS_SEGMENT_NAME,
+        path.display()
+    );
+    let tenant_id = segments
+        .next()
+        .ok_or_else(|| {
+            anyhow!(
+                "Found no tenant id in the storage path '{}'",
+                path.display()
+            )
+        })?
+        .parse::<ZTenantId>()
+        .with_context(|| {
             format!(
-                "Failed to download metadata file contents for tenant {}, timeline {}",
-                info.tenant_id, info.timeline_id
+                "Failed to parse tenant id from storage path '{}'",
+                path.display()
             )
         })?;
-        let metadata_bytes = metadata_bytes.into_inner().into_inner();
-        Some(TimelineMetadata::from_bytes(&metadata_bytes)?)
-    } else {
-        None
-    };
-    Ok((info, metadata))
+
+    let timelines_segment = segments.next().ok_or_else(|| {
+        anyhow!(
+            "Found no '{}' segment in the storage path '{}'",
+            TIMELINES_SEGMENT_NAME,
+            path.display()
+        )
+    })?;
+    ensure!(
+        timelines_segment == TIMELINES_SEGMENT_NAME,
+        "Failed to extract '{}' segment from storage path '{}'",
+        TIMELINES_SEGMENT_NAME,
+        path.display()
+    );
+    let timeline_id = segments
+        .next()
+        .ok_or_else(|| {
+            anyhow!(
+                "Found no timeline id in the storage path '{}'",
+                path.display()
+            )
+        })?
+        .parse::<ZTimelineId>()
+        .with_context(|| {
+            format!(
+                "Failed to parse timeline id from storage path '{}'",
+                path.display()
+            )
+        })?;
+
+    Ok((tenant_id, timeline_id))
 }
 
 async fn download_timeline<'a, P, S: 'static + RemoteStorage<StoragePath = P>>(
