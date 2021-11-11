@@ -309,6 +309,10 @@ impl Layer for DeltaLayer {
         true
     }
 
+    fn is_in_memory(&self) -> bool {
+        false
+    }
+
     /// debugging function to print out the contents of the layer
     fn dump(&self) -> Result<()> {
         println!(

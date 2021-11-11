@@ -267,11 +267,15 @@ impl Layer for InMemoryLayer {
     /// Nothing to do here. When you drop the last reference to the layer, it will
     /// be deallocated.
     fn delete(&self) -> Result<()> {
-        Ok(())
+        panic!("can't delete an InMemoryLayer")
     }
 
     fn is_incremental(&self) -> bool {
         self.incremental
+    }
+
+    fn is_in_memory(&self) -> bool {
+        true
     }
 
     /// debugging function to print out the contents of the layer

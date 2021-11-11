@@ -157,6 +157,9 @@ pub trait Layer: Send + Sync {
     /// the previous non-incremental layer.
     fn is_incremental(&self) -> bool;
 
+    /// Returns true for layers that are represented in memory.
+    fn is_in_memory(&self) -> bool;
+
     /// Release memory used by this layer. There is no corresponding 'load'
     /// function, that's done implicitly when you call one of the get-functions.
     fn unload(&self) -> Result<()>;

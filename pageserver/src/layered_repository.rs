@@ -1350,6 +1350,16 @@ impl LayeredTimeline {
         //
         let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
+            // This layer is in the process of being flushed to disk.
+            // It will be swapped out of the layer map, replaced with
+            // on-disk layers containing the same data.
+            // We can't GC it, as it's not on disk. We can't remove it
+            // from the layer map yet, as it would make its data
+            // inaccessible.
+            if l.is_in_memory() {
+                continue;
+            }
+
             let seg = l.get_seg_tag();
 
             if seg.rel.is_relation() {
