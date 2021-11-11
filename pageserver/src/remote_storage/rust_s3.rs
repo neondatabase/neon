@@ -9,8 +9,7 @@ use s3::{bucket::Bucket, creds::Credentials, region::Region};
 use tokio::io::{self, AsyncWriteExt};
 
 use crate::{
-    layered_repository::metadata::METADATA_FILE_NAME,
-    remote_storage::{parse_ids_from_path, strip_path_prefix, RemoteFileInfo, RemoteStorage},
+    remote_storage::{strip_path_prefix, RemoteStorage},
     S3Config,
 };
 
@@ -76,19 +75,8 @@ impl RemoteStorage for S3 {
         Ok(S3ObjectKey(key))
     }
 
-    fn info(&self, storage_path: &Self::StoragePath) -> anyhow::Result<RemoteFileInfo> {
-        let storage_path_key = &storage_path.0;
-        let is_metadata =
-            storage_path_key.ends_with(&format!("{}{}", S3_FILE_SEPARATOR, METADATA_FILE_NAME));
-        let download_destination = storage_path.download_destination(self.pageserver_workdir);
-        let (tenant_id, timeline_id) =
-            parse_ids_from_path(storage_path_key.split(S3_FILE_SEPARATOR), storage_path_key)?;
-        Ok(RemoteFileInfo {
-            tenant_id,
-            timeline_id,
-            download_destination,
-            is_metadata,
-        })
+    fn local_path(&self, storage_path: &Self::StoragePath) -> anyhow::Result<PathBuf> {
+        Ok(storage_path.download_destination(self.pageserver_workdir))
     }
 
     async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
@@ -212,9 +200,7 @@ impl RemoteStorage for S3 {
 #[cfg(test)]
 mod tests {
     use crate::{
-        remote_storage::test_utils::{
-            custom_tenant_id_path, custom_timeline_id_path, relative_timeline_path,
-        },
+        layered_repository::metadata::METADATA_FILE_NAME,
         repository::repo_harness::{RepoHarness, TIMELINE_ID},
     };
 
@@ -316,75 +302,29 @@ mod tests {
     }
 
     #[test]
-    fn info_positive() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("info_positive")?;
+    fn local_path_positive() -> anyhow::Result<()> {
+        let repo_harness = RepoHarness::create("local_path_positive")?;
         let storage = dummy_storage(&repo_harness.conf.workdir);
-        let relative_timeline_path = relative_timeline_path(&repo_harness)?;
+        let timeline_dir = repo_harness.timeline_path(&TIMELINE_ID);
+        let relative_timeline_path = timeline_dir.strip_prefix(&repo_harness.conf.workdir)?;
 
         let s3_key = create_s3_key(&relative_timeline_path.join("not a metadata"));
         assert_eq!(
-            RemoteFileInfo {
-                tenant_id: repo_harness.tenant_id,
-                timeline_id: TIMELINE_ID,
-                download_destination: s3_key.download_destination(&repo_harness.conf.workdir),
-                is_metadata: false,
-            },
+            s3_key.download_destination(&repo_harness.conf.workdir),
             storage
-                .info(&s3_key)
+                .local_path(&s3_key)
                 .expect("For a valid input, valid S3 info should be parsed"),
             "Should be able to parse metadata out of the correctly named remote delta file"
         );
 
         let s3_key = create_s3_key(&relative_timeline_path.join(METADATA_FILE_NAME));
         assert_eq!(
-            RemoteFileInfo {
-                tenant_id: repo_harness.tenant_id,
-                timeline_id: TIMELINE_ID,
-                download_destination: s3_key.download_destination(&repo_harness.conf.workdir),
-                is_metadata: true,
-            },
+            s3_key.download_destination(&repo_harness.conf.workdir),
             storage
-                .info(&s3_key)
+                .local_path(&s3_key)
                 .expect("For a valid input, valid S3 info should be parsed"),
             "Should be able to parse metadata out of the correctly named remote metadata file"
         );
-
-        Ok(())
-    }
-
-    #[test]
-    fn info_negatives() -> anyhow::Result<()> {
-        #[track_caller]
-        fn storage_info_error(storage: &S3, s3_key: &S3ObjectKey) -> String {
-            match storage.info(s3_key) {
-                Ok(wrong_info) => panic!(
-                    "Expected key {:?} to error, but got file info: {:?}",
-                    s3_key, wrong_info,
-                ),
-                Err(e) => e.to_string(),
-            }
-        }
-
-        let repo_harness = RepoHarness::create("info_negatives")?;
-        let storage = dummy_storage(&repo_harness.conf.workdir);
-        let relative_timeline_path = relative_timeline_path(&repo_harness)?;
-
-        let totally_wrong_path = "wrong_wrong_wrong";
-        let error_message =
-            storage_info_error(&storage, &S3ObjectKey(totally_wrong_path.to_string()));
-        assert!(error_message.contains(totally_wrong_path));
-
-        let wrong_tenant_id = create_s3_key(
-            &custom_tenant_id_path(&relative_timeline_path, "wrong_tenant_id")?.join("name"),
-        );
-        let error_message = storage_info_error(&storage, &wrong_tenant_id);
-        assert!(error_message.contains(&wrong_tenant_id.0));
-
-        let wrong_timeline_id = create_s3_key(
-            &custom_timeline_id_path(&relative_timeline_path, "wrong_timeline_id")?.join("name"),
-        );
-        let error_message = storage_info_error(&storage, &wrong_timeline_id);
-        assert!(error_message.contains(&wrong_timeline_id.0));
 
         Ok(())
     }
@@ -397,7 +337,7 @@ mod tests {
         let dummy_storage = dummy_storage(&repo_harness.conf.workdir);
 
         let key = dummy_storage.storage_path(&original_path)?;
-        let download_destination = dummy_storage.info(&key)?.download_destination;
+        let download_destination = dummy_storage.local_path(&key)?;
 
         assert_eq!(
             original_path, download_destination,

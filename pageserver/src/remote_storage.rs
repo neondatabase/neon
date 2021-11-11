@@ -78,16 +78,12 @@ use std::{
     thread,
 };
 
-use anyhow::{anyhow, ensure, Context};
+use anyhow::Context;
 use tokio::io;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 pub use self::storage_sync::schedule_timeline_upload;
 use self::{local_fs::LocalFs, rust_s3::S3};
-use crate::{
-    layered_repository::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME},
-    PageServerConf, RemoteStorageKind,
-};
+use crate::{PageServerConf, RemoteStorageKind};
 
 /// Based on the config, initiates the remote storage connection and starts a separate thread
 /// that ensures that pageserver and the remote storage are in sync with each other.
@@ -127,8 +123,8 @@ trait RemoteStorage: Send + Sync {
     /// Attempts to derive the storage path out of the local path, if the latter is correct.
     fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::StoragePath>;
 
-    /// Gets the layered storage information about the given entry.
-    fn info(&self, storage_path: &Self::StoragePath) -> anyhow::Result<RemoteFileInfo>;
+    /// Gets the download path of the given storage file.
+    fn local_path(&self, storage_path: &Self::StoragePath) -> anyhow::Result<PathBuf>;
 
     /// Lists all items the storage has right now.
     async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>>;
@@ -159,16 +155,6 @@ trait RemoteStorage: Send + Sync {
     async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()>;
 }
 
-/// Information about a certain remote storage entry.
-#[derive(Debug, PartialEq, Eq)]
-struct RemoteFileInfo {
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-    /// Path in the pageserver workdir where the file should go to.
-    download_destination: PathBuf,
-    is_metadata: bool,
-}
-
 fn strip_path_prefix<'a>(prefix: &'a Path, path: &'a Path) -> anyhow::Result<&'a Path> {
     if prefix == path {
         anyhow::bail!(
@@ -183,149 +169,5 @@ fn strip_path_prefix<'a>(prefix: &'a Path, path: &'a Path) -> anyhow::Result<&'a
                 prefix.display(),
             )
         })
-    }
-}
-
-fn parse_ids_from_path<'a, R: std::fmt::Display>(
-    path_segments: impl Iterator<Item = &'a str>,
-    path_log_representation: &R,
-) -> anyhow::Result<(ZTenantId, ZTimelineId)> {
-    let mut segments = path_segments.skip_while(|&segment| segment != TENANTS_SEGMENT_NAME);
-    let tenants_segment = segments.next().ok_or_else(|| {
-        anyhow!(
-            "Found no '{}' segment in the storage path '{}'",
-            TENANTS_SEGMENT_NAME,
-            path_log_representation
-        )
-    })?;
-    ensure!(
-        tenants_segment == TENANTS_SEGMENT_NAME,
-        "Failed to extract '{}' segment from storage path '{}'",
-        TENANTS_SEGMENT_NAME,
-        path_log_representation
-    );
-    let tenant_id = segments
-        .next()
-        .ok_or_else(|| {
-            anyhow!(
-                "Found no tenant id in the storage path '{}'",
-                path_log_representation
-            )
-        })?
-        .parse::<ZTenantId>()
-        .with_context(|| {
-            format!(
-                "Failed to parse tenant id from storage path '{}'",
-                path_log_representation
-            )
-        })?;
-
-    let timelines_segment = segments.next().ok_or_else(|| {
-        anyhow!(
-            "Found no '{}' segment in the storage path '{}'",
-            TIMELINES_SEGMENT_NAME,
-            path_log_representation
-        )
-    })?;
-    ensure!(
-        timelines_segment == TIMELINES_SEGMENT_NAME,
-        "Failed to extract '{}' segment from storage path '{}'",
-        TIMELINES_SEGMENT_NAME,
-        path_log_representation
-    );
-    let timeline_id = segments
-        .next()
-        .ok_or_else(|| {
-            anyhow!(
-                "Found no timeline id in the storage path '{}'",
-                path_log_representation
-            )
-        })?
-        .parse::<ZTimelineId>()
-        .with_context(|| {
-            format!(
-                "Failed to parse timeline id from storage path '{}'",
-                path_log_representation
-            )
-        })?;
-
-    Ok((tenant_id, timeline_id))
-}
-
-/// A set of common test utils to share in unit tests inside the module tree.
-#[cfg(test)]
-mod test_utils {
-    use std::path::{Path, PathBuf};
-
-    use anyhow::ensure;
-
-    use crate::{
-        layered_repository::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME},
-        repository::repo_harness::{RepoHarness, TIMELINE_ID},
-    };
-
-    /// Gives a timeline path with pageserver workdir stripped off.
-    pub fn relative_timeline_path(harness: &RepoHarness) -> anyhow::Result<PathBuf> {
-        let timeline_path = harness.timeline_path(&TIMELINE_ID);
-        Ok(timeline_path
-            .strip_prefix(&harness.conf.workdir)?
-            .to_path_buf())
-    }
-
-    /// Creates a path with custom tenant id in one of its segments.
-    /// Useful for emulating paths with wrong ids.
-    pub fn custom_tenant_id_path(
-        path_with_tenant_id: &Path,
-        new_tenant_id: &str,
-    ) -> anyhow::Result<PathBuf> {
-        let mut new_path = PathBuf::new();
-        let mut is_tenant_id = false;
-        let mut tenant_id_replaced = false;
-        for segment in path_with_tenant_id {
-            match segment.to_str() {
-                Some(TENANTS_SEGMENT_NAME) => is_tenant_id = true,
-                Some(_tenant_id_str) if is_tenant_id => {
-                    is_tenant_id = false;
-                    new_path.push(new_tenant_id);
-                    tenant_id_replaced = true;
-                    continue;
-                }
-                _ => {}
-            }
-            new_path.push(segment)
-        }
-
-        ensure!(tenant_id_replaced, "Found no tenant id segment to replace");
-        Ok(new_path)
-    }
-
-    /// Creates a path with custom timeline id in one of its segments.
-    /// Useful for emulating paths with wrong ids.
-    pub fn custom_timeline_id_path(
-        path_with_timeline_id: &Path,
-        new_timeline_id: &str,
-    ) -> anyhow::Result<PathBuf> {
-        let mut new_path = PathBuf::new();
-        let mut is_timeline_id = false;
-        let mut timeline_id_replaced = false;
-        for segment in path_with_timeline_id {
-            match segment.to_str() {
-                Some(TIMELINES_SEGMENT_NAME) => is_timeline_id = true,
-                Some(_timeline_id_str) if is_timeline_id => {
-                    is_timeline_id = false;
-                    new_path.push(new_timeline_id);
-                    timeline_id_replaced = true;
-                    continue;
-                }
-                _ => {}
-            }
-            new_path.push(segment)
-        }
-
-        ensure!(
-            timeline_id_replaced,
-            "Found no timeline id segment to replace"
-        );
-        Ok(new_path)
     }
 }
