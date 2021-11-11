@@ -199,7 +199,7 @@ impl PostgresNode {
         // parse recovery_target_lsn and primary_conninfo into Recovery Target, if any
         let replication;
 
-        if let Some(_) = conf.get("recovery_target_lsn") {
+        if conf.get("recovery_target_lsn").is_some() {
             let lsn = conf
                 .parse_field_optional("recovery_target_lsn", &context)?
                 .with_context(|| "Unreadable recovery target LSN")?;
@@ -384,7 +384,7 @@ impl PostgresNode {
                 conf.append("recovery_target_lsn", &lsn.to_string());
             }
             Replication::Replica(of) => {
-                assert!(self.env.safekeepers.len() > 0);
+                assert!(!self.env.safekeepers.is_empty());
 
                 // TODO: use future host field from safekeeper spec
                 let connstr = format!(
