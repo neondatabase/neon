@@ -256,7 +256,7 @@ pub fn find_end_of_wal(
     start_lsn: Lsn, // start reading WAL at this point or later
 ) -> Result<(XLogRecPtr, TimeLineID)> {
     let mut high_segno: XLogSegNo = 0;
-    let mut high_tli: TimeLineID = 0;
+    let mut high_tli: TimeLineID = 1;
     let mut high_ispartial = false;
 
     for entry in fs::read_dir(data_dir).unwrap().flatten() {
