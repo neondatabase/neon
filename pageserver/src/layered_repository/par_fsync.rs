@@ -1,12 +1,13 @@
 use std::{
-    fs::File,
     io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use crate::virtual_file::VirtualFile;
+
 fn fsync_path(path: &Path) -> io::Result<()> {
-    let file = File::open(path)?;
+    let file = VirtualFile::open(path)?;
     file.sync_all()
 }
 
@@ -31,7 +32,6 @@ pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
     /// Increasing this limit will
     /// - use more memory
     /// - increase the cost of spawn/join latency
-    /// - increase the peak # of file descriptors
     const MAX_NUM_THREADS: usize = 64;
     let num_threads = paths.len().min(MAX_NUM_THREADS);
     let next_path_idx = AtomicUsize::new(0);
