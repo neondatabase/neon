@@ -145,6 +145,10 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult>;
 
+    fn cache_page_image(&self, _blknum: u32, _lsn: Lsn, _img: &[u8]) -> Result<()> {
+        Ok(())
+    }
+
     /// Return size of the segment at given LSN. (Only for blocky relations.)
     fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
 

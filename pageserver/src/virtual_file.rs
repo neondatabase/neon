@@ -357,7 +357,11 @@ impl Seek for VirtualFile {
 
 impl FileExt for VirtualFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        self.with_file(|file| file.read_at(buf, offset))?
+        let result = self.with_file(|file| file.read_at(buf, offset))?;
+        if let Err(err) = &result {
+            tracing::error!("read_at error: {:?}", err);
+        }
+        result
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {

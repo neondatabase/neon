@@ -9,14 +9,17 @@ use std::os::unix::fs::FileExt;
 use std::{collections::HashMap, ops::RangeBounds, slice};
 
 use anyhow::Result;
+use bytes::{Bytes, BytesMut};
 
 use std::cmp::min;
-use std::io::Seek;
+use std::io::{Seek, SeekFrom};
 
 use zenith_utils::{lsn::Lsn, vec_map::VecMap};
 
 use super::storage_layer::PageVersion;
 use crate::layered_repository::ephemeral_file::EphemeralFile;
+
+use postgres_ffi::pg_constants::BLCKSZ;
 
 use zenith_utils::bin_ser::LeSer;
 
@@ -24,6 +27,8 @@ const EMPTY_SLICE: &[(Lsn, u64)] = &[];
 
 pub struct PageVersions {
     map: HashMap<u32, VecMap<Lsn, u64>>,
+
+    latest_map: HashMap<u32, (Lsn, u64)>,
 
     /// The PageVersion structs are stored in a serialized format in this file.
     /// Each serialized PageVersion is preceded by a 'u32' length field.
@@ -35,8 +40,46 @@ impl PageVersions {
     pub fn new(file: EphemeralFile) -> PageVersions {
         PageVersions {
             map: HashMap::new(),
+            latest_map: HashMap::new(),
             file,
         }
+    }
+
+    pub fn cache_latest(&mut self, blknum: u32, lsn: Lsn, img: &[u8]) -> Result<()> {
+        if img.len() != BLCKSZ as usize {
+            return Ok(());
+        }
+
+        let pos = if let Some((_lsn, pos)) = self.latest_map.get(&blknum) {
+            *pos
+        } else {
+            let pos = self.file.stream_position()?;
+            // round up to nearest page boundary for performance
+            //let pos = (pos + BLCKSZ as u64 - 1) & !(BLCKSZ as u64 - 1);
+
+            self.file.seek(SeekFrom::Start(pos + BLCKSZ as u64))?;
+
+            pos
+        };
+
+        self.file.write_all_at(img, pos)?;
+
+        self.latest_map.insert(blknum, (lsn, pos));
+
+        Ok(())
+    }
+
+    pub fn get_latest(&self, blknum: u32) -> Option<&(Lsn, u64)> {
+        self.latest_map.get(&blknum)
+    }
+
+    pub fn fetch_cached_latest(&self, pos: u64) -> Result<Bytes, std::io::Error> {
+        let mut buf = BytesMut::with_capacity(BLCKSZ as usize);
+        buf.resize(BLCKSZ as usize, 0u8);
+        if let Err(err) = self.file.read_exact_at(buf.as_mut(), pos) {
+            tracing::error!("read_exact_at {} failed: {:?}", pos, err);
+        }
+        Ok(buf.freeze())
     }
 
     pub fn append_or_update_last(
@@ -49,7 +92,7 @@ impl PageVersions {
         let pos = self.file.stream_position()?;
 
         // make room for the 'length' field by writing zeros as a placeholder.
-        self.file.seek(std::io::SeekFrom::Start(pos + 4)).unwrap();
+        self.file.seek(SeekFrom::Start(pos + 4)).unwrap();
 
         page_version.ser_into(&mut self.file).unwrap();
 

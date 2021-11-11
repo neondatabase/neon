@@ -1568,6 +1568,7 @@ impl LayeredTimeline {
         // call it again on the predecessor layer until we have all the required data.
         let mut layer_ref = layer;
         let mut curr_lsn = lsn;
+        let mut cacheable_result: Option<Lsn> = None;
         loop {
             match layer_ref.get_page_reconstruct_data(
                 blknum,
@@ -1575,7 +1576,15 @@ impl LayeredTimeline {
                 cached_lsn_opt,
                 &mut data,
             )? {
-                PageReconstructResult::Complete => break,
+                PageReconstructResult::Complete => {
+                    if curr_lsn == lsn {
+                        // We have an opportunity to cache this page
+                        if let Some((rec_lsn, _rec)) = data.records.first() {
+                            cacheable_result = Some(*rec_lsn);
+                        }
+                    }
+                    break;
+                }
                 PageReconstructResult::Continue(cont_lsn) => {
                     // Fetch base image / more WAL from the returned predecessor layer
                     if let Some((cont_layer, cont_lsn)) = self.get_layer_for_read(seg, cont_lsn)? {
@@ -1631,7 +1640,13 @@ impl LayeredTimeline {
             }
         }
 
-        self.reconstruct_page(seg.rel, blknum, lsn, data)
+        let img = self.reconstruct_page(seg.rel, blknum, lsn, data)?;
+
+        if let Some(cache_lsn) = cacheable_result {
+            layer_ref.cache_page_image(blknum, cache_lsn, &img)?;
+        }
+
+        Ok(img)
     }
 
     ///

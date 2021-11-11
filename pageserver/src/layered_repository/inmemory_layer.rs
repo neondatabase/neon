@@ -15,6 +15,7 @@ use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
+use lazy_static::lazy_static;
 use log::*;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -22,6 +23,17 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::vec_map::VecMap;
 
 use super::page_versions::PageVersions;
+
+use zenith_metrics::{register_int_counter, IntCounter};
+
+lazy_static! {
+    static ref LATEST_IMG_UPDATE_COUNTER: IntCounter =
+        register_int_counter!("latest_img_updates", "Number of updates of latest img").unwrap();
+    static ref LATEST_IMG_MISS_COUNTER: IntCounter =
+        register_int_counter!("latest_img_misses", "Number of cache misses of latest img").unwrap();
+    static ref LATEST_IMG_HIT_COUNTER: IntCounter =
+        register_int_counter!("latest_img_hits", "Number of cache hits of latest img").unwrap();
+}
 
 pub struct OpenLayer {
     conf: &'static PageServerConf,
@@ -160,6 +172,8 @@ impl Layer for OpenLayer {
         {
             let inner = self.inner.read().unwrap();
 
+            let latest = inner.page_versions.get_latest(blknum);
+
             // Scan the page versions backwards, starting from `lsn`.
             let iter = inner
                 .page_versions
@@ -182,6 +196,18 @@ impl Layer for OpenLayer {
                         break;
                     }
                     PageVersion::Wal(rec) => {
+                        if let Some((latest_lsn, latest_pos)) = latest {
+                            if latest_lsn == entry_lsn {
+                                // we had this cached, nice!
+                                let img = inner.page_versions.fetch_cached_latest(*latest_pos)?;
+                                reconstruct_data.page_img = Some(img);
+                                need_image = false;
+                                LATEST_IMG_HIT_COUNTER.inc();
+                                break;
+                            }
+                        }
+                        LATEST_IMG_MISS_COUNTER.inc();
+
                         reconstruct_data.records.push((*entry_lsn, rec.clone()));
                         if rec.will_init {
                             // This WAL record initializes the page, so no need to go further back
@@ -205,6 +231,14 @@ impl Layer for OpenLayer {
         } else {
             Ok(PageReconstructResult::Complete)
         }
+    }
+
+    fn cache_page_image(&self, blknum: u32, lsn: Lsn, img: &[u8]) -> Result<()> {
+        let mut inner = self.inner.write().unwrap();
+
+        LATEST_IMG_UPDATE_COUNTER.inc();
+
+        inner.page_versions.cache_latest(blknum, lsn, img)
     }
 
     /// Get size of the relation at given LSN
