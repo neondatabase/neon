@@ -10,6 +10,7 @@ use tracing::{debug, error, warn};
 use zenith_utils::zid::ZTenantId;
 
 use crate::{
+    config::PageServerConf,
     remote_storage::{
         storage_sync::{
             compression,
@@ -18,7 +19,6 @@ use crate::{
         },
         RemoteStorage, TimelineSyncId,
     },
-    PageServerConf,
 };
 
 use super::{compression::ArchiveHeader, index::RemoteTimelineIndex, NewCheckpoint};

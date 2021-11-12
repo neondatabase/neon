@@ -53,7 +53,7 @@ use zenith_utils::{
 };
 
 use crate::layered_repository::writeback_ephemeral_file;
-use crate::{relish::RelTag, PageServerConf};
+use crate::{config::PageServerConf, relish::RelTag};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 10;

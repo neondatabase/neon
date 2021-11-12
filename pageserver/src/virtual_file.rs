@@ -469,7 +469,7 @@ mod tests {
         FD: Read + Write + Seek + FileExt,
         OF: Fn(&Path, &OpenOptions) -> Result<FD, std::io::Error>,
     {
-        let testdir = crate::PageServerConf::test_repo_dir(testname);
+        let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");
@@ -571,7 +571,7 @@ mod tests {
         const THREADS: usize = 100;
         const SAMPLE: [u8; SIZE] = [0xADu8; SIZE];
 
-        let testdir = crate::PageServerConf::test_repo_dir("vfile_concurrency");
+        let testdir = crate::config::PageServerConf::test_repo_dir("vfile_concurrency");
         std::fs::create_dir_all(&testdir)?;
 
         // Create a test file.

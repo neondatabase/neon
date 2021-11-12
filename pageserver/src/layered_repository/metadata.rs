@@ -15,7 +15,7 @@ use zenith_utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::PageServerConf;
+use crate::config::PageServerConf;
 
 // Taken from PG_CONTROL_MAX_SAFE_SIZE
 const METADATA_MAX_SAFE_SIZE: usize = 512;

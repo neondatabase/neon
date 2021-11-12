@@ -5,11 +5,11 @@
 //!
 //! We keep one WAL receiver active per timeline.
 
+use crate::config::PageServerConf;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use crate::tenant_threads;
 use crate::walingest::WalIngest;
-use crate::PageServerConf;
 use anyhow::{bail, Context, Error, Result};
 use lazy_static::lazy_static;
 use postgres::fallible_iterator::FallibleIterator;
