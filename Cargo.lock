@@ -2576,7 +2576,6 @@ dependencies = [
  "anyhow",
  "crc32c",
  "fs2",
- "lz4_flex",
 ]
 
 [[package]]

@@ -126,7 +126,7 @@ impl ToastStore {
         Ok(ToastStore {
             db: Storage::open(
                 &path.join("pageserver.db"),
-                Some(&path.join("pageserver.log")),
+                None, // Some(&path.join("pageserver.log")),
                 StorageConfig {
                     cache_size: CACHE_SIZE,
                     checkpoint_interval: CHECKPOINT_INTERVAL,
