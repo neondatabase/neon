@@ -9,8 +9,8 @@ use s3::{bucket::Bucket, creds::Credentials, region::Region};
 use tokio::io::{self, AsyncWriteExt};
 
 use crate::{
+    config::S3Config,
     remote_storage::{strip_path_prefix, RemoteStorage},
-    S3Config,
 };
 
 const S3_FILE_SEPARATOR: char = '/';

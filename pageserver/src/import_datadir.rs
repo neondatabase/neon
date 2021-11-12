@@ -322,7 +322,7 @@ fn import_wal(
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(writer, startpoint)?;
+    let mut walingest = WalIngest::new(writer.deref(), startpoint)?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now

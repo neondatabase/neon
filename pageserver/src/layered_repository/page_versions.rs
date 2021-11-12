@@ -195,7 +195,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::PageServerConf;
+    use crate::config::PageServerConf;
     use std::fs;
     use std::str::FromStr;
     use zenith_utils::zid::{ZTenantId, ZTimelineId};
