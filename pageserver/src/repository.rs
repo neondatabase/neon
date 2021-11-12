@@ -208,9 +208,9 @@ pub mod repo_harness {
     use std::{fs, path::PathBuf};
 
     use crate::{
+        config::PageServerConf,
         layered_repository::{LayeredRepository, TIMELINES_SEGMENT_NAME},
         walredo::{WalRedoError, WalRedoManager},
-        PageServerConf,
     };
 
     use super::*;

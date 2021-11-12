@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata};
+use crate::config::PageServerConf;
 use crate::relish::*;
 use crate::remote_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
@@ -39,7 +40,6 @@ use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{

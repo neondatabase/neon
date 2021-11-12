@@ -22,7 +22,8 @@ use zenith_utils::http::{
 use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
-use crate::{branches, tenant_mgr, PageServerConf, ZTenantId};
+use crate::config::PageServerConf;
+use crate::{branches, tenant_mgr, ZTenantId};
 
 #[derive(Debug)]
 struct State {

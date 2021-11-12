@@ -428,8 +428,8 @@ default_tenantid = '{self.initial_tenant}'
 
         toml += f"""
 [pageserver]
-pg_port = {pageserver_port.pg}
-http_port = {pageserver_port.http}
+listen_pg_addr = 'localhost:{pageserver_port.pg}'
+listen_http_addr = 'localhost:{pageserver_port.http}'
 auth_type = '{pageserver_auth_type}'
         """
 

@@ -21,6 +21,7 @@
 //!
 //! For non-blocky relishes, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
 //!
+use crate::config::PageServerConf;
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag,
@@ -28,7 +29,6 @@ use crate::layered_repository::storage_layer::{
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::virtual_file::VirtualFile;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;

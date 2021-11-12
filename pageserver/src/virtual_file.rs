@@ -415,6 +415,7 @@ fn get_open_files() -> &'static OpenFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PageServerConf;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
@@ -469,7 +470,7 @@ mod tests {
         FD: Read + Write + Seek + FileExt,
         OF: Fn(&Path, &OpenOptions) -> Result<FD, std::io::Error>,
     {
-        let testdir = crate::PageServerConf::test_repo_dir(testname);
+        let testdir = PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");

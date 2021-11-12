@@ -35,11 +35,11 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::basebackup;
 use crate::branches;
+use crate::config::PageServerConf;
 use crate::relish::*;
 use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::walreceiver;
-use crate::PageServerConf;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {

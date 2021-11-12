@@ -2,11 +2,11 @@
 //! page server.
 
 use crate::branches;
+use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::repository::{Repository, Timeline};
 use crate::tenant_threads;
 use crate::walredo::PostgresRedoManager;
-use crate::PageServerConf;
 use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
 use log::{debug, info};

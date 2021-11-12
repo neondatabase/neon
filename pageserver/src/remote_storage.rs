@@ -85,8 +85,8 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 pub use self::storage_sync::schedule_timeline_upload;
 use self::{local_fs::LocalFs, rust_s3::S3};
 use crate::{
+    config::{PageServerConf, RemoteStorageKind},
     layered_repository::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME},
-    PageServerConf, RemoteStorageKind,
 };
 
 /// Based on the config, initiates the remote storage connection and starts a separate thread

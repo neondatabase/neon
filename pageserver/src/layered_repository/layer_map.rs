@@ -402,7 +402,7 @@ impl<'a> Iterator for HistoricLayerIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PageServerConf;
+    use crate::config::PageServerConf;
     use std::str::FromStr;
     use zenith_utils::zid::{ZTenantId, ZTimelineId};
 

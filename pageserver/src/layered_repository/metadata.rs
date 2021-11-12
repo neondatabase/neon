@@ -15,9 +15,9 @@ use zenith_utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::{
-    layered_repository::{METADATA_CHECKSUM_SIZE, METADATA_MAX_DATA_SIZE, METADATA_MAX_SAFE_SIZE},
-    PageServerConf,
+use crate::config::PageServerConf;
+use crate::layered_repository::{
+    METADATA_CHECKSUM_SIZE, METADATA_MAX_DATA_SIZE, METADATA_MAX_SAFE_SIZE,
 };
 
 /// The name of the metadata file pageserver creates per timeline.

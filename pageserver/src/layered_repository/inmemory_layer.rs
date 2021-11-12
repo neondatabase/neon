@@ -2,6 +2,7 @@
 //! An in-memory layer stores recently received page versions in memory. The page versions
 //! are held in a BTreeMap, and there's another BTreeMap to track the size of the relation.
 //!
+use crate::config::PageServerConf;
 use crate::layered_repository::filename::DeltaFileName;
 use crate::layered_repository::global_layer_map::GLOBAL_OPEN_MEM_USAGE;
 use crate::layered_repository::storage_layer::{
@@ -11,7 +12,6 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
 use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;

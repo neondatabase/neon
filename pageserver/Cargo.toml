@@ -30,7 +30,7 @@ tar = "0.4.33"
 humantime = "2.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-toml = "0.5"
+toml_edit = { version = "0.8.0", features = ["easy"] }
 scopeguard = "1.1.0"
 rust-s3 = { version = "0.27.0-rc4", features = ["no-verify-ssl"] }
 async-trait = "0.1"

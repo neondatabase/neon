@@ -80,9 +80,9 @@ use tracing::*;
 
 use super::{RemoteFileInfo, RemoteStorage};
 use crate::{
+    config::PageServerConf,
     layered_repository::metadata::{metadata_path, TimelineMetadata},
     tenant_mgr::register_timeline_download,
-    PageServerConf,
 };
 use zenith_metrics::{register_histogram_vec, register_int_gauge, HistogramVec, IntGauge};
 use zenith_utils::{

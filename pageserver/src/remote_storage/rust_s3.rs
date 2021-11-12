@@ -9,9 +9,9 @@ use s3::{bucket::Bucket, creds::Credentials, region::Region};
 use tokio::io::{self, AsyncWriteExt};
 
 use crate::{
+    config::S3Config,
     layered_repository::metadata::METADATA_FILE_NAME,
     remote_storage::{parse_ids_from_path, strip_path_prefix, RemoteFileInfo, RemoteStorage},
-    S3Config,
 };
 
 const S3_FILE_SEPARATOR: char = '/';

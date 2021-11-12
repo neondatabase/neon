@@ -21,10 +21,11 @@ use zenith_utils::logging;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
+use crate::config::PageServerConf;
+use crate::repository::Repository;
 use crate::tenant_mgr;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{repository::Repository, PageServerConf};
 use crate::{restore_local_repo, LOG_FILE_NAME};
 
 #[derive(Serialize, Deserialize, Clone)]
