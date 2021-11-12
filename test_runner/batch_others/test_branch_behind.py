@@ -1,6 +1,11 @@
 import subprocess
-from fixtures.zenith_fixtures import ZenithEnv
+from contextlib import closing
+
+import psycopg2.extras
+import pytest
 from fixtures.log_helper import log
+from fixtures.utils import print_gc_result
+from fixtures.zenith_fixtures import ZenithEnv
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -19,8 +24,16 @@ def test_branch_behind(zenith_simple_env: ZenithEnv):
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
 
+    main_cur.execute("SHOW zenith.zenith_timeline")
+    timeline = main_cur.fetchone()[0]
+
     # Create table, and insert the first 100 rows
     main_cur.execute('CREATE TABLE foo (t text)')
+
+    # keep some early lsn to test branch creation on out of date lsn
+    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
+    gced_lsn = main_cur.fetchone()[0]
+
     main_cur.execute('''
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
@@ -94,3 +107,15 @@ def test_branch_behind(zenith_simple_env: ZenithEnv):
         # FIXME: assert false, "branch with invalid LSN should have failed"
     except subprocess.CalledProcessError:
         log.info("Branch creation with pre-initdb LSN failed (as expected)")
+
+    # check that we cannot create branch based on garbage collected data
+    with closing(env.pageserver.connect()) as psconn:
+        with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
+            # call gc to advace latest_gc_cutoff
+            pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+            row = pscur.fetchone()
+            print_gc_result(row)
+
+    with pytest.raises(Exception, match="(we might've already garbage collected needed data)"):
+        # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
+        env.zenith_cli(["branch", "test_branch_create_fail", f"test_branch_behind@{gced_lsn}"])

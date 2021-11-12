@@ -203,6 +203,12 @@ impl AtomicLsn {
     }
 }
 
+impl From<Lsn> for AtomicLsn {
+    fn from(lsn: Lsn) -> Self {
+        Self::new(lsn.0)
+    }
+}
+
 /// Pair of LSN's pointing to the end of the last valid record and previous one
 #[derive(Debug, Clone, Copy)]
 pub struct RecordLsn {
