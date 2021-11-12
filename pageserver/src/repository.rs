@@ -769,6 +769,70 @@ mod tests {
         Ok(())
     }
 
+    fn make_some_layers(tline: &Arc<dyn Timeline>) -> Result<()> {
+        {
+            let writer = tline.writer();
+            // Create a relation on the timeline
+            writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+            writer.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
+            writer.advance_last_record_lsn(Lsn(0x30));
+        }
+        // materialize layers, lsn 20-30
+        tline.checkpoint(CheckpointConfig::Forced)?;
+        {
+            let writer = tline.writer();
+            writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
+            writer.put_page_image(TESTREL_A, 0, Lsn(0x50), TEST_IMG("foo blk 0 at 5"))?;
+            writer.advance_last_record_lsn(Lsn(0x50));
+        }
+        // materialize layers, lsn 40-50
+        tline.checkpoint(CheckpointConfig::Forced)
+    }
+
+    #[test]
+    fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
+        let repo =
+            RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load();
+
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        make_some_layers(&tline)?;
+
+        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+
+        // try to branch at lsn 25, should fail because we already garbage collected the data
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+            Ok(_) => panic!("branching should have failed"),
+            Err(err) => assert!(err
+                .to_string()
+                .contains("we might've already garbage collected needed data")),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_prohibit_get_page_at_lsn_for_garbage_collected_pages() -> Result<()> {
+        let repo =
+            RepoHarness::create("test_prohibit_get_page_at_lsn_for_garbage_collected_pages")?
+                .load();
+
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        make_some_layers(&tline)?;
+
+        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+
+        match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
+            Ok(_) => panic!("request for page should have failed"),
+            Err(err) => assert!(err
+                .to_string()
+                .contains("tried to request a page version that was garbage collected")),
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn corrupt_metadata() -> Result<()> {
         const TEST_NAME: &str = "corrupt_metadata";

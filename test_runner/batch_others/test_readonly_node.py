@@ -1,4 +1,5 @@
-import subprocess
+import pytest
+from fixtures.log_helper import log
 from fixtures.zenith_fixtures import ZenithEnv
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -15,13 +16,14 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     env.zenith_cli(["branch", "test_readonly_node", "empty"])
 
     pgmain = env.postgres.create_start('test_readonly_node')
-    print("postgres is running on 'test_readonly_node' branch")
+    log.info("postgres is running on 'test_readonly_node' branch")
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
 
     # Create table, and insert the first 100 rows
     main_cur.execute('CREATE TABLE foo (t text)')
+
     main_cur.execute('''
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
@@ -29,7 +31,7 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     ''')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_a = main_cur.fetchone()[0]
-    print('LSN after 100 rows: ' + lsn_a)
+    log.info('LSN after 100 rows: ' + lsn_a)
 
     # Insert some more rows. (This generates enough WAL to fill a few segments.)
     main_cur.execute('''
@@ -39,7 +41,7 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     ''')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_b = main_cur.fetchone()[0]
-    print('LSN after 200100 rows: ' + lsn_b)
+    log.info('LSN after 200100 rows: ' + lsn_b)
 
     # Insert many more rows. This generates enough WAL to fill a few segments.
     main_cur.execute('''
@@ -50,7 +52,7 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
 
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_c = main_cur.fetchone()[0]
-    print('LSN after 400100 rows: ' + lsn_c)
+    log.info('LSN after 400100 rows: ' + lsn_c)
 
     # Create first read-only node at the point where only 100 rows were inserted
     pg_hundred = env.postgres.create_start("test_readonly_node_hundred",
@@ -84,8 +86,6 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     assert cur.fetchone() == (1, )
 
     # Create node at pre-initdb lsn
-    try:
+    with pytest.raises(Exception, match='extracting base backup failed'):
+        # compute node startup with invalid LSN should fail
         env.zenith_cli(["pg", "start", "test_branch_preinitdb", "test_readonly_node@0/42"])
-        assert False, "compute node startup with invalid LSN should have failed"
-    except Exception:
-        print("Node creation with pre-initdb LSN failed (as expected)")
