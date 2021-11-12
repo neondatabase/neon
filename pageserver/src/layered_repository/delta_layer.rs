@@ -37,6 +37,7 @@
 //! A detlta file is constructed using the 'bookfile' crate. Each file consists of two
 //! parts: the page versions and the segment sizes. They are stored as separate chapters.
 //!
+use crate::config::PageServerConf;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
@@ -44,7 +45,6 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
 use log::*;

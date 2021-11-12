@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
+use crate::config::PageServerConf;
 use crate::page_cache;
 use crate::relish::*;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
@@ -44,7 +45,6 @@ use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{

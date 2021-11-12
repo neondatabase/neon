@@ -104,9 +104,9 @@ use self::{
 };
 use super::{RemoteStorage, SyncStartupData, TimelineSyncId};
 use crate::{
-    layered_repository::metadata::TimelineMetadata,
+    config::PageServerConf, layered_repository::metadata::TimelineMetadata,
     remote_storage::storage_sync::compression::read_archive_header, repository::TimelineSyncState,
-    tenant_mgr::set_timeline_states, PageServerConf,
+    tenant_mgr::set_timeline_states,
 };
 
 use zenith_metrics::{register_histogram_vec, register_int_gauge, HistogramVec, IntGauge};
