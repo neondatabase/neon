@@ -18,6 +18,7 @@ use lazy_static::lazy_static;
 use postgres_ffi::pg_constants::BLCKSZ;
 use tracing::*;
 
+use std::cmp;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
@@ -26,11 +27,12 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::{Bound::Included, Deref};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata};
+use crate::page_cache;
 use crate::relish::*;
 use crate::remote_storage::schedule_timeline_upload;
 use crate::repository::{GcResult, Repository, Timeline, TimelineWriter, WALRecord};
@@ -769,7 +771,7 @@ impl Timeline for LayeredTimeline {
     }
 
     fn get_current_logical_size(&self) -> usize {
-        self.current_logical_size.load(Ordering::Acquire) as usize
+        self.current_logical_size.load(atomic::Ordering::Acquire) as usize
     }
 
     fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
@@ -919,7 +921,7 @@ impl LayeredTimeline {
     /// Used to init current logical size on startup
     ///
     fn init_current_logical_size(&mut self) -> Result<()> {
-        if self.current_logical_size.load(Ordering::Relaxed) != 0 {
+        if self.current_logical_size.load(atomic::Ordering::Relaxed) != 0 {
             bail!("cannot init already initialized current logical size")
         };
         let lsn = self.get_last_record_lsn();
@@ -927,7 +929,7 @@ impl LayeredTimeline {
             AtomicUsize::new(self.get_current_logical_size_non_incremental(lsn)?);
         trace!(
             "current_logical_size initialized to {}",
-            self.current_logical_size.load(Ordering::Relaxed)
+            self.current_logical_size.load(atomic::Ordering::Relaxed)
         );
         Ok(())
     }
@@ -1514,6 +1516,22 @@ impl LayeredTimeline {
         Ok(result)
     }
 
+    fn lookup_cached_page(&self, seg: &SegmentTag, blknum: u32, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+        if let RelishTag::Relation(rel_tag) = &seg.rel {
+            let (lsn, read_guard) = page_cache::get().lookup_materialized_page(
+                self.tenantid,
+                self.timelineid,
+                *rel_tag,
+                blknum,
+                lsn,
+            )?;
+            let img = Bytes::from(read_guard.to_vec());
+            Some((lsn, img))
+        } else {
+            None
+        }
+    }
+
     ///
     /// Reconstruct a page version from given Layer
     ///
@@ -1524,6 +1542,22 @@ impl LayeredTimeline {
         lsn: Lsn,
         layer: &dyn Layer,
     ) -> Result<Bytes> {
+        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
+        // The cached image can be returned directly if there is no WAL between the cached image
+        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
+        // for redo.
+        let (cached_lsn_opt, cached_page_opt) = match self.lookup_cached_page(&seg, blknum, lsn) {
+            Some((cached_lsn, cached_img)) => {
+                match cached_lsn.cmp(&lsn) {
+                    cmp::Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
+                    cmp::Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
+                    cmp::Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+                }
+                (Some(cached_lsn), Some((cached_lsn, cached_img)))
+            }
+            None => (None, None),
+        };
+
         let mut data = PageReconstructData {
             records: Vec::new(),
             page_img: None,
@@ -1538,7 +1572,12 @@ impl LayeredTimeline {
         let mut layer_ref = layer;
         let mut curr_lsn = lsn;
         loop {
-            match layer_ref.get_page_reconstruct_data(blknum, curr_lsn, &mut data)? {
+            match layer_ref.get_page_reconstruct_data(
+                blknum,
+                curr_lsn,
+                cached_lsn_opt,
+                &mut data,
+            )? {
                 PageReconstructResult::Complete => break,
                 PageReconstructResult::Continue(cont_lsn) => {
                     // Fetch base image / more WAL from the returned predecessor layer
@@ -1581,6 +1620,16 @@ impl LayeredTimeline {
                         self.timelineid,
                         lsn,
                     );
+                }
+                PageReconstructResult::Cached => {
+                    let (cached_lsn, cached_img) = cached_page_opt.unwrap();
+                    assert!(data.page_img.is_none());
+                    if let Some((first_rec_lsn, first_rec)) = data.records.first() {
+                        assert!(&cached_lsn < first_rec_lsn);
+                        assert!(!first_rec.will_init);
+                    }
+                    data.page_img = Some(cached_img);
+                    break;
                 }
             }
         }
@@ -1637,6 +1686,9 @@ impl LayeredTimeline {
                 } else {
                     trace!("found {} WAL records that will init the page for blk {} in {} at {}, performing WAL redo", data.records.len(), blknum, rel, request_lsn);
                 }
+
+                let last_rec_lsn = data.records.last().unwrap().0;
+
                 let img = self.walredo_mgr.request_redo(
                     rel,
                     blknum,
@@ -1644,6 +1696,17 @@ impl LayeredTimeline {
                     data.page_img.clone(),
                     data.records,
                 )?;
+
+                if let RelishTag::Relation(rel_tag) = &rel {
+                    page_cache::get().memorize_materialized_page(
+                        self.tenantid,
+                        self.timelineid,
+                        *rel_tag,
+                        blknum,
+                        last_rec_lsn,
+                        &img,
+                    );
+                }
 
                 Ok(img)
             }
@@ -1656,7 +1719,7 @@ impl LayeredTimeline {
     fn increase_current_logical_size(&self, diff: u32) {
         let val = self
             .current_logical_size
-            .fetch_add(diff as usize, Ordering::SeqCst);
+            .fetch_add(diff as usize, atomic::Ordering::SeqCst);
         trace!(
             "increase_current_logical_size: {} + {} = {}",
             val,
@@ -1673,7 +1736,7 @@ impl LayeredTimeline {
     fn decrease_current_logical_size(&self, diff: u32) {
         let val = self
             .current_logical_size
-            .fetch_sub(diff as usize, Ordering::SeqCst);
+            .fetch_sub(diff as usize, atomic::Ordering::SeqCst);
         trace!(
             "decrease_current_logical_size: {} - {} = {}",
             val,

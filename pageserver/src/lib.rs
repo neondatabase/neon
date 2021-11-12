@@ -12,6 +12,7 @@ pub mod basebackup;
 pub mod branches;
 pub mod http;
 pub mod layered_repository;
+pub mod page_cache;
 pub mod page_service;
 pub mod relish;
 pub mod remote_storage;
@@ -46,6 +47,7 @@ pub mod defaults {
     pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
 
     pub const DEFAULT_OPEN_MEM_LIMIT: usize = 128 * 1024 * 1024;
+    pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
 }
 
@@ -76,6 +78,7 @@ pub struct PageServerConf {
     pub superuser: String,
 
     pub open_mem_limit: usize,
+    pub page_cache_size: usize,
     pub max_file_descriptors: usize,
 
     // Repository directory, relative to current working directory.
@@ -161,6 +164,7 @@ impl PageServerConf {
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             open_mem_limit: defaults::DEFAULT_OPEN_MEM_LIMIT,
+            page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),

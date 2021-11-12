@@ -169,6 +169,7 @@ impl Layer for InMemoryLayer {
         &self,
         blknum: u32,
         lsn: Lsn,
+        cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
@@ -185,6 +186,13 @@ impl Layer for InMemoryLayer {
                 .iter()
                 .rev();
             for (entry_lsn, pv) in iter {
+                match &cached_img_lsn {
+                    Some(cached_lsn) if entry_lsn <= cached_lsn => {
+                        return Ok(PageReconstructResult::Cached)
+                    }
+                    _ => {}
+                }
+
                 match pv {
                     PageVersion::Page(img) => {
                         reconstruct_data.page_img = Some(img.clone());
