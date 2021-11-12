@@ -596,7 +596,16 @@ impl Timeline for LayeredTimeline {
             RECONSTRUCT_TIME
                 .observe_closure_duration(|| self.materialize_page(seg, blknum, lsn, &*layer))
         } else {
-            bail!("relish {} not found at {}", rel, lsn);
+            // FIXME: This can happen if PostgreSQL extends a relation but never writes
+            // the page. See https://github.com/zenithdb/zenith/issues/841
+            //
+            // Would be nice to detect that situation better.
+            if seg.segno > 0 && self.get_rel_exists(rel, lsn)? {
+                warn!("Page {} blk {} at {} not found", seg.rel, blknum, lsn);
+                return Ok(ZERO_PAGE.clone());
+            }
+
+            bail!("segment {} not found at {}", rel, lsn);
         }
     }
 
