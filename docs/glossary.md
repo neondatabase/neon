@@ -51,11 +51,14 @@ Each PostgreSQL fork is considered a separate relish.
 
 ### Layer
 
-Each layer corresponds to the specific version of a relish Segment in a range of LSNs.
+A layer contains data needed to reconstruct any page versions within the
+layer's Segment and range of LSNs.
+
 There are two kinds of layers, in-memory and on-disk layers. In-memory
 layers are used to ingest incoming WAL, and provide fast access
 to the recent page versions. On-disk layers are stored as files on disk, and
-are immutable.
+are immutable. See pageserver/src/layered_repository/README.md for more.
+
 ### Layer file (on-disk layer)
 
 Layered repository on-disk format is based on immutable files.  The

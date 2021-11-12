@@ -1,12 +1,56 @@
 # Overview
 
-The on-disk format is based on immutable files. The page server
-receives a stream of incoming WAL, parses the WAL records to determine
-which pages they apply to, and accumulates the incoming changes in
-memory. Every now and then, the accumulated changes are written out to
-new immutable files. This process is called checkpointing. Old versions
-of on-disk files that are not needed by any timeline are removed by GC
-process.
+The on-disk format is based on immutable files. The page server receives a
+stream of incoming WAL, parses the WAL records to determine which pages they
+apply to, and accumulates the incoming changes in memory. Every now and then,
+the accumulated changes are written out to new immutable files. This process is
+called checkpointing. Old versions of on-disk files that are not needed by any
+timeline are removed by GC process.
+
+The main responsibility of the Page Server is to process the incoming WAL, and
+reprocess it into a format that allows reasonably quick access to any page
+version.
+
+The incoming WAL contains updates to arbitrary pages in the system. The
+distribution depends on the workload: the updates could be totally random, or
+there could be a long stream of updates to a single relation when data is bulk
+loaded, for example, or something in between. The page server slices the
+incoming WAL per relation and page, and packages the sliced WAL into
+suitably-sized "layer files". The layer files contain all the history of the
+database, back to some reasonable retention period. This system replaces the
+base backups and the WAL archive used in a traditional PostgreSQL
+installation. The layer files are immutable, they are not modified in-place
+after creation. New layer files are created for new incoming WAL, and old layer
+files are removed when they are no longer needed. We could also replace layer
+files with new files that contain the same information, merging small files for
+example, but that hasn't been implemented yet.
+
+
+Cloud Storage                   Page Server                   Safekeeper
+                     Local disk                Memory            WAL
+
+|AAAA|               |AAAA|AAAA|               |AA
+|BBBB|               |BBBB|BBBB|               |
+|CCCC|CCCC|  <----   |CCCC|CCCC|CCCC|   <---   |CC     <----   ADEBAABED
+|DDDD|DDDD|          |DDDD|DDDD|               |DDD
+|EEEE|               |EEEE|EEEE|EEEE|          |E
+
+
+In this illustration, WAL is received as a stream from the Safekeeper, from the
+right.  It is immediately captured by the page server and stored quickly in
+memory. The page server memory can be thought of as a quick "reorder buffer",
+used to hold the incoming WAL and reorder it so that we keep the WAL records for
+the same page and relation close to each other.
+
+From the page server memory, whenever enough WAL has been accumulated for one
+relation segment, it is moved to local disk, as a new layer file, and the memory
+is released.
+
+From the local disk, the layers are further copied to Cloud Storage, for
+long-term archival. After a layer has been copied to Cloud Storage, it can be
+removed from local disk, although we currently keep everything locally for fast
+access. If a layer is needed that isn't found locally, it is fetched from Cloud
+Storage and stored in local disk.
 
 # Terms used in layered repository
 
@@ -14,32 +58,9 @@ process.
 - Segment - one slice of a Relish that is stored in a LayeredTimeline.
 - Layer -  specific version of a relish Segment in a range of LSNs.
 
-Layers can be InMemory or OnDisk:
-- InMemory layer is not durably stored and needs to rebuild from WAL on pageserver start.
-- OnDisk layer is durably stored.
+# Layer map
 
-OnDisk layers can be Image or Delta:
-- ImageLayer represents an image or a snapshot of a segment at one particular LSN.
-- DeltaLayer represents a collection of WAL records or page images in a range of LSNs.
-
-Dropped segments are always represented on disk by DeltaLayer.
-
-LSN range defined by start_lsn and end_lsn:
-- start_lsn is inclusive.
-- end_lsn is exclusive.
-
-For an open in-memory layer, the end_lsn is MAX_LSN. For a frozen
-in-memory layer or a delta layer, it is a valid end bound. An image
-layer represents snapshot at one LSN, so end_lsn is always the
-snapshot LSN + 1
-
-Layers can be open or historical:
-- Open layer is a writeable one. Only InMemory layer can be open.
-FIXME: If open layer is dropped, it is not writeable, so it should be turned into historical, 
-but now it is not implemented - see bug #569.
-- Historical layer is the one that cannot be modified anymore. Now only OnDisk layers can be historical.
-
-- LayerMap - a map that tracks what layers exist for all the relishes in a timeline.
+The LayerMap tracks what layers exist for all the relishes in a timeline.
 
 LayerMap consists of two data structures:
 - segs - All the layers keyed by segment tag
@@ -54,8 +75,53 @@ TODO: Are there any exceptions to this?
 For example, timeline.list_rels(lsn) will return all segments that are visible in this timeline at the LSN,
 including ones that were not modified in this timeline and thus don't have a layer in the timeline's LayerMap.
 
-TODO:
-Describe GC and checkpoint interval settings.
+
+# Different kinds of layers
+
+A layer can be in different states:
+
+- Open - a layer where new WAL records can be appended to.
+- Closed - a layer that is read-only, no new WAL records can be appended to it
+- Historical: synonym for closed
+- InMemory: A layer that is kept only in memory, and needs to be rebuilt from WAL
+  on pageserver start
+- OnDisk: A layer that is stored on disk. If its end-LSN is older than
+  disk_consistent_lsn, it is known to be fully flushed and fsync'd to local disk.
+- Frozen layer: an in-memory layer that is Closed.
+
+There are two kinds of OnDisk layers:
+- ImageLayer represents an image or a snapshot of a 10 MB relish segment, at one particular LSN.
+- DeltaLayer represents a collection of WAL records or page images in a range of LSNs, for one
+  relish segment.
+
+Dropped segments are always represented on disk by DeltaLayer.
+
+# Layer life cycle
+
+LSN range defined by start_lsn and end_lsn:
+- start_lsn is inclusive.
+- end_lsn is exclusive.
+
+For an open in-memory layer, the end_lsn is MAX_LSN. For a frozen in-memory
+layer or a delta layer, it is a valid end bound. An image layer represents
+snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
+
+Every layer starts its life as an Open In-Memory layer. When the page server
+receives the first WAL record for a segment, it creates a new In-Memory layer
+for it, and puts it to the layer map. Later, the layer is old enough, its
+contents are written to disk, as On-Disk layers. This process is called
+"evicting" a layer.
+
+Layer eviction is a two-step process: First, the layer is marked as closed, so
+that it no longer accepts new WAL records, and the layer map is updated
+accordingly. If a new WAL record for that segment arrives after this step, a new
+Open layer is created to hold it. After this first step, the layer is a Closed
+InMemory state. This first step is called "freezing" the layer.
+
+In the second step, new Delta and Image layers are created, containing all the
+data in the Frozen InMemory layer. When the new layers are ready, the original
+frozen layer is replaced with the new layers in the layer map, and the original
+frozen layer is dropped, releasing the memory.
 
 # Layer files (On-disk layers)
 
@@ -366,6 +432,8 @@ is a newer layer file there. TODO: This optimization hasn't been
 implemented! The GC algorithm will currently keep the file on the
 'main' branch anyway, for as long as the child branch exists.
 
+TODO:
+Describe GC and checkpoint interval settings.
 
 # TODO: On LSN ranges
 
