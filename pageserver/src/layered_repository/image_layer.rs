@@ -146,9 +146,15 @@ impl Layer for ImageLayer {
         &self,
         blknum: u32,
         lsn: Lsn,
+        cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         assert!(lsn >= self.lsn);
+
+        match cached_img_lsn {
+            Some(cached_lsn) if self.lsn <= cached_lsn => return Ok(PageReconstructResult::Cached),
+            _ => {}
+        }
 
         let inner = self.load()?;
 

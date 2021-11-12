@@ -80,6 +80,8 @@ pub enum PageReconstructResult {
     /// the returned LSN. This is usually considered an error, but might be OK
     /// in some circumstances.
     Missing(Lsn),
+    /// Use the cached image at `cached_img_lsn` as the base image
+    Cached,
 }
 
 ///
@@ -127,6 +129,9 @@ pub trait Layer: Send + Sync {
     /// of the *relish*, not the beginning of the segment. The requested
     /// 'blknum' must be covered by this segment.
     ///
+    /// `cached_img_lsn` should be set to a cached page image's lsn < `lsn`.
+    /// This function will only return data after `cached_img_lsn`.
+    ///
     /// See PageReconstructResult for possible return values. The collected data
     /// is appended to reconstruct_data; the caller should pass an empty struct
     /// on first call. If this returns PageReconstructResult::Continue, look up
@@ -136,6 +141,7 @@ pub trait Layer: Send + Sync {
         &self,
         blknum: u32,
         lsn: Lsn,
+        cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult>;
 

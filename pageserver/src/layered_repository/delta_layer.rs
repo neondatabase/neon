@@ -183,11 +183,19 @@ impl Layer for DeltaLayer {
         &self,
         blknum: u32,
         lsn: Lsn,
+        cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
         assert!(self.seg.blknum_in_seg(blknum));
+
+        match &cached_img_lsn {
+            Some(cached_lsn) if &self.end_lsn <= cached_lsn => {
+                return Ok(PageReconstructResult::Cached)
+            }
+            _ => {}
+        }
 
         {
             // Open the file and lock the metadata in memory
@@ -207,6 +215,13 @@ impl Layer for DeltaLayer {
                 .iter()
                 .rev();
             for ((_blknum, pv_lsn), blob_range) in iter {
+                match &cached_img_lsn {
+                    Some(cached_lsn) if pv_lsn <= cached_lsn => {
+                        return Ok(PageReconstructResult::Cached)
+                    }
+                    _ => {}
+                }
+
                 let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
 
                 match pv {

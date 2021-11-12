@@ -26,8 +26,8 @@ use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches, defaults::*, http, page_service, remote_storage, tenant_mgr, virtual_file,
-    PageServerConf, RemoteStorageConfig, RemoteStorageKind, S3Config, LOG_FILE_NAME,
+    branches, defaults::*, http, page_cache, page_service, remote_storage, tenant_mgr,
+    virtual_file, PageServerConf, RemoteStorageConfig, RemoteStorageKind, S3Config, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
@@ -44,6 +44,7 @@ struct CfgFileParams {
     gc_horizon: Option<String>,
     gc_period: Option<String>,
     open_mem_limit: Option<String>,
+    page_cache_size: Option<String>,
     max_file_descriptors: Option<String>,
     pg_distrib_dir: Option<String>,
     auth_validation_public_key_path: Option<String>,
@@ -107,6 +108,7 @@ impl CfgFileParams {
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
             open_mem_limit: get_arg("open_mem_limit"),
+            page_cache_size: get_arg("page_cache_size"),
             max_file_descriptors: get_arg("max_file_descriptors"),
             pg_distrib_dir: get_arg("postgres-distrib"),
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
@@ -127,6 +129,7 @@ impl CfgFileParams {
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             open_mem_limit: self.open_mem_limit.or(other.open_mem_limit),
+            page_cache_size: self.page_cache_size.or(other.page_cache_size),
             max_file_descriptors: self.max_file_descriptors.or(other.max_file_descriptors),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
             auth_validation_public_key_path: self
@@ -175,6 +178,11 @@ impl CfgFileParams {
         let open_mem_limit: usize = match self.open_mem_limit.as_ref() {
             Some(open_mem_limit_str) => open_mem_limit_str.parse()?,
             None => DEFAULT_OPEN_MEM_LIMIT,
+        };
+
+        let page_cache_size: usize = match self.page_cache_size.as_ref() {
+            Some(page_cache_size_str) => page_cache_size_str.parse()?,
+            None => DEFAULT_PAGE_CACHE_SIZE,
         };
 
         let max_file_descriptors: usize = match self.max_file_descriptors.as_ref() {
@@ -252,6 +260,7 @@ impl CfgFileParams {
             gc_horizon,
             gc_period,
             open_mem_limit,
+            page_cache_size,
             max_file_descriptors,
 
             superuser: String::from(DEFAULT_SUPERUSER),
@@ -329,6 +338,13 @@ fn main() -> Result<()> {
                 .long("open_mem_limit")
                 .takes_value(true)
                 .help("Amount of memory reserved for buffering incoming WAL"),
+        )
+        .arg(
+
+            Arg::with_name("page_cache_size")
+                .long("page_cache_size")
+                .takes_value(true)
+                .help("Number of pages in the page cache"),
         )
         .arg(
             Arg::with_name("max_file_descriptors")
@@ -469,6 +485,8 @@ fn main() -> Result<()> {
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
+
+    page_cache::init(conf);
 
     // Create repo and exit if init was requested
     if init {
@@ -636,6 +654,7 @@ mod tests {
             gc_horizon: Some("gc_horizon_VALUE".to_string()),
             gc_period: Some("gc_period_VALUE".to_string()),
             open_mem_limit: Some("open_mem_limit_VALUE".to_string()),
+            page_cache_size: Some("page_cache_size_VALUE".to_string()),
             max_file_descriptors: Some("max_file_descriptors_VALUE".to_string()),
             pg_distrib_dir: Some("pg_distrib_dir_VALUE".to_string()),
             auth_validation_public_key_path: Some(
@@ -661,6 +680,7 @@ checkpoint_period = 'checkpoint_period_VALUE'
 gc_horizon = 'gc_horizon_VALUE'
 gc_period = 'gc_period_VALUE'
 open_mem_limit = 'open_mem_limit_VALUE'
+page_cache_size = 'page_cache_size_VALUE'
 max_file_descriptors = 'max_file_descriptors_VALUE'
 pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
@@ -697,6 +717,7 @@ local_path = 'remote_storage_local_VALUE'
             gc_horizon: Some("gc_horizon_VALUE".to_string()),
             gc_period: Some("gc_period_VALUE".to_string()),
             open_mem_limit: Some("open_mem_limit_VALUE".to_string()),
+            page_cache_size: Some("page_cache_size_VALUE".to_string()),
             max_file_descriptors: Some("max_file_descriptors_VALUE".to_string()),
             pg_distrib_dir: Some("pg_distrib_dir_VALUE".to_string()),
             auth_validation_public_key_path: Some(
@@ -725,6 +746,7 @@ checkpoint_period = 'checkpoint_period_VALUE'
 gc_horizon = 'gc_horizon_VALUE'
 gc_period = 'gc_period_VALUE'
 open_mem_limit = 'open_mem_limit_VALUE'
+page_cache_size = 'page_cache_size_VALUE'
 max_file_descriptors = 'max_file_descriptors_VALUE'
 pg_distrib_dir = 'pg_distrib_dir_VALUE'
 auth_validation_public_key_path = 'auth_validation_public_key_path_VALUE'
