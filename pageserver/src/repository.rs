@@ -829,6 +829,23 @@ mod tests {
                 .to_string()
                 .contains("tried to request a page version that was garbage collected")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
+        let repo =
+            RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+
+        make_some_layers(&tline)?;
+
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
+
+        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        assert!(newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)).is_ok());
 
         Ok(())
     }

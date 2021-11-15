@@ -203,7 +203,7 @@ impl Layer for DeltaLayer {
             let page_version_reader = inner
                 .book
                 .as_ref()
-                .unwrap()
+                .expect("should be loaded in load call above")
                 .chapter_reader(PAGE_VERSIONS_CHAPTER)?;
 
             // Scan the metadata BTreeMap backwards, starting from the given entry.
@@ -530,7 +530,7 @@ impl DeltaLayer {
 
         *inner = DeltaLayerInner {
             loaded: true,
-            book: None,
+            book: Some(book),
             page_version_metas,
             relsizes,
         };
