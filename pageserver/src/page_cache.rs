@@ -233,6 +233,7 @@ impl std::ops::Deref for PageWriteGuard<'_> {
 impl PageWriteGuard<'_> {
     /// Mark that the buffer contents are now valid.
     pub fn mark_valid(&mut self) {
+        assert!(self.inner.key.is_some());
         assert!(
             !self.valid,
             "mark_valid called on a buffer that was already valid"
@@ -240,6 +241,11 @@ impl PageWriteGuard<'_> {
         self.valid = true;
     }
     pub fn mark_dirty(&mut self) {
+        // only ephemeral pages can be dirty ATM.
+        assert!(matches!(
+            self.inner.key,
+            Some(CacheKey::EphemeralPage { .. })
+        ));
         self.inner.dirty = true;
     }
 }
@@ -251,6 +257,7 @@ impl Drop for PageWriteGuard<'_> {
     /// initializing it, remove the mapping from the page cache.
     ///
     fn drop(&mut self) {
+        assert!(self.inner.key.is_some());
         if !self.valid {
             let self_key = self.inner.key.as_ref().unwrap();
             PAGE_CACHE.get().unwrap().remove_mapping(self_key);
@@ -724,7 +731,7 @@ impl PageCache {
                 hash_key: _,
                 lsn: _,
             } => {
-                panic!("unexpected dirty materialize page");
+                panic!("unexpected dirty materialized page");
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
