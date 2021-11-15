@@ -262,6 +262,7 @@ impl Drop for PageWriteGuard<'_> {
             let self_key = self.inner.key.as_ref().unwrap();
             PAGE_CACHE.get().unwrap().remove_mapping(self_key);
             self.inner.key = None;
+            self.inner.dirty = false;
         }
     }
 }
@@ -378,6 +379,7 @@ impl PageCache {
                         // remove mapping for old buffer
                         self.remove_mapping(key);
                         inner.key = None;
+                        inner.dirty = false;
                     }
                     _ => {}
                 }
@@ -479,6 +481,7 @@ impl PageCache {
             // Make the slot ready
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
+            inner.dirty = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
             return ReadBufResult::NotFound(PageWriteGuard {
@@ -539,6 +542,7 @@ impl PageCache {
             // Make the slot ready
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
+            inner.dirty = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
             return WriteBufResult::NotFound(PageWriteGuard {
