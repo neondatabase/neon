@@ -1424,15 +1424,21 @@ impl LayeredTimeline {
             }
 
             // 2. Is it needed by a child branch?
+            // NOTE With that wee would keep data that
+            // might be referenced by child branches forever.
+            // We can track this in child timeline GC and delete parent layers when
+            // they are no longer needed. This might be complicated with long inheritance chains.
             for retain_lsn in &retain_lsns {
-                // start_lsn is inclusive and end_lsn is exclusive
-                if l.get_start_lsn() <= *retain_lsn && *retain_lsn < l.get_end_lsn() {
+                // start_lsn is inclusive
+                if &l.get_start_lsn() <= retain_lsn {
                     info!(
-                        "keeping {} {}-{} because it's needed by branch point {}",
+                        "keeping {} {}-{} because it's still might be referenced by child branch forked at {} is_dropped: {} is_incremental: {}",
                         seg,
                         l.get_start_lsn(),
                         l.get_end_lsn(),
-                        *retain_lsn
+                        retain_lsn,
+                        l.is_dropped(),
+                        l.is_incremental(),
                     );
                     if seg.rel.is_relation() {
                         result.ondisk_relfiles_needed_by_branches += 1;
