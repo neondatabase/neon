@@ -247,9 +247,13 @@ impl Layer for InMemoryLayer {
         assert!(lsn >= self.start_lsn);
 
         // Is the requested LSN after the segment was dropped?
-        if let Some(end_lsn) = inner.end_lsn {
-            if lsn >= end_lsn {
-                return Ok(false);
+        if inner.dropped {
+            if let Some(end_lsn) = inner.end_lsn {
+                if lsn >= end_lsn {
+                    return Ok(false);
+                }
+            } else {
+                panic!("dropped in-memory layer with no end LSN");
             }
         }
 
