@@ -5,23 +5,26 @@
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use bytes::BytesMut;
+<<<<<<< HEAD
 use postgres::{Client, Config, NoTls};
 use tracing::*;
+=======
+use log::*;
+>>>>>>> callmemaybe refactoring
 
 use std::net::SocketAddr;
-use std::thread;
-use std::thread::sleep;
 
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::send_wal::SendWalHandler;
 use crate::timeline::TimelineTools;
-use crate::SafeKeeperConf;
-use zenith_utils::connstring::connection_host_port;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
+
+use crate::callmemaybe::CallmeEvent;
+use tokio::sync::mpsc::Sender;
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -32,50 +35,6 @@ pub struct ReceiveWalConn<'pg> {
     /// NOTE that it is allowed to operate without a pageserver.
     /// So if compute has no pageserver configured do not use it.
     pageserver_connstr: Option<String>,
-}
-
-///
-/// Periodically request pageserver to call back.
-/// If pageserver already has replication channel, it will just ignore this request
-///
-fn request_callback(
-    conf: SafeKeeperConf,
-    pageserver_connstr: String,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-) {
-    // use Config parsing because SockAddr parsing doesnt allow to use host names instead of ip addresses
-    let me_connstr = format!("postgresql://no_user@{}/no_db", conf.listen_pg_addr);
-    let me_conf: Config = me_connstr.parse().unwrap();
-    let (host, port) = connection_host_port(&me_conf);
-    let callme = format!(
-        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={}'",
-        tenantid, timelineid, host, port, timelineid, tenantid,
-    );
-
-    loop {
-        info!(
-            "requesting page server to connect to us: start {} {}",
-            pageserver_connstr, callme
-        );
-        match Client::connect(&pageserver_connstr, NoTls) {
-            Ok(mut client) => {
-                if let Err(e) = client.simple_query(&callme) {
-                    error!("Failed to send callme request to pageserver: {}", e);
-                }
-            }
-            Err(e) => error!(
-                "Failed to connect to pageserver {}: {}",
-                &pageserver_connstr, e
-            ),
-        }
-
-        if let Some(period) = conf.recall_period {
-            sleep(period);
-        } else {
-            break;
-        }
-    }
 }
 
 impl<'pg> ReceiveWalConn<'pg> {
@@ -138,20 +97,33 @@ impl<'pg> ReceiveWalConn<'pg> {
             _ => bail!("unexpected message {:?} instead of greeting", msg),
         }
 
-        // Need to establish replication channel with page server.
-        // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
-        if let Some(ref pageserver_connstr) = self.pageserver_connstr {
-            let conf = swh.conf.clone();
-            let timelineid = swh.timeline.get().timelineid;
-            // copy to safely move to a thread
-            let pageserver_connstr = pageserver_connstr.to_owned();
-            let _ = thread::Builder::new()
-                .name("request_callback thread".into())
-                .spawn(move || {
-                    request_callback(conf, pageserver_connstr, timelineid, tenant_id);
+        // if requested, ask pageserver to fetch wal from us
+        // as long as this wal_stream is alive, callmemaybe thread
+        // will send requests to pageserver
+        let _guard = match self.pageserver_connstr {
+            Some(ref pageserver_connstr) => {
+                // Need to establish replication channel with page server.
+                // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
+                let timelineid = swh.timeline.get().timelineid;
+                let tx_clone = swh.tx.clone();
+                let pageserver_connstr = pageserver_connstr.to_owned();
+                swh.tx
+                    .blocking_send(CallmeEvent::Subscribe(
+                        tenant_id,
+                        timelineid,
+                        pageserver_connstr,
+                    ))
+                    .unwrap();
+
+                // create a guard to unsubscribe callback, when this wal_stream will exit
+                Some(SendWalHandlerGuard {
+                    tx: tx_clone,
+                    tenant_id,
+                    timelineid,
                 })
-                .unwrap();
-        }
+            }
+            None => None,
+        };
 
         loop {
             let reply = swh
@@ -164,5 +136,19 @@ impl<'pg> ReceiveWalConn<'pg> {
             }
             msg = self.read_msg()?;
         }
+    }
+}
+
+struct SendWalHandlerGuard {
+    tx: Sender<CallmeEvent>,
+    tenant_id: ZTenantId,
+    timelineid: ZTimelineId,
+}
+
+impl Drop for SendWalHandlerGuard {
+    fn drop(&mut self) {
+        self.tx
+            .blocking_send(CallmeEvent::Unsubscribe(self.tenant_id, self.timelineid))
+            .unwrap();
     }
 }
