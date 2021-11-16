@@ -26,6 +26,10 @@ use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody};
 use zenith_utils::sock_split::ReadStream;
 
+use crate::callmemaybe::CallmeEvent;
+use tokio::sync::mpsc::Sender;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
+
 pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
@@ -78,6 +82,29 @@ struct ReplicationConnGuard {
 impl Drop for ReplicationConnGuard {
     fn drop(&mut self) {
         self.timeline.update_replica_state(self.replica, None);
+    }
+}
+
+// XXX: Naming is a bit messy here.
+// This ReplicationStreamGuard lives as long as ReplicationConn
+// and current ReplicationConnGuard is tied to the background thread
+// that receives feedback.
+struct ReplicationStreamGuard {
+    tx: Sender<CallmeEvent>,
+    tenant_id: ZTenantId,
+    timelineid: ZTimelineId,
+}
+
+impl Drop for ReplicationStreamGuard {
+    fn drop(&mut self) {
+        // the connection with pageserver is lost,
+        // resume callback subscription
+        info!("Connection to pageserver is gone. Subscribe to callmemeybe again. tenantid {} timelineid {}",
+         self.tenant_id, self.timelineid);
+
+        self.tx
+            .blocking_send(CallmeEvent::Resume(self.tenant_id, self.timelineid))
+            .unwrap();
     }
 }
 
@@ -222,6 +249,24 @@ impl ReplicationConn {
             None
         };
         info!("Start replication from {:?} till {:?}", start_pos, stop_pos);
+
+        // Don't spam pageserver with callmemaybe queries
+        // when connection is already established.
+        let _guard = {
+            let timelineid = swh.timeline.get().timelineid;
+            let tenant_id = swh.tenantid.unwrap();
+            let tx_clone = swh.tx.clone();
+            swh.tx
+                .blocking_send(CallmeEvent::Pause(tenant_id, timelineid))
+                .unwrap();
+
+            // create a guard to subscribe callback again, when this connection will exit
+            Some(ReplicationStreamGuard {
+                tx: tx_clone,
+                tenant_id,
+                timelineid,
+            })
+        };
 
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse)?;

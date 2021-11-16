@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use zenith_utils::zid::ZTimelineId;
 
+pub mod callmemaybe;
 pub mod http;
 pub mod json_ctrl;
 pub mod receive_wal;

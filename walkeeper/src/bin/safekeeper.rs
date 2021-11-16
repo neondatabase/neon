@@ -8,15 +8,18 @@ use daemonize::Daemonize;
 use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
+use zenith_utils::http::endpoint;
+use zenith_utils::{logging, tcp_listener, GIT_VERSION};
+
+use tokio::sync::mpsc;
+use walkeeper::callmemaybe;
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::SafeKeeperConf;
-use zenith_utils::http::endpoint;
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals;
-use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
@@ -181,16 +184,35 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         );
     }
 
-    threads.push(
-        thread::Builder::new()
-            .name("WAL acceptor thread".into())
-            .spawn(|| {
-                let thread_result = wal_service::thread_main(conf, pg_listener);
-                if let Err(e) = thread_result {
-                    info!("wal_service thread terminated: {}", e);
-                }
-            })?,
-    );
+    let (tx, rx) = mpsc::channel(100);
+    let conf_cloned = conf.clone();
+    let wal_acceptor_thread = thread::Builder::new()
+        .name("WAL acceptor thread".into())
+        .spawn(|| {
+            // thread code
+            let thread_result = wal_service::thread_main(conf_cloned, pg_listener, tx);
+            if let Err(e) = thread_result {
+                info!("wal_service thread terminated: {}", e);
+            }
+        })
+        .unwrap();
+
+    threads.push(wal_acceptor_thread);
+
+    let callmemaybe_thread = thread::Builder::new()
+        .name("callmemaybe thread".into())
+        .spawn(|| {
+            // thread code
+            let thread_result = callmemaybe::thread_main(conf, rx);
+            if let Err(e) = thread_result {
+                error!("callmemaybe thread terminated: {}", e);
+            }
+        })
+        .unwrap();
+    threads.push(callmemaybe_thread);
+
+    // TODO: put more thoughts into handling of failed threads
+    // We probably should restart them.
 
     // NOTE: we still have to handle signals like SIGQUIT to prevent coredumps
     signals.handle(|signal| {
