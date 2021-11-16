@@ -425,7 +425,6 @@ pub fn save_decoded_record(
             relnode: blk.rnode_relnode,
             forknum: blk.forknum as u8,
         });
-	/*
         if blk.apply_image
             && blk.has_image
             && decoded.xl_rmid == pg_constants::RM_XLOG_ID
@@ -450,9 +449,7 @@ pub fn save_decoded_record(
             image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             timeline.put_page_image(tag, blk.blkno, lsn, image.freeze())?;
-        } else 
-	*/
-	{
+        } else {
             let rec = WALRecord {
                 will_init: blk.will_init || blk.apply_image,
                 rec: recdata.clone(),
