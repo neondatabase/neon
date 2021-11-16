@@ -445,6 +445,8 @@ pub fn save_decoded_record(
                 image.resize(image.len() + blk.hole_length as usize, 0u8);
                 image.unsplit(tail);
             }
+            image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
+            image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             timeline.put_page_image(tag, blk.blkno, lsn, image.freeze())?;
         } else {
