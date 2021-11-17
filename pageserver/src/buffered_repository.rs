@@ -23,7 +23,7 @@ use std::convert::TryInto;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::ops::{Bound::{*}, Deref};
+use std::ops::{Bound::*, Deref};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -846,16 +846,16 @@ impl Timeline for BufferedTimeline {
                 Ok(ZERO_PAGE.clone())
             }
         };
-	/*
-        if let Some(key) = reconstruct_key {
-            if let Ok(img) = &result {
-                let mut store = self.store.write().unwrap();
-                store
-                    .data
-                    .put(&StoreKey::Data(key).ser()?, &PageVersion::Page(img.clone()).ser()?)?;
+        /*
+            if let Some(key) = reconstruct_key {
+                if let Ok(img) = &result {
+                    let mut store = self.store.write().unwrap();
+                    store
+                        .data
+                        .put(&StoreKey::Data(key).ser()?, &PageVersion::Page(img.clone()).ser()?)?;
+                }
             }
-        }
-	*/
+        */
         result
     }
 
@@ -1679,7 +1679,7 @@ impl BufferedTimeline {
                         seg: dk.blknum / BRIN_SEGMENT_SIZE,
                     };
                     // At first iteration we need to scan the whole storage,
-		    // because BRIN does't have enough information
+                    // because BRIN does't have enough information
                     if last_gc != Lsn(0)
                         && store.brin.get(&seg_tag).map_or(true, |lsn| *lsn <= last_gc)
                     {
