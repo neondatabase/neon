@@ -229,17 +229,18 @@ pub struct DecodedBkpBlock {
     pub blkno: u32,
 
     /* copy of the fork_flags field from the XLogRecordBlockHeader */
-    flags: u8,
+    pub flags: u8,
 
     /* Information on full-page image, if any */
-    has_image: bool,       /* has image, even for consistency checking */
+    pub has_image: bool,   /* has image, even for consistency checking */
     pub apply_image: bool, /* has image that should be restored */
     pub will_init: bool,   /* record doesn't need previous page version to apply */
     //char	   *bkp_image;
-    hole_offset: u16,
-    hole_length: u16,
-    bimg_len: u16,
-    bimg_info: u8,
+    pub hole_offset: u16,
+    pub hole_length: u16,
+    pub bimg_offset: u32,
+    pub bimg_len: u16,
+    pub bimg_info: u8,
 
     /* Buffer holding the rmgr-specific data associated with this block */
     has_data: bool,
@@ -859,8 +860,19 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     }
 
     // 3. Decode blocks.
+    let mut ptr = record.len() - buf.remaining();
+    for blk in blocks.iter_mut() {
+        if blk.has_image {
+            blk.bimg_offset = ptr as u32;
+            ptr += blk.bimg_len as usize;
+        }
+        if blk.has_data {
+            ptr += blk.data_len as usize;
+        }
+    }
     // We don't need them, so just skip blocks_total_len bytes
     buf.advance(blocks_total_len as usize);
+    assert_eq!(ptr, record.len() - buf.remaining());
 
     let main_data_offset = (xlogrec.xl_tot_len - main_data_len) as usize;
 

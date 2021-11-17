@@ -9,7 +9,7 @@ use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Value};
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CHECKPOINT_INTERVAL: u64 = 1u64 * 1024 * 1024 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
-const COMMIT_THRESHOLD: usize = CACHE_SIZE / 4;
+const COMMIT_THRESHOLD: usize = CACHE_SIZE / 2;
 const WAL_FLUSH_THRESHOLD: u32 = 128; // 1Mb
 
 ///
@@ -126,7 +126,7 @@ impl ToastStore {
         Ok(ToastStore {
             db: Storage::open(
                 &path.join("pageserver.db"),
-                None, // Some(&path.join("pageserver.log")),
+                Some(&path.join("pageserver.log")),
                 StorageConfig {
                     cache_size: CACHE_SIZE,
                     checkpoint_interval: CHECKPOINT_INTERVAL,
