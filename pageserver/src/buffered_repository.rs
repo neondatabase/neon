@@ -785,7 +785,7 @@ impl Timeline for BufferedTimeline {
         .ser()?
         .to_vec();
         let till = StoreKey::Data(DataKey { rel, blknum, lsn }).ser()?.to_vec();
-        //let mut reconstruct_key: Option<DataKey> = None;
+        let mut reconstruct_key: Option<DataKey> = None;
         let result = {
             let store = self.store.read().unwrap();
             let mut iter = store.data.range(&from..=&till);
@@ -804,7 +804,7 @@ impl Timeline for BufferedTimeline {
                                 records: Vec::new(),
                                 page_img: None,
                             };
-                            //reconstruct_key = Some(dk);
+                            reconstruct_key = Some(dk);
                             data.records.push((dk.lsn, rec));
                             // loop until we locate full page image or initialization WAL record
                             // FIXME-KK: cross-timelines histories are not handled now
@@ -845,7 +845,6 @@ impl Timeline for BufferedTimeline {
                 Ok(ZERO_PAGE.clone())
             }
         };
-        /*
         if let Some(key) = reconstruct_key {
             if let Ok(img) = &result {
                 let mut store = self.store.write().unwrap();
@@ -854,7 +853,6 @@ impl Timeline for BufferedTimeline {
                     .put(&StoreKey::Data(key).ser()?, &PageVersion::Image(img.clone()).ser()?)?;
             }
         }
-        */
         result
     }
 
