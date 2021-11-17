@@ -23,7 +23,7 @@ use std::convert::TryInto;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::ops::{Bound::Included, Deref};
+use std::ops::{Bound::{*}, Deref};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -186,6 +186,7 @@ struct RelishStore {
     meta: Option<HashMap<RelishTag, MetadataSnapshot>>,
     brin: BTreeMap<BrinTag, Lsn>,
     last_checkpoint: Lsn,
+    last_gc: Lsn,
 }
 
 /// Public interface
@@ -785,7 +786,7 @@ impl Timeline for BufferedTimeline {
         .ser()?
         .to_vec();
         let till = StoreKey::Data(DataKey { rel, blknum, lsn }).ser()?.to_vec();
-        let mut reconstruct_key: Option<DataKey> = None;
+        //let mut reconstruct_key: Option<DataKey> = None;
         let result = {
             let store = self.store.read().unwrap();
             let mut iter = store.data.range(&from..=&till);
@@ -804,7 +805,7 @@ impl Timeline for BufferedTimeline {
                                 records: Vec::new(),
                                 page_img: None,
                             };
-                            reconstruct_key = Some(dk);
+                            //reconstruct_key = Some(dk);
                             data.records.push((dk.lsn, rec));
                             // loop until we locate full page image or initialization WAL record
                             // FIXME-KK: cross-timelines histories are not handled now
@@ -845,14 +846,16 @@ impl Timeline for BufferedTimeline {
                 Ok(ZERO_PAGE.clone())
             }
         };
+	/*
         if let Some(key) = reconstruct_key {
             if let Ok(img) = &result {
                 let mut store = self.store.write().unwrap();
                 store
                     .data
-                    .put(&StoreKey::Data(key).ser()?, &PageVersion::Image(img.clone()).ser()?)?;
+                    .put(&StoreKey::Data(key).ser()?, &PageVersion::Page(img.clone()).ser()?)?;
             }
         }
+	*/
         result
     }
 
@@ -1249,6 +1252,7 @@ impl BufferedTimeline {
                 meta: None,
                 brin: BTreeMap::new(),
                 last_checkpoint: Lsn(0),
+                last_gc: Lsn(0),
             }),
 
             walredo_mgr,
@@ -1417,7 +1421,7 @@ impl BufferedTimeline {
                         rel: dk.rel,
                         seg: dk.blknum / BRIN_SEGMENT_SIZE,
                     };
-                    // At first iteratiob we need to scan the whole storage, because BRIN does't have enough information
+                    // At first iteration we need to scan the whole storage, because BRIN does't have enough information
                     if last_checkpoint != Lsn(0)
                         && store
                             .brin
@@ -1575,6 +1579,13 @@ impl BufferedTimeline {
         // Keep tracked dropped relish
         let mut dropped: HashSet<RelishTag> = HashSet::new();
 
+        let last_gc;
+        {
+            let mut store = self.store.write().unwrap();
+            last_gc = store.last_gc;
+            store.last_gc = self.get_last_record_lsn();
+        }
+
         'meta: loop {
             let store = self.store.read().unwrap();
             let mut iter = store.data.range(&from.ser()?..);
@@ -1663,6 +1674,29 @@ impl BufferedTimeline {
                 let raw_key = pair.0;
                 let key = StoreKey::des(&raw_key)?;
                 if let StoreKey::Data(dk) = key {
+                    let seg_tag = BrinTag {
+                        rel: dk.rel,
+                        seg: dk.blknum / BRIN_SEGMENT_SIZE,
+                    };
+                    // At first iteration we need to scan the whole storage,
+		    // because BRIN does't have enough information
+                    if last_gc != Lsn(0)
+                        && store.brin.get(&seg_tag).map_or(true, |lsn| *lsn <= last_gc)
+                    {
+                        // This segment was not update since last GC: jump to next one
+                        let mut iter = store.brin.range((Excluded(seg_tag), Unbounded));
+                        while let Some((next_seg, lsn)) = iter.next_back() {
+                            if *lsn > last_gc {
+                                from = StoreKey::Data(DataKey {
+                                    rel: next_seg.rel,
+                                    blknum: next_seg.seg * BRIN_SEGMENT_SIZE,
+                                    lsn: Lsn(0),
+                                });
+                                continue 'pages;
+                            }
+                        }
+                        break;
+                    }
                     let same_page = from_rel == dk.rel && from_blknum == dk.blknum;
                     if !same_page {
                         result.pages_total += 1;
