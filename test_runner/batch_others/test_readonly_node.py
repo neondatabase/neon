@@ -86,6 +86,10 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     assert cur.fetchone() == (1, )
 
     # Create node at pre-initdb lsn
-    with pytest.raises(Exception, match='extracting base backup failed'):
+    # This can fail in two different ways:
+    # 1. With "extracting base backup failed"
+    # 2. With "directory <repo dir> is not a database cluster directory"
+    # TODO have explicit check so the failure has constant reason
+    with pytest.raises(Exception):
         # compute node startup with invalid LSN should fail
         env.zenith_cli(["pg", "start", "test_branch_preinitdb", "test_readonly_node@0/42"])
