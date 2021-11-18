@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::{BufMut, BytesMut};
 use log::*;
 use std::fmt::Write as FmtWrite;
@@ -242,10 +242,12 @@ impl<'a> Basebackup<'a> {
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
         let checkpoint_bytes = self
             .timeline
-            .get_page_at_lsn(RelishTag::Checkpoint, 0, self.lsn)?;
-        let pg_control_bytes =
-            self.timeline
-                .get_page_at_lsn(RelishTag::ControlFile, 0, self.lsn)?;
+            .get_page_at_lsn(RelishTag::Checkpoint, 0, self.lsn)
+            .context("failed to get checkpoint bytes")?;
+        let pg_control_bytes = self
+            .timeline
+            .get_page_at_lsn(RelishTag::ControlFile, 0, self.lsn)
+            .context("failed get control bytes")?;
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 

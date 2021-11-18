@@ -10,7 +10,7 @@
 //     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -456,6 +456,11 @@ impl PageServerHandler {
 
         // check that the timeline exists
         let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
+        if let Some(lsn) = lsn {
+            timeline
+                .check_lsn_is_in_scope(lsn)
+                .context("invalid basebackup lsn")?;
+        }
 
         // switch client to COPYOUT
         pgb.write_message(&BeMessage::CopyOutResponse)?;
@@ -691,9 +696,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .unwrap_or(Ok(self.conf.gc_horizon))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
-
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layer_relfiles_total"),
                 RowDescriptor::int8_col(b"layer_relfiles_needed_by_cutoff"),

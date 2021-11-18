@@ -42,8 +42,6 @@ pub struct BranchInfo {
 impl BranchInfo {
     pub fn from_path<T: AsRef<Path>>(
         path: T,
-        conf: &PageServerConf,
-        tenantid: &ZTenantId,
         repo: &Arc<dyn Repository>,
         include_non_incremental_logical_size: bool,
     ) -> Result<Self> {
@@ -58,27 +56,14 @@ impl BranchInfo {
 
         let timeline = repo.get_timeline(timeline_id)?;
 
-        let ancestor_path = conf.ancestor_path(&timeline_id, tenantid);
-        let mut ancestor_id: Option<String> = None;
-        let mut ancestor_lsn: Option<String> = None;
-
-        if ancestor_path.exists() {
-            let ancestor = std::fs::read_to_string(ancestor_path)?;
-            let mut strings = ancestor.split('@');
-
-            ancestor_id = Some(
-                strings
-                    .next()
-                    .with_context(|| "wrong branch ancestor point in time format")?
-                    .to_owned(),
-            );
-            ancestor_lsn = Some(
-                strings
-                    .next()
-                    .with_context(|| "wrong branch ancestor point in time format")?
-                    .to_owned(),
-            );
-        }
+        // we use ancestor lsn zero if we don't have an ancestor, so turn this into an option based on timeline id
+        let (ancestor_id, ancestor_lsn) = match timeline.get_ancestor_timeline_id() {
+            Some(ancestor_id) => (
+                Some(ancestor_id.to_string()),
+                Some(timeline.get_ancestor_lsn().to_string()),
+            ),
+            None => (None, None),
+        };
 
         // non incremental size calculation can be heavy, so let it be optional
         // needed for tests to check size calculation
@@ -154,7 +139,11 @@ pub fn create_repo(
 
     info!("created directory structure in {}", repo_dir.display());
 
-    let tli = create_timeline(conf, None, &tenantid)?;
+    // create a new timeline directory
+    let timeline_id = ZTimelineId::generate();
+    let timelinedir = conf.timeline_path(&timeline_id, &tenantid);
+
+    crashsafe_dir::create_dir(&timelinedir)?;
 
     let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
         conf,
@@ -166,7 +155,7 @@ pub fn create_repo(
     // Load data into pageserver
     // TODO To implement zenith import we need to
     //      move data loading out of create_repo()
-    bootstrap_timeline(conf, tenantid, tli, repo.as_ref())?;
+    bootstrap_timeline(conf, tenantid, timeline_id, repo.as_ref())?;
 
     Ok(repo)
 }
@@ -233,7 +222,9 @@ fn bootstrap_timeline(
 
     // Import the contents of the data directory at the initial checkpoint
     // LSN, and any WAL after that.
-    let timeline = repo.create_empty_timeline(tli)?;
+    // Initdb lsn will be equal to last_record_lsn which will be set after import.
+    // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
+    let timeline = repo.create_empty_timeline(tli, lsn)?;
     restore_local_repo::import_timeline_from_postgres_datadir(
         &pgdata_path,
         timeline.writer().as_ref(),
@@ -286,8 +277,6 @@ pub(crate) fn get_branches(
             })?;
             BranchInfo::from_path(
                 dir_entry.path(),
-                conf,
-                tenantid,
                 &repo,
                 include_non_incremental_logical_size,
             )
@@ -333,24 +322,24 @@ pub(crate) fn create_branch(
         );
     }
 
-    // create a new timeline directory for it
-    let newtli = create_timeline(conf, Some(startpoint), tenantid)?;
+    let new_timeline_id = ZTimelineId::generate();
 
-    // Let the Repository backend do its initialization
-    repo.branch_timeline(startpoint.timelineid, newtli, startpoint.lsn)?;
+    // Forward entire timeline creation routine to repository
+    // backend, so it can do all needed initialization
+    repo.branch_timeline(startpoint.timelineid, new_timeline_id, startpoint.lsn)?;
 
     // Remember the human-readable branch name for the new timeline.
     // FIXME: there's a race condition, if you create a branch with the same
     // name concurrently.
-    let data = newtli.to_string();
+    let data = new_timeline_id.to_string();
     fs::write(conf.branch_path(branchname, tenantid), data)?;
 
     Ok(BranchInfo {
         name: branchname.to_string(),
-        timeline_id: newtli,
+        timeline_id: new_timeline_id,
         latest_valid_lsn: startpoint.lsn,
-        ancestor_id: None,
-        ancestor_lsn: None,
+        ancestor_id: Some(startpoint.timelineid.to_string()),
+        ancestor_lsn: Some(startpoint.lsn.to_string()),
         current_logical_size: 0,
         current_logical_size_non_incremental: Some(0),
     })
@@ -427,25 +416,4 @@ fn parse_point_in_time(
     }
 
     bail!("could not parse point-in-time {}", s);
-}
-
-fn create_timeline(
-    conf: &PageServerConf,
-    ancestor: Option<PointInTime>,
-    tenantid: &ZTenantId,
-) -> Result<ZTimelineId> {
-    // Create initial timeline
-
-    let timelineid = ZTimelineId::generate();
-
-    let timelinedir = conf.timeline_path(&timelineid, tenantid);
-
-    fs::create_dir(&timelinedir)?;
-
-    if let Some(ancestor) = ancestor {
-        let data = format!("{}@{}", ancestor.timelineid, ancestor.lsn);
-        fs::write(timelinedir.join("ancestor"), data)?;
-    }
-
-    Ok(timelineid)
 }
