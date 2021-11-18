@@ -292,7 +292,7 @@ pub fn list_files(
             deltafiles.push(deltafilename);
         } else if let Some(imgfilename) = ImageFileName::parse_str(fname) {
             imgfiles.push(imgfilename);
-        } else if fname == METADATA_FILE_NAME || fname == "ancestor" || fname.ends_with(".old") {
+        } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
             // ignore these
         } else {
             warn!("unrecognized filename in timeline dir: {}", fname);

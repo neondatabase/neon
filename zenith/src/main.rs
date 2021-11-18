@@ -233,7 +233,7 @@ fn main() -> Result<()> {
         }
     };
     if let Err(e) = subcmd_result {
-        eprintln!("command failed: {}", e);
+        eprintln!("command failed: {:#}", e);
         exit(1);
     }
 

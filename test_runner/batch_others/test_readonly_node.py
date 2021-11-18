@@ -86,6 +86,6 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     assert cur.fetchone() == (1, )
 
     # Create node at pre-initdb lsn
-    with pytest.raises(Exception, match='extracting base backup failed'):
+    with pytest.raises(Exception, match="invalid basebackup lsn"):
         # compute node startup with invalid LSN should fail
-        env.zenith_cli(["pg", "start", "test_branch_preinitdb", "test_readonly_node@0/42"])
+        env.zenith_cli(["pg", "start", "test_readonly_node_preinitdb", "test_readonly_node@0/42"])

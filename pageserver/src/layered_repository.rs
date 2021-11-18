@@ -140,13 +140,17 @@ impl Repository for LayeredRepository {
         Ok(self.get_timeline_locked(timelineid, &mut timelines)?)
     }
 
-    fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>> {
+    fn create_empty_timeline(
+        &self,
+        timelineid: ZTimelineId,
+        initdb_lsn: Lsn,
+    ) -> Result<Arc<dyn Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
-        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), Lsn(0));
+        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), Lsn(0), initdb_lsn);
         Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
@@ -174,13 +178,9 @@ impl Repository for LayeredRepository {
         let mut timelines = self.timelines.lock().unwrap();
         let src_timeline = self.get_timeline_locked(src, &mut timelines)?;
 
-        let latest_gc_cutoff = src_timeline.latest_gc_cutoff.load();
-        ensure!(
-            start_lsn >= latest_gc_cutoff,
-            "Branch start LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
-            start_lsn,
-            latest_gc_cutoff,
-        );
+        src_timeline
+            .check_lsn_is_in_scope(start_lsn)
+            .context("invalid branch start lsn")?;
 
         let RecordLsn {
             last: src_last,
@@ -194,6 +194,11 @@ impl Repository for LayeredRepository {
             None
         };
 
+        // create a new timeline directory
+        let timelinedir = self.conf.timeline_path(&dst, &self.tenantid);
+
+        crashsafe_dir::create_dir(&timelinedir)?;
+
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
         // into the ancestor.
@@ -202,15 +207,13 @@ impl Repository for LayeredRepository {
             dst_prev,
             Some(src),
             start_lsn,
-            src_timeline.latest_gc_cutoff.load(),
+            src_timeline.latest_gc_cutoff_lsn.load(),
+            src_timeline.initdb_lsn,
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
         Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
 
-        info!(
-            "branched timeline {} from {} at {} latest_gc_cutoff {}",
-            dst, src, start_lsn, latest_gc_cutoff
-        );
+        info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
         Ok(())
     }
@@ -277,7 +280,8 @@ impl LayeredRepository {
         match timelines.get(&timelineid) {
             Some(timeline) => Ok(timeline.clone()),
             None => {
-                let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)?;
+                let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)
+                    .context("failed to load metadata")?;
                 let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
                 // Recurse to look up the ancestor timeline.
@@ -307,7 +311,9 @@ impl LayeredRepository {
                 )?;
 
                 // List the layers on disk, and load them into the layer map
-                let loaded_layers = timeline.load_layer_map(disk_consistent_lsn)?;
+                let loaded_layers = timeline
+                    .load_layer_map(disk_consistent_lsn)
+                    .context("failed to load layermap")?;
                 if self.upload_relishes {
                     schedule_timeline_upload(self.tenantid, timelineid, loaded_layers, metadata);
                 }
@@ -379,6 +385,7 @@ impl LayeredRepository {
         tenantid: ZTenantId,
     ) -> Result<TimelineMetadata> {
         let path = metadata_path(conf, timelineid, tenantid);
+        info!("loading metadata from {}", path.display());
         let metadata_bytes = std::fs::read(&path)?;
         TimelineMetadata::from_bytes(&metadata_bytes)
     }
@@ -575,13 +582,25 @@ pub struct LayeredTimeline {
     write_lock: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
-    latest_gc_cutoff: AtomicLsn,
+    latest_gc_cutoff_lsn: AtomicLsn,
+
+    // It may change across major versions so for simplicity
+    // keep it after running initdb for a timeline.
+    // It is needed in checks when we want to error on some operations
+    // when they are requested for pre-initdb lsn.
+    // It can be unified with latest_gc_cutoff_lsn under some "first_valid_lsn",
+    // though lets keep them both for better error visibility.
+    initdb_lsn: Lsn,
 }
 
 /// Public interface functions
 impl Timeline for LayeredTimeline {
     fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
+    }
+
+    fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
+        self.ancestor_timeline.as_ref().map(|x| x.timelineid)
     }
 
     /// Wait until WAL has been received up to the given LSN.
@@ -615,12 +634,12 @@ impl Timeline for LayeredTimeline {
             );
         }
         debug_assert!(lsn <= self.get_last_record_lsn());
-        let latest_gc_cutoff = self.latest_gc_cutoff.load();
+        let latest_gc_cutoff_lsn = self.latest_gc_cutoff_lsn.load();
         // error instead of assert to simplify testing
         ensure!(
-            lsn >= latest_gc_cutoff,
+            lsn >= latest_gc_cutoff_lsn,
             "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-            lsn, latest_gc_cutoff
+            lsn, latest_gc_cutoff_lsn
         );
 
         let seg = SegmentTag::from_blknum(rel, blknum);
@@ -781,6 +800,28 @@ impl Timeline for LayeredTimeline {
         }
     }
 
+    ///
+    /// Validate lsn against initdb_lsn and latest_gc_cutoff_lsn.
+    ///
+    fn check_lsn_is_in_scope(&self, lsn: Lsn) -> Result<()> {
+        let initdb_lsn = self.initdb_lsn;
+        ensure!(
+            lsn >= initdb_lsn,
+            "LSN {} is earlier than initdb lsn {}",
+            lsn,
+            initdb_lsn,
+        );
+
+        let latest_gc_cutoff_lsn = self.latest_gc_cutoff_lsn.load();
+        ensure!(
+            lsn >= latest_gc_cutoff_lsn,
+            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
+            lsn,
+            latest_gc_cutoff_lsn,
+        );
+        Ok(())
+    }
+
     fn get_last_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().last
     }
@@ -889,7 +930,8 @@ impl LayeredTimeline {
 
             write_lock: Mutex::new(()),
 
-            latest_gc_cutoff: AtomicLsn::from(metadata.latest_gc_cutoff()),
+            latest_gc_cutoff_lsn: AtomicLsn::from(metadata.latest_gc_cutoff_lsn()),
+            initdb_lsn: metadata.initdb_lsn(),
         };
         Ok(timeline)
     }
@@ -1270,7 +1312,8 @@ impl LayeredTimeline {
                 ondisk_prev_record_lsn,
                 ancestor_timelineid,
                 self.ancestor_lsn,
-                self.latest_gc_cutoff.load(),
+                self.latest_gc_cutoff_lsn.load(),
+                self.initdb_lsn,
             );
 
             LayeredRepository::save_metadata(
@@ -1368,9 +1411,9 @@ impl LayeredTimeline {
 
         let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
 
-        // We need to ensure that no one branches at a point before latest_gc_cutoff.
+        // We need to ensure that no one branches at a point before latest_gc_cutoff_lsn.
         // See branch_timeline() for details.
-        self.latest_gc_cutoff.store(cutoff);
+        self.latest_gc_cutoff_lsn.store(cutoff);
 
         info!("GC starting");
 

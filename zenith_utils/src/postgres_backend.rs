@@ -450,7 +450,21 @@ impl PostgresBackend {
             }
 
             FeMessage::Execute(_) => {
-                handler.process_query(self, unnamed_query_string.clone())?;
+                trace!("got execute {:?}", unnamed_query_string);
+                // xxx distinguish fatal and recoverable errors?
+                if let Err(e) = handler.process_query(self, unnamed_query_string.clone()) {
+                    let errmsg = format!("{}", e);
+
+                    warn!(
+                        "query handler for {:?} failed: {:#}",
+                        unnamed_query_string, e
+                    );
+                    self.write_message(&BeMessage::ErrorResponse(errmsg))?;
+                }
+                // NOTE there is no ReadyForQuery message. This handler is used
+                // for basebackup and it uses CopyOut which doesnt require
+                // ReadyForQuery message and backend just switches back to
+                // processing mode after sending CopyDone or ErrorResponse.
             }
 
             FeMessage::Sync => {

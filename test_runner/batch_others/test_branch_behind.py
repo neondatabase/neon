@@ -100,23 +100,18 @@ def test_branch_behind(zenith_simple_env: ZenithEnv):
     assert cur.fetchone() == (1, )
 
     # branch at pre-initdb lsn
-    #
-    # FIXME: This works currently, but probably shouldn't be allowed
-    try:
+    with pytest.raises(Exception, match="invalid branch start lsn"):
         env.zenith_cli(["branch", "test_branch_preinitdb", "test_branch_behind@0/42"])
-        # FIXME: assert false, "branch with invalid LSN should have failed"
-    except subprocess.CalledProcessError:
-        log.info("Branch creation with pre-initdb LSN failed (as expected)")
 
     # check that we cannot create branch based on garbage collected data
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-            # call gc to advace latest_gc_cutoff
+            # call gc to advace latest_gc_cutoff_lsn
             pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
             row = pscur.fetchone()
             print_gc_result(row)
 
-    with pytest.raises(Exception, match="(we might've already garbage collected needed data)"):
+    with pytest.raises(Exception, match="invalid branch start lsn"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
         env.zenith_cli(["branch", "test_branch_create_fail", f"test_branch_behind@{gced_lsn}"])
 

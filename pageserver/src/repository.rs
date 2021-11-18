@@ -20,7 +20,12 @@ pub trait Repository: Send + Sync {
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
 
     /// Create a new, empty timeline. The caller is responsible for loading data into it
-    fn create_empty_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<dyn Timeline>>;
+    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
+    fn create_empty_timeline(
+        &self,
+        timelineid: ZTimelineId,
+        initdb_lsn: Lsn,
+    ) -> Result<Arc<dyn Timeline>>;
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
@@ -124,6 +129,9 @@ pub trait Timeline: Send + Sync {
     /// Get a list of all existing non-relational objects
     fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
 
+    /// Get the ancestor's timeline id
+    fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId>;
+
     /// Get the LSN where this branch was created
     fn get_ancestor_lsn(&self) -> Lsn;
 
@@ -150,6 +158,10 @@ pub trait Timeline: Send + Sync {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
+
+    ///
+    /// Check that it is valid to request operations with that lsn.
+    fn check_lsn_is_in_scope(&self, lsn: Lsn) -> Result<()>;
 
     /// Retrieve current logical size of the timeline
     ///
@@ -347,7 +359,7 @@ mod tests {
         //repo.get_timeline("11223344556677881122334455667788");
 
         // Create timeline to work on
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
 
         writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
@@ -465,7 +477,7 @@ mod tests {
         let repo = RepoHarness::create("test_drop_extend")?.load();
 
         // Create timeline to work on
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
 
         writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
@@ -502,7 +514,7 @@ mod tests {
         let repo = RepoHarness::create("test_truncate_extend")?.load();
 
         // Create timeline to work on
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
 
         //from storage_layer.rs
@@ -601,7 +613,7 @@ mod tests {
     #[test]
     fn test_large_rel() -> Result<()> {
         let repo = RepoHarness::create("test_large_rel")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
 
         let mut lsn = 0x10;
@@ -664,7 +676,7 @@ mod tests {
     #[test]
     fn test_list_rels_drop() -> Result<()> {
         let repo = RepoHarness::create("test_list_rels_drop")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
         const TESTDB: u32 = 111;
 
@@ -722,7 +734,7 @@ mod tests {
     #[test]
     fn test_branch() -> Result<()> {
         let repo = RepoHarness::create("test_branch")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
@@ -818,7 +830,7 @@ mod tests {
         let repo =
             RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load();
 
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(&tline, Lsn(0x20))?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
@@ -827,9 +839,35 @@ mod tests {
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
             Ok(_) => panic!("branching should have failed"),
-            Err(err) => assert!(err
-                .to_string()
-                .contains("we might've already garbage collected needed data")),
+            Err(err) => {
+                assert!(err.to_string().contains("invalid branch start lsn"));
+                assert!(err
+                    .source()
+                    .unwrap()
+                    .to_string()
+                    .contains("we might've already garbage collected needed data"))
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> Result<()> {
+        let repo = RepoHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load();
+
+        repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
+        // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+            Ok(_) => panic!("branching should have failed"),
+            Err(err) => {
+                assert!(&err.to_string().contains("invalid branch start lsn"));
+                assert!(&err
+                    .source()
+                    .unwrap()
+                    .to_string()
+                    .contains("is earlier than initdb lsn"));
+            }
         }
 
         Ok(())
@@ -841,7 +879,7 @@ mod tests {
             RepoHarness::create("test_prohibit_get_page_at_lsn_for_garbage_collected_pages")?
                 .load();
 
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(&tline, Lsn(0x20))?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
@@ -859,7 +897,7 @@ mod tests {
     fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
         let repo =
             RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         make_some_layers(&tline, Lsn(0x20))?;
 
@@ -877,7 +915,7 @@ mod tests {
     fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
         let harness = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?;
         let repo = harness.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         make_some_layers(&tline, Lsn(0x20))?;
 
@@ -913,7 +951,7 @@ mod tests {
         let harness = RepoHarness::create(TEST_NAME)?;
         let repo = harness.load();
 
-        repo.create_empty_timeline(TIMELINE_ID)?;
+        repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         drop(repo);
 
         let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
@@ -927,7 +965,11 @@ mod tests {
 
         let new_repo = harness.load();
         let err = new_repo.get_timeline(TIMELINE_ID).err().unwrap();
-        assert!(err.to_string().contains("checksum"));
+        assert_eq!(err.to_string(), "failed to load metadata");
+        assert_eq!(
+            err.source().unwrap().to_string(),
+            "metadata checksum mismatch"
+        );
 
         Ok(())
     }
@@ -938,7 +980,7 @@ mod tests {
         let harness = RepoHarness::create(TEST_NAME)?;
         let repo = harness.load();
 
-        repo.create_empty_timeline(TIMELINE_ID)?;
+        repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         drop(repo);
 
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
