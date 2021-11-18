@@ -35,14 +35,6 @@ jobs:
     - name: Checkout zenith repo
       uses: actions/checkout@v2
 
-    - name: Checkout zenith-perf-data repo
-      uses: actions/checkout@v2
-      with:
-        repository: zenithdb/zenith-perf-data
-        token: ${{ secrets.VIP_VAP_ACCESS_TOKEN }}
-        ref: master
-        path: zenith-perf-data
-
     # actions/setup-python@v2 is not working correctly on self-hosted runners
     # see https://github.com/actions/setup-python/issues/162
     # and probably https://github.com/actions/setup-python/issues/162#issuecomment-865387976 in particular
@@ -112,14 +104,11 @@ jobs:
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
       run: |
-        mkdir -p zenith-perf-data/data/staging
-        pipenv run pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir zenith-perf-data/data/staging
+        mkdir -p perf-report-staging
+        pipenv run pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging
 
     - name: Submit result
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
       run: |
-        cd zenith-perf-data
-        git add data
-        git commit --author="vipvap <vipvap@zenith.tech>" -m "add performance test result for $GITHUB_SHA zenith revision"
-        git push https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-perf-data.git master
+        REPORT_FROM=$(realpath perf-report-staging) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
