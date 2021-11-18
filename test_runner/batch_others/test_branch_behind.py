@@ -119,3 +119,13 @@ def test_branch_behind(zenith_simple_env: ZenithEnv):
     with pytest.raises(Exception, match="(we might've already garbage collected needed data)"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
         env.zenith_cli(["branch", "test_branch_create_fail", f"test_branch_behind@{gced_lsn}"])
+
+    # check that after gc everything is still there
+    hundred_cur.execute('SELECT count(*) FROM foo')
+    assert hundred_cur.fetchone() == (100, )
+
+    more_cur.execute('SELECT count(*) FROM foo')
+    assert more_cur.fetchone() == (200100, )
+
+    main_cur.execute('SELECT count(*) FROM foo')
+    assert main_cur.fetchone() == (400100, )
