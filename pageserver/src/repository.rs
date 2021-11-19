@@ -312,14 +312,16 @@ mod tests {
     use super::repo_harness::*;
     use super::*;
     use postgres_ffi::{pg_constants, xlog_utils::SIZEOF_CHECKPOINT};
+    use std::fs;
 
     /// Arbitrary relation tag, for testing.
-    const TESTREL_A: RelishTag = RelishTag::Relation(RelTag {
+    const TESTREL_A_REL_TAG: RelTag = RelTag {
         spcnode: 0,
         dbnode: 111,
         relnode: 1000,
         forknum: 0,
-    });
+    };
+    const TESTREL_A: RelishTag = RelishTag::Relation(TESTREL_A_REL_TAG);
     const TESTREL_B: RelishTag = RelishTag::Relation(RelTag {
         spcnode: 0,
         dbnode: 111,
@@ -769,23 +771,45 @@ mod tests {
         Ok(())
     }
 
-    fn make_some_layers(tline: &Arc<dyn Timeline>) -> Result<()> {
+    fn make_some_layers(tline: &Arc<dyn Timeline>, start_lsn: Lsn) -> Result<()> {
+        let mut lsn = start_lsn;
         {
             let writer = tline.writer();
             // Create a relation on the timeline
-            writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-            writer.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
-            writer.advance_last_record_lsn(Lsn(0x30));
+            writer.put_page_image(
+                TESTREL_A,
+                0,
+                lsn,
+                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
+            )?;
+            lsn += 0x10;
+            writer.put_page_image(
+                TESTREL_A,
+                0,
+                lsn,
+                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
+            )?;
+            writer.advance_last_record_lsn(lsn);
         }
-        // materialize layers, lsn 20-30
         tline.checkpoint(CheckpointConfig::Forced)?;
         {
             let writer = tline.writer();
-            writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
-            writer.put_page_image(TESTREL_A, 0, Lsn(0x50), TEST_IMG("foo blk 0 at 5"))?;
-            writer.advance_last_record_lsn(Lsn(0x50));
+            lsn += 0x10;
+            writer.put_page_image(
+                TESTREL_A,
+                0,
+                lsn,
+                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
+            )?;
+            lsn += 0x10;
+            writer.put_page_image(
+                TESTREL_A,
+                0,
+                lsn,
+                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
+            )?;
+            writer.advance_last_record_lsn(lsn);
         }
-        // materialize layers, lsn 40-50
         tline.checkpoint(CheckpointConfig::Forced)
     }
 
@@ -795,7 +819,7 @@ mod tests {
             RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load();
 
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
-        make_some_layers(&tline)?;
+        make_some_layers(&tline, Lsn(0x20))?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
@@ -818,9 +842,8 @@ mod tests {
                 .load();
 
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
-        make_some_layers(&tline)?;
+        make_some_layers(&tline, Lsn(0x20))?;
 
-        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
 
         match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
@@ -838,7 +861,7 @@ mod tests {
             RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID)?;
 
-        make_some_layers(&tline)?;
+        make_some_layers(&tline, Lsn(0x20))?;
 
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
         let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
@@ -846,6 +869,40 @@ mod tests {
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
         assert!(newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)).is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
+        let harness = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?;
+        let repo = harness.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID)?;
+
+        make_some_layers(&tline, Lsn(0x20))?;
+
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        let newtline = repo.get_timeline(NEW_TIMELINE_ID)?;
+
+        make_some_layers(&newtline, Lsn(0x60))?;
+
+        // run gc on parent
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+
+        // check that the layer in parent before the branching point is still there
+        let tline_dir = harness.conf.timeline_path(&TIMELINE_ID, &harness.tenant_id);
+
+        let expected_image_layer_path = tline_dir.join(format!(
+            "rel_{}_{}_{}_{}_{}_{:016X}_{:016X}",
+            TESTREL_A_REL_TAG.spcnode,
+            TESTREL_A_REL_TAG.dbnode,
+            TESTREL_A_REL_TAG.relnode,
+            TESTREL_A_REL_TAG.forknum,
+            0, // seg is 0
+            0x20,
+            0x30,
+        ));
+        assert!(fs::metadata(&expected_image_layer_path).is_ok());
 
         Ok(())
     }
