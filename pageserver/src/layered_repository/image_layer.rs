@@ -21,6 +21,7 @@
 //!
 //! For non-blocky relishes, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
 //!
+use crate::layered_repository::blob::read_blob;
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag,
@@ -39,18 +40,20 @@ use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use zenith_utils::vec_map::VecMap;
 
 use bookfile::{Book, BookWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
+use super::blob::BlobRange;
+
 // Magic constant to identify a Zenith segment image file
 pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
 
-/// Contains each block in block # order
-const BLOCKY_IMAGES_CHAPTER: u64 = 1;
-const NONBLOCKY_IMAGE_CHAPTER: u64 = 2;
+const BLOB_CHAPTER: u64 = 4;
+const META_CHAPTER: u64 = 5;
 
 /// Contains the [`Summary`] struct
 const SUMMARY_CHAPTER: u64 = 3;
@@ -87,28 +90,31 @@ const BLOCK_SIZE: usize = 8192;
 ///
 pub struct ImageLayer {
     path_or_conf: PathOrConf,
-    pub tenantid: ZTenantId,
-    pub timelineid: ZTimelineId,
-    pub seg: SegmentTag,
+    tenantid: ZTenantId,
+    timelineid: ZTimelineId,
+    seg: SegmentTag,
 
     // This entry contains an image of all pages as of this LSN
-    pub lsn: Lsn,
+    lsn: Lsn,
 
     inner: Mutex<ImageLayerInner>,
-}
-
-#[derive(Clone)]
-enum ImageType {
-    Blocky { num_blocks: u32 },
-    NonBlocky,
 }
 
 pub struct ImageLayerInner {
     /// If None, the 'image_type' has not been loaded into memory yet.
     book: Option<Book<VirtualFile>>,
 
-    /// Derived from filename and bookfile chapter metadata
-    image_type: ImageType,
+    meta: VecMap<SegmentTag, BlobRange>,
+}
+
+impl ImageLayerInner {
+    fn get_seg_blob_range(&self, seg: SegmentTag) -> Result<BlobRange> {
+        self.meta
+            .as_slice()
+            .binary_search_by_key(&&seg, |(seg, _meta)| seg)
+            .map(|idx| self.meta.as_slice()[idx].1.clone())
+            .map_err(|_| anyhow!("segment not found in ImageLayer"))
+    }
 }
 
 impl Layer for ImageLayer {
@@ -160,34 +166,29 @@ impl Layer for ImageLayer {
 
         let base_blknum = blknum % RELISH_SEG_SIZE;
 
-        let buf = match &inner.image_type {
-            ImageType::Blocky { num_blocks } => {
-                // Check if the request is beyond EOF
-                if base_blknum >= *num_blocks {
-                    return Ok(PageReconstructResult::Missing(lsn));
-                }
+        let blob_range = inner.get_seg_blob_range(self.seg)?;
 
-                let mut buf = vec![0u8; BLOCK_SIZE];
-                let offset = BLOCK_SIZE as u64 * base_blknum as u64;
+        let chapter = inner.book.as_ref().unwrap().chapter_reader(BLOB_CHAPTER)?;
 
-                let chapter = inner
-                    .book
-                    .as_ref()
-                    .unwrap()
-                    .chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
-                chapter.read_exact_at(&mut buf, offset)?;
-
-                buf
+        let buf = if self.seg.rel.is_blocky() {
+            // Check if the request is beyond EOF
+            if base_blknum >= get_num_blocks(&blob_range) {
+                return Ok(PageReconstructResult::Missing(lsn));
             }
-            ImageType::NonBlocky => {
-                ensure!(base_blknum == 0);
-                inner
-                    .book
-                    .as_ref()
-                    .unwrap()
-                    .read_chapter(NONBLOCKY_IMAGE_CHAPTER)?
-                    .into_vec()
-            }
+
+            let mut buf = vec![0u8; BLOCK_SIZE];
+
+            let block_offset = BLOCK_SIZE as u64 * base_blknum as u64;
+            assert!(block_offset + BLOCK_SIZE as u64 <= blob_range.size as u64);
+
+            let offset = blob_range.offset + block_offset;
+
+            chapter.read_exact_at(&mut buf, offset)?;
+
+            buf
+        } else {
+            ensure!(base_blknum == 0);
+            read_blob(&chapter, &blob_range)?
         };
 
         reconstruct_data.page_img = Some(Bytes::from(buf));
@@ -196,11 +197,14 @@ impl Layer for ImageLayer {
 
     /// Get size of the segment
     fn get_seg_size(&self, _lsn: Lsn) -> Result<u32> {
-        let inner = self.load()?;
-        match inner.image_type {
-            ImageType::Blocky { num_blocks } => Ok(num_blocks),
-            ImageType::NonBlocky => Err(anyhow!("get_seg_size called for non-blocky segment")),
+        if !self.seg.rel.is_blocky() {
+            bail!("get_seg_size called for non-blocky segment");
         }
+
+        let inner = self.load()?;
+
+        let blob_range = inner.get_seg_blob_range(self.seg)?;
+        Ok(get_num_blocks(&blob_range))
     }
 
     /// Does this segment exist at given LSN?
@@ -235,15 +239,11 @@ impl Layer for ImageLayer {
 
         let inner = self.load()?;
 
-        match inner.image_type {
-            ImageType::Blocky { num_blocks } => println!("({}) blocks ", num_blocks),
-            ImageType::NonBlocky => {
-                let chapter = inner
-                    .book
-                    .as_ref()
-                    .unwrap()
-                    .read_chapter(NONBLOCKY_IMAGE_CHAPTER)?;
-                println!("non-blocky ({} bytes)", chapter.len());
+        for (seg, blob_range) in inner.meta.as_slice() {
+            if seg.rel.is_blocky() {
+                println!("{} ({}) blocks ", seg, get_num_blocks(blob_range));
+            } else {
+                println!("{} non-blocky ({} bytes)", seg, blob_range.size);
             }
         }
 
@@ -275,15 +275,7 @@ impl ImageLayer {
         lsn: Lsn,
         base_images: Vec<Bytes>,
     ) -> Result<ImageLayer> {
-        let image_type = if seg.rel.is_blocky() {
-            let num_blocks: u32 = base_images.len().try_into()?;
-            ImageType::Blocky { num_blocks }
-        } else {
-            assert_eq!(base_images.len(), 1);
-            ImageType::NonBlocky
-        };
-
-        let layer = ImageLayer {
+        let mut layer = ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
             tenantid,
@@ -291,10 +283,9 @@ impl ImageLayer {
             lsn,
             inner: Mutex::new(ImageLayerInner {
                 book: None,
-                image_type: image_type.clone(),
+                meta: VecMap::default(),
             }),
         };
-        let inner = layer.inner.lock().unwrap();
 
         // Write the images into a file
         //
@@ -309,21 +300,32 @@ impl ImageLayer {
         let buf_writer = BufWriter::new(file);
         let book = BookWriter::new(buf_writer, IMAGE_FILE_MAGIC)?;
 
-        let book = match &image_type {
-            ImageType::Blocky { .. } => {
-                let mut chapter = book.new_chapter(BLOCKY_IMAGES_CHAPTER);
-                for block_bytes in base_images {
-                    assert_eq!(block_bytes.len(), BLOCK_SIZE);
-                    chapter.write_all(&block_bytes)?;
-                }
-                chapter.close()?
+        let mut blob_chapter = book.new_chapter(BLOB_CHAPTER);
+
+        let size = if seg.rel.is_blocky() {
+            for block_bytes in &base_images {
+                assert_eq!(block_bytes.len(), BLOCK_SIZE);
+                blob_chapter.write_all(block_bytes)?;
             }
-            ImageType::NonBlocky => {
-                let mut chapter = book.new_chapter(NONBLOCKY_IMAGE_CHAPTER);
-                chapter.write_all(&base_images[0])?;
-                chapter.close()?
-            }
+            BLOCK_SIZE * base_images.len()
+        } else {
+            assert_eq!(base_images.len(), 1);
+            blob_chapter.write_all(&base_images[0])?;
+            base_images[0].len()
         };
+
+        let book = blob_chapter.close()?;
+
+        let inner = layer.inner.get_mut().unwrap();
+
+        inner
+            .meta
+            .append(seg, BlobRange { offset: 0, size })
+            .unwrap();
+
+        let mut meta_chapter = book.new_chapter(META_CHAPTER);
+        inner.meta.ser_into(&mut meta_chapter)?;
+        let book = meta_chapter.close()?;
 
         let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
         let summary = Summary {
@@ -341,8 +343,6 @@ impl ImageLayer {
         writer.get_ref().sync_all()?;
 
         trace!("saved {}", path.display());
-
-        drop(inner);
 
         Ok(layer)
     }
@@ -431,22 +431,13 @@ impl ImageLayer {
             }
         }
 
-        let image_type = if self.seg.rel.is_blocky() {
-            let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
-            let images_len = chapter.len();
-            ensure!(images_len % BLOCK_SIZE as u64 == 0);
-            let num_blocks: u32 = (images_len / BLOCK_SIZE as u64).try_into()?;
-            ImageType::Blocky { num_blocks }
-        } else {
-            let _chapter = book.chapter_reader(NONBLOCKY_IMAGE_CHAPTER)?;
-            ImageType::NonBlocky
-        };
+        let meta = VecMap::des(&book.read_chapter(META_CHAPTER)?)?;
 
         debug!("loaded from {}", &path.display());
 
         *inner = ImageLayerInner {
             book: Some(book),
-            image_type,
+            meta,
         };
 
         Ok(inner)
@@ -463,11 +454,11 @@ impl ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
             tenantid,
-            seg: filename.seg,
+            seg: filename.start_seg,
             lsn: filename.lsn,
             inner: Mutex::new(ImageLayerInner {
                 book: None,
-                image_type: ImageType::Blocky { num_blocks: 0 },
+                meta: VecMap::default(),
             }),
         }
     }
@@ -490,14 +481,18 @@ impl ImageLayer {
             lsn: summary.lsn,
             inner: Mutex::new(ImageLayerInner {
                 book: None,
-                image_type: ImageType::Blocky { num_blocks: 0 },
+                meta: VecMap::default(),
             }),
         })
     }
 
     fn layer_name(&self) -> ImageFileName {
         ImageFileName {
-            seg: self.seg,
+            start_seg: self.seg,
+            end_seg: SegmentTag {
+                rel: self.seg.rel,
+                segno: self.seg.segno + 1,
+            },
             lsn: self.lsn,
         }
     }
@@ -511,4 +506,10 @@ impl ImageLayer {
             &self.layer_name(),
         )
     }
+}
+
+/// Must only be called for blob ranges of blocky relishes.
+fn get_num_blocks(blob_range: &BlobRange) -> u32 {
+    assert_eq!(blob_range.size % BLOCK_SIZE, 0);
+    (blob_range.size / BLOCK_SIZE).try_into().unwrap()
 }

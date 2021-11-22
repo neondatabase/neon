@@ -106,7 +106,11 @@ impl Layer for InMemoryLayer {
         }
 
         let delta_filename = DeltaFileName {
-            seg: self.seg,
+            start_seg: self.seg,
+            end_seg: SegmentTag {
+                rel: self.seg.rel,
+                segno: self.seg.segno + 1,
+            },
             start_lsn: self.start_lsn,
             end_lsn,
             dropped: inner.dropped,
@@ -606,7 +610,7 @@ impl InMemoryLayer {
                 true,
                 &inner.page_versions,
                 None,
-                inner.segsizes.clone(),
+                inner.segsizes.as_slice(),
             )?;
             trace!(
                 "freeze: created delta layer for dropped segment {} {}-{}",
@@ -640,7 +644,7 @@ impl InMemoryLayer {
                 false,
                 &inner.page_versions,
                 Some(end_lsn_inclusive),
-                segsizes,
+                segsizes.as_slice(), // TODO avoid copy above
             )?;
             delta_layers.push(delta_layer);
             trace!(

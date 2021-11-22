@@ -5,7 +5,7 @@ use crate::layered_repository::storage_layer::SegmentTag;
 use crate::relish::*;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
-use std::fmt;
+use std::fmt::{self, Write};
 use std::fs;
 use std::path::PathBuf;
 
@@ -15,10 +15,109 @@ use zenith_utils::lsn::Lsn;
 
 use super::metadata::METADATA_FILE_NAME;
 
+fn parse_seg(input: &mut &str) -> Option<SegmentTag> {
+    let rel = if let Some(rest) = input.strip_prefix("rel_") {
+        let mut parts = rest.splitn(5, '_');
+        let rel = RelishTag::Relation(RelTag {
+            spcnode: parts.next()?.parse::<u32>().ok()?,
+            dbnode: parts.next()?.parse::<u32>().ok()?,
+            relnode: parts.next()?.parse::<u32>().ok()?,
+            forknum: parts.next()?.parse::<u8>().ok()?,
+        });
+        *input = parts.next()?;
+        debug_assert!(parts.next().is_none());
+        rel
+    } else if let Some(rest) = input.strip_prefix("pg_xact_") {
+        let (segno, rest) = rest.split_once('_')?;
+        *input = rest;
+        RelishTag::Slru {
+            slru: SlruKind::Clog,
+            segno: u32::from_str_radix(segno, 16).ok()?,
+        }
+    } else if let Some(rest) = input.strip_prefix("pg_multixact_members_") {
+        let (segno, rest) = rest.split_once('_')?;
+        *input = rest;
+        RelishTag::Slru {
+            slru: SlruKind::MultiXactMembers,
+            segno: u32::from_str_radix(segno, 16).ok()?,
+        }
+    } else if let Some(rest) = input.strip_prefix("pg_multixact_offsets_") {
+        let (segno, rest) = rest.split_once('_')?;
+        *input = rest;
+        RelishTag::Slru {
+            slru: SlruKind::MultiXactOffsets,
+            segno: u32::from_str_radix(segno, 16).ok()?,
+        }
+    } else if let Some(rest) = input.strip_prefix("pg_filenodemap_") {
+        let mut parts = rest.splitn(3, '_');
+        let rel = RelishTag::FileNodeMap {
+            spcnode: parts.next()?.parse::<u32>().ok()?,
+            dbnode: parts.next()?.parse::<u32>().ok()?,
+        };
+        *input = parts.next()?;
+        debug_assert!(parts.next().is_none());
+        rel
+    } else if let Some(rest) = input.strip_prefix("pg_twophase_") {
+        let (xid, rest) = rest.split_once('_')?;
+        *input = rest;
+        RelishTag::TwoPhase {
+            xid: xid.parse::<u32>().ok()?,
+        }
+    } else if let Some(rest) = input.strip_prefix("pg_control_checkpoint_") {
+        *input = rest;
+        RelishTag::Checkpoint
+    } else if let Some(rest) = input.strip_prefix("pg_control_") {
+        *input = rest;
+        RelishTag::ControlFile
+    } else {
+        return None;
+    };
+
+    let (segno, rest) = input.split_once('_')?;
+    *input = rest;
+
+    Some(SegmentTag {
+        rel,
+        segno: segno.parse().ok()?,
+    })
+}
+
+fn write_seg(seg: &SegmentTag) -> String {
+    let mut s = match seg.rel {
+        RelishTag::Relation(reltag) => format!(
+            "rel_{}_{}_{}_{}",
+            reltag.spcnode, reltag.dbnode, reltag.relnode, reltag.forknum
+        ),
+        RelishTag::Slru {
+            slru: SlruKind::Clog,
+            segno,
+        } => format!("pg_xact_{:04X}", segno),
+        RelishTag::Slru {
+            slru: SlruKind::MultiXactMembers,
+            segno,
+        } => format!("pg_multixact_members_{:04X}", segno),
+        RelishTag::Slru {
+            slru: SlruKind::MultiXactOffsets,
+            segno,
+        } => format!("pg_multixact_offsets_{:04X}", segno),
+        RelishTag::FileNodeMap { spcnode, dbnode } => {
+            format!("pg_filenodemap_{}_{}", spcnode, dbnode)
+        }
+        RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
+        RelishTag::Checkpoint => "pg_control_checkpoint".to_string(),
+        RelishTag::ControlFile => "pg_control".to_string(),
+    };
+
+    write!(&mut s, "_{}", seg.segno).unwrap();
+
+    s
+}
+
 // Note: LayeredTimeline::load_layer_map() relies on this sort order
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct DeltaFileName {
-    pub seg: SegmentTag,
+    pub start_seg: SegmentTag,
+    pub end_seg: SegmentTag,
     pub start_lsn: Lsn,
     pub end_lsn: Lsn,
     pub dropped: bool,
@@ -38,59 +137,12 @@ impl DeltaFileName {
     /// match the expected pattern.
     ///
     pub fn parse_str(fname: &str) -> Option<Self> {
-        let rel;
-        let mut parts;
-        if let Some(rest) = fname.strip_prefix("rel_") {
-            parts = rest.split('_');
-            rel = RelishTag::Relation(RelTag {
-                spcnode: parts.next()?.parse::<u32>().ok()?,
-                dbnode: parts.next()?.parse::<u32>().ok()?,
-                relnode: parts.next()?.parse::<u32>().ok()?,
-                forknum: parts.next()?.parse::<u8>().ok()?,
-            });
-        } else if let Some(rest) = fname.strip_prefix("pg_xact_") {
-            parts = rest.split('_');
-            rel = RelishTag::Slru {
-                slru: SlruKind::Clog,
-                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_multixact_members_") {
-            parts = rest.split('_');
-            rel = RelishTag::Slru {
-                slru: SlruKind::MultiXactMembers,
-                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_multixact_offsets_") {
-            parts = rest.split('_');
-            rel = RelishTag::Slru {
-                slru: SlruKind::MultiXactOffsets,
-                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_filenodemap_") {
-            parts = rest.split('_');
-            rel = RelishTag::FileNodeMap {
-                spcnode: parts.next()?.parse::<u32>().ok()?,
-                dbnode: parts.next()?.parse::<u32>().ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_twophase_") {
-            parts = rest.split('_');
-            rel = RelishTag::TwoPhase {
-                xid: parts.next()?.parse::<u32>().ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_control_checkpoint_") {
-            parts = rest.split('_');
-            rel = RelishTag::Checkpoint;
-        } else if let Some(rest) = fname.strip_prefix("pg_control_") {
-            parts = rest.split('_');
-            rel = RelishTag::ControlFile;
-        } else {
-            return None;
-        }
+        let mut rest = fname;
+        let start_seg = parse_seg(&mut rest)?;
+        let end_seg = parse_seg(&mut rest)?;
+        debug_assert!(start_seg < end_seg);
 
-        let segno = parts.next()?.parse::<u32>().ok()?;
-
-        let seg = SegmentTag { rel, segno };
-
+        let mut parts = rest.split('_');
         let start_lsn = Lsn::from_hex(parts.next()?).ok()?;
         let end_lsn = Lsn::from_hex(parts.next()?).ok()?;
 
@@ -107,7 +159,8 @@ impl DeltaFileName {
         }
 
         Some(DeltaFileName {
-            seg,
+            start_seg,
+            end_seg,
             start_lsn,
             end_lsn,
             dropped,
@@ -117,36 +170,14 @@ impl DeltaFileName {
 
 impl fmt::Display for DeltaFileName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let basename = match self.seg.rel {
-            RelishTag::Relation(reltag) => format!(
-                "rel_{}_{}_{}_{}",
-                reltag.spcnode, reltag.dbnode, reltag.relnode, reltag.forknum
-            ),
-            RelishTag::Slru {
-                slru: SlruKind::Clog,
-                segno,
-            } => format!("pg_xact_{:04X}", segno),
-            RelishTag::Slru {
-                slru: SlruKind::MultiXactMembers,
-                segno,
-            } => format!("pg_multixact_members_{:04X}", segno),
-            RelishTag::Slru {
-                slru: SlruKind::MultiXactOffsets,
-                segno,
-            } => format!("pg_multixact_offsets_{:04X}", segno),
-            RelishTag::FileNodeMap { spcnode, dbnode } => {
-                format!("pg_filenodemap_{}_{}", spcnode, dbnode)
-            }
-            RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
-            RelishTag::Checkpoint => "pg_control_checkpoint".to_string(),
-            RelishTag::ControlFile => "pg_control".to_string(),
-        };
+        let start_seg = write_seg(&self.start_seg);
+        let end_seg = write_seg(&self.end_seg);
 
         write!(
             f,
             "{}_{}_{:016X}_{:016X}{}",
-            basename,
-            self.seg.segno,
+            start_seg,
+            end_seg,
             u64::from(self.start_lsn),
             u64::from(self.end_lsn),
             if self.dropped { "_DROPPED" } else { "" }
@@ -156,7 +187,8 @@ impl fmt::Display for DeltaFileName {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct ImageFileName {
-    pub seg: SegmentTag,
+    pub start_seg: SegmentTag,
+    pub end_seg: SegmentTag,
     pub lsn: Lsn,
 }
 
@@ -171,103 +203,31 @@ impl ImageFileName {
     /// match the expected pattern.
     ///
     pub fn parse_str(fname: &str) -> Option<Self> {
-        let rel;
-        let mut parts;
-        if let Some(rest) = fname.strip_prefix("rel_") {
-            parts = rest.split('_');
-            rel = RelishTag::Relation(RelTag {
-                spcnode: parts.next()?.parse::<u32>().ok()?,
-                dbnode: parts.next()?.parse::<u32>().ok()?,
-                relnode: parts.next()?.parse::<u32>().ok()?,
-                forknum: parts.next()?.parse::<u8>().ok()?,
-            });
-        } else if let Some(rest) = fname.strip_prefix("pg_xact_") {
-            parts = rest.split('_');
-            rel = RelishTag::Slru {
-                slru: SlruKind::Clog,
-                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_multixact_members_") {
-            parts = rest.split('_');
-            rel = RelishTag::Slru {
-                slru: SlruKind::MultiXactMembers,
-                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_multixact_offsets_") {
-            parts = rest.split('_');
-            rel = RelishTag::Slru {
-                slru: SlruKind::MultiXactOffsets,
-                segno: u32::from_str_radix(parts.next()?, 16).ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_filenodemap_") {
-            parts = rest.split('_');
-            rel = RelishTag::FileNodeMap {
-                spcnode: parts.next()?.parse::<u32>().ok()?,
-                dbnode: parts.next()?.parse::<u32>().ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_twophase_") {
-            parts = rest.split('_');
-            rel = RelishTag::TwoPhase {
-                xid: parts.next()?.parse::<u32>().ok()?,
-            };
-        } else if let Some(rest) = fname.strip_prefix("pg_control_checkpoint_") {
-            parts = rest.split('_');
-            rel = RelishTag::Checkpoint;
-        } else if let Some(rest) = fname.strip_prefix("pg_control_") {
-            parts = rest.split('_');
-            rel = RelishTag::ControlFile;
-        } else {
+        let mut rest = fname;
+        let start_seg = parse_seg(&mut rest)?;
+        let end_seg = parse_seg(&mut rest)?;
+        debug_assert!(start_seg < end_seg);
+
+        if rest.contains('_') {
             return None;
         }
 
-        let segno = parts.next()?.parse::<u32>().ok()?;
+        let lsn = Lsn::from_hex(rest).ok()?;
 
-        let seg = SegmentTag { rel, segno };
-
-        let lsn = Lsn::from_hex(parts.next()?).ok()?;
-
-        if parts.next().is_some() {
-            return None;
-        }
-
-        Some(ImageFileName { seg, lsn })
+        Some(ImageFileName {
+            start_seg,
+            end_seg,
+            lsn,
+        })
     }
 }
 
 impl fmt::Display for ImageFileName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let basename = match self.seg.rel {
-            RelishTag::Relation(reltag) => format!(
-                "rel_{}_{}_{}_{}",
-                reltag.spcnode, reltag.dbnode, reltag.relnode, reltag.forknum
-            ),
-            RelishTag::Slru {
-                slru: SlruKind::Clog,
-                segno,
-            } => format!("pg_xact_{:04X}", segno),
-            RelishTag::Slru {
-                slru: SlruKind::MultiXactMembers,
-                segno,
-            } => format!("pg_multixact_members_{:04X}", segno),
-            RelishTag::Slru {
-                slru: SlruKind::MultiXactOffsets,
-                segno,
-            } => format!("pg_multixact_offsets_{:04X}", segno),
-            RelishTag::FileNodeMap { spcnode, dbnode } => {
-                format!("pg_filenodemap_{}_{}", spcnode, dbnode)
-            }
-            RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
-            RelishTag::Checkpoint => "pg_control_checkpoint".to_string(),
-            RelishTag::ControlFile => "pg_control".to_string(),
-        };
+        let start_seg = write_seg(&self.start_seg);
+        let end_seg = write_seg(&self.end_seg);
 
-        write!(
-            f,
-            "{}_{}_{:016X}",
-            basename,
-            self.seg.segno,
-            u64::from(self.lsn),
-        )
+        write!(f, "{}_{}_{:016X}", start_seg, end_seg, u64::from(self.lsn),)
     }
 }
 

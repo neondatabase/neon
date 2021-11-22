@@ -119,16 +119,16 @@ impl From<&DeltaLayer> for Summary {
 pub struct DeltaLayer {
     path_or_conf: PathOrConf,
 
-    pub tenantid: ZTenantId,
-    pub timelineid: ZTimelineId,
-    pub seg: SegmentTag,
+    tenantid: ZTenantId,
+    timelineid: ZTimelineId,
+    seg: SegmentTag,
 
     //
     // This entry contains all the changes from 'start_lsn' to 'end_lsn'. The
     // start is inclusive, and end is exclusive.
     //
-    pub start_lsn: Lsn,
-    pub end_lsn: Lsn,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
 
     dropped: bool,
 
@@ -144,17 +144,15 @@ pub struct DeltaLayerInner {
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
-    page_version_metas: VecMap<(u32, Lsn), BlobRange>,
+    page_version_metas: VecMap<(SegmentTag, u32, Lsn), BlobRange>,
 
     /// `relsizes` tracks the size of the relation at different points in time.
-    relsizes: VecMap<Lsn, u32>,
+    relsizes: VecMap<(SegmentTag, Lsn), u32>,
 }
 
 impl DeltaLayerInner {
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
-        let slice = self
-            .relsizes
-            .slice_range((Included(&Lsn(0)), Included(&lsn)));
+    fn get_seg_size(&self, seg: SegmentTag, lsn: Lsn) -> Result<u32> {
+        let slice = self.relsizes.slice_range((seg, Lsn(0))..=(seg, lsn));
         if let Some((_entry_lsn, entry)) = slice.last() {
             Ok(*entry)
         } else {
@@ -221,14 +219,14 @@ impl Layer for DeltaLayer {
                 .chapter_reader(PAGE_VERSIONS_CHAPTER)?;
 
             // Scan the metadata BTreeMap backwards, starting from the given entry.
-            let minkey = (blknum, Lsn(0));
-            let maxkey = (blknum, lsn);
+            let minkey = (self.seg, blknum, Lsn(0));
+            let maxkey = (self.seg, blknum, lsn);
             let iter = inner
                 .page_version_metas
                 .slice_range((Included(&minkey), Included(&maxkey)))
                 .iter()
                 .rev();
-            for ((_blknum, pv_lsn), blob_range) in iter {
+            for ((_seg, _blknum, pv_lsn), blob_range) in iter {
                 match &cached_img_lsn {
                     Some(cached_lsn) if pv_lsn <= cached_lsn => {
                         return Ok(PageReconstructResult::Cached)
@@ -261,7 +259,7 @@ impl Layer for DeltaLayer {
             if need_image
                 && reconstruct_data.records.is_empty()
                 && self.seg.rel.is_blocky()
-                && blknum - self.seg.segno * RELISH_SEG_SIZE >= inner.get_seg_size(lsn)?
+                && blknum - self.seg.segno * RELISH_SEG_SIZE >= inner.get_seg_size(self.seg, lsn)?
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -288,7 +286,7 @@ impl Layer for DeltaLayer {
 
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
-        inner.get_seg_size(lsn)
+        inner.get_seg_size(self.seg, lsn)
     }
 
     /// Does this segment exist at given LSN?
@@ -342,8 +340,8 @@ impl Layer for DeltaLayer {
 
         println!("--- relsizes ---");
         let inner = self.load()?;
-        for (k, v) in inner.relsizes.as_slice() {
-            println!("  {}: {}", k, v);
+        for ((seg, lsn), v) in inner.relsizes.as_slice() {
+            println!("  {}@{}: {}", seg, lsn, v);
         }
         println!("--- page versions ---");
 
@@ -352,11 +350,13 @@ impl Layer for DeltaLayer {
         let book = Book::new(file)?;
 
         let chapter = book.chapter_reader(PAGE_VERSIONS_CHAPTER)?;
-        for ((blk, lsn), blob_range) in inner.page_version_metas.as_slice() {
+        for ((seg, blk, lsn), blob_range) in inner.page_version_metas.as_slice() {
             let mut desc = String::new();
 
             let buf = read_blob(&chapter, blob_range)?;
             let pv = PageVersion::des(&buf)?;
+
+            write!(&mut desc, "{}", seg)?;
 
             match pv {
                 PageVersion::Page(img) => {
@@ -414,11 +414,19 @@ impl DeltaLayer {
         dropped: bool,
         page_versions: &PageVersions,
         cutoff: Option<Lsn>,
-        relsizes: VecMap<Lsn, u32>,
+        relsizes: &[(Lsn, u32)],
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
             assert!(!relsizes.is_empty());
         }
+
+        let relsizes = {
+            let mut m = VecMap::default();
+            for &(lsn, size) in relsizes {
+                m.append((seg, lsn), size).unwrap();
+            }
+            m
+        };
 
         let delta_layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -459,7 +467,7 @@ impl DeltaLayer {
 
             inner
                 .page_version_metas
-                .append((blknum, lsn), blob_range)
+                .append((seg, blknum, lsn), blob_range)
                 .unwrap();
         }
 
@@ -573,7 +581,7 @@ impl DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
             timelineid,
             tenantid,
-            seg: filename.seg,
+            seg: filename.start_seg,
             start_lsn: filename.start_lsn,
             end_lsn: filename.end_lsn,
             dropped: filename.dropped,
@@ -615,7 +623,11 @@ impl DeltaLayer {
 
     fn layer_name(&self) -> DeltaFileName {
         DeltaFileName {
-            seg: self.seg,
+            start_seg: self.seg,
+            end_seg: SegmentTag {
+                rel: self.seg.rel,
+                segno: self.seg.segno + 1,
+            },
             start_lsn: self.start_lsn,
             end_lsn: self.end_lsn,
             dropped: self.dropped,

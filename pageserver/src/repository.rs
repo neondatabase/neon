@@ -993,12 +993,17 @@ mod tests {
         let tline_dir = harness.conf.timeline_path(&TIMELINE_ID, &harness.tenant_id);
 
         let expected_image_layer_path = tline_dir.join(format!(
-            "rel_{}_{}_{}_{}_{}_{:016X}_{:016X}",
+            "rel_{}_{}_{}_{}_{}_rel_{}_{}_{}_{}_{}_{:016X}_{:016X}",
             TESTREL_A_REL_TAG.spcnode,
             TESTREL_A_REL_TAG.dbnode,
             TESTREL_A_REL_TAG.relnode,
             TESTREL_A_REL_TAG.forknum,
             0, // seg is 0
+            TESTREL_A_REL_TAG.spcnode,
+            TESTREL_A_REL_TAG.dbnode,
+            TESTREL_A_REL_TAG.relnode,
+            TESTREL_A_REL_TAG.forknum,
+            1, // end seg is 1
             0x20,
             0x30,
         ));
@@ -1146,13 +1151,13 @@ mod tests {
         // These files are considered to be in the future and will be renamed out
         // of the way
         let future_filenames = vec![
-            format!("pg_control_0_{:016X}", 0x8001),
-            format!("pg_control_0_{:016X}_{:016X}", 0x8001, 0x8008),
+            format!("pg_control_0_pg_control_1_{:016X}", 0x8001),
+            format!("pg_control_0_pg_control_1_{:016X}_{:016X}", 0x8001, 0x8008),
         ];
         // But these are not:
         let past_filenames = vec![
-            format!("pg_control_0_{:016X}", 0x8000),
-            format!("pg_control_0_{:016X}_{:016X}", 0x7000, 0x8001),
+            format!("pg_control_0_pg_control_1_{:016X}", 0x8000),
+            format!("pg_control_0_pg_control_1_{:016X}_{:016X}", 0x7000, 0x8001),
         ];
 
         for filename in future_filenames.iter().chain(past_filenames.iter()) {
