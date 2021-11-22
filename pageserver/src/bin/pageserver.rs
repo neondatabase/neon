@@ -123,7 +123,7 @@ impl CfgFileParams {
             listen_http_addr: self.listen_http_addr.or(other.listen_http_addr),
             checkpoint_distance: self.checkpoint_distance.or(other.checkpoint_distance),
             checkpoint_period: self.checkpoint_period.or(other.checkpoint_period),
-	    reconstruct_threshold: self.reconstruct_threshold.or(other.reconstruct_threshold),
+            reconstruct_threshold: self.reconstruct_threshold.or(other.reconstruct_threshold),
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
             pg_distrib_dir: self.pg_distrib_dir.or(other.pg_distrib_dir),
@@ -244,7 +244,7 @@ impl CfgFileParams {
             listen_http_addr,
             checkpoint_distance,
             checkpoint_period,
-	    reconstruct_threshold,
+            reconstruct_threshold,
             gc_horizon,
             gc_period,
 

@@ -152,7 +152,7 @@ impl PageServerConf {
             daemonize: false,
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
             checkpoint_period: Duration::from_secs(10),
-	    reconstruct_threshold: defaults::DEFAULT_RECONSTRUCT_THRESHOLD,
+            reconstruct_threshold: defaults::DEFAULT_RECONSTRUCT_THRESHOLD,
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),

@@ -10,7 +10,7 @@ use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Value};
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
-//const CACHE_SIZE: usize = 128 * 1024; // 1Gb
+                                     //const CACHE_SIZE: usize = 128 * 1024; // 1Gb
 
 ///
 /// Toast storage consistof two KV databases: one for storing main index
@@ -128,7 +128,7 @@ impl ToastStore {
                 &path.join("pageserver.db"),
                 StorageConfig {
                     cache_size: CACHE_SIZE,
-		    nosync: false,
+                    nosync: false,
                 },
             )?,
             commit_lsn: Lsn(0),
@@ -174,7 +174,7 @@ impl ToastStore {
     pub fn commit(&mut self, commit_lsn: Lsn) -> Result<()> {
         let mut tx = self.db.start_transaction();
         tx.commit()?;
-	self.commit_lsn = commit_lsn;
+        self.commit_lsn = commit_lsn;
         Ok(())
     }
 

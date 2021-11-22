@@ -1897,7 +1897,7 @@ impl<'a> BufferedTimelineWriter<'a> {
             */
         }
         if store.data.commit_lsn + self.tl.conf.checkpoint_distance < lsn {
-	    store.data.commit(lsn)?;
+            store.data.commit(lsn)?;
             self.tl.disk_consistent_lsn.store(lsn);
         }
         Ok(())
@@ -2000,11 +2000,9 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
     ///
     fn checkpoint(&self) -> Result<()> {
         let mut store = self.tl.store.write().unwrap();
-	let lsn = self.tl.get_last_record_lsn();
+        let lsn = self.tl.get_last_record_lsn();
         store.data.commit(lsn)?;
-        self.tl
-            .disk_consistent_lsn
-            .store(lsn);
+        self.tl.disk_consistent_lsn.store(lsn);
         Ok(())
     }
 
