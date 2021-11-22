@@ -33,11 +33,13 @@ pub mod defaults {
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
     // Minimal size of WAL records chain to trigger materialization of the page
-    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 0;
-    pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(1);
+    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
+    pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(10);
+
+    pub const DEFAULT_RECONSTRUCT_THRESHOLD: u64 = 0;
 
     pub const DEFAULT_GC_HORIZON: u64 = 1024;
-    pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(1);
+    pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(10);
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
     pub const DEFAULT_RELISH_STORAGE_MAX_CONCURRENT_SYNC_LIMITS: usize = 100;
@@ -64,6 +66,7 @@ pub struct PageServerConf {
     // page server crashes.
     pub checkpoint_distance: u64,
     pub checkpoint_period: Duration,
+    pub reconstruct_threshold: u64,
 
     pub gc_horizon: u64,
     pub gc_period: Duration,
@@ -149,6 +152,7 @@ impl PageServerConf {
             daemonize: false,
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
             checkpoint_period: Duration::from_secs(10),
+	    reconstruct_threshold: defaults::DEFAULT_RECONSTRUCT_THRESHOLD,
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),

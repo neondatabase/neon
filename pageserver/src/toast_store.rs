@@ -4,13 +4,13 @@ use std::convert::TryInto;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 use tracing::*;
+use zenith_utils::lsn::Lsn;
+
 use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Value};
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
-const CHECKPOINT_INTERVAL: u64 = 1u64 * 1024 * 1024 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
-const COMMIT_THRESHOLD: usize = CACHE_SIZE / 2;
-const WAL_FLUSH_THRESHOLD: u32 = 128; // 1Mb
+//const CACHE_SIZE: usize = 128 * 1024; // 1Gb
 
 ///
 /// Toast storage consistof two KV databases: one for storing main index
@@ -20,7 +20,7 @@ const WAL_FLUSH_THRESHOLD: u32 = 128; // 1Mb
 ///
 pub struct ToastStore {
     db: Storage,         // key-value database
-    pub committed: bool, // last transaction was committed (not delayed)
+    pub commit_lsn: Lsn, // LSN of last committed transaction
 }
 
 pub struct ToastIterator<'a> {
@@ -126,14 +126,12 @@ impl ToastStore {
         Ok(ToastStore {
             db: Storage::open(
                 &path.join("pageserver.db"),
-                Some(&path.join("pageserver.log")),
                 StorageConfig {
                     cache_size: CACHE_SIZE,
-                    checkpoint_interval: CHECKPOINT_INTERVAL,
-                    wal_flush_threshold: WAL_FLUSH_THRESHOLD,
+		    nosync: false,
                 },
             )?,
-            committed: false,
+            commit_lsn: Lsn(0),
         })
     }
 
@@ -141,7 +139,6 @@ impl ToastStore {
         let mut tx = self.db.start_transaction();
         let value_len = value.len();
         let mut key = key.clone();
-        self.committed = false;
         if value_len >= TOAST_SEGMENT_SIZE {
             let compressed_data = lz4_flex::compress_prepend_size(value);
             let compressed_data_len = compressed_data.len();
@@ -170,18 +167,14 @@ impl ToastStore {
             key.extend_from_slice(&[0u8; 4]);
             tx.put(&key, value)?;
         }
-        if tx.get_cache_info().pinned > COMMIT_THRESHOLD {
-            tx.commit()?;
-            self.committed = true;
-        } else {
-            tx.delay()?;
-        }
+        tx.delay()?;
         Ok(())
     }
 
-    pub fn checkpoint(&self) -> Result<()> {
+    pub fn commit(&mut self, commit_lsn: Lsn) -> Result<()> {
         let mut tx = self.db.start_transaction();
         tx.commit()?;
+	self.commit_lsn = commit_lsn;
         Ok(())
     }
 
@@ -228,7 +221,6 @@ impl ToastStore {
         min_key.extend_from_slice(&[0u8; 4]);
         max_key.extend_from_slice(&[0xFFu8; 4]);
         let mut iter = tx.range(&min_key..&max_key);
-        self.committed = false;
         if let Some(entry) = iter.next() {
             let mut key = entry?.0.clone();
             let key_len = key.len();
@@ -243,12 +235,7 @@ impl ToastStore {
                 tx.remove(&key)?;
             }
         }
-        if tx.get_cache_info().pinned > COMMIT_THRESHOLD {
-            tx.commit()?;
-            self.committed = true;
-        } else {
-            tx.delay()?;
-        }
+        tx.delay()?;
         Ok(())
     }
 }

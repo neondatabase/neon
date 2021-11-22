@@ -400,8 +400,6 @@ impl BufferedRepository {
             std::thread::sleep(conf.checkpoint_period);
             info!("checkpointer thread for tenant {} waking up", self.tenantid);
 
-            // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
-            // bytes of WAL since last checkpoint.
             {
                 let timelines: Vec<(ZTimelineId, Arc<BufferedTimeline>)> = self
                     .timelines
@@ -419,7 +417,7 @@ impl BufferedRepository {
                     STORAGE_TIME
                         .with_label_values(&["checkpoint_timed"])
                         .observe_closure_duration(|| {
-                            timeline.checkpoint_internal(conf.checkpoint_distance, false)
+                            timeline.checkpoint_internal(conf.reconstruct_threshold, false)
                         })?
                 }
                 // release lock on 'timelines'
@@ -933,7 +931,7 @@ impl Timeline for BufferedTimeline {
     fn checkpoint(&self) -> Result<()> {
         STORAGE_TIME
             .with_label_values(&["checkpoint_force"])
-            //pass checkpoint_distance=0 to force checkpoint
+            //pass resonstruct_threshold=0 to force page materialization
             .observe_closure_duration(|| self.checkpoint_internal(0, true))
     }
 
@@ -1375,12 +1373,12 @@ impl BufferedTimeline {
     /// Matrialize last page versions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    /// checkpoint_interval is used to measure total length of applied WAL records.
+    /// reconstruct_threshold is used to measure total length of applied WAL records.
     /// It can be used to prevent to frequent materialization of page. We can avoid store materialized page if history of changes is not so long
     /// and can be fast replayed. Alternatively we can measure interval from last version LSN:
     /// it will enforce materialization of "stabilized" pages. But there is a risk that permanently updated page will never be materialized.
     ///
-    fn checkpoint_internal(&self, checkpoint_distance: u64, _forced: bool) -> Result<()> {
+    fn checkpoint_internal(&self, reconstruct_threshold: u64, _forced: bool) -> Result<()> {
         // From boundary is constant and till boundary is changed at each iteration.
         let from = StoreKey::Data(DataKey {
             rel: RelishTag::Relation(ZERO_TAG),
@@ -1485,7 +1483,7 @@ impl BufferedTimeline {
                         drop(iter);
                         drop(store);
                         // See comment above. May be we should also enforce here checkpointing of too old versions.
-                        if history_len as u64 >= checkpoint_distance {
+                        if history_len as u64 >= reconstruct_threshold {
                             let img = RECONSTRUCT_TIME.observe_closure_duration(|| {
                                 self.reconstruct_page(dk.rel, dk.blknum, dk.lsn, data)
                             });
@@ -1898,8 +1896,9 @@ impl<'a> BufferedTimelineWriter<'a> {
                         }
             */
         }
-        if store.data.committed {
-            self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
+        if store.data.commit_lsn + self.tl.conf.checkpoint_distance < lsn {
+	    store.data.commit(lsn)?;
+            self.tl.disk_consistent_lsn.store(lsn);
         }
         Ok(())
     }
@@ -1981,9 +1980,6 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
             size: Some(relsize),
         };
         store.data.put(&mk.ser()?, &mv.ser()?)?;
-        if store.data.committed {
-            self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
-        }
         Ok(())
     }
 
@@ -1996,10 +1992,6 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         let mk = StoreKey::Metadata(MetadataKey { rel, lsn });
         let mv = MetadataValue { size: None }; // None indicates dropped relation
         store.data.put(&mk.ser()?, &mv.ser()?)?;
-
-        if store.data.committed {
-            self.tl.disk_consistent_lsn.store(lsn); // each update is flushed to the disk
-        }
         Ok(())
     }
 
@@ -2007,11 +1999,12 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
     /// Complete all delayed commits and advance disk_consistent_lsn
     ///
     fn checkpoint(&self) -> Result<()> {
-        let store = self.tl.store.write().unwrap();
-        store.data.checkpoint()?;
+        let mut store = self.tl.store.write().unwrap();
+	let lsn = self.tl.get_last_record_lsn();
+        store.data.commit(lsn)?;
         self.tl
             .disk_consistent_lsn
-            .store(self.tl.get_last_record_lsn());
+            .store(lsn);
         Ok(())
     }
 
