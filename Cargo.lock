@@ -2572,6 +2572,8 @@ checksum = "b07db065a5cf61a7e4ba64f29e67db906fb1787316516c4e6e5ff0fea1efcd8a"
 [[package]]
 name = "yakv"
 version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ae1ec7c67193f20a10b113492c57f097c34958d5bdc3c974a65361559aa21d9"
 dependencies = [
  "anyhow",
  "fs2",

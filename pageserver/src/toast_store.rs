@@ -3,7 +3,6 @@ use lz4_flex;
 use std::convert::TryInto;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
-use tracing::*;
 use zenith_utils::lsn::Lsn;
 
 use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Value};
@@ -32,7 +31,7 @@ impl<'a> Iterator for ToastIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let mut toast: Option<Vec<u8>> = None;
         let mut next_segno = 0u16;
-        while let Some(elem) = self.iter.next() {
+        for elem in &mut self.iter {
             if let Ok((key, value)) = elem {
                 let key_len = key.len();
                 let n_segments =
@@ -73,7 +72,7 @@ impl<'a> DoubleEndedIterator for ToastIterator<'a> {
         let mut next_segno = 0u16;
         while let Some(elem) = self.iter.next_back() {
             if let Ok((key, value)) = elem {
-                assert!(value.len() != 0);
+                assert!(!value.is_empty());
                 let key_len = key.len();
                 let n_segments =
                     u16::from_be_bytes(key[key_len - 4..key_len - 2].try_into().unwrap());
@@ -95,10 +94,7 @@ impl<'a> DoubleEndedIterator for ToastIterator<'a> {
                     next_segno = segno;
                     if next_segno == 0 {
                         let toast = toast.unwrap();
-                        if toast.len() == 0 {
-                            warn!("n_segments={}", n_segments);
-                        }
-                        assert!(toast.len() != 0);
+                        assert!(!toast.is_empty());
                         let res = lz4_flex::decompress_size_prepended(&toast);
                         return Some(if let Ok(decompressed_data) = res {
                             Ok((key, decompressed_data))
@@ -135,10 +131,11 @@ impl ToastStore {
         })
     }
 
-    pub fn put(&mut self, key: &Key, value: &Value) -> Result<()> {
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let mut tx = self.db.start_transaction();
         let value_len = value.len();
-        let mut key = key.clone();
+        let mut key = key.to_vec();
+	let value = &value.to_vec();
         if value_len >= TOAST_SEGMENT_SIZE {
             let compressed_data = lz4_flex::compress_prepend_size(value);
             let compressed_data_len = compressed_data.len();
@@ -214,15 +211,15 @@ impl ToastStore {
         }
     }
 
-    pub fn remove(&mut self, key: &Key) -> Result<()> {
+    pub fn remove(&mut self, key: &[u8]) -> Result<()> {
         let mut tx = self.db.start_transaction();
-        let mut min_key = key.clone();
-        let mut max_key = key.clone();
+        let mut min_key = key.to_vec();
+        let mut max_key = key.to_vec();
         min_key.extend_from_slice(&[0u8; 4]);
         max_key.extend_from_slice(&[0xFFu8; 4]);
         let mut iter = tx.range(&min_key..&max_key);
         if let Some(entry) = iter.next() {
-            let mut key = entry?.0.clone();
+            let mut key = entry?.0;
             let key_len = key.len();
             let n_segments = u16::from_be_bytes(key[key_len - 4..key_len - 2].try_into().unwrap());
             if n_segments != 0 {

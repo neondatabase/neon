@@ -300,7 +300,7 @@ impl BufferedRepository {
     fn get_buffered_timeline(&self, timelineid: ZTimelineId) -> Result<Arc<BufferedTimeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
-        Ok(self.get_timeline_locked(timelineid, &mut timelines)?)
+        self.get_timeline_locked(timelineid, &mut timelines)
     }
 
     // Implementation of the public `get_timeline` function. This differs from the public
@@ -406,7 +406,7 @@ impl BufferedRepository {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|pair| (pair.0.clone(), pair.1.clone()))
+                    .map(|pair| (*pair.0, pair.1.clone()))
                     .collect();
                 //let timelines = self.timelines.lock().unwrap();
                 for (timelineid, timeline) in timelines.iter() {
@@ -954,9 +954,9 @@ impl Timeline for BufferedTimeline {
         let mut dropped: HashSet<RelishTag> = HashSet::new();
         let store = self.store.read().unwrap();
         'meta: loop {
-            let mut iter = store.data.range(&from.ser()?..);
+            let iter = store.data.range(&from.ser()?..);
 
-            while let Some(entry) = iter.next() {
+            for entry in iter {
                 let pair = entry?;
                 if let StoreKey::Metadata(dk) = StoreKey::des(&pair.0)? {
                     // processing metadata
@@ -1006,8 +1006,8 @@ impl Timeline for BufferedTimeline {
         let mut from_blknum = 0;
         let mut page_versions: Vec<(u32, Lsn, PageVersion)> = Vec::new();
         'pages: loop {
-            let mut iter = store.data.range(&from.ser()?..);
-            while let Some(entry) = iter.next() {
+            let iter = store.data.range(&from.ser()?..);
+            for entry in iter {
                 let pair = entry?;
                 if let StoreKey::Data(dk) = StoreKey::des(&pair.0)? {
                     let same_seg = from_rel == dk.rel
@@ -1586,11 +1586,11 @@ impl BufferedTimeline {
 
         'meta: loop {
             let store = self.store.read().unwrap();
-            let mut iter = store.data.range(&from.ser()?..);
+            let iter = store.data.range(&from.ser()?..);
             // We can not remove deteriorated version immediately, we need to check first that successor exists
             let mut last_key: Option<yakv::storage::Key> = None;
 
-            while let Some(entry) = iter.next() {
+            for entry in iter {
                 let pair = entry?;
                 let raw_key = pair.0;
                 let key = StoreKey::des(&raw_key)?;
@@ -1665,9 +1665,9 @@ impl BufferedTimeline {
         let mut from_blknum = 0;
         'pages: loop {
             let store = self.store.read().unwrap();
-            let mut iter = store.data.range(&from.ser()?..);
+            let iter = store.data.range(&from.ser()?..);
             deteriorated.clear();
-            while let Some(entry) = iter.next() {
+            for entry in iter {
                 let pair = entry?;
                 let raw_key = pair.0;
                 let key = StoreKey::des(&raw_key)?;
