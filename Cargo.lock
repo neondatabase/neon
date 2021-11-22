@@ -1421,9 +1421,11 @@ name = "proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.13.0",
  "bytes",
  "clap",
  "hex",
+ "hmac 0.10.1",
  "lazy_static",
  "md5",
  "parking_lot",
@@ -1432,6 +1434,8 @@ dependencies = [
  "rustls 0.19.1",
  "serde",
  "serde_json",
+ "sha2",
+ "thiserror",
  "tokio",
  "tokio-postgres",
  "zenith_utils",

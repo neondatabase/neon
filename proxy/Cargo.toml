@@ -8,18 +8,22 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.13.0"
 bytes = { version = "1.0.1", features = ['serde'] }
+clap = "2.33.0"
+hex = "0.4.3"
+hmac = "0.10.1"
 lazy_static = "1.4.0"
 md5 = "0.7.0"
-rand = "0.8.3"
-hex = "0.4.3"
 parking_lot = "0.11.2"
+rand = "0.8.3"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rustls = "0.19.1"
 serde = "1"
 serde_json = "1"
-tokio = { version = "1.11", features = ["macros"] }
+sha2 = "0.9.8"
+thiserror = "1.0.30"
+tokio = { version = "1.11", features = ['macros'] }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
-clap = "2.33.0"
-rustls = "0.19.1"
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 zenith_utils = { path = "../zenith_utils" }

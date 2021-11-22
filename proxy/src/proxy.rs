@@ -1,3 +1,4 @@
+use crate::auth::{self, AuthStream};
 use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
 use anyhow::{anyhow, bail};
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::{io, thread};
 use tokio_postgres::NoTls;
-use zenith_utils::postgres_backend::{self, PostgresBackend, ProtoState, Stream};
+use zenith_utils::postgres_backend::{self, PostgresBackend, Stream};
 use zenith_utils::pq_proto::{BeMessage as Be, FeMessage as Fe, *};
 use zenith_utils::sock_split::{ReadStream, WriteStream};
 
@@ -211,40 +212,34 @@ impl ProxyConnection {
         }
     }
 
-    fn handle_existing_user(&mut self, user: &str, db: &str) -> anyhow::Result<DatabaseInfo> {
-        let md5_salt = rand::random::<[u8; 4]>();
+    fn handle_existing_user(&mut self, _user: &str, _db: &str) -> anyhow::Result<DatabaseInfo> {
+        let _cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
 
-        // Ask password
-        self.pgb
-            .write_message(&Be::AuthenticationMD5Password(&md5_salt))?;
-        self.pgb.state = ProtoState::Authentication; // XXX
+        // TODO: fetch secret from console
+        // user='user' password='password'
+        let secret = crate::scram::ScramSecret::parse(
+            &[
+                "SCRAM-SHA-256",
+                "4096:XiWzgkfGNyY3ipsz08PY+A==",
+                &[
+                    "YMmirZHYtTB6erVDCxL4Zjn66Kn7RCfS+aV3qROV4o8=",
+                    "aCSKHnugk1l9Ut6VhO5VeeWsB8xhVdPk/NyEgjOJ3nk=",
+                ]
+                .join(":"),
+            ]
+            .join("$"),
+        )
+        .unwrap();
 
-        // Check password
-        let msg = match self.pgb.read_message()? {
-            Some(Fe::PasswordMessage(msg)) => msg,
-            None => bail!("connection is lost"),
-            bad => bail!("unexpected message type: {:?}", bad),
-        };
-        println!("got message: {:?}", msg);
-
-        let (_trailing_null, md5_response) = msg
-            .split_last()
-            .ok_or_else(|| anyhow!("unexpected password message"))?;
-
-        let cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
-        let db_info = cplane.authenticate_proxy_request(
-            user,
-            db,
-            md5_response,
-            &md5_salt,
-            &self.psql_session_id,
-        )?;
+        AuthStream::new(&mut self.pgb)
+            .begin(auth::Scram(&secret))?
+            .authenticate()?;
 
         self.pgb
             .write_message_noflush(&Be::AuthenticationOk)?
             .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
-        Ok(db_info)
+        todo!()
     }
 
     fn handle_new_user(&mut self) -> anyhow::Result<DatabaseInfo> {

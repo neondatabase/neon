@@ -373,9 +373,8 @@ impl PostgresBackend {
                             }
                             AuthType::MD5 => {
                                 rand::thread_rng().fill(&mut self.md5_salt);
-                                let md5_salt = self.md5_salt;
                                 self.write_message(&BeMessage::AuthenticationMD5Password(
-                                    &md5_salt,
+                                    self.md5_salt,
                                 ))?;
                                 self.state = ProtoState::Authentication;
                             }

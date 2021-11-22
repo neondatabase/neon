@@ -11,9 +11,13 @@ use state::{ProxyConfig, ProxyState};
 use std::thread;
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
+mod auth;
 mod cplane_api;
 mod mgmt;
+mod parse;
 mod proxy;
+mod sasl;
+mod scram;
 mod state;
 mod waiters;
 
