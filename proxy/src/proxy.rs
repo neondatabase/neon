@@ -119,7 +119,6 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     // We can't perform TLS handshake without a config
                     let enc = tls.is_some();
                     stream.write_message(&Be::EncryptionResponse(enc)).await?;
-
                     if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.

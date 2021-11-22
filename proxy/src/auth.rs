@@ -1,13 +1,18 @@
+mod credentials;
+mod flow;
+
 use crate::compute::DatabaseInfo;
 use crate::config::ProxyConfig;
 use crate::cplane_api::{self, CPlaneApi};
 use crate::error::UserFacingError;
 use crate::stream::PqStream;
-use crate::waiters;
-use std::collections::HashMap;
+use crate::{sasl, waiters};
+use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use zenith_utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
+
+pub use credentials::ClientCredentials;
 
 /// Common authentication error.
 #[derive(Debug, Error)]
@@ -16,13 +21,16 @@ pub enum AuthErrorImpl {
     #[error(transparent)]
     Console(#[from] cplane_api::AuthError),
 
+    #[error(transparent)]
+    Sasl(#[from] sasl::SaslError),
+
     /// For passwords that couldn't be processed by [`parse_password`].
     #[error("Malformed password message")]
     MalformedPassword,
 
     /// Errors produced by [`PqStream`].
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 }
 
 impl AuthErrorImpl {
@@ -67,70 +75,6 @@ impl UserFacingError for AuthError {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum ClientCredsParseError {
-    #[error("Parameter `{0}` is missing in startup packet")]
-    MissingKey(&'static str),
-}
-
-impl UserFacingError for ClientCredsParseError {}
-
-/// Various client credentials which we use for authentication.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClientCredentials {
-    pub user: String,
-    pub dbname: String,
-}
-
-impl TryFrom<HashMap<String, String>> for ClientCredentials {
-    type Error = ClientCredsParseError;
-
-    fn try_from(mut value: HashMap<String, String>) -> Result<Self, Self::Error> {
-        let mut get_param = |key| {
-            value
-                .remove(key)
-                .ok_or(ClientCredsParseError::MissingKey(key))
-        };
-
-        let user = get_param("user")?;
-        let db = get_param("database")?;
-
-        Ok(Self { user, dbname: db })
-    }
-}
-
-impl ClientCredentials {
-    /// Use credentials to authenticate the user.
-    pub async fn authenticate(
-        self,
-        config: &ProxyConfig,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> Result<DatabaseInfo, AuthError> {
-        fail::fail_point!("proxy-authenticate", |_| {
-            Err(AuthError::auth_failed("failpoint triggered"))
-        });
-
-        use crate::config::ClientAuthMethod::*;
-        use crate::config::RouterConfig::*;
-        match &config.router_config {
-            Static { host, port } => handle_static(host.clone(), *port, client, self).await,
-            Dynamic(Mixed) => {
-                if self.user.ends_with("@zenith") {
-                    handle_existing_user(config, client, self).await
-                } else {
-                    handle_new_user(config, client).await
-                }
-            }
-            Dynamic(Password) => handle_existing_user(config, client, self).await,
-            Dynamic(Link) => handle_new_user(config, client).await,
-        }
-    }
-}
-
-fn new_psql_session_id() -> String {
-    hex::encode(rand::random::<[u8; 8]>())
-}
-
 async fn handle_static(
     host: String,
     port: u16,
@@ -169,7 +113,7 @@ async fn handle_existing_user(
     let md5_salt = rand::random();
 
     client
-        .write_message(&Be::AuthenticationMD5Password(&md5_salt))
+        .write_message(&Be::AuthenticationMD5Password(md5_salt))
         .await?;
 
     // Read client's password hash
@@ -211,6 +155,10 @@ async fn handle_new_user(
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
     Ok(db_info)
+}
+
+fn new_psql_session_id() -> String {
+    hex::encode(rand::random::<[u8; 8]>())
 }
 
 fn parse_password(bytes: &[u8]) -> Option<&str> {

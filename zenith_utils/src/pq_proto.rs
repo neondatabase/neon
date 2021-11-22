@@ -401,7 +401,8 @@ fn read_null_terminated(buf: &mut Bytes) -> anyhow::Result<Bytes> {
 #[derive(Debug)]
 pub enum BeMessage<'a> {
     AuthenticationOk,
-    AuthenticationMD5Password(&'a [u8; 4]),
+    AuthenticationMD5Password([u8; 4]),
+    AuthenticationSasl(BeAuthenticationSaslMessage<'a>),
     AuthenticationCleartextPassword,
     BackendKeyData(CancelKeyData),
     BindComplete,
@@ -427,6 +428,13 @@ pub enum BeMessage<'a> {
     XLogData(XLogDataBody<'a>),
     NoticeResponse(&'a str),
     KeepAlive(WalSndKeepAlive),
+}
+
+#[derive(Debug)]
+pub enum BeAuthenticationSaslMessage<'a> {
+    Methods(&'a [&'a str]),
+    Continue(&'a [u8]),
+    Final(&'a [u8]),
 }
 
 #[derive(Debug)]
@@ -609,6 +617,32 @@ impl<'a> BeMessage<'a> {
                     Ok::<_, io::Error>(())
                 })
                 .unwrap(); // write into BytesMut can't fail
+            }
+
+            BeMessage::AuthenticationSasl(msg) => {
+                buf.put_u8(b'R');
+                write_body(buf, |buf| {
+                    use BeAuthenticationSaslMessage::*;
+                    match msg {
+                        Methods(methods) => {
+                            buf.put_i32(10); // Specifies that SASL auth method is used.
+                            for method in methods.iter() {
+                                write_cstr(method.as_bytes(), buf)?;
+                            }
+                            buf.put_u8(0); // zero terminator for the list
+                        }
+                        Continue(extra) => {
+                            buf.put_i32(11); // Continue SASL auth.
+                            buf.put_slice(extra);
+                        }
+                        Final(extra) => {
+                            buf.put_i32(12); // Send final SASL message.
+                            buf.put_slice(extra);
+                        }
+                    }
+                    Ok::<_, io::Error>(())
+                })
+                .unwrap()
             }
 
             BeMessage::BackendKeyData(key_data) => {
