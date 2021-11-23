@@ -131,13 +131,12 @@ impl ToastStore {
         })
     }
 
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put(&mut self, key: Key, value: Value) -> Result<()> {
         let mut tx = self.db.start_transaction();
         let value_len = value.len();
-        let mut key = key.to_vec();
-	let value = &value.to_vec();
+        let mut key = key;
         if value_len >= TOAST_SEGMENT_SIZE {
-            let compressed_data = lz4_flex::compress_prepend_size(value);
+            let compressed_data = lz4_flex::compress_prepend_size(&value);
             let compressed_data_len = compressed_data.len();
             let mut offs: usize = 0;
             let mut segno = 0u16;
@@ -162,7 +161,7 @@ impl ToastStore {
             }
         } else {
             key.extend_from_slice(&[0u8; 4]);
-            tx.put(&key, value)?;
+            tx.put(&key, &value)?;
         }
         tx.delay()?;
         Ok(())
@@ -211,10 +210,10 @@ impl ToastStore {
         }
     }
 
-    pub fn remove(&mut self, key: &[u8]) -> Result<()> {
+    pub fn remove(&mut self, key: Key) -> Result<()> {
         let mut tx = self.db.start_transaction();
-        let mut min_key = key.to_vec();
-        let mut max_key = key.to_vec();
+        let mut min_key = key.clone();
+        let mut max_key = key;
         min_key.extend_from_slice(&[0u8; 4]);
         max_key.extend_from_slice(&[0xFFu8; 4]);
         let mut iter = tx.range(&min_key..&max_key);

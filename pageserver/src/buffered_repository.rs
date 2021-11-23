@@ -1489,7 +1489,7 @@ impl BufferedTimeline {
                             });
 
                             let mut store = self.store.write().unwrap();
-                            store.data.put(&key, &PageVersion::Page(img?).ser()?)?;
+                            store.data.put(key, PageVersion::Page(img?).ser()?)?;
                             n_checkpointed_records += 1;
                         }
                     }
@@ -1615,7 +1615,7 @@ impl BufferedTimeline {
                                 // then drop previus version as it is not needed any more
                                 drop(store);
                                 let mut store = self.store.write().unwrap();
-                                store.data.remove(&prev_key)?;
+                                store.data.remove(prev_key)?;
                                 result.meta_removed += 1;
                                 // We should reset iterator and start from the current point
                                 continue 'meta;
@@ -1626,7 +1626,7 @@ impl BufferedTimeline {
                             // object was dropped, so we can immediately remove deteriorated version
                             drop(store);
                             let mut store = self.store.write().unwrap();
-                            store.data.remove(&raw_key)?;
+                            store.data.remove(raw_key)?;
                             dropped.insert(dk.rel);
                             result.meta_dropped += 1;
                             // We should reset iterator and start from the current point
@@ -1658,15 +1658,13 @@ impl BufferedTimeline {
             lsn: Lsn(0),
         });
 
-        // Array to accumulate keys we can remove.
-        // Place it outside main loop to reduce number of dynamic memory allocations
-        let mut deteriorated: Vec<yakv::storage::Key> = Vec::new();
         // currently proceed block number
         let mut from_blknum = 0;
         'pages: loop {
             let store = self.store.read().unwrap();
             let iter = store.data.range(&from.ser()?..);
-            deteriorated.clear();
+            // Array to accumulate keys we can remove.
+            let mut deteriorated: Vec<yakv::storage::Key> = Vec::new();
             for entry in iter {
                 let pair = entry?;
                 let raw_key = pair.0;
@@ -1718,10 +1716,10 @@ impl BufferedTimeline {
                                     // ... then remove all previously accumulated deltas and images, as them are not needed any more
                                     drop(store);
                                     let mut store = self.store.write().unwrap();
-                                    for key in deteriorated.iter() {
+                                    result.pages_removed += deteriorated.len() as u64;
+                                    for key in deteriorated {
                                         store.data.remove(key)?;
                                     }
-                                    result.pages_removed += deteriorated.len() as u64;
                                     // We should reset iterator and start from the current point
                                     continue 'pages;
                                 }
@@ -1737,7 +1735,7 @@ impl BufferedTimeline {
                             drop(store);
                             let mut store = self.store.write().unwrap();
                             // We should reset iterator and start from the current point
-                            store.data.remove(&raw_key)?;
+                            store.data.remove(raw_key)?;
                             result.pages_dropped += 1;
                             continue 'pages;
                         }
@@ -1856,7 +1854,7 @@ impl<'a> BufferedTimelineWriter<'a> {
         ensure!(lsn.is_aligned(), "unaligned record LSN");
         let key = StoreKey::Data(DataKey { rel, blknum, lsn });
         let mut store = self.tl.store.write().unwrap();
-        store.data.put(&key.ser()?, &ver.ser()?)?;
+        store.data.put(key.ser()?, ver.ser()?)?;
         store.brin.insert(
             BrinTag {
                 rel,
@@ -1880,7 +1878,7 @@ impl<'a> BufferedTimelineWriter<'a> {
             let mv = MetadataValue {
                 size: Some(blknum + 1),
             };
-            store.data.put(&mk.ser()?, &mv.ser()?)?;
+            store.data.put(mk.ser()?, mv.ser()?)?;
             /* Looks like we do not need to explicitly fill gap, because we in any case have to handle situation when
              * page in accessed before been wal logged
                         //  Fill gap with zero pages
@@ -1979,7 +1977,7 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         let mv = MetadataValue {
             size: Some(relsize),
         };
-        store.data.put(&mk.ser()?, &mv.ser()?)?;
+        store.data.put(mk.ser()?, mv.ser()?)?;
         Ok(())
     }
 
@@ -1991,7 +1989,7 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         meta_hash.remove(&rel);
         let mk = StoreKey::Metadata(MetadataKey { rel, lsn });
         let mv = MetadataValue { size: None }; // None indicates dropped relation
-        store.data.put(&mk.ser()?, &mv.ser()?)?;
+        store.data.put(mk.ser()?, mv.ser()?)?;
         Ok(())
     }
 
