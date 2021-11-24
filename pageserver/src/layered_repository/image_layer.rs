@@ -258,6 +258,7 @@ impl ImageLayer {
         seg: SegmentTag,
         lsn: Lsn,
         base_images: Vec<Bytes>,
+        nosync: bool,
     ) -> Result<ImageLayer> {
         let image_type = if seg.rel.is_blocky() {
             let num_blocks: u32 = base_images.len().try_into()?;
@@ -317,8 +318,9 @@ impl ImageLayer {
 
         // This flushes the underlying 'buf_writer'.
         let writer = book.close()?;
-        writer.get_ref().sync_all()?;
-
+        if !nosync {
+            writer.get_ref().sync_all()?;
+        }
         trace!("saved {}", path.display());
 
         drop(inner);

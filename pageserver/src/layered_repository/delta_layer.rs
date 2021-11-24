@@ -379,6 +379,7 @@ impl DeltaLayer {
         dropped: bool,
         page_versions: impl Iterator<Item = (u32, Lsn, &'a PageVersion)>,
         relsizes: VecMap<Lsn, u32>,
+        nosync: bool,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
             assert!(!relsizes.is_empty());
@@ -451,8 +452,9 @@ impl DeltaLayer {
 
         // This flushes the underlying 'buf_writer'.
         let writer = book.close()?;
-        writer.get_ref().sync_all()?;
-
+        if !nosync {
+            writer.get_ref().sync_all()?;
+        }
         trace!("saved {}", &path.display());
 
         drop(inner);

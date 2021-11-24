@@ -62,6 +62,7 @@ fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
 
 struct TenantHandleEntry {
     checkpointer_handle: Option<JoinHandle<()>>,
+    uploader_handle: Option<JoinHandle<()>>,
     gc_handle: Option<JoinHandle<()>>,
 }
 
@@ -107,11 +108,13 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
 
     let checkpointer_handle = BufferedRepository::launch_checkpointer_thread(conf, repo.clone());
     let gc_handle = BufferedRepository::launch_gc_thread(conf, repo.clone());
+    let uploader_handle = BufferedRepository::launch_upload_thread(conf, repo.clone());
 
     let mut handles = TENANT_HANDLES.lock().unwrap();
     let h = TenantHandleEntry {
         checkpointer_handle: Some(checkpointer_handle),
         gc_handle: Some(gc_handle),
+        uploader_handle: Some(uploader_handle),
     };
 
     handles.insert(tenant_id, h);
@@ -170,6 +173,8 @@ pub fn stop_tenant_threads(tenantid: ZTenantId) {
     if let Some(h) = handles.get_mut(&tenantid) {
         h.checkpointer_handle.take().map(JoinHandle::join);
         debug!("checkpointer for tenant {} has stopped", tenantid);
+        h.uploader_handle.take().map(JoinHandle::join);
+        debug!("uploader for tenant {} has stopped", tenantid);
         h.gc_handle.take().map(JoinHandle::join);
         debug!("gc for tenant {} has stopped", tenantid);
     }

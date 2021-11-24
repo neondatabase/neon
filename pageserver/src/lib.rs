@@ -36,6 +36,9 @@ pub mod defaults {
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
     pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(10);
 
+    pub const DEFAULT_UPLOAD_DISTANCE: u64 = 1024 * 1024 * 1024;
+    pub const DEFAULT_UPLOAD_PERIOD: Duration = Duration::from_secs(250);
+
     pub const DEFAULT_RECONSTRUCT_THRESHOLD: u64 = 0;
 
     pub const DEFAULT_GC_HORIZON: u64 = 1024;
@@ -66,6 +69,8 @@ pub struct PageServerConf {
     // page server crashes.
     pub checkpoint_distance: u64,
     pub checkpoint_period: Duration,
+    pub upload_period: Duration,
+    pub upload_distance: u64,
     pub reconstruct_threshold: u64,
 
     pub gc_horizon: u64,
@@ -152,6 +157,8 @@ impl PageServerConf {
             daemonize: false,
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
             checkpoint_period: Duration::from_secs(10),
+            upload_distance: defaults::DEFAULT_UPLOAD_DISTANCE,
+            upload_period: defaults::DEFAULT_UPLOAD_PERIOD,
             reconstruct_threshold: defaults::DEFAULT_RECONSTRUCT_THRESHOLD,
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),

@@ -42,6 +42,8 @@ struct CfgFileParams {
     listen_http_addr: Option<String>,
     checkpoint_distance: Option<String>,
     checkpoint_period: Option<String>,
+    upload_distance: Option<String>,
+    upload_period: Option<String>,
     reconstruct_threshold: Option<String>,
     gc_horizon: Option<String>,
     gc_period: Option<String>,
@@ -104,6 +106,8 @@ impl CfgFileParams {
             listen_http_addr: get_arg("listen-http"),
             checkpoint_distance: get_arg("checkpoint_distance"),
             checkpoint_period: get_arg("checkpoint_period"),
+            upload_distance: get_arg("upload_distance"),
+            upload_period: get_arg("upload_period"),
             reconstruct_threshold: get_arg("reconstruct_threshold"),
             gc_horizon: get_arg("gc_horizon"),
             gc_period: get_arg("gc_period"),
@@ -123,6 +127,8 @@ impl CfgFileParams {
             listen_http_addr: self.listen_http_addr.or(other.listen_http_addr),
             checkpoint_distance: self.checkpoint_distance.or(other.checkpoint_distance),
             checkpoint_period: self.checkpoint_period.or(other.checkpoint_period),
+            upload_distance: self.upload_distance.or(other.upload_distance),
+            upload_period: self.upload_period.or(other.upload_period),
             reconstruct_threshold: self.reconstruct_threshold.or(other.reconstruct_threshold),
             gc_horizon: self.gc_horizon.or(other.gc_horizon),
             gc_period: self.gc_period.or(other.gc_period),
@@ -159,6 +165,15 @@ impl CfgFileParams {
         let checkpoint_period = match self.checkpoint_period.as_ref() {
             Some(checkpoint_period_str) => humantime::parse_duration(checkpoint_period_str)?,
             None => DEFAULT_CHECKPOINT_PERIOD,
+        };
+
+        let upload_distance: u64 = match self.upload_distance.as_ref() {
+            Some(upload_distance_str) => upload_distance_str.parse()?,
+            None => DEFAULT_UPLOAD_DISTANCE,
+        };
+        let upload_period = match self.upload_period.as_ref() {
+            Some(upload_period_str) => humantime::parse_duration(upload_period_str)?,
+            None => DEFAULT_UPLOAD_PERIOD,
         };
 
         let reconstruct_threshold: u64 = match self.reconstruct_threshold.as_ref() {
@@ -244,6 +259,8 @@ impl CfgFileParams {
             listen_http_addr,
             checkpoint_distance,
             checkpoint_period,
+            upload_distance,
+            upload_period,
             reconstruct_threshold,
             gc_horizon,
             gc_period,
@@ -304,6 +321,18 @@ fn main() -> Result<()> {
                 .long("checkpoint_period")
                 .takes_value(true)
                 .help("Interval between checkpoint iterations"),
+        )
+        .arg(
+            Arg::with_name("checkpoint_distance")
+                .long("checkpoint_distance")
+                .takes_value(true)
+                .help("Distance from current LSN to perform checkpoint of in-memory layers"),
+        )
+        .arg(
+            Arg::with_name("upload_period")
+                .long("upload_period")
+                .takes_value(true)
+                .help("Interval between upload iterations"),
         )
         .arg(
             Arg::with_name("reconstruct_threshold")
@@ -615,6 +644,8 @@ mod tests {
             listen_http_addr: Some("listen_http_addr_VALUE".to_string()),
             checkpoint_distance: Some("checkpoint_distance_VALUE".to_string()),
             checkpoint_period: Some("checkpoint_period_VALUE".to_string()),
+            upload_distance: Some("upload_distance_VALUE".to_string()),
+            upload_period: Some("upload_period_VALUE".to_string()),
             reconstruct_threshold: Some("reconstruct_threshold_VALUE".to_string()),
             gc_horizon: Some("gc_horizon_VALUE".to_string()),
             gc_period: Some("gc_period_VALUE".to_string()),
@@ -639,6 +670,8 @@ mod tests {
 listen_http_addr = 'listen_http_addr_VALUE'
 checkpoint_distance = 'checkpoint_distance_VALUE'
 checkpoint_period = 'checkpoint_period_VALUE'
+upload_distance = 'upload_distance_VALUE'
+upload_period = 'upload_period_VALUE'
 reconstruct_threshold = 'reconstruct_threshold_VALUE'
 gc_horizon = 'gc_horizon_VALUE'
 gc_period = 'gc_period_VALUE'
@@ -674,6 +707,8 @@ local_path = 'relish_storage_local_VALUE'
             listen_http_addr: Some("listen_http_addr_VALUE".to_string()),
             checkpoint_distance: Some("checkpoint_distance_VALUE".to_string()),
             checkpoint_period: Some("checkpoint_period_VALUE".to_string()),
+            upload_distance: Some("upload_distance_VALUE".to_string()),
+            upload_period: Some("upload_period_VALUE".to_string()),
             reconstruct_threshold: Some("reconstruct_threshold_VALUE".to_string()),
             gc_horizon: Some("gc_horizon_VALUE".to_string()),
             gc_period: Some("gc_period_VALUE".to_string()),
@@ -701,6 +736,8 @@ local_path = 'relish_storage_local_VALUE'
 listen_http_addr = 'listen_http_addr_VALUE'
 checkpoint_distance = 'checkpoint_distance_VALUE'
 checkpoint_period = 'checkpoint_period_VALUE'
+upload_distance = 'upload_distance_VALUE'
+upload_period = 'upload_period_VALUE'
 reconstruct_threshold = 'reconstruct_threshold_VALUE'
 gc_horizon = 'gc_horizon_VALUE'
 gc_period = 'gc_period_VALUE'

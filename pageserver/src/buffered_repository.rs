@@ -428,6 +428,53 @@ impl BufferedRepository {
     }
 
     ///
+    /// Launch the S3 uppload thread in given repository.
+    ///
+    pub fn launch_upload_thread(
+        conf: &'static PageServerConf,
+        rc: Arc<BufferedRepository>,
+    ) -> JoinHandle<()> {
+        std::thread::Builder::new()
+            .name("Upload thread".into())
+            .spawn(move || {
+                // FIXME: relaunch it? Panic is not good.
+                rc.upload_loop(conf).expect("Checkpointer thread died");
+            })
+            .unwrap()
+    }
+
+    ///
+    /// Upload thread's main loop
+    ///
+    fn upload_loop(&self, conf: &'static PageServerConf) -> Result<()> {
+        while !tenant_mgr::shutdown_requested() {
+            std::thread::sleep(conf.upload_period);
+            info!("upload thread for tenant {} waking up", self.tenantid);
+
+            {
+                let timelines: Vec<(ZTimelineId, Arc<BufferedTimeline>)> = self
+                    .timelines
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|pair| (*pair.0, pair.1.clone()))
+                    .collect();
+                for (timelineid, timeline) in timelines.iter() {
+                    let _entered =
+                        info_span!("upload", timeline = %timelineid, tenant = %self.tenantid)
+                            .entered();
+
+                    STORAGE_TIME
+                        .with_label_values(&["upload_timed"])
+                        .observe_closure_duration(|| timeline.upload_internal())?
+                }
+            }
+        }
+        trace!("Upload thread shut down");
+        Ok(())
+    }
+
+    ///
     /// Launch the GC thread in given repository.
     ///
     pub fn launch_gc_thread(
@@ -1001,9 +1048,11 @@ impl Timeline for BufferedTimeline {
             blknum: 0,
             lsn: Lsn(0),
         });
+        let nosync = true;
 
         // currently proceed block number
         let mut from_blknum = 0;
+        let mut last_lsn = Lsn(0);
         let mut page_versions: Vec<(u32, Lsn, PageVersion)> = Vec::new();
         'pages: loop {
             let iter = store.data.range(&from.ser()?..);
@@ -1011,7 +1060,7 @@ impl Timeline for BufferedTimeline {
                 let pair = entry?;
                 if let StoreKey::Data(dk) = StoreKey::des(&pair.0)? {
                     let same_seg = from_rel == dk.rel
-                        && dk.blknum / RELISH_SEG_SIZE < from_blknum / RELISH_SEG_SIZE;
+                        && dk.blknum / RELISH_SEG_SIZE == from_blknum / RELISH_SEG_SIZE;
                     if !same_seg && from_rel != zero_rel {
                         let is_dropped = dropped.contains(&from_rel);
                         let segtag = SegmentTag::from_blknum(from_rel, from_blknum);
@@ -1026,8 +1075,10 @@ impl Timeline for BufferedTimeline {
                                 is_dropped,
                                 page_versions.iter().map(|t| (t.0, t.1, &t.2)),
                                 relsizes[&from_rel].clone(),
+                                nosync,
                             )?;
                             page_versions.clear();
+                            last_lsn = Lsn(0);
                         }
                         if !is_dropped {
                             let mut images: Vec<Bytes> =
@@ -1048,6 +1099,7 @@ impl Timeline for BufferedTimeline {
                                     segtag,
                                     end_lsn,
                                     images,
+                                    nosync,
                                 )?;
                             }
                         }
@@ -1060,7 +1112,7 @@ impl Timeline for BufferedTimeline {
                             blknum: from_blknum,
                             lsn: start_lsn,
                         });
-                    } else if dk.lsn >= start_lsn {
+                    } else if dk.lsn >= end_lsn {
                         from_blknum += 1;
                         from = StoreKey::Data(DataKey {
                             rel: from_rel,
@@ -1068,7 +1120,10 @@ impl Timeline for BufferedTimeline {
                             lsn: start_lsn,
                         });
                     } else {
-                        page_versions.push((dk.blknum, dk.lsn, PageVersion::des(&pair.1)?));
+                        if dk.lsn != last_lsn {
+                            last_lsn = dk.lsn;
+                            page_versions.push((dk.blknum, dk.lsn, PageVersion::des(&pair.1)?));
+                        }
                         continue;
                     }
                     continue 'pages;
@@ -1092,6 +1147,7 @@ impl Timeline for BufferedTimeline {
                     is_dropped,
                     page_versions.iter().map(|t| (t.0, t.1, &t.2)),
                     relsizes[&from_rel].clone(),
+                    nosync,
                 )?;
             }
             if !is_dropped {
@@ -1112,6 +1168,7 @@ impl Timeline for BufferedTimeline {
                         segtag,
                         end_lsn,
                         images,
+                        nosync,
                     )?;
                 }
             }
@@ -1367,6 +1424,52 @@ impl BufferedTimeline {
             }
         }
         Ok(result)
+    }
+
+    ///
+    /// Upload materialized page versions to S3
+    ///
+    fn upload_internal(&self) -> Result<()> {
+        /*
+        // TODO: remember LSN of previos backup
+        let start_lsn = Lsn(0);
+        let end_lsn = self.get_last_record_lsn();
+        if start_lsn + self.conf.upload_distance < end_lsn {
+            self.export_timeline(start_lsn, end_lsn)?;
+        }
+        Ok(())
+         */
+        self.make_snapshot()
+    }
+
+    fn make_snapshot(&self) -> Result<()> {
+        let store = self.store.read().unwrap();
+        let now = Instant::now();
+        if let Some(meta_hash) = &store.meta {
+            let lsn = self.get_last_record_lsn();
+            for (rel, snap) in meta_hash.iter() {
+                let rel_size = snap.size;
+                for segno in 0..(rel_size + RELISH_SEG_SIZE - 1) / RELISH_SEG_SIZE {
+                    let first_blknum = segno * RELISH_SEG_SIZE;
+                    let last_blknum = u32::min(first_blknum + RELISH_SEG_SIZE, rel_size);
+                    let images: Result<Vec<Bytes>> = (first_blknum..last_blknum)
+                        .map(|blknum| self.get_page_at_lsn(*rel, blknum, lsn))
+                        .collect();
+                    let segtag = SegmentTag::from_blknum(*rel, first_blknum);
+                    ImageLayer::create(
+                        self.conf,
+                        self.timelineid,
+                        self.tenantid,
+                        segtag,
+                        lsn,
+                        images?,
+                        true,
+                    )?;
+                }
+            }
+        }
+        info!("Make snapshot in {:?}", now.elapsed());
+        Ok(())
     }
 
     ///
