@@ -85,24 +85,24 @@ impl CfgFileParams {
             arg_matches.value_of(arg_name).map(str::to_owned)
         };
 
-        let remote_storage = if let Some(local_path) = get_arg("relish-storage-local-path") {
+        let remote_storage = if let Some(local_path) = get_arg("remote-storage-local-path") {
             Some(RemoteStorage::Local { local_path })
         } else if let Some((bucket_name, bucket_region)) =
-            get_arg("relish-storage-s3-bucket").zip(get_arg("relish-storage-region"))
+            get_arg("remote-storage-s3-bucket").zip(get_arg("remote-storage-region"))
         {
             Some(RemoteStorage::AwsS3 {
                 bucket_name,
                 bucket_region,
-                access_key_id: get_arg("relish-storage-access-key"),
-                secret_access_key: get_arg("relish-storage-secret-access-key"),
+                access_key_id: get_arg("remote-storage-access-key"),
+                secret_access_key: get_arg("remote-storage-secret-access-key"),
             })
         } else {
             None
         };
 
         Self {
-            listen_pg_addr: get_arg("listen-pg"),
-            listen_http_addr: get_arg("listen-http"),
+            listen_pg_addr: get_arg("listen_pg_addr"),
+            listen_http_addr: get_arg("listen_http_addr"),
             checkpoint_distance: get_arg("checkpoint_distance"),
             checkpoint_period: get_arg("checkpoint_period"),
             gc_horizon: get_arg("gc_horizon"),
@@ -114,7 +114,7 @@ impl CfgFileParams {
             auth_validation_public_key_path: get_arg("auth-validation-public-key-path"),
             auth_type: get_arg("auth-type"),
             remote_storage,
-            remote_storage_max_concurrent_sync: get_arg("relish-storage-max-concurrent-sync"),
+            remote_storage_max_concurrent_sync: get_arg("remote-storage-max-concurrent-sync"),
         }
     }
 
@@ -282,17 +282,17 @@ fn main() -> Result<()> {
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("listen-pg")
+            Arg::with_name("listen_pg_addr")
                 .short("l")
-                .long("listen-pg")
-                .alias("listen") // keep some compatibility
+                .long("listen_pg_addr")
+                .aliases(&["listen", "listen-pg"]) // keep some compatibility
                 .takes_value(true)
                 .help(formatcp!("listen for incoming page requests on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
         )
         .arg(
-            Arg::with_name("listen-http")
-                .long("listen-http")
-                .alias("http_endpoint") // keep some compatibility
+            Arg::with_name("listen_http_addr")
+                .long("listen_http_addr")
+                .aliases(&["http_endpoint", "listen-http"]) // keep some compatibility
                 .takes_value(true)
                 .help(formatcp!("http endpoint address for metrics and management API calls on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
@@ -385,45 +385,45 @@ fn main() -> Result<()> {
                 .help("Authentication scheme type. One of: Trust, MD5, ZenithJWT"),
         )
         .arg(
-            Arg::with_name("relish-storage-local-path")
-                .long("relish-storage-local-path")
+            Arg::with_name("remote-storage-local-path")
+                .long("remote-storage-local-path")
                 .takes_value(true)
-                .help("Path to the local directory, to be used as an external relish storage")
+                .help("Path to the local directory, to be used as an external remote storage")
                 .conflicts_with_all(&[
-                    "relish-storage-s3-bucket",
-                    "relish-storage-region",
-                    "relish-storage-access-key",
-                    "relish-storage-secret-access-key",
+                    "remote-storage-s3-bucket",
+                    "remote-storage-region",
+                    "remote-storage-access-key",
+                    "remote-storage-secret-access-key",
                 ]),
         )
         .arg(
-            Arg::with_name("relish-storage-s3-bucket")
-                .long("relish-storage-s3-bucket")
+            Arg::with_name("remote-storage-s3-bucket")
+                .long("remote-storage-s3-bucket")
                 .takes_value(true)
-                .help("Name of the AWS S3 bucket to use an external relish storage")
-                .requires("relish-storage-region"),
+                .help("Name of the AWS S3 bucket to use an external remote storage")
+                .requires("remote-storage-region"),
         )
         .arg(
-            Arg::with_name("relish-storage-region")
-                .long("relish-storage-region")
+            Arg::with_name("remote-storage-region")
+                .long("remote-storage-region")
                 .takes_value(true)
                 .help("Region of the AWS S3 bucket"),
         )
         .arg(
-            Arg::with_name("relish-storage-access-key")
-                .long("relish-storage-access-key")
+            Arg::with_name("remote-storage-access-key")
+                .long("remote-storage-access-key")
                 .takes_value(true)
                 .help("Credentials to access the AWS S3 bucket"),
         )
         .arg(
-            Arg::with_name("relish-storage-secret-access-key")
-                .long("relish-storage-secret-access-key")
+            Arg::with_name("remote-storage-secret-access-key")
+                .long("remote-storage-secret-access-key")
                 .takes_value(true)
                 .help("Credentials to access the AWS S3 bucket"),
         )
         .arg(
-            Arg::with_name("relish-storage-max-concurrent-sync")
-                .long("relish-storage-max-concurrent-sync")
+            Arg::with_name("remote-storage-max-concurrent-sync")
+                .long("remote-storage-max-concurrent-sync")
                 .takes_value(true)
                 .help("Maximum allowed concurrent synchronisations with storage"),
         )
