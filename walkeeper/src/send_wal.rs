@@ -46,6 +46,7 @@ impl postgres_backend::Handler for SendWalHandler {
         if let Some(app_name) = sm.params.get("application_name") {
             self.appname = Some(app_name.clone());
         }
+
         Ok(())
     }
 
@@ -75,7 +76,17 @@ impl postgres_backend::Handler for SendWalHandler {
         } else if query_string.starts_with(b"START_REPLICATION") {
             ReplicationConn::new(pgb).run(self, pgb, &query_string)?;
         } else if query_string.starts_with(b"START_WAL_PUSH") {
-            ReceiveWalConn::new(pgb)
+            // TODO: this repeats query decoding logic from page_service so it is probably
+            // a good idea to refactor it in pgbackend and pass string to process query instead of bytes
+            let decoded_query_string = match query_string.last() {
+                Some(0) => std::str::from_utf8(&query_string[..query_string.len() - 1])?,
+                _ => std::str::from_utf8(&query_string)?,
+            };
+            let pageserver_connstr = decoded_query_string
+                .split_whitespace()
+                .nth(1)
+                .map(|s| s.to_owned());
+            ReceiveWalConn::new(pgb, pageserver_connstr)
                 .run(self)
                 .with_context(|| "failed to run ReceiveWalConn")?;
         } else if query_string.starts_with(b"JSON_CTRL") {
