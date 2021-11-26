@@ -15,13 +15,11 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use zenith_utils::http::error::HttpErrorBody;
-use zenith_utils::postgres_backend::AuthType;
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::read_pidfile;
 use crate::storage::PageServerNode;
 use zenith_utils::connstring::connection_address;
-use zenith_utils::connstring::connection_host_port;
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
@@ -116,17 +114,6 @@ impl SafekeeperNode {
         );
         io::stdout().flush().unwrap();
 
-        // Configure connection to page server
-        //
-        // FIXME: We extract the host and port from the connection string instead of using
-        // the connection string directly, because the 'safekeeper' binary expects
-        // host:port format. That's a bit silly when we already have a full libpq connection
-        // string at hand.
-        let pageserver_conn = {
-            let (host, port) = connection_host_port(&self.pageserver.pg_connection_config);
-            format!("{}:{}", host, port)
-        };
-
         let listen_pg = format!("localhost:{}", self.conf.pg_port);
         let listen_http = format!("localhost:{}", self.conf.http_port);
 
@@ -134,17 +121,12 @@ impl SafekeeperNode {
         cmd.args(&["-D", self.datadir_path().to_str().unwrap()])
             .args(&["--listen-pg", &listen_pg])
             .args(&["--listen-http", &listen_http])
-            .args(&["--pageserver", &pageserver_conn])
             .args(&["--recall", "1 second"])
             .arg("--daemonize")
             .env_clear()
             .env("RUST_BACKTRACE", "1");
         if !self.conf.sync {
             cmd.arg("--no-sync");
-        }
-
-        if self.env.pageserver.auth_type == AuthType::ZenithJWT {
-            cmd.env("PAGESERVER_AUTH_TOKEN", &self.env.pageserver.auth_token);
         }
 
         let var = "LLVM_PROFILE_FILE";

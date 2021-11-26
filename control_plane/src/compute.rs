@@ -199,17 +199,24 @@ impl PostgresNode {
         })
     }
 
-    fn sync_safekeepers(&self) -> Result<Lsn> {
+    fn sync_safekeepers(&self, auth_token: &Option<String>) -> Result<Lsn> {
         let pg_path = self.env.pg_bin_dir().join("postgres");
-        let sync_handle = Command::new(pg_path)
-            .arg("--sync-safekeepers")
+        let mut cmd = Command::new(&pg_path);
+
+        cmd.arg("--sync-safekeepers")
             .env_clear()
             .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
             .env("PGDATA", self.pgdata().to_str().unwrap())
             .stdout(Stdio::piped())
             // Comment this to avoid capturing stderr (useful if command hangs)
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(token) = auth_token {
+            cmd.env("ZENITH_AUTH_TOKEN", token);
+        }
+
+        let sync_handle = cmd
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
 
@@ -319,8 +326,11 @@ impl PostgresNode {
             } else {
                 ""
             };
-
-            format!("host={} port={} password={}", host, port, password)
+            // NOTE avoiding spaces in connection string, because it is less error prone if we forward it somewhere.
+            // Also note that not all parameters are supported here. Because in compute we substitute $ZENITH_AUTH_TOKEN
+            // We parse this string and build it back with token from env var, and for simplicity rebuild
+            // uses only needed variables namely host, port, user, password.
+            format!("postgresql://no_user:{}@{}:{}", password, host, port)
         };
         conf.append("shared_preload_libraries", "zenith");
         conf.append_line("");
@@ -358,7 +368,7 @@ impl PostgresNode {
         Ok(())
     }
 
-    fn load_basebackup(&self) -> Result<()> {
+    fn load_basebackup(&self, auth_token: &Option<String>) -> Result<()> {
         let backup_lsn = if let Some(lsn) = self.lsn {
             Some(lsn)
         } else if self.uses_wal_proposer {
@@ -366,7 +376,7 @@ impl PostgresNode {
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
             // when things would be more stable (TODO).
-            let lsn = self.sync_safekeepers()?;
+            let lsn = self.sync_safekeepers(auth_token)?;
             if lsn == Lsn(0) {
                 None
             } else {
@@ -417,7 +427,6 @@ impl PostgresNode {
         .env_clear()
         .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
         .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
-
         if let Some(token) = auth_token {
             cmd.env("ZENITH_AUTH_TOKEN", token);
         }
@@ -451,7 +460,7 @@ impl PostgresNode {
         fs::write(&postgresql_conf_path, postgresql_conf)?;
 
         // 3. Load basebackup
-        self.load_basebackup()?;
+        self.load_basebackup(auth_token)?;
 
         if self.lsn.is_some() {
             File::create(self.pgdata().join("standby.signal"))?;

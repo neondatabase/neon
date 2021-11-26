@@ -28,20 +28,22 @@ pub struct ReceiveWalConn<'pg> {
     pg_backend: &'pg mut PostgresBackend,
     /// The cached result of `pg_backend.socket().peer_addr()` (roughly)
     peer_addr: SocketAddr,
+    /// Pageserver connection string forwarded from compute
+    /// NOTE that it is allowed to operate without a pageserver.
+    /// So if compute has no pageserver configured do not use it.
+    pageserver_connstr: Option<String>,
 }
 
 ///
 /// Periodically request pageserver to call back.
 /// If pageserver already has replication channel, it will just ignore this request
 ///
-fn request_callback(conf: SafeKeeperConf, timelineid: ZTimelineId, tenantid: ZTenantId) {
-    let ps_addr = conf.pageserver_addr.unwrap();
-    let ps_connstr = format!(
-        "postgresql://no_user:{}@{}/no_db",
-        &conf.pageserver_auth_token.unwrap_or_default(),
-        ps_addr
-    );
-
+fn request_callback(
+    conf: SafeKeeperConf,
+    pageserver_connstr: String,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
+) {
     // use Config parsing because SockAddr parsing doesnt allow to use host names instead of ip addresses
     let me_connstr = format!("postgresql://no_user@{}/no_db", conf.listen_pg_addr);
     let me_conf: Config = me_connstr.parse().unwrap();
@@ -54,15 +56,18 @@ fn request_callback(conf: SafeKeeperConf, timelineid: ZTimelineId, tenantid: ZTe
     loop {
         info!(
             "requesting page server to connect to us: start {} {}",
-            ps_connstr, callme
+            pageserver_connstr, callme
         );
-        match Client::connect(&ps_connstr, NoTls) {
+        match Client::connect(&pageserver_connstr, NoTls) {
             Ok(mut client) => {
                 if let Err(e) = client.simple_query(&callme) {
                     error!("Failed to send callme request to pageserver: {}", e);
                 }
             }
-            Err(e) => error!("Failed to connect to pageserver {}: {}", &ps_connstr, e),
+            Err(e) => error!(
+                "Failed to connect to pageserver {}: {}",
+                &pageserver_connstr, e
+            ),
         }
 
         if let Some(period) = conf.recall_period {
@@ -74,11 +79,15 @@ fn request_callback(conf: SafeKeeperConf, timelineid: ZTimelineId, tenantid: ZTe
 }
 
 impl<'pg> ReceiveWalConn<'pg> {
-    pub fn new(pg: &'pg mut PostgresBackend) -> ReceiveWalConn<'pg> {
+    pub fn new(
+        pg: &'pg mut PostgresBackend,
+        pageserver_connstr: Option<String>,
+    ) -> ReceiveWalConn<'pg> {
         let peer_addr = *pg.get_peer_addr();
         ReceiveWalConn {
             pg_backend: pg,
             peer_addr,
+            pageserver_connstr,
         }
     }
 
@@ -127,17 +136,17 @@ impl<'pg> ReceiveWalConn<'pg> {
             _ => bail!("unexpected message {:?} instead of greeting", msg),
         }
 
-        // if requested, ask pageserver to fetch wal from us
-        // xxx: this place seems not really fitting
-        if swh.conf.pageserver_addr.is_some() {
-            // Need to establish replication channel with page server.
-            // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
+        // Need to establish replication channel with page server.
+        // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
+        if let Some(ref pageserver_connstr) = self.pageserver_connstr {
             let conf = swh.conf.clone();
             let timelineid = swh.timeline.get().timelineid;
+            // copy to safely move to a thread
+            let pageserver_connstr = pageserver_connstr.to_owned();
             let _ = thread::Builder::new()
                 .name("request_callback thread".into())
                 .spawn(move || {
-                    request_callback(conf, timelineid, tenant_id);
+                    request_callback(conf, pageserver_connstr, timelineid, tenant_id);
                 })
                 .unwrap();
         }

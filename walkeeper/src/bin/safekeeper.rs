@@ -44,6 +44,9 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
+        // FIXME this argument is no longer needed since pageserver address is forwarded from compute.
+        // However because this argument is in use by console's e2e tests lets keep it for now and remove separately.
+        // So currently it is a noop.
         .arg(
             Arg::with_name("pageserver")
                 .short("p")
@@ -99,10 +102,6 @@ fn main() -> Result<()> {
 
     if let Some(addr) = arg_matches.value_of("listen-http") {
         conf.listen_http_addr = addr.to_owned();
-    }
-
-    if let Some(addr) = arg_matches.value_of("pageserver") {
-        conf.pageserver_addr = Some(addr.to_owned());
     }
 
     if let Some(ttl) = arg_matches.value_of("ttl") {

@@ -340,6 +340,7 @@ class ProposerPostgres:
                 "synchronous_standby_names = 'walproposer'\n",
                 f"zenith.zenith_timeline = '{self.timeline_id}'\n",
                 f"zenith.zenith_tenant = '{self.tenant_id}'\n",
+                f"zenith.page_server_connstring = ''\n",
                 f"wal_acceptors = '{wal_acceptors}'\n",
             ])
 
