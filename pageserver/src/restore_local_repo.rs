@@ -425,20 +425,26 @@ pub fn save_decoded_record(
             relnode: blk.rnode_relnode,
             forknum: blk.forknum as u8,
         });
+
+        //
+        // Instead of storing full-page-image WAL record,
+        // it is better to store extracted image: we can skip wal-redo
+        // in this case. Also some FPI records may contain multiple (up to 32) pages,
+        // so them have to be copied multiple times.
+        //
         if blk.apply_image
             && blk.has_image
             && decoded.xl_rmid == pg_constants::RM_XLOG_ID
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
+            // compression of WAL is not yet supported: fall back to storing the original WAL record
+            && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
         {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
             let img_offs = blk.bimg_offset as usize;
             let mut image = BytesMut::with_capacity(pg_constants::BLCKSZ as usize);
             image.extend_from_slice(&recdata[img_offs..img_offs + img_len]);
-
-            // Compression of WAL is not yet supported
-            assert!((blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0);
 
             if blk.hole_length != 0 {
                 let tail = image.split_off(blk.hole_offset as usize);
