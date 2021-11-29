@@ -973,7 +973,12 @@ impl LayeredTimeline {
 
         for filename in &deltafilenames {
             ensure!(filename.start_lsn < filename.end_lsn);
-            if filename.end_lsn > disk_consistent_lsn {
+            // The end-LSN is exclusive, while disk_consistent_lsn is
+            // inclusive. For example, if disk_consistent_lsn is 100, it is
+            // OK for a delta layer to have end LSN 101, but if the end LSN
+            // is 102, then it might not have been fully flushed to disk
+            // before crash.
+            if filename.end_lsn > disk_consistent_lsn + 1 {
                 warn!(
                     "found future delta layer {} on timeline {}",
                     filename, self.timelineid

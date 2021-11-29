@@ -980,7 +980,12 @@ mod tests {
         let harness = RepoHarness::create(TEST_NAME)?;
         let repo = harness.load();
 
-        repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        // Create a timeline with disk_consistent_lsn = 8000
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0x8000))?;
+        let writer = tline.writer();
+        writer.advance_last_record_lsn(Lsn(0x8000));
+        drop(writer);
+        repo.checkpoint_iteration(CheckpointConfig::Forced)?;
         drop(repo);
 
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
@@ -994,38 +999,85 @@ mod tests {
             Ok(())
         };
 
-        let image_filename = format!("pg_control_0_{:016X}", 8000);
-        let delta_filename = format!("pg_control_0_{:016X}_{:016X}", 8000, 8008);
-
-        make_empty_file(&image_filename)?;
-        make_empty_file(&delta_filename)?;
-
-        let new_repo = harness.load();
-        new_repo.get_timeline(TIMELINE_ID).unwrap();
-        drop(new_repo);
-
-        let check_old = |filename: &str, num: u32| {
+        // Helper function to check that a relation file exists, and a corresponding
+        // <filename>.0.old file does not.
+        let assert_exists = |filename: &str| {
             let path = timeline_path.join(filename);
-            assert!(!path.exists());
+            assert!(path.exists(), "file {} was removed", filename);
 
-            let backup_path = timeline_path.join(format!("{}.{}.old", filename, num));
-            assert!(backup_path.exists());
+            // Check that there is no .old file
+            let backup_path = timeline_path.join(format!("{}.0.old", filename));
+            assert!(
+                !backup_path.exists(),
+                "unexpected backup file {}",
+                backup_path.display()
+            );
         };
 
-        check_old(&image_filename, 0);
-        check_old(&delta_filename, 0);
+        // Helper function to check that a relation file does *not* exists, and a corresponding
+        // <filename>.<num>.old file does.
+        let assert_is_renamed = |filename: &str, num: u32| {
+            let path = timeline_path.join(filename);
+            assert!(
+                !path.exists(),
+                "file {} was not removed as expected",
+                filename
+            );
 
-        make_empty_file(&image_filename)?;
-        make_empty_file(&delta_filename)?;
+            let backup_path = timeline_path.join(format!("{}.{}.old", filename, num));
+            assert!(
+                backup_path.exists(),
+                "backup file {} was not created",
+                backup_path.display()
+            );
+        };
+
+        // These files are considered to be in the future and will be renamed out
+        // of the way
+        let future_filenames = vec![
+            format!("pg_control_0_{:016X}", 0x8001),
+            format!("pg_control_0_{:016X}_{:016X}", 0x8001, 0x8008),
+        ];
+        // But these are not:
+        let past_filenames = vec![
+            format!("pg_control_0_{:016X}", 0x8000),
+            format!("pg_control_0_{:016X}_{:016X}", 0x7000, 0x8001),
+        ];
+
+        for filename in future_filenames.iter().chain(past_filenames.iter()) {
+            make_empty_file(filename)?;
+        }
+
+        // Load the timeline. This will cause the files in the "future" to be renamed
+        // away.
+        let new_repo = harness.load();
+        new_repo.get_timeline(TIMELINE_ID).unwrap();
+        drop(new_repo);
+
+        for filename in future_filenames.iter() {
+            assert_is_renamed(filename, 0);
+        }
+        for filename in past_filenames.iter() {
+            assert_exists(filename);
+        }
+
+        // Create the future files again, and load again. They should be renamed to
+        // *.1.old this time.
+        for filename in future_filenames.iter() {
+            make_empty_file(filename)?;
+        }
 
         let new_repo = harness.load();
         new_repo.get_timeline(TIMELINE_ID).unwrap();
         drop(new_repo);
 
-        check_old(&image_filename, 0);
-        check_old(&delta_filename, 0);
-        check_old(&image_filename, 1);
-        check_old(&delta_filename, 1);
+        for filename in future_filenames.iter() {
+            assert_is_renamed(filename, 0);
+            assert_is_renamed(filename, 1);
+        }
+        for filename in past_filenames.iter() {
+            assert_exists(filename);
+        }
 
         Ok(())
     }
