@@ -4,6 +4,7 @@
 use anyhow::Result;
 use clap::{App, Arg};
 use pageserver::layered_repository::dump_layerfile_from_path;
+use pageserver::virtual_file;
 use std::path::PathBuf;
 use zenith_utils::GIT_VERSION;
 
@@ -20,6 +21,9 @@ fn main() -> Result<()> {
         .get_matches();
 
     let path = PathBuf::from(arg_matches.value_of("path").unwrap());
+
+    // Basic initialization of things that don't change after startup
+    virtual_file::init(10);
 
     dump_layerfile_from_path(&path)?;
 
