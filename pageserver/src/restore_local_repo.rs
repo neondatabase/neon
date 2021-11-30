@@ -11,7 +11,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
 use crate::relish::*;
@@ -416,7 +416,6 @@ pub fn save_decoded_record(
     if checkpoint.update_next_xid(decoded.xl_xid) {
         *checkpoint_modified = true;
     }
-
     // Iterate through all the blocks that the record modifies, and
     // "put" a separate copy of the record for each block.
     for blk in decoded.blocks.iter() {
@@ -427,13 +426,43 @@ pub fn save_decoded_record(
             forknum: blk.forknum as u8,
         });
 
-        let rec = WALRecord {
-            will_init: blk.will_init || blk.apply_image,
-            rec: recdata.clone(),
-            main_data_offset: decoded.main_data_offset as u32,
-        };
+        //
+        // Instead of storing full-page-image WAL record,
+        // it is better to store extracted image: we can skip wal-redo
+        // in this case. Also some FPI records may contain multiple (up to 32) pages,
+        // so them have to be copied multiple times.
+        //
+        if blk.apply_image
+            && blk.has_image
+            && decoded.xl_rmid == pg_constants::RM_XLOG_ID
+            && (decoded.xl_info == pg_constants::XLOG_FPI
+                || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
+            // compression of WAL is not yet supported: fall back to storing the original WAL record
+            && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
+        {
+            // Extract page image from FPI record
+            let img_len = blk.bimg_len as usize;
+            let img_offs = blk.bimg_offset as usize;
+            let mut image = BytesMut::with_capacity(pg_constants::BLCKSZ as usize);
+            image.extend_from_slice(&recdata[img_offs..img_offs + img_len]);
 
-        timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
+            if blk.hole_length != 0 {
+                let tail = image.split_off(blk.hole_offset as usize);
+                image.resize(image.len() + blk.hole_length as usize, 0u8);
+                image.unsplit(tail);
+            }
+            image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
+            image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+            assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
+            timeline.put_page_image(tag, blk.blkno, lsn, image.freeze())?;
+        } else {
+            let rec = WALRecord {
+                will_init: blk.will_init || blk.apply_image,
+                rec: recdata.clone(),
+                main_data_offset: decoded.main_data_offset as u32,
+            };
+            timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
+        }
     }
 
     let mut buf = decoded.record.clone();
