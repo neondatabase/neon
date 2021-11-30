@@ -37,7 +37,7 @@ pub mod defaults {
     pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(10);
 
     pub const DEFAULT_UPLOAD_DISTANCE: u64 = 1024 * 1024 * 1024;
-    pub const DEFAULT_UPLOAD_PERIOD: Duration = Duration::from_secs(250);
+    pub const DEFAULT_UPLOAD_PERIOD: Duration = Duration::from_secs(3600);
 
     pub const DEFAULT_RECONSTRUCT_THRESHOLD: u64 = 0;
 

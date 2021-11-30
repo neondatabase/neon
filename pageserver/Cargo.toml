@@ -37,14 +37,15 @@ async-trait = "0.1"
 const_format = "0.2.21"
 tracing = "0.1.27"
 signal-hook = {version = "0.3.10", features = ["extended-siginfo"] }
-#yakv = { path  = "../../yakv" }
-yakv = "0.2.2"
+yakv = { path  = "../../yakv" }
+#yakv = "0.2.4"
 lz4_flex = "0.9.0"
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }
 zenith_utils = { path = "../zenith_utils" }
 workspace_hack = { path = "../workspace_hack" }
+parking_lot = "0.11.2"
 
 [dev-dependencies]
 hex-literal = "0.3"

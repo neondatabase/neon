@@ -3,9 +3,10 @@ use lz4_flex;
 use std::convert::TryInto;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
-use zenith_utils::lsn::Lsn;
 
-use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Value};
+use yakv::storage::{
+    Key, ReadOnlyTransaction, Storage, StorageConfig, StorageIterator, Transaction, Value,
+};
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
@@ -18,12 +19,53 @@ const CACHE_SIZE: usize = 32 * 1024; // 256Mb
 /// data locality and reduce key size for TOAST segments.
 ///
 pub struct ToastStore {
-    db: Storage,         // key-value database
-    pub commit_lsn: Lsn, // LSN of last committed transaction
+    db: Storage, // key-value database
 }
 
 pub struct ToastIterator<'a> {
     iter: StorageIterator<'a>,
+}
+
+pub struct ToastSnapshot<'a> {
+    tx: ReadOnlyTransaction<'a>,
+}
+
+impl<'a> ToastSnapshot<'a> {
+    pub fn range<R: RangeBounds<Key>>(&self, range: R) -> ToastIterator<'_> {
+        let from = match range.start_bound() {
+            Bound::Included(key) => {
+                let mut key = key.clone();
+                key.extend_from_slice(&[0u8; 4]);
+                Bound::Included(key)
+            }
+            Bound::Excluded(key) => {
+                let mut key = key.clone();
+                key.extend_from_slice(&[0u8; 4]);
+                Bound::Excluded(key)
+            }
+            _ => Bound::Unbounded,
+        };
+        let till = match range.end_bound() {
+            Bound::Included(key) => {
+                let mut key = key.clone();
+                key.extend_from_slice(&[0xFFu8; 4]);
+                Bound::Included(key)
+            }
+            Bound::Excluded(key) => {
+                let mut key = key.clone();
+                key.extend_from_slice(&[0xFFu8; 4]);
+                Bound::Excluded(key)
+            }
+            _ => Bound::Unbounded,
+        };
+        ToastIterator {
+            iter: self.tx.range((from, till)),
+        }
+    }
+
+    pub fn iter(&self) -> ToastIterator<'_> {
+        self.range(..)
+    }
 }
 
 impl<'a> Iterator for ToastIterator<'a> {
@@ -32,7 +74,7 @@ impl<'a> Iterator for ToastIterator<'a> {
         let mut toast: Option<Vec<u8>> = None;
         let mut next_segno = 0u16;
         for elem in &mut self.iter {
-            if let Ok((key, value)) = elem {
+            let res = if let Ok((key, value)) = elem {
                 let key_len = key.len();
                 let n_segments =
                     u16::from_be_bytes(key[key_len - 4..key_len - 2].try_into().unwrap());
@@ -46,20 +88,22 @@ impl<'a> Iterator for ToastIterator<'a> {
                     }
                     toast.as_mut().unwrap().extend_from_slice(&value);
                     next_segno = segno + 1;
-                    if next_segno == n_segments {
-                        let res = lz4_flex::decompress_size_prepended(&toast.unwrap());
-                        return Some(if let Ok(decompressed_data) = res {
-                            Ok((key, decompressed_data))
-                        } else {
-                            Err(anyhow!(res.unwrap_err()))
-                        });
+                    if next_segno != n_segments {
+                        continue;
+                    }
+                    let res = lz4_flex::decompress_size_prepended(&toast.unwrap());
+                    if let Ok(decompressed_data) = res {
+                        Ok((key, decompressed_data))
+                    } else {
+                        Err(anyhow!(res.unwrap_err()))
                     }
                 } else {
-                    return Some(Ok((key, value)));
+                    Ok((key, value))
                 }
             } else {
-                return Some(elem);
-            }
+                elem
+            };
+            return Some(res);
         }
         assert_eq!(next_segno, 0);
         None
@@ -125,14 +169,15 @@ impl ToastStore {
                 StorageConfig {
                     cache_size: CACHE_SIZE,
                     nosync: false,
+                    mursiw: true,
                 },
             )?,
-            commit_lsn: Lsn(0),
         })
     }
 
-    pub fn put(&mut self, key: Key, value: Value) -> Result<()> {
+    pub fn put(&self, key: Key, value: Value) -> Result<()> {
         let mut tx = self.db.start_transaction();
+        self.tx_remove(&mut tx, &key)?;
         let value_len = value.len();
         let mut key = key;
         if value_len >= TOAST_SEGMENT_SIZE {
@@ -146,7 +191,7 @@ impl ToastStore {
             key.extend_from_slice(&n_segments.to_be_bytes());
             key.extend_from_slice(&[0u8; 2]);
             let key_len = key.len();
-            while offs + TOAST_SEGMENT_SIZE <= compressed_data_len {
+            while offs + TOAST_SEGMENT_SIZE < compressed_data_len {
                 key[key_len - 2..].copy_from_slice(&segno.to_be_bytes());
                 tx.put(
                     &key,
@@ -155,10 +200,8 @@ impl ToastStore {
                 offs += TOAST_SEGMENT_SIZE;
                 segno += 1;
             }
-            if offs < compressed_data_len {
-                key[key_len - 2..].copy_from_slice(&segno.to_be_bytes());
-                tx.put(&key, &compressed_data[offs..].to_vec())?;
-            }
+            key[key_len - 2..].copy_from_slice(&segno.to_be_bytes());
+            tx.put(&key, &compressed_data[offs..].to_vec())?;
         } else {
             key.extend_from_slice(&[0u8; 4]);
             tx.put(&key, &value)?;
@@ -167,53 +210,27 @@ impl ToastStore {
         Ok(())
     }
 
-    pub fn commit(&mut self, commit_lsn: Lsn) -> Result<()> {
-        let mut tx = self.db.start_transaction();
+    pub fn commit(&self) -> Result<()> {
+        let tx = self.db.start_transaction();
         tx.commit()?;
-        self.commit_lsn = commit_lsn;
         Ok(())
     }
 
-    pub fn iter(&self) -> ToastIterator<'_> {
-        self.range(..)
-    }
-
-    pub fn range<R: RangeBounds<Key>>(&self, range: R) -> ToastIterator<'_> {
-        let from = match range.start_bound() {
-            Bound::Included(key) => {
-                let mut key = key.clone();
-                key.extend_from_slice(&[0u8; 4]);
-                Bound::Included(key)
-            }
-            Bound::Excluded(key) => {
-                let mut key = key.clone();
-                key.extend_from_slice(&[0u8; 4]);
-                Bound::Excluded(key)
-            }
-            _ => Bound::Unbounded,
-        };
-        let till = match range.end_bound() {
-            Bound::Included(key) => {
-                let mut key = key.clone();
-                key.extend_from_slice(&[0xFFu8; 4]);
-                Bound::Included(key)
-            }
-            Bound::Excluded(key) => {
-                let mut key = key.clone();
-                key.extend_from_slice(&[0xFFu8; 4]);
-                Bound::Excluded(key)
-            }
-            _ => Bound::Unbounded,
-        };
-        ToastIterator {
-            iter: self.db.range((from, till)),
+    pub fn take_snapshot(&self) -> ToastSnapshot<'_> {
+        ToastSnapshot {
+            tx: self.db.read_only_transaction(),
         }
     }
 
-    pub fn remove(&mut self, key: Key) -> Result<()> {
+    pub fn remove(&self, key: Key) -> Result<()> {
         let mut tx = self.db.start_transaction();
+        self.tx_remove(&mut tx, &key)?;
+        tx.delay()
+    }
+
+    pub fn tx_remove(&self, tx: &mut Transaction, key: &Key) -> Result<()> {
         let mut min_key = key.clone();
-        let mut max_key = key;
+        let mut max_key = key.clone();
         min_key.extend_from_slice(&[0u8; 4]);
         max_key.extend_from_slice(&[0xFFu8; 4]);
         let mut iter = tx.range(&min_key..&max_key);
@@ -231,7 +248,10 @@ impl ToastStore {
                 tx.remove(&key)?;
             }
         }
-        tx.delay()?;
         Ok(())
+    }
+
+    pub fn size(&self) -> u64 {
+        self.db.get_database_info().db_used
     }
 }
