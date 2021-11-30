@@ -130,9 +130,8 @@ impl SafekeeperNode {
         let listen_pg = format!("localhost:{}", self.conf.pg_port);
         let listen_http = format!("localhost:{}", self.conf.http_port);
 
-        let mut cmd: &mut Command = &mut Command::new(self.env.safekeeper_bin()?);
-        cmd = cmd
-            .args(&["-D", self.datadir_path().to_str().unwrap()])
+        let mut cmd = Command::new(self.env.safekeeper_bin()?);
+        cmd.args(&["-D", self.datadir_path().to_str().unwrap()])
             .args(&["--listen-pg", &listen_pg])
             .args(&["--listen-http", &listen_http])
             .args(&["--pageserver", &pageserver_conn])
@@ -141,11 +140,16 @@ impl SafekeeperNode {
             .env_clear()
             .env("RUST_BACKTRACE", "1");
         if !self.conf.sync {
-            cmd = cmd.arg("--no-sync");
+            cmd.arg("--no-sync");
         }
 
         if self.env.pageserver.auth_type == AuthType::ZenithJWT {
             cmd.env("PAGESERVER_AUTH_TOKEN", &self.env.pageserver.auth_token);
+        }
+
+        let var = "LLVM_PROFILE_FILE";
+        if let Some(val) = std::env::var_os(var) {
+            cmd.env(var, val);
         }
 
         if !cmd.status()?.success() {

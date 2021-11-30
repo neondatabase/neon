@@ -20,17 +20,16 @@ tokio = "1.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nix = "0.23.0"
-
-zenith_metrics = { path = "../zenith_metrics" }
-workspace_hack = { path = "../workspace_hack" }
+signal-hook = "0.3.10"
 rand = "0.8.3"
 jsonwebtoken = "7"
 hex = { version = "0.4.3", features = ["serde"] }
-
 rustls = "0.19.1"
 rustls-split = "0.2.1"
-
 git-version = "0.3.5"
+
+zenith_metrics = { path = "../zenith_metrics" }
+workspace_hack = { path = "../workspace_hack" }
 
 [dev-dependencies]
 hex-literal = "0.3"

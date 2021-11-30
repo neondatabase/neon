@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::{io, result, thread};
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -97,7 +97,6 @@ impl PageServerNode {
     }
 
     pub fn init(&self, create_tenant: Option<&str>) -> anyhow::Result<()> {
-        let mut cmd = Command::new(self.env.pageserver_bin()?);
         let listen_pg = format!("localhost:{}", self.env.pageserver.pg_port);
         let listen_http = format!("localhost:{}", self.env.pageserver.http_port);
         let mut args = vec![
@@ -122,18 +121,19 @@ impl PageServerNode {
             args.extend(&["--create-tenant", tenantid])
         }
 
-        let status = cmd
-            .args(args)
-            .env_clear()
-            .env("RUST_BACKTRACE", "1")
-            .status()
-            .expect("pageserver init failed");
+        let mut cmd = Command::new(self.env.pageserver_bin()?);
+        cmd.args(args).env_clear().env("RUST_BACKTRACE", "1");
 
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("pageserver init failed"))
+        let var = "LLVM_PROFILE_FILE";
+        if let Some(val) = std::env::var_os(var) {
+            cmd.env(var, val);
         }
+
+        if !cmd.status()?.success() {
+            bail!("pageserver init failed");
+        }
+
+        Ok(())
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -157,6 +157,11 @@ impl PageServerNode {
             .arg("--daemonize")
             .env_clear()
             .env("RUST_BACKTRACE", "1");
+
+        let var = "LLVM_PROFILE_FILE";
+        if let Some(val) = std::env::var_os(var) {
+            cmd.env(var, val);
+        }
 
         if !cmd.status()?.success() {
             bail!(

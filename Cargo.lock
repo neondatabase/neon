@@ -1888,7 +1888,6 @@ version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c98891d737e271a2954825ef19e46bd16bdb98e2746f2eec4f7a4ef7946efd1"
 dependencies = [
- "cc",
  "libc",
  "signal-hook-registry",
 ]
@@ -2360,6 +2359,7 @@ dependencies = [
  "rust-s3",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -2611,6 +2611,7 @@ dependencies = [
  "rustls-split",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror",
  "tokio",
