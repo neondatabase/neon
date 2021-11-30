@@ -8,14 +8,15 @@ use daemonize::Daemonize;
 use log::*;
 use std::path::{Path, PathBuf};
 use std::thread;
-use zenith_utils::http::endpoint;
-use zenith_utils::{logging, tcp_listener, GIT_VERSION};
-
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::SafeKeeperConf;
+use zenith_utils::http::endpoint;
+use zenith_utils::shutdown::exit_now;
+use zenith_utils::signals;
+use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
@@ -131,6 +132,7 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         e
     })?;
 
+    // XXX: Don't spawn any threads before daemonizing!
     if conf.daemonize {
         info!("daemonizing...");
 
@@ -145,51 +147,59 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
             .stdout(stdout)
             .stderr(stderr);
 
-        match daemonize.start() {
+        // XXX: The parent process should exit abruptly right after
+        // it has spawned a child to prevent coverage machinery from
+        // dumping stats into a `profraw` file now owned by the child.
+        // Otherwise, the coverage data will be damaged.
+        match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
             Err(e) => error!("Error, {}", e),
         }
     }
 
-    let mut threads = Vec::new();
+    let signals = signals::install_shutdown_handlers()?;
+    let mut threads = vec![];
 
-    let conf_cloned = conf.clone();
-    let http_endpoint_thread = thread::Builder::new()
-        .name("http_endpoint_thread".into())
-        .spawn(|| {
-            // TODO authentication
-            let router = http::make_router(conf_cloned);
-            endpoint::serve_thread_main(router, http_listener).unwrap();
-        })
-        .unwrap();
-    threads.push(http_endpoint_thread);
+    let conf_ = conf.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("http_endpoint_thread".into())
+            .spawn(|| {
+                // TODO authentication
+                let router = http::make_router(conf_);
+                endpoint::serve_thread_main(router, http_listener).unwrap();
+            })?,
+    );
 
     if conf.ttl.is_some() {
-        let s3_conf = conf.clone();
-        let s3_offload_thread = thread::Builder::new()
-            .name("S3 offload thread".into())
+        let conf_ = conf.clone();
+        threads.push(
+            thread::Builder::new()
+                .name("S3 offload thread".into())
+                .spawn(|| {
+                    s3_offload::thread_main(conf_);
+                })?,
+        );
+    }
+
+    threads.push(
+        thread::Builder::new()
+            .name("WAL acceptor thread".into())
             .spawn(|| {
-                // thread code
-                s3_offload::thread_main(s3_conf);
-            })
-            .unwrap();
-        threads.push(s3_offload_thread);
-    }
+                let thread_result = wal_service::thread_main(conf, pg_listener);
+                if let Err(e) = thread_result {
+                    info!("wal_service thread terminated: {}", e);
+                }
+            })?,
+    );
 
-    let wal_acceptor_thread = thread::Builder::new()
-        .name("WAL acceptor thread".into())
-        .spawn(|| {
-            // thread code
-            let thread_result = wal_service::thread_main(conf, pg_listener);
-            if let Err(e) = thread_result {
-                info!("wal_service thread terminated: {}", e);
-            }
-        })
-        .unwrap();
-    threads.push(wal_acceptor_thread);
-
-    for t in threads {
-        t.join().unwrap()
-    }
-    Ok(())
+    // NOTE: we still have to handle signals like SIGQUIT to prevent coredumps
+    signals.handle(|signal| {
+        // TODO: implement graceful shutdown with joining threads etc
+        info!(
+            "Got {}. Terminating in immediate shutdown mode",
+            signal.name()
+        );
+        std::process::exit(111);
+    })
 }

@@ -509,6 +509,12 @@ sync = false # Disable fsyncs to make the tests go faster
         env_vars['ZENITH_REPO_DIR'] = str(self.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
 
+        # Pass coverage settings
+        var = 'LLVM_PROFILE_FILE'
+        val = os.environ.get(var)
+        if val:
+            env_vars[var] = val
+
         # Intercept CalledProcessError and print more info
         try:
             res = subprocess.run(args,

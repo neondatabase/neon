@@ -40,12 +40,16 @@ pub mod logging;
 
 // Misc
 pub mod accum;
+pub mod shutdown;
 
 // Utility for binding TcpListeners with proper socket options.
 pub mod tcp_listener;
 
 // Utility for putting a raw file descriptor into non-blocking mode
 pub mod nonblock;
+
+// Default signal handling
+pub mod signals;
 
 // This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 //

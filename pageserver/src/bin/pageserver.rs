@@ -14,14 +14,6 @@ use tracing::*;
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
 
 use anyhow::{bail, ensure, Context, Result};
-use signal_hook::consts::signal::*;
-use signal_hook::consts::TERM_SIGNALS;
-use signal_hook::flag;
-use signal_hook::iterator::exfiltrator::WithOrigin;
-use signal_hook::iterator::SignalsInfo;
-use std::process::exit;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 use clap::{App, Arg, ArgMatches};
 use daemonize::Daemonize;
@@ -32,6 +24,8 @@ use pageserver::{
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
+use zenith_utils::shutdown::exit_now;
+use zenith_utils::signals::{self, Signal};
 
 use const_format::formatcp;
 
@@ -524,17 +518,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
 
     info!("version: {}", GIT_VERSION);
 
-    let term_now = Arc::new(AtomicBool::new(false));
-    for sig in TERM_SIGNALS {
-        // When terminated by a second term signal, exit with exit code 1.
-        // This will do nothing the first time (because term_now is false).
-        flag::register_conditional_shutdown(*sig, 1, Arc::clone(&term_now))?;
-        // But this will "arm" the above for the second time, by setting it to true.
-        // The order of registering these is important, if you put this one first, it will
-        // first arm and then terminate ‒ all in the first round.
-        flag::register(*sig, Arc::clone(&term_now))?;
-    }
-
     // TODO: Check that it looks like a valid repository before going further
 
     // bind sockets before daemonizing so we report errors early and do not return until we are listening
@@ -550,6 +533,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     );
     let pageserver_listener = tcp_listener::bind(conf.listen_pg_addr.clone())?;
 
+    // XXX: Don't spawn any threads before daemonizing!
     if conf.daemonize {
         info!("daemonizing...");
 
@@ -564,18 +548,21 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
             .stdout(stdout)
             .stderr(stderr);
 
-        match daemonize.start() {
+        // XXX: The parent process should exit abruptly right after
+        // it has spawned a child to prevent coverage machinery from
+        // dumping stats into a `profraw` file now owned by the child.
+        // Otherwise, the coverage data will be damaged.
+        match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
             Err(err) => error!(%err, "could not daemonize"),
         }
     }
 
-    // keep join handles for spawned threads
-    // don't spawn threads before daemonizing
-    let mut join_handles = Vec::new();
+    let signals = signals::install_shutdown_handlers()?;
+    let mut threads = vec![];
 
     if let Some(handle) = remote_storage::run_storage_sync_thread(conf)? {
-        join_handles.push(handle);
+        threads.push(handle);
     }
     // Initialize tenant manager.
     tenant_mgr::init(conf);
@@ -594,61 +581,55 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
     let cloned = auth.clone();
-    let http_endpoint_thread = thread::Builder::new()
-        .name("http_endpoint_thread".into())
-        .spawn(move || {
-            let router = http::make_router(conf, cloned);
-            endpoint::serve_thread_main(router, http_listener)
-        })?;
-
-    join_handles.push(http_endpoint_thread);
+    threads.push(
+        thread::Builder::new()
+            .name("http_endpoint_thread".into())
+            .spawn(move || {
+                let router = http::make_router(conf, cloned);
+                endpoint::serve_thread_main(router, http_listener)
+            })?,
+    );
 
     // Spawn a thread to listen for connections. It will spawn further threads
     // for each connection.
-    let page_service_thread = thread::Builder::new()
-        .name("Page Service thread".into())
-        .spawn(move || {
-            page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
-        })?;
+    threads.push(
+        thread::Builder::new()
+            .name("Page Service thread".into())
+            .spawn(move || {
+                page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
+            })?,
+    );
 
-    for info in SignalsInfo::<WithOrigin>::new(TERM_SIGNALS)?.into_iter() {
-        match info.signal {
-            SIGQUIT => {
-                info!("Got SIGQUIT. Terminate pageserver in immediate shutdown mode");
-                exit(111);
-            }
-            SIGINT | SIGTERM => {
-                info!("Got SIGINT/SIGTERM. Terminate gracefully in fast shutdown mode");
-                // Terminate postgres backends
-                postgres_backend::set_pgbackend_shutdown_requested();
-                // Stop all tenants and flush their data
-                tenant_mgr::shutdown_all_tenants()?;
-                // Wait for pageservice thread to complete the job
-                page_service_thread
+    signals.handle(|signal| match signal {
+        Signal::Quit => {
+            info!(
+                "Got {}. Terminating in immediate shutdown mode",
+                signal.name()
+            );
+            std::process::exit(111);
+        }
+
+        Signal::Interrupt | Signal::Terminate => {
+            info!(
+                "Got {}. Terminating gracefully in fast shutdown mode",
+                signal.name()
+            );
+
+            postgres_backend::set_pgbackend_shutdown_requested();
+            tenant_mgr::shutdown_all_tenants()?;
+            endpoint::shutdown();
+
+            for handle in std::mem::take(&mut threads) {
+                handle
                     .join()
                     .expect("thread panicked")
                     .expect("thread exited with an error");
-
-                // Shut down http router
-                endpoint::shutdown();
-
-                // Wait for all threads
-                for handle in join_handles.into_iter() {
-                    handle
-                        .join()
-                        .expect("thread panicked")
-                        .expect("thread exited with an error");
-                }
-                info!("Pageserver shut down successfully completed");
-                exit(0);
             }
-            unknown_signal => {
-                debug!("Unknown signal {}", unknown_signal);
-            }
+
+            info!("Shut down successfully completed");
+            std::process::exit(0);
         }
-    }
-
-    Ok(())
+    })
 }
 
 #[cfg(test)]

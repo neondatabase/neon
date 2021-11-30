@@ -28,6 +28,7 @@ anyhow = "1.0"
 crc32c = "0.6.0"
 humantime = "2.1.0"
 walkdir = "2"
+signal-hook = "0.3.10"
 serde = { version = "1.0", features = ["derive"] }
 hex = "0.4.3"
 const_format = "0.2.21"
