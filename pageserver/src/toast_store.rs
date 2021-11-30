@@ -3,9 +3,8 @@ use lz4_flex;
 use std::convert::TryInto;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
-use zenith_utils::lsn::Lsn;
 
-use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Value};
+use yakv::storage::{Key, Storage, StorageConfig, StorageIterator, Transaction, Value};
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
@@ -19,11 +18,27 @@ const CACHE_SIZE: usize = 32 * 1024; // 256Mb
 ///
 pub struct ToastStore {
     db: Storage,         // key-value database
-    pub commit_lsn: Lsn, // LSN of last committed transaction
 }
 
 pub struct ToastIterator<'a> {
     iter: StorageIterator<'a>,
+}
+
+#[derive(Clone, Copy)]
+pub struct PageData {
+    data: [u8; 8192],
+}
+
+impl PageData {
+    pub fn find_first_zero_bit(&self, offs: usize) -> usize {
+        let bytes = self.data;
+        for i in offs..8192 {
+            if bytes[i] != 0xFFu8 {
+                return i * 8 + bytes[i].trailing_ones() as usize;
+            }
+        }
+        usize::MAX
+    }
 }
 
 impl<'a> Iterator for ToastIterator<'a> {
@@ -125,14 +140,15 @@ impl ToastStore {
                 StorageConfig {
                     cache_size: CACHE_SIZE,
                     nosync: false,
+					mursiw: true,
                 },
             )?,
-            commit_lsn: Lsn(0),
         })
     }
 
-    pub fn put(&mut self, key: Key, value: Value) -> Result<()> {
+    pub fn put(&self, key: Key, value: Value) -> Result<()> {
         let mut tx = self.db.start_transaction();
+		self.tx_remove(&mut tx, &key)?;
         let value_len = value.len();
         let mut key = key;
         if value_len >= TOAST_SEGMENT_SIZE {
@@ -146,7 +162,7 @@ impl ToastStore {
             key.extend_from_slice(&n_segments.to_be_bytes());
             key.extend_from_slice(&[0u8; 2]);
             let key_len = key.len();
-            while offs + TOAST_SEGMENT_SIZE <= compressed_data_len {
+            while offs + TOAST_SEGMENT_SIZE < compressed_data_len {
                 key[key_len - 2..].copy_from_slice(&segno.to_be_bytes());
                 tx.put(
                     &key,
@@ -155,10 +171,8 @@ impl ToastStore {
                 offs += TOAST_SEGMENT_SIZE;
                 segno += 1;
             }
-            if offs < compressed_data_len {
-                key[key_len - 2..].copy_from_slice(&segno.to_be_bytes());
-                tx.put(&key, &compressed_data[offs..].to_vec())?;
-            }
+            key[key_len - 2..].copy_from_slice(&segno.to_be_bytes());
+            tx.put(&key, &compressed_data[offs..].to_vec())?;
         } else {
             key.extend_from_slice(&[0u8; 4]);
             tx.put(&key, &value)?;
@@ -167,10 +181,9 @@ impl ToastStore {
         Ok(())
     }
 
-    pub fn commit(&mut self, commit_lsn: Lsn) -> Result<()> {
-        let mut tx = self.db.start_transaction();
+    pub fn commit(&mut self) -> Result<()> {
+        let tx = self.db.start_transaction();
         tx.commit()?;
-        self.commit_lsn = commit_lsn;
         Ok(())
     }
 
@@ -210,10 +223,15 @@ impl ToastStore {
         }
     }
 
-    pub fn remove(&mut self, key: Key) -> Result<()> {
+    pub fn remove(&self, key: Key) -> Result<()> {
         let mut tx = self.db.start_transaction();
-        let mut min_key = key.clone();
-        let mut max_key = key;
+        self.tx_remove(&mut tx, &key)?;
+        tx.delay()
+    }
+
+    pub fn tx_remove(&self, tx: &mut Transaction, key: &[u8]) -> Result<()> {
+        let mut min_key = key.to_vec();
+        let mut max_key = key.to_vec();
         min_key.extend_from_slice(&[0u8; 4]);
         max_key.extend_from_slice(&[0xFFu8; 4]);
         let mut iter = tx.range(&min_key..&max_key);
@@ -231,7 +249,10 @@ impl ToastStore {
                 tx.remove(&key)?;
             }
         }
-        tx.delay()?;
         Ok(())
+    }
+
+    pub fn size(&self) -> u64 {
+        self.db.get_database_info().db_used
     }
 }

@@ -187,6 +187,7 @@ struct RelishStore {
     brin: BTreeMap<BrinTag, Lsn>,
     last_checkpoint: Lsn,
     last_gc: Lsn,
+	last_commit: Lsn,
 }
 
 /// Public interface
@@ -1308,6 +1309,7 @@ impl BufferedTimeline {
                 brin: BTreeMap::new(),
                 last_checkpoint: Lsn(0),
                 last_gc: Lsn(0),
+                last_commit: Lsn(0),
             }),
 
             walredo_mgr,
@@ -1591,7 +1593,7 @@ impl BufferedTimeline {
                                 self.reconstruct_page(dk.rel, dk.blknum, dk.lsn, data)
                             });
 
-                            let mut store = self.store.write().unwrap();
+                            let store = self.store.write().unwrap();
                             store.data.put(key, PageVersion::Page(img?).ser()?)?;
                             n_checkpointed_records += 1;
                         }
@@ -1717,7 +1719,7 @@ impl BufferedTimeline {
                             if same_rel {
                                 // then drop previus version as it is not needed any more
                                 drop(store);
-                                let mut store = self.store.write().unwrap();
+                                let store = self.store.write().unwrap();
                                 store.data.remove(prev_key)?;
                                 result.meta_removed += 1;
                                 // We should reset iterator and start from the current point
@@ -1728,7 +1730,7 @@ impl BufferedTimeline {
                         if meta.size.is_none() {
                             // object was dropped, so we can immediately remove deteriorated version
                             drop(store);
-                            let mut store = self.store.write().unwrap();
+                            let store = self.store.write().unwrap();
                             store.data.remove(raw_key)?;
                             dropped.insert(dk.rel);
                             result.meta_dropped += 1;
@@ -1783,8 +1785,8 @@ impl BufferedTimeline {
                         && store.brin.get(&seg_tag).map_or(true, |lsn| *lsn <= last_gc)
                     {
                         // This segment was not update since last GC: jump to next one
-                        let mut iter = store.brin.range((Excluded(seg_tag), Unbounded));
-                        while let Some((next_seg, lsn)) = iter.next_back() {
+                        let iter = store.brin.range((Excluded(seg_tag), Unbounded));
+                        for (next_seg, lsn) in iter {
                             if *lsn > last_gc {
                                 from = StoreKey::Data(DataKey {
                                     rel: next_seg.rel,
@@ -1818,7 +1820,7 @@ impl BufferedTimeline {
                                 if let PageVersion::Page(_) = ver {
                                     // ... then remove all previously accumulated deltas and images, as them are not needed any more
                                     drop(store);
-                                    let mut store = self.store.write().unwrap();
+                                    let store = self.store.write().unwrap();
                                     result.pages_removed += deteriorated.len() as u64;
                                     for key in deteriorated {
                                         store.data.remove(key)?;
@@ -1836,7 +1838,7 @@ impl BufferedTimeline {
                             // we can remove all its pages
                             assert!(deteriorated.is_empty()); // we should not append anything to `deteriorated` for dropped relation
                             drop(store);
-                            let mut store = self.store.write().unwrap();
+                            let store = self.store.write().unwrap();
                             // We should reset iterator and start from the current point
                             store.data.remove(raw_key)?;
                             result.pages_dropped += 1;
@@ -1997,8 +1999,9 @@ impl<'a> BufferedTimelineWriter<'a> {
                         }
             */
         }
-        if store.data.commit_lsn + self.tl.conf.checkpoint_distance < lsn {
-            store.data.commit(lsn)?;
+        if store.last_commit + self.tl.conf.checkpoint_distance < lsn {
+            store.data.commit()?;
+			store.last_commit = lsn;
             self.tl.disk_consistent_lsn.store(lsn);
         }
         Ok(())
@@ -2102,7 +2105,8 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
     fn checkpoint(&self) -> Result<()> {
         let mut store = self.tl.store.write().unwrap();
         let lsn = self.tl.get_last_record_lsn();
-        store.data.commit(lsn)?;
+		store.last_commit = lsn;
+        store.data.commit()?;
         self.tl.disk_consistent_lsn.store(lsn);
         Ok(())
     }

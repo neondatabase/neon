@@ -38,7 +38,7 @@ const_format = "0.2.21"
 tracing = "0.1.27"
 signal-hook = {version = "0.3.10", features = ["extended-siginfo"] }
 #yakv = { path  = "../../yakv" }
-yakv = "0.2.2"
+yakv = "0.2.4"
 lz4_flex = "0.9.0"
 
 postgres_ffi = { path = "../postgres_ffi" }
