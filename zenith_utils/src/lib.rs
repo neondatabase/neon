@@ -72,5 +72,6 @@ pub mod nonblock;
 use git_version::git_version;
 pub const GIT_VERSION: &str = git_version!(
     prefix = "git:",
-    fallback = concat!("git-env:", env!("GIT_VERSION"))
+    fallback = concat!("git-env:", env!("GIT_VERSION")),
+    args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha
 );
