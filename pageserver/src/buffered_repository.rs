@@ -1807,8 +1807,8 @@ impl BufferedTimeline {
                             && inner.brin.get(&seg_tag).map_or(true, |lsn| *lsn <= last_gc)
                         {
                             // This segment was not update since last GC: jump to next one
-                            let mut iter = inner.brin.range((Excluded(seg_tag), Unbounded));
-                            while let Some((next_seg, lsn)) = iter.next() {
+                            let iter = inner.brin.range((Excluded(seg_tag), Unbounded));
+                            for (next_seg, lsn) in iter {
                                 if *lsn > last_gc {
                                     from = StoreKey::Data(DataKey {
                                         rel: next_seg.rel,

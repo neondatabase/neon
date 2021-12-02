@@ -228,9 +228,9 @@ impl ToastStore {
         Ok(())
     }
 
-    pub fn tx_remove(&self, tx: &mut Transaction, key: &Key) -> Result<()> {
-        let mut min_key = key.clone();
-        let mut max_key = key.clone();
+    pub fn tx_remove(&self, tx: &mut Transaction, key: &[u8]) -> Result<()> {
+        let mut min_key = key.to_vec();
+        let mut max_key = key.to_vec();
         min_key.extend_from_slice(&[0u8; 4]);
         max_key.extend_from_slice(&[0xFFu8; 4]);
         let mut iter = tx.range(&min_key..&max_key);
