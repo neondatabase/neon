@@ -323,8 +323,8 @@ fn main() -> Result<()> {
                 .help("Interval between checkpoint iterations"),
         )
         .arg(
-            Arg::with_name("checkpoint_distance")
-                .long("checkpoint_distance")
+            Arg::with_name("upload_distance")
+                .long("upload_distance")
                 .takes_value(true)
                 .help("Distance from current LSN to perform checkpoint of in-memory layers"),
         )

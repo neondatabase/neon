@@ -5,7 +5,7 @@ use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 
 use yakv::storage::{
-    Key, ReadOnlyTransaction, Storage, StorageConfig, StorageIterator, Transaction, Value,
+    Key, ReadOnlyTransaction, Select, Storage, StorageConfig, StorageIterator, Transaction, Value,
 };
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
@@ -169,7 +169,6 @@ impl ToastStore {
                 StorageConfig {
                     cache_size: CACHE_SIZE,
                     nosync: false,
-                    mursiw: true,
                 },
             )?,
         })
@@ -206,7 +205,7 @@ impl ToastStore {
             key.extend_from_slice(&[0u8; 4]);
             tx.put(&key, &value)?;
         }
-        tx.delay()?;
+        tx.delay();
         Ok(())
     }
 
@@ -225,7 +224,8 @@ impl ToastStore {
     pub fn remove(&self, key: Key) -> Result<()> {
         let mut tx = self.db.start_transaction();
         self.tx_remove(&mut tx, &key)?;
-        tx.delay()
+        tx.delay();
+        Ok(())
     }
 
     pub fn tx_remove(&self, tx: &mut Transaction, key: &Key) -> Result<()> {

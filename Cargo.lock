@@ -2572,7 +2572,7 @@ checksum = "b07db065a5cf61a7e4ba64f29e67db906fb1787316516c4e6e5ff0fea1efcd8a"
 
 [[package]]
 name = "yakv"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "fs2",
