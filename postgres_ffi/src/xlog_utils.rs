@@ -187,8 +187,13 @@ fn find_end_of_wal_segment(
             let xl_tot_len = LittleEndian::read_u32(&buf[page_offs..page_offs + 4]) as usize;
             if xl_tot_len == 0 {
                 info!(
-                    "find_end_of_wal_segment reached zeros at {:?}",
-                    Lsn(XLogSegNoOffsetToRecPtr(segno, offs as u32, wal_seg_size))
+                    "find_end_of_wal_segment reached zeros at {:?}, last records ends at {:?}",
+                    Lsn(XLogSegNoOffsetToRecPtr(segno, offs as u32, wal_seg_size)),
+                    Lsn(XLogSegNoOffsetToRecPtr(
+                        segno,
+                        last_valid_rec_pos as u32,
+                        wal_seg_size
+                    ))
                 );
                 break; // zeros, reached the end
             }
@@ -303,12 +308,17 @@ pub fn find_end_of_wal(
                     high_segno,
                 );
             }
+            let start_offset = if start_lsn.segment_number(wal_seg_size) == high_segno {
+                start_lsn.segment_offset(wal_seg_size)
+            } else {
+                0
+            };
             high_offs = find_end_of_wal_segment(
                 data_dir,
                 high_segno,
                 high_tli,
                 wal_seg_size,
-                start_lsn.segment_offset(wal_seg_size),
+                start_offset,
             )?;
         }
         let high_ptr = XLogSegNoOffsetToRecPtr(high_segno, high_offs, wal_seg_size);

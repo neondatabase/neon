@@ -238,16 +238,22 @@ impl Repository for LayeredRepository {
     }
 
     fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()> {
-        {
-            let timelines = self.timelines.lock().unwrap();
+        // Scan through the hashmap and collect a list of all the timelines,
+        // while holding the lock. Then drop the lock and actually perform the
+        // checkpoints.  We don't want to block everything else while the
+        // checkpoint runs.
+        let timelines = self.timelines.lock().unwrap();
+        let timelines_to_checkpoint: Vec<(ZTimelineId, Arc<LayeredTimeline>)> = timelines
+            .iter()
+            .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
+            .collect();
+        drop(timelines);
 
-            for (timelineid, timeline) in timelines.iter() {
-                let _entered =
-                    info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid)
-                        .entered();
+        for (timelineid, timeline) in timelines_to_checkpoint.iter() {
+            let _entered =
+                info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid).entered();
 
-                timeline.checkpoint(cconf)?;
-            }
+            timeline.checkpoint(cconf)?;
         }
 
         Ok(())

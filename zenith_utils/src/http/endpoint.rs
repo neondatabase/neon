@@ -153,7 +153,7 @@ pub fn check_permission(req: &Request<Body>, tenantid: Option<ZTenantId>) -> Res
     }
 }
 
-// Send shutdown signal
+/// Initiate graceful shutdown of the http endpoint
 pub fn shutdown() {
     if let Some(tx) = SHUTDOWN_SENDER.lock().unwrap().take() {
         let _ = tx.send(());

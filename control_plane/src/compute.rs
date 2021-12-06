@@ -290,8 +290,12 @@ impl PostgresNode {
         conf.append("max_wal_size", "100GB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
-        conf.append("wal_sender_timeout", "0");
         conf.append("wal_level", "replica");
+        // wal_sender_timeout is the maximum time to wait for WAL replication.
+        // It also defines how often the walreciever will send a feedback message to the wal sender.
+        conf.append("wal_sender_timeout", "5s");
+        conf.append("max_replication_flush_lag", "160MB");
+        conf.append("max_replication_apply_lag", "1500MB");
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
 

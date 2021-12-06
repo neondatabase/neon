@@ -297,6 +297,11 @@ impl Layer for DeltaLayer {
         inner.page_version_metas = VecMap::default();
         inner.relsizes = VecMap::default();
         inner.loaded = false;
+
+        // Note: we keep the Book open. Is that a good idea? The virtual file
+        // machinery has its own rules for closing the file descriptor if it's not
+        // needed, but the Book struct uses up some memory, too.
+
         Ok(())
     }
 
@@ -410,7 +415,7 @@ impl DeltaLayer {
             end_lsn,
             dropped,
             inner: Mutex::new(DeltaLayerInner {
-                loaded: true,
+                loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
                 relsizes,
@@ -495,8 +500,13 @@ impl DeltaLayer {
         }
 
         let path = self.path();
-        let file = VirtualFile::open(&path)?;
-        let book = Book::new(file)?;
+
+        // Open the file if it's not open already.
+        if inner.book.is_none() {
+            let file = VirtualFile::open(&path)?;
+            inner.book = Some(Book::new(file)?);
+        }
+        let book = inner.book.as_ref().unwrap();
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
@@ -531,12 +541,9 @@ impl DeltaLayer {
 
         debug!("loaded from {}", &path.display());
 
-        *inner = DeltaLayerInner {
-            loaded: true,
-            book: Some(book),
-            page_version_metas,
-            relsizes,
-        };
+        inner.page_version_metas = page_version_metas;
+        inner.relsizes = relsizes;
+        inner.loaded = true;
 
         Ok(inner)
     }
