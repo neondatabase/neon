@@ -336,9 +336,9 @@ jobs:
             if << parameters.save_perf_report >>; then
               if [[ $CIRCLE_BRANCH == "main" ]]; then
                 # TODO: reuse scripts/git-upload
-                export REPORT_FROM="$(PERF_REPORT_DIR)"
+                export REPORT_FROM="$PERF_REPORT_DIR"
                 export REPORT_TO=local
-                ../scripts/generate_and_push_perf_report.sh
+                scripts/generate_and_push_perf_report.sh
               fi
             fi
       - run:
