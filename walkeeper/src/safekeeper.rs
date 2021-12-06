@@ -753,7 +753,10 @@ where
             self.s.commit_lsn = self.commit_lsn;
             self.s.truncate_lsn = self.truncate_lsn;
         }
-        self.storage.persist(&self.s, sync_control_file)?;
+
+        if sync_control_file {
+            self.storage.persist(&self.s, true)?;
+        }
 
         let resp = self.append_response();
         info!(
