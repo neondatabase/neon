@@ -8,13 +8,13 @@ use bytes::Buf;
 use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
-use log::*;
 use pageserver::waldecoder::WalStreamDecoder;
 use postgres_ffi::xlog_utils::TimeLineID;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
+use tracing::*;
 
 use lazy_static::lazy_static;
 

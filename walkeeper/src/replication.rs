@@ -5,7 +5,6 @@ use crate::send_wal::SendWalHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
-use log::*;
 use postgres_ffi::xlog_utils::{
     get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
 };
@@ -20,6 +19,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{str, thread};
+use tracing::*;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
@@ -177,6 +177,8 @@ impl ReplicationConn {
         pgb: &mut PostgresBackend,
         cmd: &Bytes,
     ) -> Result<()> {
+        let _enter = info_span!("WAL sender", timeline = %swh.timelineid.unwrap()).entered();
+
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(swh.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();

@@ -5,8 +5,8 @@
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use bytes::BytesMut;
-use log::*;
 use postgres::{Client, Config, NoTls};
+use tracing::*;
 
 use std::net::SocketAddr;
 use std::thread;
@@ -116,6 +116,8 @@ impl<'pg> ReceiveWalConn<'pg> {
 
     /// Receive WAL from wal_proposer
     pub fn run(&mut self, swh: &mut SendWalHandler) -> Result<()> {
+        let _enter = info_span!("WAL acceptor", timeline = %swh.timelineid.unwrap()).entered();
+
         // Notify the libpq client that it's allowed to send `CopyData` messages
         self.pg_backend
             .write_message(&BeMessage::CopyBothResponse)?;

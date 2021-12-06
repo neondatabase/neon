@@ -3,9 +3,10 @@
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
 use anyhow::Result;
-use log::*;
+use regex::Regex;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
+use tracing::*;
 
 use crate::send_wal::SendWalHandler;
 use crate::SafeKeeperConf;
@@ -33,9 +34,19 @@ pub fn thread_main(conf: SafeKeeperConf, listener: TcpListener) -> Result<()> {
     }
 }
 
+// Get unique thread id (Rust internal), with ThreadId removed for shorter printing
+fn get_tid() -> u64 {
+    let tids = format!("{:?}", thread::current().id());
+    let r = Regex::new(r"ThreadId\((\d+)\)").unwrap();
+    let caps = r.captures(&tids).unwrap();
+    caps.get(1).unwrap().as_str().parse().unwrap()
+}
+
 /// This is run by `thread_main` above, inside a background thread.
 ///
 fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<()> {
+    let _enter = info_span!("", tid = ?get_tid()).entered();
+
     socket.set_nodelay(true)?;
 
     let mut conn_handler = SendWalHandler::new(conf);
