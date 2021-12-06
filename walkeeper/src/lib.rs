@@ -13,6 +13,7 @@ pub mod s3_offload;
 pub mod safekeeper;
 pub mod send_wal;
 pub mod timeline;
+pub mod upgrade;
 pub mod wal_service;
 
 pub mod defaults {

@@ -30,7 +30,7 @@ use zenith_utils::pq_proto::SystemId;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 1;
+pub const SK_FORMAT_VERSION: u32 = 2;
 const SK_PROTOCOL_VERSION: u32 = 1;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 
@@ -102,7 +102,7 @@ impl fmt::Debug for TermHistory {
 }
 
 /// Unique id of proposer. Not needed for correctness, used for monitoring.
-type PgUuid = [u8; 16];
+pub type PgUuid = [u8; 16];
 
 /// Persistent consensus state of the acceptor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,12 +140,9 @@ pub struct ServerInfo {
 }
 
 /// Persistent information stored on safekeeper node
+/// On disk data is prefixed by magic and format version and followed by checksum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperState {
-    /// magic for verifying content the control file
-    pub magic: u32,
-    /// safekeeper format version
-    pub format_version: u32,
     /// persistent acceptor state
     pub acceptor_state: AcceptorState,
     /// information about server
@@ -166,8 +163,6 @@ pub struct SafeKeeperState {
 impl SafeKeeperState {
     pub fn new() -> SafeKeeperState {
         SafeKeeperState {
-            magic: SK_MAGIC,
-            format_version: SK_FORMAT_VERSION,
             acceptor_state: AcceptorState {
                 term: 0,
                 term_history: TermHistory::empty(),
