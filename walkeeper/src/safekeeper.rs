@@ -702,15 +702,17 @@ where
                 );
                 self.decoder = WalStreamDecoder::new(msg.h.begin_lsn);
             }
-            self.decoder.feed_bytes(&msg.wal_data);
-            loop {
-                match self.decoder.poll_decode()? {
-                    None => break, // no full record yet
-                    Some((lsn, _rec)) => {
-                        last_rec_lsn = lsn;
-                    }
-                }
-            }
+            // XXX: decoder is disabled for this test
+            // self.decoder.feed_bytes(&msg.wal_data);
+            // loop {
+            //     match self.decoder.poll_decode()? {
+            //         None => break, // no full record yet
+            //         Some((lsn, _rec)) => {
+            //             last_rec_lsn = lsn;
+            //         }
+            //     }
+            // }
+            last_rec_lsn = msg.h.begin_lsn + msg.wal_data.len() as u64;
 
             // If this was the first record we ever receieved, remember LSN to help
             // find_end_of_wal skip the hole in the beginning.

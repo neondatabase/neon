@@ -11,3 +11,6 @@ test_output/
 # Coverage
 *.profraw
 *.profdata
+
+tmp1
+tmp2
