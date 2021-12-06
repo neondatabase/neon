@@ -39,10 +39,10 @@ pub mod defaults {
     // would be more appropriate. But a low value forces the code to be exercised more,
     // which is good for now to trigger bugs.
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
-    pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(1);
+    pub const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_secs(10);
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-    pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(100);
+    pub const DEFAULT_GC_PERIOD: Duration = Duration::from_secs(10);
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
     pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 100;

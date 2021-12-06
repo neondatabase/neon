@@ -36,17 +36,10 @@ pg_port = {pageserver_pg_port}
 http_port = {pageserver_http_port}
 auth_type = '{pageserver_auth_type}'
 
-[[safekeepers]]
-name = '{safekeeper_name}'
-pg_port = {safekeeper_pg_port}
-http_port = {safekeeper_http_port}
 "#,
         pageserver_pg_port = DEFAULT_PAGESERVER_PG_PORT,
         pageserver_http_port = DEFAULT_PAGESERVER_HTTP_PORT,
         pageserver_auth_type = AuthType::Trust,
-        safekeeper_name = DEFAULT_SAFEKEEPER_NAME,
-        safekeeper_pg_port = DEFAULT_SAFEKEEPER_PG_PORT,
-        safekeeper_http_port = DEFAULT_SAFEKEEPER_HTTP_PORT,
     )
 }
 
