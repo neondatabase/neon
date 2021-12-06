@@ -5,12 +5,19 @@ use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 
 use yakv::storage::{
-    Key, ReadOnlyTransaction, Select, Storage, StorageConfig, StorageIterator, Transaction, Value,
+    Key,
+    Select,
+    //    ReadOnlyTransaction,
+    Snapshot,
+    Storage,
+    StorageConfig,
+    StorageIterator,
+    Transaction,
+    Value,
 };
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
 const CACHE_SIZE: usize = 32 * 1024; // 256Mb
-                                     //const CACHE_SIZE: usize = 128 * 1024; // 1Gb
 
 ///
 /// Toast storage consistof two KV databases: one for storing main index
@@ -27,7 +34,8 @@ pub struct ToastIterator<'a> {
 }
 
 pub struct ToastSnapshot<'a> {
-    tx: ReadOnlyTransaction<'a>,
+    //    tx: ReadOnlyTransaction<'a>,
+    tx: Snapshot<'a>,
 }
 
 impl<'a> ToastSnapshot<'a> {
@@ -205,7 +213,8 @@ impl ToastStore {
             key.extend_from_slice(&[0u8; 4]);
             tx.put(&key, &value)?;
         }
-        tx.delay();
+        tx.subcommit()?;
+        //tx.delay();
         Ok(())
     }
 
@@ -217,14 +226,16 @@ impl ToastStore {
 
     pub fn take_snapshot(&self) -> ToastSnapshot<'_> {
         ToastSnapshot {
-            tx: self.db.read_only_transaction(),
+            //tx: self.db.read_only_transaction(),
+            tx: self.db.take_snapshot(),
         }
     }
 
     pub fn remove(&self, key: Key) -> Result<()> {
         let mut tx = self.db.start_transaction();
         self.tx_remove(&mut tx, &key)?;
-        tx.delay();
+        tx.subcommit()?;
+        //tx.delay();
         Ok(())
     }
 
