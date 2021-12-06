@@ -3,7 +3,6 @@
 //
 
 use anyhow::Result;
-use log::*;
 use postgres_ffi::xlog_utils::*;
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
@@ -16,6 +15,7 @@ use std::path::Path;
 use std::time::SystemTime;
 use tokio::runtime;
 use tokio::time::sleep;
+use tracing::*;
 use walkdir::WalkDir;
 
 use crate::SafeKeeperConf;

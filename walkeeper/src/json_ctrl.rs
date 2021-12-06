@@ -9,8 +9,8 @@
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use crc32c::crc32c_append;
-use log::*;
 use serde::{Deserialize, Serialize};
+use tracing::*;
 
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{

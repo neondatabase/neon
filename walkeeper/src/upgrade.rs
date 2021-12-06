@@ -3,8 +3,8 @@ use crate::safekeeper::{
     AcceptorState, PgUuid, SafeKeeperState, ServerInfo, Term, TermHistory, TermSwitchEntry,
 };
 use anyhow::{bail, Result};
-use log::*;
 use serde::{Deserialize, Serialize};
+use tracing::*;
 use zenith_utils::{bin_ser::LeSer, lsn::Lsn};
 
 /// Persistent consensus state of the acceptor.
