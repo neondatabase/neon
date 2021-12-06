@@ -7,3 +7,7 @@ test_output/
 .vscode
 /.zenith
 /integration_tests/.zenith
+
+# Coverage
+*.profraw
+*.profdata
