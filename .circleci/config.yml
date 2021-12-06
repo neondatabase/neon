@@ -14,7 +14,6 @@ jobs:
     executor: zenith-build-executor
     steps:
       - checkout
-
       - run:
           name: rustfmt
           when: always
@@ -81,6 +80,8 @@ jobs:
       build_type:
         type: enum
         enum: ["debug", "release"]
+    environment:
+      BUILD_TYPE: << parameters.build_type >>
     steps:
       - run:
           name: apt install dependencies
@@ -116,15 +117,16 @@ jobs:
       - run:
           name: Rust build << parameters.build_type >>
           command: |
-            export CARGO_INCREMENTAL=0
-            BUILD_TYPE="<< parameters.build_type >>"
             if [[ $BUILD_TYPE == "debug" ]]; then
-              echo "Build in debug mode"
-              cargo build --bins --tests
+              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
+              CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
-              echo "Build in release mode"
-              cargo build --release --bins --tests
+              cov_prefix=()
+              CARGO_FLAGS=--release
             fi
+
+            export CARGO_INCREMENTAL=0
+            "${cov_prefix[@]}" cargo build $CARGO_FLAGS --bins --tests
 
       - save_cache:
           name: Save rust cache
@@ -138,45 +140,77 @@ jobs:
         # has to run separately from cargo fmt section
         # since needs to run with dependencies
       - run:
-          name: clippy
+          name: cargo clippy
           command: |
-            ./run_clippy.sh
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
+            elif [[ $BUILD_TYPE == "release" ]]; then
+              cov_prefix=()
+            fi
+
+            "${cov_prefix[@]}" ./run_clippy.sh
 
         # Run rust unit tests
-      - run: cargo test
+      - run:
+          name: cargo test
+          command: |
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
+            elif [[ $BUILD_TYPE == "release" ]]; then
+              cov_prefix=()
+            fi
+
+            "${cov_prefix[@]}" cargo test
 
         # Install the rust binaries, for use by test jobs
-        # `--locked` is required; otherwise, `cargo install` will ignore Cargo.lock.
-        # FIXME: this is a really silly way to install; maybe we should just output
-        # a tarball as an artifact? Or a .deb package?
       - run:
-          name: cargo install
+          name: Install rust binaries
           command: |
-            export CARGO_INCREMENTAL=0
-            BUILD_TYPE="<< parameters.build_type >>"
             if [[ $BUILD_TYPE == "debug" ]]; then
-              echo "Install debug mode"
-              CARGO_FLAGS="--debug"
+              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
             elif [[ $BUILD_TYPE == "release" ]]; then
-              echo "Install release mode"
-              # The default is release mode; there is no --release flag.
-              CARGO_FLAGS=""
+              cov_prefix=()
             fi
-            cargo install $CARGO_FLAGS --locked --root /tmp/zenith --path pageserver
-            cargo install $CARGO_FLAGS --locked --root /tmp/zenith --path walkeeper
-            cargo install $CARGO_FLAGS --locked --root /tmp/zenith --path zenith
+
+            binaries=$(
+              "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
+              jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
+            )
+
+            test_exe_paths=$(
+              "${cov_prefix[@]}" cargo test --message-format=json --no-run |
+              jq -r '.executable | select(. != null)'
+            )
+
+            mkdir -p /tmp/zenith/bin
+            mkdir -p /tmp/zenith/test_bin
+            mkdir -p /tmp/zenith/etc
+
+            # Install target binaries
+            for bin in $binaries; do
+              SRC=target/$BUILD_TYPE/$bin
+              DST=/tmp/zenith/bin/$bin
+              cp $SRC $DST
+              echo $DST >> /tmp/zenith/etc/binaries.list
+            done
+
+            # Install test executables (for code coverage)
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              for bin in $test_exe_paths; do
+                SRC=$bin
+                DST=/tmp/zenith/test_bin/$(basename $bin)
+                cp $SRC $DST
+                echo $DST >> /tmp/zenith/etc/binaries.list
+              done
+            fi
 
         # Install the postgres binaries, for use by test jobs
-        # FIXME: this is a silly way to do "install"; maybe just output a standard
-        # postgres package, whatever the favored form is (tarball? .deb package?)
-        # Note that pg_regress needs some build artifacts that probably aren't
-        # in the usual package...?
       - run:
-          name: postgres install
+          name: Install postgres binaries
           command: |
             cp -a tmp_install /tmp/zenith/pg_install
 
-        # Save the rust output binaries for other jobs in this workflow.
+        # Save the rust binaries and coverage data for other jobs in this workflow.
       - persist_to_workspace:
           root: /tmp/zenith
           paths:
@@ -228,6 +262,8 @@ jobs:
       save_perf_report:
         type: boolean
         default: false
+    environment:
+      BUILD_TYPE: << parameters.build_type >>
     steps:
       - attach_workspace:
           at: /tmp/zenith
@@ -241,21 +277,22 @@ jobs:
           command: pipenv --python 3.7 install
       - run:
           name: Run pytest
-          working_directory: test_runner
           # pytest doesn't output test logs in real time, so CI job may fail with
           # `Too long with no output` error, if a test is running for a long time.
-          # In that case, tests should have internal timeouts that are less than 
+          # In that case, tests should have internal timeouts that are less than
           # no_output_timeout, specified here.
           no_output_timeout: 10m
           environment:
             - ZENITH_BIN: /tmp/zenith/bin
             - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
             - TEST_OUTPUT: /tmp/test_output
-            # this variable will be embedded in perf test report 
+            # this variable will be embedded in perf test report
             # and is needed to distinguish different environments
             - PLATFORM: zenith-local-ci
           command: |
-            TEST_SELECTION="<< parameters.test_selection >>"
+            PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
+
+            TEST_SELECTION="test_runner/<< parameters.test_selection >>"
             EXTRA_PARAMS="<< parameters.extra_params >>"
             if [ -z "$TEST_SELECTION" ]; then
               echo "test_selection must be set"
@@ -263,15 +300,21 @@ jobs:
             fi
             if << parameters.run_in_parallel >>; then
               EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
-            fi;
+            fi
             if << parameters.save_perf_report >>; then
               if [[ $CIRCLE_BRANCH == "main" ]]; then
-                mkdir -p perf-report-local
-                EXTRA_PARAMS="--out-dir perf-report-local $EXTRA_PARAMS"
-              fi;
-            fi;
+                mkdir -p "$PERF_REPORT_DIR"
+                EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
+              fi
+            fi
 
             export GITHUB_SHA=$CIRCLE_SHA1
+
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
+            elif [[ $BUILD_TYPE == "release" ]]; then
+              cov_prefix=()
+            fi
 
             # Run the tests.
             #
@@ -283,14 +326,21 @@ jobs:
             # -n4 uses four processes to run tests via pytest-xdist
             # -s is not used to prevent pytest from capturing output, because tests are running
             # in parallel and logs are mixed between different tests
-            pipenv run pytest --junitxml=$TEST_OUTPUT/junit.xml --tb=short --verbose -m "not remote_cluster" -rA $TEST_SELECTION $EXTRA_PARAMS
+            "${cov_prefix[@]}" pipenv run pytest \
+              --junitxml=$TEST_OUTPUT/junit.xml \
+              --tb=short \
+              --verbose \
+              -m "not remote_cluster" \
+              -rA $TEST_SELECTION $EXTRA_PARAMS
 
             if << parameters.save_perf_report >>; then
               if [[ $CIRCLE_BRANCH == "main" ]]; then
-                REPORT_FROM=$(realpath perf-report-local) REPORT_TO=local ../scripts/generate_and_push_perf_report.sh
-              fi;
-            fi;
-
+                # TODO: reuse scripts/git-upload
+                export REPORT_FROM="$(PERF_REPORT_DIR)"
+                export REPORT_TO=local
+                ../scripts/generate_and_push_perf_report.sh
+              fi
+            fi
       - run:
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
@@ -306,6 +356,65 @@ jobs:
       # The store_test_results step tells CircleCI where to find the junit.xml file.
       - store_test_results:
           path: /tmp/test_output
+      # Save coverage data (if any)
+      - persist_to_workspace:
+          root: /tmp/zenith
+          paths:
+            - "*"
+
+  coverage-report:
+    executor: zenith-build-executor
+    steps:
+      - attach_workspace:
+          at: /tmp/zenith
+      - checkout
+      - restore_cache:
+          name: Restore rust cache
+          keys:
+            # Require an exact match. While an out of date cache might speed up the build,
+            # there's no way to clean out old packages, so the cache grows every time something
+            # changes.
+            - v04-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
+      - run:
+          name: Install llvm-tools
+          command: |
+            # TODO: install a proper symbol demangler, e.g. rustfilt
+            # TODO: we should embed this into a docker image
+            rustup component add llvm-tools-preview
+      - run:
+          name: Build coverage report
+          command: |
+            COMMIT_URL=https://github.com/zenithdb/zenith/commit/$CIRCLE_SHA1
+
+            scripts/coverage \
+              --dir=/tmp/zenith/coverage report \
+              --input-objects=/tmp/zenith/etc/binaries.list \
+              --commit-url=$COMMIT_URL \
+              --format=github
+      - run:
+          name: Upload coverage report
+          command: |
+            LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
+            REPORT_URL=https://zenithdb.github.io/zenith-coverage-data/$CIRCLE_SHA1
+            COMMIT_URL=https://github.com/zenithdb/zenith/commit/$CIRCLE_SHA1
+
+            scripts/git-upload \
+              --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-coverage-data.git \
+              --message="Add code coverage for $COMMIT_URL" \
+              copy /tmp/zenith/coverage/report $CIRCLE_SHA1 # COPY FROM TO_RELATIVE
+
+            # Add link to the coverage report to the commit
+            curl -f -X POST \
+            https://api.github.com/repos/$LOCAL_REPO/statuses/$CIRCLE_SHA1 \
+            -H "Accept: application/vnd.github.v3+json" \
+            --user "$CI_ACCESS_TOKEN" \
+            --data \
+              "{
+                \"state\": \"success\",
+                \"context\": \"zenith-coverage\",
+                \"description\": \"Coverage report is ready\",
+                \"target_url\": \"$REPORT_URL\"
+              }"
 
   # Build zenithdb/zenith:latest image and push it to Docker hub
   docker-image:
@@ -410,6 +519,12 @@ workflows:
           save_perf_report: true
           requires:
             - build-zenith-release
+      - coverage-report:
+          # Context passes credentials for gh api
+          context: CI_ACCESS_TOKEN
+          requires:
+            # TODO: consider adding more
+            - other-tests-debug
       - docker-image:
           # Context gives an ability to login
           context: Docker Hub
