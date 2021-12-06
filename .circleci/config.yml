@@ -4,7 +4,7 @@ executors:
   zenith-build-executor:
     resource_class: xlarge
     docker:
-      - image: cimg/rust:1.55.0
+      - image: cimg/rust:1.56.1
   zenith-python-executor:
     docker:
       - image: cimg/python:3.7.10  # Oldest available 3.7 with Ubuntu 20.04 (for GLIBC and Rust) at CirlceCI
