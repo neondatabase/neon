@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use routerify::{ext::RequestExt, RouterBuilder};
+use serde::Serialize;
 use tracing::*;
 use zenith_utils::auth::JwtAuth;
 use zenith_utils::http::endpoint::attach_openapi_ui;
@@ -18,6 +19,8 @@ use zenith_utils::http::{
     request::get_request_param,
     request::parse_request_param,
 };
+use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTimelineId;
 
 use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
@@ -140,6 +143,99 @@ async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>,
     Ok(json_response(StatusCode::OK, response_data)?)
 }
 
+async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let conf = get_state(&request).conf;
+    let timelines_dir = conf.timelines_path(&tenant_id);
+
+    let mut timelines_dir_contents =
+        tokio::fs::read_dir(&timelines_dir).await.with_context(|| {
+            format!(
+                "Failed to list timelines dir '{}' contents",
+                timelines_dir.display()
+            )
+        })?;
+
+    let mut local_timelines = Vec::new();
+    while let Some(entry) = timelines_dir_contents.next_entry().await.with_context(|| {
+        format!(
+            "Failed to list timelines dir '{}' contents",
+            timelines_dir.display()
+        )
+    })? {
+        let entry_path = entry.path();
+        let entry_type = entry.file_type().await.with_context(|| {
+            format!(
+                "Failed to get file type of timeline dirs' entry '{}'",
+                entry_path.display()
+            )
+        })?;
+
+        if entry_type.is_dir() {
+            match entry.file_name().to_string_lossy().parse::<ZTimelineId>() {
+                Ok(timeline_id) => local_timelines.push(timeline_id.to_string()),
+                Err(e) => error!(
+                    "Failed to get parse timeline id from timeline dirs' entry '{}': {}",
+                    entry_path.display(),
+                    e
+                ),
+            }
+        }
+    }
+
+    let response_data = serde_json::to_value(&local_timelines).with_context(|| {
+        format!(
+            "Failed to serialize timeline ids response: {:?}",
+            local_timelines
+        )
+    })?;
+
+    Ok(json_response(StatusCode::OK, response_data)?)
+}
+
+#[derive(Debug, Serialize)]
+struct TimelineDetails {
+    #[serde(with = "hex")]
+    timeline_id: ZTimelineId,
+    #[serde(with = "hex")]
+    tenant_id: ZTenantId,
+    ancestor_timeline_id: Option<ZTimelineId>,
+    last_record_lsn: Lsn,
+    prev_record_lsn: Lsn,
+    start_lsn: Lsn,
+    disk_consistent_lsn: Lsn,
+}
+
+async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let response_data = tokio::task::spawn_blocking(move || {
+        let _enter =
+            info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id)
+                .entered();
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        let timeline = repo.get_timeline(timeline_id)?;
+        Ok::<_, anyhow::Error>(TimelineDetails {
+            timeline_id,
+            tenant_id,
+            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+            disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
+            last_record_lsn: timeline.get_last_record_lsn(),
+            prev_record_lsn: timeline.get_prev_record_lsn(),
+            start_lsn: timeline.get_start_lsn(),
+        })
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
+    Ok(json_response(StatusCode::OK, response_data)?)
+}
+
 async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     // check for management permission
     check_permission(&request, None)?;
@@ -198,6 +294,11 @@ pub fn make_router(
         .get("/v1/status", status_handler)
         .get("/v1/branch/:tenant_id", branch_list_handler)
         .get("/v1/branch/:tenant_id/:branch_name", branch_detail_handler)
+        .get("/v1/timeline/:tenant_id", timeline_list_handler)
+        .get(
+            "/v1/timeline/:tenant_id/:timeline_id",
+            timeline_detail_handler,
+        )
         .post("/v1/branch", branch_create_handler)
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
