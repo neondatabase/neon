@@ -154,3 +154,84 @@ zid_newtype!(ZTimelineId);
 pub struct ZTenantId(ZId);
 
 zid_newtype!(ZTenantId);
+
+/// Serde routines for Option<T> (de)serialization, using `T:Display` representations for inner values.
+/// Useful for Option<ZTenantId> and Option<ZTimelineId> to get their hex representations into serialized string and deserialize them back.
+pub mod opt_display_serde {
+    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+    use std::{fmt::Display, str::FromStr};
+
+    pub fn serialize<S, Id>(id: &Option<Id>, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        Id: Display,
+    {
+        id.as_ref().map(ToString::to_string).serialize(ser)
+    }
+
+    pub fn deserialize<'de, D, Id>(des: D) -> Result<Option<Id>, D::Error>
+    where
+        D: Deserializer<'de>,
+        Id: FromStr,
+        <Id as FromStr>::Err: Display,
+    {
+        Ok(if let Some(s) = Option::<String>::deserialize(des)? {
+            Some(Id::from_str(&s).map_err(de::Error::custom)?)
+        } else {
+            None
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Display;
+
+    use super::*;
+    use hex::FromHexError;
+    use hex_literal::hex;
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct TestStruct<E: Display, T: FromStr<Err = E> + Display> {
+        #[serde(with = "opt_display_serde")]
+        field: Option<T>,
+    }
+
+    #[test]
+    fn test_hex_serializations_tenant_id() {
+        let original_struct = TestStruct {
+            field: Some(ZTenantId::from_array(hex!(
+                "11223344556677881122334455667788"
+            ))),
+        };
+
+        let serialized_string = serde_json::to_string(&original_struct).unwrap();
+        assert_eq!(
+            serialized_string,
+            r#"{"field":"11223344556677881122334455667788"}"#
+        );
+
+        let deserialized_struct: TestStruct<FromHexError, ZTenantId> =
+            serde_json::from_str(&serialized_string).unwrap();
+        assert_eq!(original_struct, deserialized_struct);
+    }
+
+    #[test]
+    fn test_hex_serializations_timeline_id() {
+        let original_struct = TestStruct {
+            field: Some(ZTimelineId::from_array(hex!(
+                "AA223344556677881122334455667788"
+            ))),
+        };
+
+        let serialized_string = serde_json::to_string(&original_struct).unwrap();
+        assert_eq!(
+            serialized_string,
+            r#"{"field":"aa223344556677881122334455667788"}"#
+        );
+
+        let deserialized_struct: TestStruct<FromHexError, ZTimelineId> =
+            serde_json::from_str(&serialized_string).unwrap();
+        assert_eq!(original_struct, deserialized_struct);
+    }
+}

@@ -88,7 +88,7 @@ fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result
     }
 
     loop {
-        if tenant_mgr::get_tenant_state(tenantid) != TenantState::Active {
+        if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
         }
 
@@ -102,7 +102,7 @@ fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result
     }
 
     trace!(
-        "checkpointer thread stopped for tenant {} state is {}",
+        "checkpointer thread stopped for tenant {} state is {:?}",
         tenantid,
         tenant_mgr::get_tenant_state(tenantid)
     );
@@ -120,7 +120,7 @@ fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
     }
 
     loop {
-        if tenant_mgr::get_tenant_state(tenantid) != TenantState::Active {
+        if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
         }
 
@@ -135,13 +135,14 @@ fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
         // TODO Write it in more adequate way using
         // condvar.wait_timeout() or something
         let mut sleep_time = conf.gc_period.as_secs();
-        while sleep_time > 0 && tenant_mgr::get_tenant_state(tenantid) == TenantState::Active {
+        while sleep_time > 0 && tenant_mgr::get_tenant_state(tenantid) == Some(TenantState::Active)
+        {
             sleep_time -= 1;
             std::thread::sleep(Duration::from_secs(1));
         }
     }
     trace!(
-        "GC thread stopped for tenant {} state is {}",
+        "GC thread stopped for tenant {} state is {:?}",
         tenantid,
         tenant_mgr::get_tenant_state(tenantid)
     );

@@ -70,7 +70,8 @@ def test_tenant_list_psql(zenith_env_builder: ZenithEnvBuilder):
     cur = conn.cursor()
 
     # check same tenant cannot be created twice
-    with pytest.raises(psycopg2.DatabaseError, match=f'tenant {env.initial_tenant} already exists'):
+    with pytest.raises(psycopg2.DatabaseError,
+                       match=f'repo for {env.initial_tenant} already exists'):
         cur.execute(f'tenant_create {env.initial_tenant}')
 
     # create one more tenant

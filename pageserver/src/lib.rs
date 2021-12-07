@@ -1,4 +1,4 @@
-use layered_repository::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
+use layered_repository::TIMELINES_SEGMENT_NAME;
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -105,7 +105,7 @@ impl PageServerConf {
     //
 
     fn tenants_path(&self) -> PathBuf {
-        self.workdir.join(TENANTS_SEGMENT_NAME)
+        self.workdir.join("tenants")
     }
 
     fn tenant_path(&self, tenantid: &ZTenantId) -> PathBuf {

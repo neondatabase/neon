@@ -12,7 +12,7 @@ use crate::tenant_mgr::TenantState;
 use crate::tenant_threads;
 use crate::walrecord::*;
 use crate::PageServerConf;
-use anyhow::{bail, Error, Result};
+use anyhow::{bail, Context, Error, Result};
 use lazy_static::lazy_static;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
@@ -205,7 +205,13 @@ fn walreceiver_main(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
-    let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)?;
+    let timeline =
+        tenant_mgr::get_timeline_for_tenant(tenantid, timelineid).with_context(|| {
+            format!(
+                "Can not start the walrecever for a remote tenant {}, timeline {}",
+                tenantid, timelineid,
+            )
+        })?;
 
     //
     // Start streaming the WAL, from where we left off previously.

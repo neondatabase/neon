@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::{opt_display_serde, ZTenantId};
 
 //
 // This data structures represents zenith CLI config
@@ -46,7 +46,7 @@ pub struct LocalEnv {
 
     // Default tenant ID to use with the 'zenith' command line utility, when
     // --tenantid is not explicitly specified.
-    #[serde(with = "opt_tenantid_serde")]
+    #[serde(with = "opt_display_serde")]
     #[serde(default)]
     pub default_tenantid: Option<ZTenantId>,
 
@@ -323,32 +323,5 @@ fn base_path() -> PathBuf {
     match std::env::var_os("ZENITH_REPO_DIR") {
         Some(val) => PathBuf::from(val.to_str().unwrap()),
         None => ".zenith".into(),
-    }
-}
-
-/// Serde routines for Option<ZTenantId>. The serialized form is a hex string.
-mod opt_tenantid_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::str::FromStr;
-    use zenith_utils::zid::ZTenantId;
-
-    pub fn serialize<S>(tenantid: &Option<ZTenantId>, ser: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        tenantid.map(|t| t.to_string()).serialize(ser)
-    }
-
-    pub fn deserialize<'de, D>(des: D) -> Result<Option<ZTenantId>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s: Option<String> = Option::deserialize(des)?;
-        if let Some(s) = s {
-            return Ok(Some(
-                ZTenantId::from_str(&s).map_err(serde::de::Error::custom)?,
-            ));
-        }
-        Ok(None)
     }
 }

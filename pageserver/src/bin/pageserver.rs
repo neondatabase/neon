@@ -559,13 +559,17 @@ fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {
     }
 
     let signals = signals::install_shutdown_handlers()?;
-    let mut threads = vec![];
+    let mut threads = Vec::new();
 
-    if let Some(handle) = remote_storage::run_storage_sync_thread(conf)? {
+    let sync_startup = remote_storage::start_local_timeline_sync(conf)
+        .context("Failed to set up local files sync with external storage")?;
+
+    if let Some(handle) = sync_startup.sync_loop_handle {
         threads.push(handle);
     }
+
     // Initialize tenant manager.
-    tenant_mgr::init(conf);
+    tenant_mgr::set_timeline_states(conf, sync_startup.initial_timeline_states);
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
