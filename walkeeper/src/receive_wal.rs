@@ -5,12 +5,7 @@
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use bytes::BytesMut;
-<<<<<<< HEAD
-use postgres::{Client, Config, NoTls};
 use tracing::*;
-=======
-use log::*;
->>>>>>> callmemaybe refactoring
 
 use std::net::SocketAddr;
 
@@ -24,7 +19,7 @@ use zenith_utils::pq_proto::{BeMessage, FeMessage};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -103,17 +98,23 @@ impl<'pg> ReceiveWalConn<'pg> {
         let _guard = match self.pageserver_connstr {
             Some(ref pageserver_connstr) => {
                 // Need to establish replication channel with page server.
-                // Add far as replication in postgres is initiated by receiver, we should use callme mechanism
+                // Add far as replication in postgres is initiated by receiver
+                // we should use callmemaybe mechanism.
                 let timelineid = swh.timeline.get().timelineid;
                 let tx_clone = swh.tx.clone();
                 let pageserver_connstr = pageserver_connstr.to_owned();
                 swh.tx
-                    .blocking_send(CallmeEvent::Subscribe(
+                    .send(CallmeEvent::Subscribe(
                         tenant_id,
                         timelineid,
                         pageserver_connstr,
                     ))
-                    .unwrap();
+                    .unwrap_or_else(|e| {
+                        error!(
+                            "failed to send Subscribe request to callmemaybe thread {}",
+                            e
+                        );
+                    });
 
                 // create a guard to unsubscribe callback, when this wal_stream will exit
                 Some(SendWalHandlerGuard {
@@ -140,7 +141,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 }
 
 struct SendWalHandlerGuard {
-    tx: Sender<CallmeEvent>,
+    tx: UnboundedSender<CallmeEvent>,
     tenant_id: ZTenantId,
     timelineid: ZTimelineId,
 }
@@ -148,7 +149,12 @@ struct SendWalHandlerGuard {
 impl Drop for SendWalHandlerGuard {
     fn drop(&mut self) {
         self.tx
-            .blocking_send(CallmeEvent::Unsubscribe(self.tenant_id, self.timelineid))
-            .unwrap();
+            .send(CallmeEvent::Unsubscribe(self.tenant_id, self.timelineid))
+            .unwrap_or_else(|e| {
+                error!(
+                    "failed to send Unsubscribe request to callmemaybe thread {}",
+                    e
+                );
+            });
     }
 }
