@@ -200,9 +200,6 @@ impl Drop for SubscriptionStateInner {
 }
 
 pub async fn main_loop(conf: SafeKeeperConf, mut rx: Receiver<CallmeEvent>) -> Result<()> {
-    let default_timeout = Duration::from_secs(5);
-    let recall_period = conf.recall_period.unwrap_or(default_timeout);
-
     let subscriptions: Mutex<HashMap<(ZTenantId, ZTimelineId), SubscriptionState>> =
         Mutex::new(HashMap::new());
 
@@ -259,7 +256,7 @@ pub async fn main_loop(conf: SafeKeeperConf, mut rx: Receiver<CallmeEvent>) -> R
                     },
                 }
             },
-            _ = tokio::time::sleep(recall_period) => { true },
+            _ = tokio::time::sleep(conf.recall_period) => { true },
         };
 
         if call_iteration {
@@ -268,7 +265,7 @@ pub async fn main_loop(conf: SafeKeeperConf, mut rx: Receiver<CallmeEvent>) -> R
             for (&(_tenantid, _timelineid), state) in subscriptions.iter() {
                 let listen_pg_addr = conf.listen_pg_addr.clone();
 
-                state.call(recall_period, listen_pg_addr);
+                state.call(conf.recall_period, listen_pg_addr);
             }
         }
     }

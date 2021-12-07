@@ -112,7 +112,7 @@ fn main() -> Result<()> {
     }
 
     if let Some(recall) = arg_matches.value_of("recall") {
-        conf.recall_period = Some(humantime::parse_duration(recall)?);
+        conf.recall_period = humantime::parse_duration(recall)?;
     }
 
     start_safekeeper(conf)
