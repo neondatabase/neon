@@ -409,8 +409,8 @@ impl AcceptorProposerMessage {
 }
 
 pub trait Storage {
-    /// Persist safekeeper state on disk, optionally syncing it.
-    fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()>;
+    /// Persist safekeeper state on disk.
+    fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
     /// Write piece of wal in buf to disk and sync it.
     fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8]) -> Result<()>;
     // Truncate WAL at specified LSN
@@ -563,7 +563,7 @@ where
         self.s.server.ztli = msg.ztli;
         self.s.server.wal_seg_size = msg.wal_seg_size;
         self.storage
-            .persist(&self.s, true)
+            .persist(&self.s)
             .with_context(|| "failed to persist shared state")?;
 
         self.metrics = SafeKeeperMetrics::new(self.s.server.ztli);
@@ -593,7 +593,7 @@ where
         if self.s.acceptor_state.term < msg.term {
             self.s.acceptor_state.term = msg.term;
             // persist vote before sending it out
-            self.storage.persist(&self.s, true)?;
+            self.storage.persist(&self.s)?;
             resp.term = self.s.acceptor_state.term;
             resp.vote_given = true as u64;
         }
@@ -605,7 +605,7 @@ where
     fn bump_if_higher(&mut self, term: Term) -> Result<()> {
         if self.s.acceptor_state.term < term {
             self.s.acceptor_state.term = term;
-            self.storage.persist(&self.s, true)?;
+            self.storage.persist(&self.s)?;
         }
         Ok(())
     }
@@ -644,7 +644,7 @@ where
         self.flush_lsn = msg.start_streaming_at;
         // and now adopt term history from proposer
         self.s.acceptor_state.term_history = msg.term_history.clone();
-        self.storage.persist(&self.s, true)?;
+        self.storage.persist(&self.s)?;
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
 
@@ -748,7 +748,10 @@ where
             self.s.commit_lsn = self.commit_lsn;
             self.s.truncate_lsn = self.truncate_lsn;
         }
-        self.storage.persist(&self.s, sync_control_file)?;
+
+        if sync_control_file {
+            self.storage.persist(&self.s)?;
+        }
 
         let resp = self.append_response();
         info!(
@@ -773,7 +776,7 @@ mod tests {
     }
 
     impl Storage for InMemoryStorage {
-        fn persist(&mut self, s: &SafeKeeperState, _sync: bool) -> Result<()> {
+        fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
             self.persisted_state = s.clone();
             Ok(())
         }

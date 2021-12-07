@@ -85,20 +85,13 @@ pub enum CreateControlFile {
 }
 
 lazy_static! {
-    static ref PERSIST_SYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
-        "safekeeper_persist_sync_control_file_seconds",
+    static ref PERSIST_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_persist_control_file_seconds",
         "Seconds to persist and sync control file, grouped by timeline",
         &["timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
-    .expect("Failed to register safekeeper_persist_sync_control_file_seconds histogram vec");
-    static ref PERSIST_NOSYNC_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
-        "safekeeper_persist_nosync_control_file_seconds",
-        "Seconds to persist and sync control file, grouped by timeline",
-        &["timeline_id"],
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
-    )
-    .expect("Failed to register safekeeper_persist_nosync_control_file_seconds histogram vec");
+    .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec");
 }
 
 impl SharedState {
@@ -338,8 +331,7 @@ struct FileStorage {
     // save timeline dir to avoid reconstructing it every time
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
-    persist_sync_control_file_seconds: Histogram,
-    persist_nosync_control_file_seconds: Histogram,
+    persist_control_file_seconds: Histogram,
 }
 
 impl FileStorage {
@@ -443,9 +435,7 @@ impl FileStorage {
                 lock_file,
                 timeline_dir,
                 conf: conf.clone(),
-                persist_sync_control_file_seconds: PERSIST_SYNC_CONTROL_FILE_SECONDS
-                    .with_label_values(&[&timelineid_str]),
-                persist_nosync_control_file_seconds: PERSIST_NOSYNC_CONTROL_FILE_SECONDS
+                persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
                     .with_label_values(&[&timelineid_str]),
             },
             state,
@@ -456,13 +446,8 @@ impl FileStorage {
 impl Storage for FileStorage {
     // persists state durably to underlying storage
     // for description see https://lwn.net/Articles/457667/
-    fn persist(&mut self, s: &SafeKeeperState, sync: bool) -> Result<()> {
-        let _timer = if sync {
-            &self.persist_sync_control_file_seconds
-        } else {
-            &self.persist_nosync_control_file_seconds
-        }
-        .start_timer();
+    fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
+        let _timer = &self.persist_control_file_seconds.start_timer();
 
         // write data to safekeeper.control.partial
         let control_partial_path = self.timeline_dir.join(CONTROL_FILE_NAME_PARTIAL);
@@ -488,36 +473,32 @@ impl Storage for FileStorage {
             )
         })?;
 
-        if sync {
-            // fsync the file
-            control_partial.sync_all().with_context(|| {
-                format!(
-                    "failed to sync partial control file at {}",
-                    control_partial_path.display()
-                )
-            })?;
-        }
+        // fsync the file
+        control_partial.sync_all().with_context(|| {
+            format!(
+                "failed to sync partial control file at {}",
+                control_partial_path.display()
+            )
+        })?;
 
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);
 
         // rename should be atomic
         fs::rename(&control_partial_path, &control_path)?;
-        if sync {
-            // this sync is not required by any standard but postgres does this (see durable_rename)
-            File::open(&control_path)
-                .and_then(|f| f.sync_all())
-                .with_context(|| {
-                    format!(
-                        "failed to sync control file at: {}",
-                        &control_path.display()
-                    )
-                })?;
+        // this sync is not required by any standard but postgres does this (see durable_rename)
+        File::open(&control_path)
+            .and_then(|f| f.sync_all())
+            .with_context(|| {
+                format!(
+                    "failed to sync control file at: {}",
+                    &control_path.display()
+                )
+            })?;
 
-            // fsync the directory (linux specific)
-            File::open(&self.timeline_dir)
-                .and_then(|f| f.sync_all())
-                .with_context(|| "failed to sync control file directory")?;
-        }
+        // fsync the directory (linux specific)
+        File::open(&self.timeline_dir)
+            .and_then(|f| f.sync_all())
+            .with_context(|| "failed to sync control file directory")?;
         Ok(())
     }
 
@@ -729,9 +710,7 @@ mod test {
                     .expect("failed to read state");
             // change something
             state.wal_start_lsn = Lsn(42);
-            storage
-                .persist(&state, true)
-                .expect("failed to persist state");
+            storage.persist(&state).expect("failed to persist state");
         }
 
         let (_, state) = load_from_control_file(&conf, timeline_id, CreateControlFile::False)
@@ -749,9 +728,7 @@ mod test {
                     .expect("failed to read state");
             // change something
             state.wal_start_lsn = Lsn(42);
-            storage
-                .persist(&state, true)
-                .expect("failed to persist state");
+            storage.persist(&state).expect("failed to persist state");
         }
         let control_path = conf.timeline_dir(&timeline_id).join(CONTROL_FILE_NAME);
         let mut data = fs::read(&control_path).unwrap();
