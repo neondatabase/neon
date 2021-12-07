@@ -19,7 +19,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
 use crate::timeline::CreateControlFile;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Handler for streaming WAL from acceptor
 pub struct SendWalHandler {
@@ -30,7 +30,7 @@ pub struct SendWalHandler {
     pub timelineid: Option<ZTimelineId>,
     pub timeline: Option<Arc<Timeline>>,
     //sender to communicate with callmemaybe thread
-    pub tx: Sender<CallmeEvent>,
+    pub tx: UnboundedSender<CallmeEvent>,
 }
 
 impl postgres_backend::Handler for SendWalHandler {
@@ -103,7 +103,7 @@ impl postgres_backend::Handler for SendWalHandler {
 }
 
 impl SendWalHandler {
-    pub fn new(conf: SafeKeeperConf, tx: Sender<CallmeEvent>) -> Self {
+    pub fn new(conf: SafeKeeperConf, tx: UnboundedSender<CallmeEvent>) -> Self {
         SendWalHandler {
             conf,
             appname: None,

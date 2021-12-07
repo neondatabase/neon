@@ -11,14 +11,14 @@ use tracing::*;
 use crate::callmemaybe::CallmeEvent;
 use crate::send_wal::SendWalHandler;
 use crate::SafeKeeperConf;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 pub fn thread_main(
     conf: SafeKeeperConf,
     listener: TcpListener,
-    tx: Sender<CallmeEvent>,
+    tx: UnboundedSender<CallmeEvent>,
 ) -> Result<()> {
     loop {
         match listener.accept() {
@@ -51,7 +51,11 @@ fn get_tid() -> u64 {
 
 /// This is run by `thread_main` above, inside a background thread.
 ///
-fn handle_socket(socket: TcpStream, conf: SafeKeeperConf, tx: Sender<CallmeEvent>) -> Result<()> {
+fn handle_socket(
+    socket: TcpStream,
+    conf: SafeKeeperConf,
+    tx: UnboundedSender<CallmeEvent>,
+) -> Result<()> {
     let _enter = info_span!("", tid = ?get_tid()).entered();
 
     socket.set_nodelay(true)?;

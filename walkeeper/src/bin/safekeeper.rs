@@ -184,7 +184,7 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         );
     }
 
-    let (tx, rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::unbounded_channel();
     let conf_cloned = conf.clone();
     let wal_acceptor_thread = thread::Builder::new()
         .name("WAL acceptor thread".into())

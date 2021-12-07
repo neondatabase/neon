@@ -27,7 +27,7 @@ use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody
 use zenith_utils::sock_split::ReadStream;
 
 use crate::callmemaybe::CallmeEvent;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
@@ -90,7 +90,7 @@ impl Drop for ReplicationConnGuard {
 // and current ReplicationConnGuard is tied to the background thread
 // that receives feedback.
 struct ReplicationStreamGuard {
-    tx: Sender<CallmeEvent>,
+    tx: UnboundedSender<CallmeEvent>,
     tenant_id: ZTenantId,
     timelineid: ZTimelineId,
 }
@@ -103,8 +103,10 @@ impl Drop for ReplicationStreamGuard {
          self.tenant_id, self.timelineid);
 
         self.tx
-            .blocking_send(CallmeEvent::Resume(self.tenant_id, self.timelineid))
-            .unwrap();
+            .send(CallmeEvent::Resume(self.tenant_id, self.timelineid))
+            .unwrap_or_else(|e| {
+                error!("failed to send Resume request to callmemaybe thread {}", e);
+            });
     }
 }
 
@@ -251,21 +253,27 @@ impl ReplicationConn {
         info!("Start replication from {:?} till {:?}", start_pos, stop_pos);
 
         // Don't spam pageserver with callmemaybe queries
-        // when connection is already established.
+        // when replication connection with pageserver is already established.
         let _guard = {
-            let timelineid = swh.timeline.get().timelineid;
-            let tenant_id = swh.tenantid.unwrap();
-            let tx_clone = swh.tx.clone();
-            swh.tx
-                .blocking_send(CallmeEvent::Pause(tenant_id, timelineid))
-                .unwrap();
+            if swh.appname == Some("wal_proposer_recovery".to_string()) {
+                None
+            } else {
+                let timelineid = swh.timeline.get().timelineid;
+                let tenant_id = swh.tenantid.unwrap();
+                let tx_clone = swh.tx.clone();
+                swh.tx
+                    .send(CallmeEvent::Pause(tenant_id, timelineid))
+                    .unwrap_or_else(|e| {
+                        error!("failed to send Pause request to callmemaybe thread {}", e);
+                    });
 
-            // create a guard to subscribe callback again, when this connection will exit
-            Some(ReplicationStreamGuard {
-                tx: tx_clone,
-                tenant_id,
-                timelineid,
-            })
+                // create a guard to subscribe callback again, when this connection will exit
+                Some(ReplicationStreamGuard {
+                    tx: tx_clone,
+                    tenant_id,
+                    timelineid,
+                })
+            }
         };
 
         // switch to copy
