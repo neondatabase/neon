@@ -18,12 +18,14 @@ pub mod wal_service;
 
 pub mod defaults {
     use const_format::formatcp;
+    use std::time::Duration;
 
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 5454;
     pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
 
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(1);
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +43,7 @@ pub struct SafeKeeperConf {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub ttl: Option<Duration>,
-    pub recall_period: Option<Duration>,
+    pub recall_period: Duration,
 }
 
 impl SafeKeeperConf {
@@ -62,7 +64,7 @@ impl Default for SafeKeeperConf {
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             ttl: None,
-            recall_period: None,
+            recall_period: defaults::DEFAULT_RECALL_PERIOD,
         }
     }
 }
