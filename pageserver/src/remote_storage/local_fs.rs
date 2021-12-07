@@ -558,7 +558,7 @@ mod fs_tests {
         assert_eq!(
             first_part_local,
             first_part_remote.as_slice(),
-            "First part bytes should be returned when requrested"
+            "First part bytes should be returned when requested"
         );
 
         let mut second_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
@@ -575,7 +575,7 @@ mod fs_tests {
         assert_eq!(
             second_part_local,
             second_part_remote.as_slice(),
-            "Second part bytes should be returned when requrested"
+            "Second part bytes should be returned when requested"
         );
 
         Ok(())

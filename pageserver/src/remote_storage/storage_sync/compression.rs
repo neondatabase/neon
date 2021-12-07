@@ -1,29 +1,30 @@
-//! A set of methods to asynchronously compress and uncompress a stream of data, without holding the entire data in memory.
-//!
-//! For that, both comporess and uncompress functions operate buffered streams (currently hardcoded sice of [`ARCHIVE_STREAM_BUFFER_SIZE_BYTES`]),
+//! A set of structs to represent a compressed part of the timeline, and methods to asynchronously compress and uncompress a stream of data,
+//! without holding the entire data in memory.
+//! For the latter, both compress and uncompress functions operate buffered streams (currently hardcoded size of [`ARCHIVE_STREAM_BUFFER_SIZE_BYTES`]),
 //! not attempting to hold the entire archive in memory.
 //!
-//! With those ideas, the compression is done with <a href="https://datatracker.ietf.org/doc/html/rfc8878">zstd</a> streaming compression algorithm via the `async-compression` crate.
-//! The create does not contain any knobs to tweak the compression, but otherwise is one of the only ones that's both async and has an API to manage the part of an acrhive.
+//! The compression is done with <a href="https://datatracker.ietf.org/doc/html/rfc8878">zstd</a> streaming algorithm via the `async-compression` crate.
+//! The crate does not contain any knobs to tweak the compression, but otherwise is one of the only ones that's both async and has an API to manage the part of an archive.
 //! Zstd was picked as the best algorithm among the ones available in the crate, after testing the initial timeline file compression.
 //!
 //! Archiving is almost agnostic to timeline file types, with an exception of the metadata file, that's currently distinguished in the [un]compression code.
+//! The metadata file is treated separately when [de]compression is involved, to reduce the risk of corrupting the metadata file.
+//! When compressed, the metadata file is always required and stored as the last file in the archive stream.
+//! When uncompressed, the metadata file gets naturally uncompressed last, to ensure that all other relishes are decompressed successfully first.
 //!
 //! Archive structure:
 //! +----------------------------------------+
 //! | header | file_1, ..., file_k, metadata |
 //! +----------------------------------------+
 //!
-//! The archive consists of two separate files:
-//! * header, that contains all files names and their sizes and relative paths in the timeline directory
+//! The archive consists of two separate zstd archives:
+//! * header archive, that contains all files names and their sizes and relative paths in the timeline directory
 //! Header is a Rust structure, serialized into bytes and compressed with zstd.
-//! * files part, that has metadata file as the last one, all compressed with zstd into a single binary blob
+//! * files archive, that has metadata file as the last one, all compressed with zstd into a single binary blob
 //!
 //! Header offset is stored in the file name, along with the `disk_consistent_lsn` from the metadata file.
 //! See [`parse_archive_name`] and [`ARCHIVE_EXTENSION`] for the name details, example: `00000000016B9150-.zst_9732`.
 //! This way, the header could be retrieved without reading an entire archive file.
-//!
-//! The files are stored with the metadata as the last file, to reduce the risk of corrupting the metadata file.
 
 use std::{
     collections::BTreeSet,
@@ -45,8 +46,11 @@ use zenith_utils::{bin_ser::BeSer, lsn::Lsn};
 
 use crate::layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME};
 
+use super::index::RelativePath;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveHeader {
+    /// All regular timeline files, excluding the metadata file.
     pub files: Vec<FileEntry>,
     // Metadata file name is known to the system, as its location relative to the timeline dir,
     // so no need to store anything but its size in bytes.
@@ -58,7 +62,7 @@ pub struct FileEntry {
     /// Uncompressed file size, bytes.
     pub size: u64,
     /// A path, relative to the directory root, used when compressing the directory contents.
-    pub subpath: String,
+    pub subpath: RelativePath,
 }
 
 const ARCHIVE_EXTENSION: &str = "-.zst_";
@@ -76,9 +80,9 @@ const ARCHIVE_STREAM_BUFFER_SIZE_BYTES: usize = 4 * 1024 * 1024;
 /// An `impl AsyncRead` and `impl AsyncWrite` pair of connected streams is created to implement the partial contents streaming.
 /// The writer end gets into the archive producer future, to put the header and a stream of compressed files.
 /// * prepares archive consumer future, by executing the provided closure
-/// The closure gets the reader end stream and the name of the file to cretate a future that would stream the file contents elsewhere.
+/// The closure gets the reader end stream and the name of the file to create a future that would stream the file contents elsewhere.
 /// * runs and waits for both futures to complete
-/// * on a successful completion of both futures, hedader, its size and the user-defined consumer future return data is returned
+/// * on a successful completion of both futures, header, its size and the user-defined consumer future return data is returned
 /// Due to the design above, the archive name and related data is visible inside the consumer future only, so it's possible to return the data,
 /// needed for future processing.
 pub async fn archive_files_as_stream<Cons, ConsRet, Fut>(
@@ -132,7 +136,7 @@ where
 
 /// Similar to [`archive_files_as_stream`], creates a pair of streams to uncompress the 2nd part of the archive,
 /// that contains files and is located after the header.
-/// S3 allows downloading partial file contents for a given file key (i.e. name), to accomodate this retrieval,
+/// S3 allows downloading partial file contents for a given file key (i.e. name), to accommodate this retrieval,
 /// a closure is used.
 /// Same concepts with two concurrent futures, user-defined closure, future and return value apply here, but the
 /// consumer and the receiver ends are swapped, since the uncompression happens.
@@ -194,10 +198,6 @@ pub async fn read_archive_header<A: io::AsyncRead + Send + Sync + Unpin>(
     let mut header_bytes = Vec::new();
     ZstdDecoder::new(io::BufReader::new(compressed_header_bytes.as_slice()))
         .read_to_end(&mut header_bytes)
-        .await
-        .context("Failed to decompress a header from the archive")?;
-    header_bytes
-        .flush()
         .await
         .context("Failed to decompress a header from the archive")?;
 
@@ -274,20 +274,18 @@ async fn uncompress_with_header(
     for entry in header.files {
         uncompress_entry(
             &mut archive,
-            &entry.subpath,
+            &entry.subpath.as_path(destination_dir),
             entry.size,
             files_to_skip,
-            destination_dir,
         )
         .await
         .with_context(|| format!("Failed to uncompress archive entry {:?}", entry))?;
     }
     uncompress_entry(
         &mut archive,
-        METADATA_FILE_NAME,
+        &destination_dir.join(METADATA_FILE_NAME),
         header.metadata_file_size,
         files_to_skip,
-        destination_dir,
     )
     .await
     .context("Failed to uncompress the metadata entry")?;
@@ -296,12 +294,10 @@ async fn uncompress_with_header(
 
 async fn uncompress_entry(
     archive: &mut ZstdDecoder<io::BufReader<impl io::AsyncRead + Send + Sync + Unpin>>,
-    entry_subpath: &str,
+    destination_path: &Path,
     entry_size: u64,
     files_to_skip: &BTreeSet<PathBuf>,
-    destination_dir: &Path,
 ) -> anyhow::Result<()> {
-    let destination_path = destination_dir.join(entry_subpath);
     if let Some(parent) = destination_path.parent() {
         fs::create_dir_all(parent).await.with_context(|| {
             format!(
@@ -311,9 +307,9 @@ async fn uncompress_entry(
         })?;
     };
 
-    if files_to_skip.contains(destination_path.as_path()) {
+    if files_to_skip.contains(destination_path) {
         debug!("Skipping {}", destination_path.display());
-        read_n_bytes(entry_size, archive, &mut io::sink())
+        copy_n_bytes(entry_size, archive, &mut io::sink())
             .await
             .context("Failed to skip bytes in the archive")?;
         return Ok(());
@@ -326,7 +322,7 @@ async fn uncompress_entry(
                 destination_path.display()
             )
         })?);
-    read_n_bytes(entry_size, archive, &mut destination)
+    copy_n_bytes(entry_size, archive, &mut destination)
         .await
         .with_context(|| {
             format!(
@@ -349,7 +345,7 @@ async fn write_archive_contents(
 ) -> anyhow::Result<()> {
     debug!("Starting writing files into archive");
     for file_entry in header.files {
-        let path = source_dir.join(&file_entry.subpath);
+        let path = file_entry.subpath.as_path(&source_dir);
         let mut source_file =
             io::BufReader::new(fs::File::open(&path).await.with_context(|| {
                 format!(
@@ -413,16 +409,12 @@ async fn prepare_header(
 
         if file_path.file_name().and_then(|name| name.to_str()) != Some(METADATA_FILE_NAME) {
             let entry = FileEntry {
-                subpath: file_path
-                    .strip_prefix(&source_dir)
-                    .with_context(|| {
-                        format!(
-                            "File '{}' does not belong to pageserver workspace",
-                            file_path.display()
-                        )
-                    })?
-                    .to_string_lossy()
-                    .to_string(),
+                subpath: RelativePath::new(source_dir, file_path).with_context(|| {
+                    format!(
+                        "File '{}' does not belong to pageserver workspace",
+                        file_path.display()
+                    )
+                })?,
                 size: file_metadata.len(),
             };
             archive_files.push(entry);
@@ -449,26 +441,17 @@ async fn prepare_header(
     Ok((header, compressed_header_bytes))
 }
 
-async fn read_n_bytes(
+async fn copy_n_bytes(
     n: u64,
     from: &mut (impl io::AsyncRead + Send + Sync + Unpin),
     into: &mut (impl io::AsyncWrite + Send + Sync + Unpin),
 ) -> anyhow::Result<()> {
-    let mut bytes_unread = n;
-    while bytes_unread > 0 {
-        let mut buf = vec![0; bytes_unread as usize];
-        let bytes_read = from.read(&mut buf).await?;
-        if bytes_read == 0 {
-            break;
-        }
-        into.write_all(&buf[0..bytes_read]).await?;
-        bytes_unread -= bytes_read as u64;
-    }
+    let bytes_written = io::copy(&mut from.take(n), into).await?;
     ensure!(
-        bytes_unread == 0,
-        "Failed to read exactly {} bytes from the input, bytes unread: {}",
+        bytes_written == n,
+        "Failed to read exactly {} bytes from the input, bytes written: {}",
         n,
-        bytes_unread,
+        bytes_written,
     );
     Ok(())
 }

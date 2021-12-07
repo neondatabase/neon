@@ -16,11 +16,16 @@ This way, the backups are managed in background, not affecting directly other pa
 
 Current implementation
 * provides remote storage wrappers for AWS S3 and local FS
-* uploads layers, frozen by pageserver checkpoint thread
-* downloads and registers layers, found on the remote storage, but missing locally
+* synchronizes the differences with local timelines and remote states as fast as possible
+* uploads new relishes, frozen by pageserver checkpoint thread
+* downloads and registers timelines, found on the remote storage, but missing locally, if those are requested somehow via pageserver (e.g. http api, gc)
 * uses compression when deals with files, for better S3 usage
 * maintains an index of what's stored remotely
 * evicts failing tasks and stops the corresponding timelines
+
+The tasks are delayed with every retry and the retries are capped, to avoid poisonous tasks.
+After any task eviction, or any error at startup checks (e.g. obviously different and wrong local and remote states fot the same timeline),
+the timeline has to be stopped from submitting further checkpoint upload tasks, which is done along the corresponding timeline status change.
 
 No good optimisations or performance testing is done, the feature is disabled by default and gets polished over time.
 It's planned to deal with all questions that are currently on and prepare the feature to be enabled by default in cloud environments.
@@ -53,19 +58,18 @@ But it's already used in the project, so for now it's reused to avoid bloating t
 Based on previous evaluation, even `rusoto-s3` could be a better choice over this library, but needs further benchmarking.
 
 
-* gc and branches are ignored
+* gc is ignored
 
-So far, we don't consider non-main images and don't adjust the remote storage based on GC thread loop results.
-Only checkpointer loop affects the remote storage.
+So far, we don't adjust the remote storage based on GC thread loop results, only checkpointer loop affects the remote storage.
+Index module could be used as a base to implement a deferred GC mechanism, a "defragmentation" that repacks archives into new ones after GC is done removing the files from the archives.
 
-* more timelines should be downloaded on demand
+* bracnhes implementaion could be improved
 
-Since we download and load remote layers into pageserver, there's a possibility a need for those layers' ancestors arise.
-Most probably, every downloaded image's ancestor is not present in locally too, but currently there's no logic for downloading such ancestors and their metadata,
-so the pageserver is unable to respond property on requests to such ancestors.
+Currently, there's a code to sync the branches along with the timeline files: on upload, every local branch files that are missing remotely are uploaded,
+on the timeline download, missing remote branch files are downlaoded.
 
-To implement the downloading, more `tenant_mgr` refactoring is needed to properly handle web requests for layers and handle the state changes.
-[Here](https://github.com/zenithdb/zenith/pull/689#issuecomment-931216193) are the details about initial state management updates needed.
+A branch is a per-tenant entity, yet a current implementaion requires synchronizing a timeline first to get the branch files locally.
+Currently, there's no other way to know about the remote branch files, neither the file contents is verified and updated.
 
 * no IT tests
 

@@ -1,25 +1,40 @@
-//! A synchronization logic for the [`RemoteStorage`] and the state to ensure the correct synchronizations.
+//! A synchronization logic for the [`RemoteStorage`] and pageserver in-memory state to ensure correct synchronizations
+//! between local tenant files and their counterparts from the remote storage.
 //!
-//! The synchronization does not aim to be immediate, instead
-//! doing all the job in a separate thread asynchronously, attempting to fully replicate the
-//! pageserver timeline workdir data on the remote storage in a custom format, beneficial for storing.
+//! The synchronization does not aim to be immediate, yet eventually consistent.
+//! Synchronization is done with the queue being emptied via separate thread asynchronously,
+//! attempting to fully store pageserver's local data on the remote storage in a custom format, beneficial for storing.
 //!
-//! [`SYNC_QUEUE`] is a deque to hold [`SyncTask`] for image upload/download.
-//! The queue gets emptied by a single thread with the loop, that polls the tasks in batches (size configurable).
-//! Every task in a batch processed concurrently, which is possible due to incremental nature of the timelines.
+//! A queue is implemented in the [`sync_queue`] module as a pair of sender and receiver channels, to block on zero tasks instead of checking the queue.
+//! The pair's shared buffer of a fixed size serves as an implicit queue, holding [`SyncTask`] for local files upload/download operations.
 //!
-//! During the loop startup, an initial loop state is constructed from all remote storage entries.
+//! The queue gets emptied by a single thread with the loop, that polls the tasks in batches of deduplicated tasks (size configurable).
+//! Every task in a batch processed concurrently, which is possible due to incremental nature of the timelines:
+//! it's not asserted, but assumed that timeline's checkpoints only add the files locally, not removing or amending the existing ones.
+//! Only GC removes local timeline files, the GC support is not added to sync currently,
+//! yet downloading extra files is not critically bad at this stage, GC can remove those again.
+//!
+//! Along the timeline files, branch files are uploaded and downloaded every time a corresponding sync task is processed.
+//! For simplicity, branch files are also treated as immutable: only missing files are uploaded or downloaded, no removals, amendments or file contents checks are done.
+//! Also, the branches are copied as separate files, with no extra compressions done.
+//! Despite branches information currently belonging to tenants, a tenants' timeline sync is required to upload or download the branch files, also, there's no way to know
+//! the branch sync state outside of the sync loop.
+//! This implementation is currently considered as temporary and is a subjec to change later.
+//!
+//! During the loop startup, an initial [`RemoteTimelineIndex`] state is constructed via listing the remote storage contents.
 //! It's enough to poll the remote state once on startup only, due to agreement that the pageserver has
 //! an exclusive write access to the remote storage: new files appear in the storage only after the same
 //! pageserver writes them.
-//!
-//! The list construction is currently the only place where the storage sync can return an [`Err`] to the user.
-//! New upload tasks are accepted via [`schedule_timeline_checkpoint_upload`] function disregarding of the corresponding loop startup,
-//! it's up to the caller to avoid uploading of the new file, if that caller did not enable the loop.
-//! After the initial state is loaded into memory and the loop starts, any further [`Err`] results do not stop the loop, but rather
-//! reschedules the same task, with possibly less files to sync in it.
+//! It's important to do so, since storages like S3 can get slower and more expensive as the number of files grows.
+//! The index state is used to issue initial sync tasks, if needed:
+//! * all timelines with local state behind the remote gets download tasks scheduled.
+//! Such timelines are considered "remote" before the download succeeds, so a number of operations (gc, checkpoints) on that timeline are unavailable.
+//! * all never local state gets scheduled for upload, such timelines are "local" and fully operational
+//! * the rest of the remote timelines are reported to pageserver, but not downloaded before they are actually accessed in pageserver,
+//! it may schedule the download on such occasions.
 //!
 //! The synchronization unit is an archive: a set of timeline files (or relishes) and a special metadata file, all compressed into a blob.
+//! Currently, there's no way to process an archive partially, if the archive processing fails, it has to be started from zero next time again.
 //! An archive contains set of files of a certain timeline, added during checkpoint(s) and the timeline metadata at that moment.
 //! The archive contains that metadata's `disk_consistent_lsn` in its name, to be able to restore partial index information from just a remote storage file list.
 //! The index is created at startup (possible due to exclusive ownership over the remote storage by the pageserver) and keeps track of which files were stored
@@ -27,45 +42,51 @@
 //! Among other tasks, the index is used to prevent invalid uploads and non-existing downloads on demand.
 //! Refer to [`compression`] and [`index`] for more details on the archives and index respectively.
 //!
-//! After pageserver parforms a succesful image checkpoint and produces new local files, it schedules an upload with
-//! the list of the files and its metadata file contents at the moment of checkpointing.
-//! Pageserver needs both the file list and metadata to load the timeline, so both are mandatory for the upload, that's why the uploads happen after checkpointing.
-//! Not every upload of the same timeline gets processed: if `disk_consistent_lsn` is unchanged due to checkpointing for some reason, the remote data is not updated.
+//! The list construction is currently the only place where the storage sync can return an [`Err`] to the user.
+//! New sync tasks are accepted via [`schedule_timeline_checkpoint_upload`] and [`schedule_timeline_download`] functions,
+//! disregarding of the corresponding loop startup.
+//! It's up to the caller to avoid synchronizations if the loop is disabled: otherwise, the sync tasks will be ignored.
+//! After the initial state is loaded into memory and the loop starts, any further [`Err`] results do not stop the loop, but rather
+//! reschedule the same task, with possibly less files to sync:
+//! * download tasks currently never replace existing local file with metadata file as an exception
+//! (but this is a subject to change when checksum checks are implemented: all files could get overwritten on a checksum mismatch)
+//! * download tasks carry the information of skipped acrhives, so resubmissions are not downloading successfully processed archives again
+//!
+//! Not every upload of the same timeline gets processed: if the checkpoint with the same `disk_consistent_lsn` was already uploaded, no reuploads happen, as checkpoints
+//! are considered to be immutable. The order of `lsn` during upload submissions is allowed to be arbitrary and not required to be ascending.
+//! Refer to [`upload`] and [`download`] for more details.
 //!
 //! Current uploads are per-checkpoint and don't accumulate any data with optimal size for storing on S3.
-//! The upload is atomic and gets rescheduled entirely, if fails along the way.
-//! The downloads are per-timeline and download all missing timeline files.
-//! The archives get processed sequentially, from smaller `disk_consistent_lsn` to larger, with metadata files being added as last.
-//! If any of the archive processing fails along the way, all the remaining archives are rescheduled for the next attempt.
-//! There's a reschedule threshold that evicts tasks that fail too much and stops the corresponding timeline so it does not diverge from the state on the remote storage.
+//! The downloaded archives get processed sequentially, from smaller `disk_consistent_lsn` to larger, with metadata files being added as last.
 //! The archive unpacking is designed to unpack metadata as the last file, so the risk of leaving the corrupt timeline due to uncompression error is small (while not eliminated entirely and that should be improved).
+//! There's a reschedule threshold that evicts tasks that fail too much and stops the corresponding timeline so it does not diverge from the state on the remote storage.
+//! Among other pageserver-specific changes to such evicted timelines, no uploads are expected to come from them to ensure the remote storage state does not get corrupted.
 //!
-//! Synchronization never removes any local from pageserver workdir or remote files from the remote storage, yet there could be overwrites of the same files (metadata file updates; archive redownloads).
+//! Synchronization never removes any local from pageserver workdir or remote files from the remote storage, yet there could be overwrites of the same files (metadata file updates; future checksum mismatch fixes).
 //! NOTE: No real contents or checksum check happens right now and is a subject to improve later.
 //!
-//! After the whole timeline is downloaded, [`crate::tenant_mgr::register_timeline_download`] function is used to register the image in pageserver.
+//! After the whole timeline is downloaded, [`crate::tenant_mgr::set_timeline_states`] function is used to update pageserver memory stage for the timeline processed.
+//! No extra branch registration is done.
 //!
 //! When pageserver signals shutdown, current sync task gets finished and the loop exists.
-//!
-//! Currently there's no other way to download a remote relish if it was not downloaded after initial remote storage files check.
-//! This is a subject to change in the near future.
 
 mod compression;
+mod download;
 pub mod index;
+mod upload;
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     num::{NonZeroU32, NonZeroUsize},
-    ops::{Deref, DerefMut},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     thread,
 };
 
-use anyhow::{anyhow, ensure, Context};
+use anyhow::{bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
-use tokio::sync::RwLock;
+use tokio::{fs, sync::RwLock};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver},
     time::Instant,
@@ -74,13 +95,18 @@ use tracing::*;
 
 use self::{
     compression::ArchiveHeader,
-    index::{ArchiveId, RemoteTimeline},
+    download::download_timeline,
+    index::{
+        ArchiveDescription, ArchiveId, RelativePath, RemoteTimeline, RemoteTimelineIndex,
+        TimelineIndexEntry,
+    },
+    upload::upload_timeline_checkpoint,
 };
-use super::{RemoteStorage, TimelineSyncId};
+use super::{RemoteStorage, SyncStartupData, TimelineSyncId};
 use crate::{
     layered_repository::metadata::TimelineMetadata,
-    tenant_mgr::{perform_post_timeline_sync_steps, TimelineRegistration},
-    PageServerConf,
+    remote_storage::storage_sync::compression::read_archive_header, repository::TimelineSyncState,
+    tenant_mgr::set_timeline_states, PageServerConf,
 };
 
 use zenith_metrics::{register_histogram_vec, register_int_gauge, HistogramVec, IntGauge};
@@ -106,9 +132,12 @@ lazy_static! {
 }
 
 /// Wraps mpsc channel bits around into a queue interface.
-/// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoud meaningless spinning.
+/// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoid meaningless spinning.
 mod sync_queue {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use anyhow::anyhow;
     use once_cell::sync::OnceCell;
@@ -120,13 +149,17 @@ mod sync_queue {
     static SENDER: OnceCell<UnboundedSender<SyncTask>> = OnceCell::new();
     static LENGTH: AtomicUsize = AtomicUsize::new(0);
 
+    /// Initializes the queue with the given sender channel that is used to put the tasks into later.
+    /// Errors if called more than once.
     pub fn init(sender: UnboundedSender<SyncTask>) -> anyhow::Result<()> {
         SENDER
             .set(sender)
-            .map_err(|_| anyhow!("sync queue was already initialized"))?;
+            .map_err(|_sender| anyhow!("sync queue was already initialized"))?;
         Ok(())
     }
 
+    /// Adds a new task to the queue, if the queue was initialized, returning `true` on success.
+    /// On any error, or if the queue was not initialized, the task gets dropped (not scheduled) and `false` is returned.
     pub fn push(new_task: SyncTask) -> bool {
         if let Some(sender) = SENDER.get() {
             match sender.send(new_task) {
@@ -143,22 +176,30 @@ mod sync_queue {
                 }
             }
         } else {
-            warn!("Failed to enqueue a sync task: the receiver is not initialized");
+            warn!("Failed to enqueue a sync task: the sender is not initialized");
             false
         }
     }
 
+    /// Polls a new task from the queue, using its receiver counterpart.
+    /// Does not block if the queue is empty, returning [`None`] instead.
+    /// Needed to correctly track the queue length.
     pub async fn next_task(receiver: &mut UnboundedReceiver<SyncTask>) -> Option<SyncTask> {
         let task = receiver.recv().await;
-        LENGTH.fetch_sub(1, Ordering::Relaxed);
+        if task.is_some() {
+            LENGTH.fetch_sub(1, Ordering::Relaxed);
+        }
         task
     }
 
+    /// Fetches a task batch, not bigger than the given limit.
+    /// Not blocking, can return fewer tasks if the queue does not contain enough.
+    /// Duplicate entries are eliminated and not considered in batch size calculations.
     pub async fn next_task_batch(
         receiver: &mut UnboundedReceiver<SyncTask>,
         mut max_batch_size: usize,
-    ) -> Vec<SyncTask> {
-        let mut tasks = Vec::with_capacity(max_batch_size);
+    ) -> BTreeSet<SyncTask> {
+        let mut tasks = BTreeSet::new();
 
         if max_batch_size == 0 {
             return tasks;
@@ -167,11 +208,12 @@ mod sync_queue {
         loop {
             match receiver.try_recv() {
                 Ok(new_task) => {
-                    max_batch_size -= 1;
                     LENGTH.fetch_sub(1, Ordering::Relaxed);
-                    tasks.push(new_task);
-                    if max_batch_size == 0 {
-                        break;
+                    if tasks.insert(new_task) {
+                        max_batch_size -= 1;
+                        if max_batch_size == 0 {
+                            break;
+                        }
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -188,6 +230,7 @@ mod sync_queue {
         tasks
     }
 
+    /// Length of the queue, assuming that all receiver counterparts were only called using the queue api.
     pub fn len() -> usize {
         LENGTH.load(Ordering::Relaxed)
     }
@@ -195,7 +238,7 @@ mod sync_queue {
 
 /// A task to run in the async download/upload loop.
 /// Limited by the number of retries, after certain threshold the failing task gets evicted and the timeline disabled.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct SyncTask {
     sync_id: TimelineSyncId,
     retries: u32,
@@ -212,7 +255,7 @@ impl SyncTask {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum SyncKind {
     /// A certain amount of images (archive files) to download.
     Download(TimelineDownload),
@@ -223,21 +266,23 @@ enum SyncKind {
 
 /// Local timeline files for upload, appeared after the new checkpoint.
 /// Current checkpoint design assumes new files are added only, no deletions or amendment happens.
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct NewCheckpoint {
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct NewCheckpoint {
     /// Relish file paths in the pageserver workdir, that were added for the corresponding checkpoint.
     layers: Vec<PathBuf>,
     metadata: TimelineMetadata,
 }
 
 /// Info about the remote image files.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 struct TimelineDownload {
     files_to_skip: Arc<BTreeSet<PathBuf>>,
-    archives_to_download: Vec<ArchiveId>,
+    archives_to_skip: BTreeSet<ArchiveId>,
 }
 
 /// Adds the new checkpoint files as an upload sync task to the queue.
+/// On task failure, it gets retried again from the start a number of times.
+///
 /// Ensure that the loop is started otherwise the task is never processed.
 pub fn schedule_timeline_checkpoint_upload(
     tenant_id: ZTenantId,
@@ -267,71 +312,108 @@ pub fn schedule_timeline_checkpoint_upload(
     }
 }
 
+/// Requests the download of the entire timeline for a given tenant.
+/// No existing local files are currently owerwritten, except the metadata file.
+/// The timeline downloads checkpoint archives, from the earliest `disc_consistent_lsn` to the latest,
+/// replacing the metadata file as the lasat file in every archive uncompression result.
+///
+/// On any failure, the task gets retried, omitting already downloaded archives and files
+/// (yet requiring to download the entire archive even if it got partially extracted before the failure).
+///
+/// Ensure that the loop is started otherwise the task is never processed.
+pub fn schedule_timeline_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
+    sync_queue::push(SyncTask::new(
+        TimelineSyncId(tenant_id, timeline_id),
+        0,
+        SyncKind::Download(TimelineDownload {
+            files_to_skip: Arc::new(BTreeSet::new()),
+            archives_to_skip: BTreeSet::new(),
+        }),
+    ));
+}
+
 /// Uses a remote storage given to start the storage sync loop.
 /// See module docs for loop step description.
 pub(super) fn spawn_storage_sync_thread<
     P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    config: &'static PageServerConf,
-    remote_storage: S,
+    conf: &'static PageServerConf,
+    local_timeline_files: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>,
+    storage: S,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
-) -> anyhow::Result<thread::JoinHandle<anyhow::Result<()>>> {
+) -> anyhow::Result<SyncStartupData> {
     let (sender, receiver) = mpsc::unbounded_channel();
     sync_queue::init(sender)?;
 
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to create storage sync runtime")?;
+
+    let download_paths = runtime
+        // TODO could take long time, consider [de]serializing [`RemoteTimelineIndex`] instead
+        .block_on(storage.list())
+        .context("Failed to list remote storage files")?
+        .into_iter()
+        .filter_map(|remote_path| match storage.local_path(&remote_path) {
+            Ok(local_path) => Some(local_path),
+            Err(e) => {
+                error!(
+                    "Failed to find local path for remote path {:?}: {:#}",
+                    remote_path, e
+                );
+                None
+            }
+        });
+    let remote_index = RemoteTimelineIndex::try_parse_descriptions_from_paths(conf, download_paths);
+
+    let initial_timeline_states = schedule_first_sync_tasks(&remote_index, local_timeline_files);
+
     let handle = thread::Builder::new()
-        .name("Queue based remote storage sync".to_string())
+        .name("Remote storage sync thread".to_string())
         .spawn(move || {
-            let thread_result = storage_sync_loop(
-                config,
+            storage_sync_loop(
+                runtime,
+                conf,
                 receiver,
-                remote_storage,
+                remote_index,
+                storage,
                 max_concurrent_sync,
                 max_sync_errors,
-            );
-            if let Err(e) = &thread_result {
-                error!("Failed to run storage sync thread: {:#}", e);
-            }
-            thread_result
-        })?;
-    Ok(handle)
+            )
+        })
+        .context("Failed to spawn remote storage sync thread")?;
+    Ok(SyncStartupData {
+        initial_timeline_states,
+        sync_loop_handle: Some(handle),
+    })
 }
 
 fn storage_sync_loop<
     P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    config: &'static PageServerConf,
+    runtime: tokio::runtime::Runtime,
+    conf: &'static PageServerConf,
     mut receiver: UnboundedReceiver<SyncTask>,
-    remote_storage: S,
+    index: RemoteTimelineIndex,
+    storage: S,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
 ) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let remote_timelines = runtime
-        .block_on(index::reconstruct_from_storage(&remote_storage))
-        .context("Failed to determine previously uploaded timelines")?;
-
-    schedule_first_tasks(config, &remote_timelines);
-
-    // TODO kb return it back under a single Arc?
-    let remote_storage = Arc::new(remote_storage);
-    let remote_timelines = Arc::new(RwLock::new(remote_timelines));
+    let remote_assets = Arc::new((storage, RwLock::new(index)));
     while !crate::tenant_mgr::shutdown_requested() {
-        let registration_steps = runtime.block_on(loop_step(
-            config,
+        let new_timeline_states = runtime.block_on(loop_step(
+            conf,
             &mut receiver,
-            Arc::clone(&remote_storage),
-            Arc::clone(&remote_timelines),
+            Arc::clone(&remote_assets),
             max_concurrent_sync,
             max_sync_errors,
         ));
         // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-        perform_post_timeline_sync_steps(config, registration_steps);
+        set_timeline_states(conf, new_timeline_states);
     }
 
     debug!("Shutdown requested, stopping");
@@ -342,19 +424,18 @@ async fn loop_step<
     P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    config: &'static PageServerConf,
+    conf: &'static PageServerConf,
     receiver: &mut UnboundedReceiver<SyncTask>,
-    remote_storage: Arc<S>,
-    remote_timelines: Arc<RwLock<HashMap<TimelineSyncId, RemoteTimeline>>>,
+    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
-) -> HashMap<(ZTenantId, ZTimelineId), TimelineRegistration> {
+) -> HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>> {
     let max_concurrent_sync = max_concurrent_sync.get();
-    let mut next_tasks = Vec::with_capacity(max_concurrent_sync);
+    let mut next_tasks = BTreeSet::new();
 
     // request the first task in blocking fashion to do less meaningless work
     if let Some(first_task) = sync_queue::next_task(receiver).await {
-        next_tasks.push(first_task);
+        next_tasks.insert(first_task);
     } else {
         debug!("Shutdown requested, stopping");
         return HashMap::new();
@@ -378,11 +459,10 @@ async fn loop_step<
         .map(|task| async {
             let sync_id = task.sync_id;
             let extra_step = match tokio::spawn(process_task(
-                config,
-                Arc::clone(&remote_storage),
+                conf,
+                Arc::clone(&remote_assets),
                 task,
                 max_sync_errors,
-                Arc::clone(&remote_timelines),
             ))
             .await
             {
@@ -399,37 +479,37 @@ async fn loop_step<
         })
         .collect::<FuturesUnordered<_>>();
 
-    let mut extra_sync_steps = HashMap::with_capacity(max_concurrent_sync);
-    while let Some((sync_id, extra_step)) = task_batch.next().await {
-        let TimelineSyncId(tenant_id, timeline_id) = sync_id;
-        debug!(
-            "Finished storage sync task for tenant {}, timeline {}",
-            tenant_id, timeline_id
-        );
-        if let Some(extra_step) = extra_step {
-            extra_sync_steps.insert((tenant_id, timeline_id), extra_step);
+    let mut new_timeline_states: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>> =
+        HashMap::with_capacity(max_concurrent_sync);
+    while let Some((sync_id, state_update)) = task_batch.next().await {
+        debug!("Finished storage sync task for sync id {}", sync_id);
+        if let Some(state_update) = state_update {
+            let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+            new_timeline_states
+                .entry(tenant_id)
+                .or_default()
+                .insert(timeline_id, state_update);
         }
     }
 
-    extra_sync_steps
+    new_timeline_states
 }
 
 async fn process_task<
     P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    config: &'static PageServerConf,
-    remote_storage: Arc<S>,
+    conf: &'static PageServerConf,
+    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
     task: SyncTask,
     max_sync_errors: NonZeroU32,
-    remote_timelines: Arc<RwLock<HashMap<TimelineSyncId, RemoteTimeline>>>,
-) -> Option<TimelineRegistration> {
+) -> Option<TimelineSyncState> {
     if task.retries > max_sync_errors.get() {
         error!(
-            "Evicting task {:?} that failed {} times, exceeding the error theshold",
+            "Evicting task {:?} that failed {} times, exceeding the error threshold",
             task.kind, task.retries
         );
-        return Some(TimelineRegistration::Evict);
+        return Some(TimelineSyncState::Evicted);
     }
 
     if task.retries > 0 {
@@ -445,22 +525,25 @@ async fn process_task<
     match task.kind {
         SyncKind::Download(download_data) => {
             let sync_status = download_timeline(
-                config,
-                remote_timelines.read().await.deref(),
-                Arc::clone(&remote_storage),
+                conf,
+                remote_assets,
                 task.sync_id,
                 download_data,
                 task.retries + 1,
             )
             .await;
             register_sync_status(sync_start, "download", sync_status);
-            Some(TimelineRegistration::Download)
+
+            if sync_status? {
+                Some(TimelineSyncState::Ready)
+            } else {
+                Some(TimelineSyncState::AwaitsDownload)
+            }
         }
         SyncKind::Upload(layer_upload) => {
             let sync_status = upload_timeline_checkpoint(
-                config,
-                remote_timelines.write().await.deref_mut(),
-                Arc::clone(&remote_storage),
+                conf,
+                remote_assets,
                 task.sync_id,
                 layer_upload,
                 task.retries + 1,
@@ -472,26 +555,112 @@ async fn process_task<
     }
 }
 
-fn schedule_first_tasks(
-    config: &'static PageServerConf,
-    remote_timelines: &HashMap<TimelineSyncId, RemoteTimeline>,
-) {
-    for (&sync_id, timeline) in remote_timelines {
-        if !config.timeline_path(&sync_id.1, &sync_id.0).exists() {
-            sync_queue::push(SyncTask::new(
-                sync_id,
-                0,
-                SyncKind::Download(TimelineDownload {
-                    files_to_skip: Arc::new(BTreeSet::new()),
-                    archives_to_download: timeline.stored_archives(),
-                }),
-            ));
-        } else {
-            debug!(
-                "Timeline with tenant id {}, timeline id {} exists locally, not downloading",
-                sync_id.0, sync_id.1
-            );
+fn schedule_first_sync_tasks(
+    index: &RemoteTimelineIndex,
+    local_timeline_files: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>,
+) -> HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>> {
+    let mut initial_timeline_statuses: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>> =
+        HashMap::new();
+
+    let mut new_sync_tasks =
+        VecDeque::with_capacity(local_timeline_files.len().max(local_timeline_files.len()));
+
+    for (sync_id, (local_metadata, local_files)) in local_timeline_files {
+        let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+        match index.timeline_entry(&sync_id) {
+            Some(index_entry) => {
+                let timeline_status = compare_local_and_remote_timeline(
+                    &mut new_sync_tasks,
+                    sync_id,
+                    local_metadata,
+                    local_files,
+                    index_entry,
+                );
+                initial_timeline_statuses
+                    .entry(tenant_id)
+                    .or_default()
+                    .insert(timeline_id, timeline_status);
+            }
+            None => {
+                new_sync_tasks.push_back(SyncTask::new(
+                    sync_id,
+                    0,
+                    SyncKind::Upload(NewCheckpoint {
+                        layers: local_files,
+                        metadata: local_metadata,
+                    }),
+                ));
+                initial_timeline_statuses
+                    .entry(tenant_id)
+                    .or_default()
+                    .insert(timeline_id, TimelineSyncState::Ready);
+            }
         }
+    }
+
+    let unprocessed_remote_ids = |remote_id: &TimelineSyncId| {
+        initial_timeline_statuses
+            .get(&remote_id.0)
+            .and_then(|timelines| timelines.get(&remote_id.1))
+            .is_none()
+    };
+    for unprocessed_remote_id in index
+        .all_sync_ids()
+        .filter(unprocessed_remote_ids)
+        .collect::<Vec<_>>()
+    {
+        let TimelineSyncId(cloud_only_tenant_id, cloud_only_timeline_id) = unprocessed_remote_id;
+        initial_timeline_statuses
+            .entry(cloud_only_tenant_id)
+            .or_default()
+            .insert(cloud_only_timeline_id, TimelineSyncState::CloudOnly);
+    }
+
+    new_sync_tasks.into_iter().for_each(|task| {
+        sync_queue::push(task);
+    });
+    initial_timeline_statuses
+}
+
+fn compare_local_and_remote_timeline(
+    new_sync_tasks: &mut VecDeque<SyncTask>,
+    sync_id: TimelineSyncId,
+    local_metadata: TimelineMetadata,
+    local_files: Vec<PathBuf>,
+    remote_entry: &TimelineIndexEntry,
+) -> TimelineSyncState {
+    let local_lsn = local_metadata.disk_consistent_lsn();
+    let uploads = remote_entry.uploaded_checkpoints();
+
+    if !uploads.contains(&local_lsn) {
+        new_sync_tasks.push_back(SyncTask::new(
+            sync_id,
+            0,
+            SyncKind::Upload(NewCheckpoint {
+                layers: local_files.clone(),
+                metadata: local_metadata,
+            }),
+        ));
+    }
+
+    let uploads_count = uploads.len();
+    let archives_to_skip: BTreeSet<ArchiveId> = uploads
+        .into_iter()
+        .filter(|upload_lsn| upload_lsn <= &local_lsn)
+        .map(ArchiveId)
+        .collect();
+    if archives_to_skip.len() != uploads_count {
+        new_sync_tasks.push_back(SyncTask::new(
+            sync_id,
+            0,
+            SyncKind::Download(TimelineDownload {
+                files_to_skip: Arc::new(local_files.into_iter().collect()),
+                archives_to_skip,
+            }),
+        ));
+        TimelineSyncState::AwaitsDownload
+    } else {
+        TimelineSyncState::Ready
     }
 }
 
@@ -506,568 +675,143 @@ fn register_sync_status(sync_start: Instant, sync_name: &str, sync_status: Optio
     .observe(secs_elapsed)
 }
 
-async fn download_timeline<
+async fn update_index_description<
     P: Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    config: &'static PageServerConf,
-    remote_timelines: &HashMap<TimelineSyncId, RemoteTimeline>,
-    remote_storage: Arc<S>,
-    sync_id: TimelineSyncId,
-    mut download: TimelineDownload,
-    retries: u32,
-) -> Option<bool> {
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
-    debug!(
-        "Downloading layers for tenant {}, timeline {}",
-        tenant_id, timeline_id
-    );
-
-    let remote_timeline = remote_timelines.get(&sync_id)?;
-
-    let archives_total = download.archives_to_download.len();
-    debug!("Downloading {} archives of a timeline", archives_total);
-    while let Some(archive_id) = download.archives_to_download.pop() {
-        if let Err(e) = try_download_archive(
-            Arc::clone(&remote_storage),
-            config.timeline_path(&timeline_id, &tenant_id),
-            remote_timeline,
-            archive_id,
-            Arc::clone(&download.files_to_skip),
-        )
-        .await
-        {
-            // add the failed archive back
-            download.archives_to_download.push(archive_id);
-            let archives_left = download.archives_to_download.len();
-            error!(
-                "Failed to download archive {:?} for tenant {} timeline {} : {:#}, requeueing the download ({} archives left out of {})",
-                archive_id, tenant_id, timeline_id, e, archives_left, archives_total
-            );
-            sync_queue::push(SyncTask::new(
-                sync_id,
-                retries,
-                SyncKind::Download(download),
-            ));
-            return Some(false);
-        }
-    }
-    debug!("Finished downloading all timeline's archives");
-    Some(true)
-}
-
-async fn try_download_archive<
-    P: Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    remote_storage: Arc<S>,
-    timeline_dir: PathBuf,
-    remote_timeline: &RemoteTimeline,
-    archive_id: ArchiveId,
-    files_to_skip: Arc<BTreeSet<PathBuf>>,
-) -> anyhow::Result<()> {
-    debug!("Downloading archive {:?}", archive_id);
-    let remote_archive = remote_timeline
-        .archive_data(archive_id)
-        .ok_or_else(|| anyhow!("Archive {:?} not found in remote storage", archive_id))?;
-    let (archive_header, header_size) = remote_timeline
-        .restore_header(archive_id)
-        .context("Failed to restore header when downloading an archive")?;
-
-    compression::uncompress_file_stream_with_index(
-        timeline_dir.clone(),
-        files_to_skip,
-        remote_archive.disk_consistent_lsn(),
-        archive_header,
-        header_size,
-        move |mut archive_target, archive_name| async move {
-            let archive_local_path = timeline_dir.join(&archive_name);
-            remote_storage
-                .download_range(
-                    &remote_storage.storage_path(&archive_local_path)?,
-                    header_size,
-                    None,
-                    &mut archive_target,
-                )
-                .await
-        },
-    )
-    .await?;
-
-    Ok(())
-}
-
-async fn upload_timeline_checkpoint<
-    P: Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    config: &'static PageServerConf,
-    remote_timelines: &mut HashMap<TimelineSyncId, RemoteTimeline>,
-    remote_storage: Arc<S>,
-    sync_id: TimelineSyncId,
-    new_checkpoint: NewCheckpoint,
-    retries: u32,
-) -> Option<bool> {
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
-    debug!(
-        "Uploading checkpoint for tenant {}, timeline {}",
-        tenant_id, timeline_id
-    );
-    let remote_timeline = remote_timelines.get(&sync_id);
-
-    let new_upload_lsn = new_checkpoint.metadata.disk_consistent_lsn();
-    let already_contains_upload_lsn = remote_timeline
-        .map(|remote_timeline| remote_timeline.contains_archive(new_upload_lsn))
-        .unwrap_or(false);
-    if already_contains_upload_lsn {
-        warn!(
-            "Received a checkpoint witn Lsn {} that's already been uploaded to remote storage, skipping the upload.",
-            new_upload_lsn
-        );
-        return None;
-    }
-
-    let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
-    let already_uploaded_files = remote_timeline
-        .map(|timeline| timeline.stored_files(&timeline_dir))
-        .unwrap_or_default();
-    match try_upload_checkpoint(
-        config,
-        remote_storage,
-        sync_id,
-        &new_checkpoint,
-        already_uploaded_files,
-    )
-    .await
-    {
-        Ok((archive_header, header_size)) => {
-            remote_timelines
-                .entry(sync_id)
-                .or_insert_with(RemoteTimeline::empty)
-                .set_archive_contents(
-                    new_checkpoint.metadata.disk_consistent_lsn(),
-                    archive_header,
-                    header_size,
-                );
-            debug!("Checkpoint uploaded successfully");
-            Some(true)
-        }
-        Err(e) => {
-            error!(
-                "Failed to upload checkpoint: {:#}, requeueing the upload",
-                e
-            );
-            sync_queue::push(SyncTask::new(
-                sync_id,
-                retries,
-                SyncKind::Upload(new_checkpoint),
-            ));
-            Some(false)
-        }
-    }
-}
-
-async fn try_upload_checkpoint<
-    P: Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    config: &'static PageServerConf,
-    remote_storage: Arc<S>,
-    sync_id: TimelineSyncId,
-    new_checkpoint: &NewCheckpoint,
-    files_to_skip: BTreeSet<PathBuf>,
-) -> anyhow::Result<(ArchiveHeader, u64)> {
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
-    let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
-
-    let files_to_upload = new_checkpoint
-        .layers
-        .iter()
-        .filter(|&path_to_upload| {
-            if files_to_skip.contains(path_to_upload) {
-                error!(
-                    "Skipping file upload '{}', since it was already uploaded",
-                    path_to_upload.display()
-                );
-                false
-            } else {
-                true
+    (storage, index): &(S, RwLock<RemoteTimelineIndex>),
+    timeline_dir: &Path,
+    id: TimelineSyncId,
+) -> anyhow::Result<RemoteTimeline> {
+    let mut index_write = index.write().await;
+    let full_index = match index_write.timeline_entry(&id) {
+        None => bail!("Timeline not found for sync id {}", id),
+        Some(TimelineIndexEntry::Full(_)) => bail!("Index is already populated for sync id {}", id),
+        Some(TimelineIndexEntry::Description(description)) => {
+            let mut archive_header_downloads = FuturesUnordered::new();
+            for (&archive_id, description) in description {
+                archive_header_downloads.push(async move {
+                    let header = download_archive_header(storage, timeline_dir, description)
+                        .await
+                        .map_err(|e| (e, archive_id))?;
+                    Ok((archive_id, description.header_size, header))
+                });
             }
-        })
-        .collect::<Vec<_>>();
-    ensure!(!files_to_upload.is_empty(), "No files to upload");
 
-    compression::archive_files_as_stream(
-        &timeline_dir,
-        files_to_upload.into_iter(),
-        &new_checkpoint.metadata,
-        move |archive_streamer, archive_name| async move {
-            let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
-            remote_storage
-                .upload(
-                    archive_streamer,
-                    &remote_storage.storage_path(&timeline_dir.join(&archive_name))?,
-                )
-                .await
-        },
-    )
-    .await
-    .map(|(header, header_size, _)| (header, header_size))
+            let mut full_index = RemoteTimeline::empty();
+            while let Some(header_data) = archive_header_downloads.next().await {
+                match header_data {
+                        Ok((archive_id, header_size, header)) => full_index.update_archive_contents(archive_id.0, header, header_size),
+                        Err((e, archive_id)) => bail!(
+                            "Failed to download archive header for tenant {}, timeline {}, archive for Lsn {}: {}",
+                            id.0, id.1, archive_id.0,
+                            e
+                        ),
+                    }
+            }
+            full_index
+        }
+    };
+    index_write.add_timeline_entry(id, TimelineIndexEntry::Full(full_index.clone()));
+    Ok(full_index)
+}
+
+async fn download_archive_header<
+    P: Send + Sync + 'static,
+    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
+>(
+    storage: &S,
+    timeline_dir: &Path,
+    description: &ArchiveDescription,
+) -> anyhow::Result<ArchiveHeader> {
+    let mut header_buf = std::io::Cursor::new(Vec::new());
+    let remote_path = storage.storage_path(&timeline_dir.join(&description.archive_name))?;
+    storage
+        .download_range(
+            &remote_path,
+            0,
+            Some(description.header_size),
+            &mut header_buf,
+        )
+        .await?;
+    let header_buf = header_buf.into_inner();
+    let header = read_archive_header(&description.archive_name, &mut header_buf.as_slice()).await?;
+    Ok(header)
+}
+
+async fn tenant_branch_files(
+    conf: &'static PageServerConf,
+    tenant_id: ZTenantId,
+) -> anyhow::Result<HashSet<RelativePath>> {
+    let branches_dir = conf.branches_path(&tenant_id);
+    if !branches_dir.exists() {
+        return Ok(HashSet::new());
+    }
+
+    let mut branch_entries = fs::read_dir(&branches_dir)
+        .await
+        .context("Failed to list tenant branches dir contents")?;
+
+    let mut branch_files = HashSet::new();
+    while let Some(branch_entry) = branch_entries.next_entry().await? {
+        if branch_entry.file_type().await?.is_file() {
+            branch_files.insert(RelativePath::new(&branches_dir, branch_entry.path())?);
+        }
+    }
+    Ok(branch_files)
 }
 
 #[cfg(test)]
-mod tests {
+mod test_utils {
     use std::{
         collections::{BTreeMap, BTreeSet},
         fs,
     };
 
-    use super::{index::reconstruct_from_storage, *};
+    use super::*;
     use crate::{
-        layered_repository::metadata::metadata_path,
-        remote_storage::local_fs::LocalFs,
-        repository::repo_harness::{RepoHarness, TIMELINE_ID},
+        layered_repository::metadata::metadata_path, remote_storage::local_fs::LocalFs,
+        repository::repo_harness::RepoHarness,
     };
-    use tempfile::tempdir;
     use zenith_utils::lsn::Lsn;
 
-    #[tokio::test]
-    async fn reupload_timeline() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("reupload_timeline")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
-        let storage = Arc::new(LocalFs::new(
-            tempdir()?.path().to_owned(),
-            &repo_harness.conf.workdir,
-        )?);
-        let mut remote_timelines = HashMap::new();
-
-        let first_upload_metadata = dummy_metadata(Lsn(0x10));
-        let first_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["a", "b"],
-            first_upload_metadata.clone(),
-        )?;
-        let local_timeline_path = repo_harness.timeline_path(&TIMELINE_ID);
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            &mut remote_timelines,
-            Arc::clone(&storage),
-            TIMELINE_ID,
-            first_checkpoint,
-        )
-        .await;
-
-        let uploaded_timeline = remote_timelines
-            .get(&sync_id)
-            .expect("Should have the timeline after the corresponding checkpoint upload");
-        let uploaded_archives = uploaded_timeline.stored_archives();
-        assert_eq!(
-            uploaded_archives.len(),
-            1,
-            "Only one archive is expected after a first upload"
-        );
-        let first_uploaded_archive = uploaded_archives.first().copied().unwrap();
-        assert_eq!(
-            uploaded_timeline.latest_disk_consistent_lsn(),
-            Some(first_upload_metadata.disk_consistent_lsn()),
-            "Metadata that was uploaded, should have its Lsn stored"
-        );
-        assert_eq!(
-            uploaded_timeline
-                .archive_data(uploaded_archives.first().copied().unwrap())
-                .unwrap()
-                .disk_consistent_lsn(),
-            first_upload_metadata.disk_consistent_lsn(),
-            "Uploaded archive should have corresponding Lsn"
-        );
-        assert_eq!(
-            uploaded_timeline.stored_files(&local_timeline_path),
-            vec![local_timeline_path.join("a"), local_timeline_path.join("b")]
-                .into_iter()
-                .collect(),
-            "Should have all files from the first checkpoint"
-        );
-
-        let second_upload_metadata = dummy_metadata(Lsn(0x40));
-        let second_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["b", "c"],
-            second_upload_metadata.clone(),
-        )?;
-        assert!(
-            first_upload_metadata.disk_consistent_lsn()
-                < second_upload_metadata.disk_consistent_lsn()
-        );
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            &mut remote_timelines,
-            Arc::clone(&storage),
-            TIMELINE_ID,
-            second_checkpoint,
-        )
-        .await;
-
-        let updated_timeline = remote_timelines
-            .get(&sync_id)
-            .expect("Should have the timeline after 2 checkpoints are uploaded");
-        let mut updated_archives = updated_timeline.stored_archives();
-        assert_eq!(
-            updated_archives.len(),
-            2,
-            "Two archives are expected after a successful update of the upload"
-        );
-        updated_archives.retain(|archive_id| archive_id != &first_uploaded_archive);
-        assert_eq!(
-            updated_archives.len(),
-            1,
-            "Only one new archive is expected among the uploaded"
-        );
-        let second_uploaded_archive = updated_archives.last().copied().unwrap();
-        assert_eq!(
-            updated_timeline.latest_disk_consistent_lsn(),
-            Some(second_upload_metadata.disk_consistent_lsn()),
-            "Metadata that was uploaded, should have its Lsn stored"
-        );
-        assert_eq!(
-            updated_timeline
-                .archive_data(second_uploaded_archive)
-                .unwrap()
-                .disk_consistent_lsn(),
-            second_upload_metadata.disk_consistent_lsn(),
-            "Uploaded archive should have corresponding Lsn"
-        );
-        assert_eq!(
-            updated_timeline.stored_files(&local_timeline_path),
-            vec![
-                local_timeline_path.join("a"),
-                local_timeline_path.join("b"),
-                local_timeline_path.join("c"),
-            ]
-            .into_iter()
-            .collect(),
-            "Should have all files from both checkpoints without duplicates"
-        );
-
-        let third_upload_metadata = dummy_metadata(Lsn(0x20));
-        let third_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["d"],
-            third_upload_metadata.clone(),
-        )?;
-        assert_ne!(
-            third_upload_metadata.disk_consistent_lsn(),
-            first_upload_metadata.disk_consistent_lsn()
-        );
-        assert!(
-            third_upload_metadata.disk_consistent_lsn()
-                < second_upload_metadata.disk_consistent_lsn()
-        );
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            &mut remote_timelines,
-            Arc::clone(&storage),
-            TIMELINE_ID,
-            third_checkpoint,
-        )
-        .await;
-
-        let updated_timeline = remote_timelines
-            .get(&sync_id)
-            .expect("Should have the timeline after 3 checkpoints are uploaded");
-        let mut updated_archives = updated_timeline.stored_archives();
-        assert_eq!(
-            updated_archives.len(),
-            3,
-            "Three archives are expected after two successful updates of the upload"
-        );
-        updated_archives.retain(|archive_id| {
-            archive_id != &first_uploaded_archive && archive_id != &second_uploaded_archive
-        });
-        assert_eq!(
-            updated_archives.len(),
-            1,
-            "Only one new archive is expected among the uploaded"
-        );
-        let third_uploaded_archive = updated_archives.last().copied().unwrap();
-        assert!(
-            updated_timeline.latest_disk_consistent_lsn().unwrap()
-                > third_upload_metadata.disk_consistent_lsn(),
-            "Should not influence the last lsn by uploading an older checkpoint"
-        );
-        assert_eq!(
-            updated_timeline
-                .archive_data(third_uploaded_archive)
-                .unwrap()
-                .disk_consistent_lsn(),
-            third_upload_metadata.disk_consistent_lsn(),
-            "Uploaded archive should have corresponding Lsn"
-        );
-        assert_eq!(
-            updated_timeline.stored_files(&local_timeline_path),
-            vec![
-                local_timeline_path.join("a"),
-                local_timeline_path.join("b"),
-                local_timeline_path.join("c"),
-                local_timeline_path.join("d"),
-            ]
-            .into_iter()
-            .collect(),
-            "Should have all files from three checkpoints without duplicates"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn reupload_timeline_rejected() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("reupload_timeline")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
-        let storage = Arc::new(LocalFs::new(
-            tempdir()?.path().to_owned(),
-            &repo_harness.conf.workdir,
-        )?);
-        let mut remote_timelines = HashMap::new();
-
-        let first_upload_metadata = dummy_metadata(Lsn(0x10));
-        let first_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["a", "b"],
-            first_upload_metadata.clone(),
-        )?;
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            &mut remote_timelines,
-            Arc::clone(&storage),
-            TIMELINE_ID,
-            first_checkpoint,
-        )
-        .await;
-        let after_first_uploads = remote_timelines.clone();
-
-        let normal_upload_metadata = dummy_metadata(Lsn(0x20));
-        assert_ne!(
-            normal_upload_metadata.disk_consistent_lsn(),
-            first_upload_metadata.disk_consistent_lsn()
-        );
-
-        let checkpoint_with_no_files = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &[],
-            normal_upload_metadata.clone(),
-        )?;
-        upload_timeline_checkpoint(
-            repo_harness.conf,
-            &mut remote_timelines,
-            Arc::clone(&storage),
-            sync_id,
-            checkpoint_with_no_files,
-            0,
-        )
-        .await;
-        assert_timelines_equal(after_first_uploads.clone(), remote_timelines.clone());
-
-        let checkpoint_with_uploaded_lsn = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["something", "new"],
-            first_upload_metadata.clone(),
-        )?;
-        upload_timeline_checkpoint(
-            repo_harness.conf,
-            &mut remote_timelines,
-            Arc::clone(&storage),
-            sync_id,
-            checkpoint_with_uploaded_lsn,
-            0,
-        )
-        .await;
-        assert_timelines_equal(after_first_uploads, remote_timelines);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_download_timeline() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("test_download_timeline")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
-        let storage = Arc::new(LocalFs::new(
-            tempdir()?.path().to_owned(),
-            &repo_harness.conf.workdir,
-        )?);
-        let mut remote_timelines = HashMap::new();
-
-        let regular_timeline_path = repo_harness.timeline_path(&TIMELINE_ID);
-        let regular_timeline = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["a", "b"],
-            dummy_metadata(Lsn(0x30)),
-        )?;
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            &mut remote_timelines,
-            Arc::clone(&storage),
-            TIMELINE_ID,
-            regular_timeline,
-        )
-        .await;
-        fs::remove_dir_all(&regular_timeline_path)?;
-        let remote_regular_timeline = remote_timelines.get(&sync_id).unwrap().clone();
-
-        download_timeline(
-            repo_harness.conf,
-            &remote_timelines,
-            Arc::clone(&storage),
-            sync_id,
-            TimelineDownload {
-                files_to_skip: Arc::new(BTreeSet::new()),
-                archives_to_download: remote_regular_timeline.stored_archives(),
-            },
-            0,
-        )
-        .await;
-        assert_timelines_equal(
-            remote_timelines,
-            reconstruct_from_storage(storage.as_ref()).await?,
-        );
-        assert_timeline_files_match(&repo_harness, TIMELINE_ID, remote_regular_timeline);
-
-        Ok(())
-    }
-
     #[track_caller]
-    async fn ensure_correct_timeline_upload(
+    pub async fn ensure_correct_timeline_upload(
         harness: &RepoHarness,
-        remote_timelines: &mut HashMap<TimelineSyncId, RemoteTimeline>,
-        remote_storage: Arc<LocalFs>,
+        remote_assets: Arc<(LocalFs, RwLock<RemoteTimelineIndex>)>,
         timeline_id: ZTimelineId,
         new_upload: NewCheckpoint,
     ) {
         let sync_id = TimelineSyncId(harness.tenant_id, timeline_id);
         upload_timeline_checkpoint(
             harness.conf,
-            remote_timelines,
-            Arc::clone(&remote_storage),
+            Arc::clone(&remote_assets),
             sync_id,
             new_upload.clone(),
             0,
         )
         .await;
-        assert_timelines_equal(
-            remote_timelines.clone(),
-            reconstruct_from_storage(remote_storage.as_ref())
-                .await
-                .unwrap(),
-        );
 
-        let new_remote_timeline = remote_timelines.get(&sync_id).unwrap().clone();
+        let (storage, index) = remote_assets.as_ref();
+        assert_index_descriptions(
+            index,
+            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+                harness.conf,
+                remote_assets
+                    .0
+                    .list()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+            ),
+        )
+        .await;
+
+        let new_remote_timeline = expect_timeline(index, sync_id).await;
         let new_remote_lsn = new_remote_timeline
-            .latest_disk_consistent_lsn()
+            .checkpoints()
+            .max()
             .expect("Remote timeline should have an lsn after reupload");
         let upload_lsn = new_upload.metadata.disk_consistent_lsn();
         assert!(
@@ -1075,9 +819,7 @@ mod tests {
             "Remote timeline after upload should have the biggest Lsn out of all uploads"
         );
         assert!(
-            new_remote_timeline
-                .stored_archives()
-                .contains(&ArchiveId(upload_lsn)),
+            new_remote_timeline.contains_checkpoint_at(upload_lsn),
             "Should contain upload lsn among the remote ones"
         );
 
@@ -1094,20 +836,119 @@ mod tests {
         assert_timeline_files_match(harness, timeline_id, new_remote_timeline);
     }
 
-    #[track_caller]
-    fn assert_timelines_equal(
-        expected: HashMap<TimelineSyncId, RemoteTimeline>,
-        actual: HashMap<TimelineSyncId, RemoteTimeline>,
-    ) {
-        let expected_sorted = expected.iter().collect::<BTreeMap<_, _>>();
-        let actual_sorted = actual.iter().collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            expected_sorted, actual_sorted,
-            "Different timeline contents"
-        );
+    pub async fn expect_timeline(
+        index: &RwLock<RemoteTimelineIndex>,
+        sync_id: TimelineSyncId,
+    ) -> RemoteTimeline {
+        if let Some(TimelineIndexEntry::Full(remote_timeline)) =
+            index.read().await.timeline_entry(&sync_id)
+        {
+            remote_timeline.clone()
+        } else {
+            panic!(
+                "Expect to have a full remote timeline in the index for sync id {}",
+                sync_id
+            )
+        }
     }
 
-    fn assert_timeline_files_match(
+    #[track_caller]
+    pub async fn assert_index_descriptions(
+        index: &RwLock<RemoteTimelineIndex>,
+        expected_index_with_descriptions: RemoteTimelineIndex,
+    ) {
+        let index_read = index.read().await;
+        let actual_sync_ids = index_read.all_sync_ids().collect::<BTreeSet<_>>();
+        let expected_sync_ids = expected_index_with_descriptions
+            .all_sync_ids()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual_sync_ids, expected_sync_ids,
+            "Index contains unexpected sync ids"
+        );
+
+        let mut actual_branches = BTreeMap::new();
+        let mut expected_branches = BTreeMap::new();
+        let mut actual_timeline_entries = BTreeMap::new();
+        let mut expected_timeline_entries = BTreeMap::new();
+        for sync_id in actual_sync_ids {
+            actual_branches.insert(
+                sync_id.1,
+                index_read
+                    .branch_files(sync_id.0)
+                    .into_iter()
+                    .flat_map(|branch_paths| branch_paths.iter())
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+            );
+            expected_branches.insert(
+                sync_id.1,
+                expected_index_with_descriptions
+                    .branch_files(sync_id.0)
+                    .into_iter()
+                    .flat_map(|branch_paths| branch_paths.iter())
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+            );
+
+            actual_timeline_entries.insert(
+                sync_id,
+                index_read.timeline_entry(&sync_id).unwrap().clone(),
+            );
+            expected_timeline_entries.insert(
+                sync_id,
+                expected_index_with_descriptions
+                    .timeline_entry(&sync_id)
+                    .unwrap()
+                    .clone(),
+            );
+        }
+        drop(index_read);
+
+        assert_eq!(
+            actual_branches, expected_branches,
+            "Index contains unexpected branches"
+        );
+
+        for (sync_id, actual_timeline_entry) in actual_timeline_entries {
+            let expected_timeline_description = expected_timeline_entries
+                .remove(&sync_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Failed to find an expected timeline with id {} in the index",
+                        sync_id
+                    )
+                });
+            let expected_timeline_description = match expected_timeline_description {
+                TimelineIndexEntry::Description(description) => description,
+                TimelineIndexEntry::Full(_) => panic!("Expected index entry for sync id {} is a full entry, while a description was expected", sync_id),
+            };
+
+            match actual_timeline_entry {
+                TimelineIndexEntry::Description(actual_descriptions) => {
+                    assert_eq!(
+                        actual_descriptions, expected_timeline_description,
+                        "Index contains unexpected descriptions entry for sync id {}",
+                        sync_id
+                    )
+                }
+                TimelineIndexEntry::Full(actual_full_entry) => {
+                    let expected_lsns = expected_timeline_description
+                        .values()
+                        .map(|description| description.disk_consistent_lsn)
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(
+                        actual_full_entry.checkpoints().collect::<BTreeSet<_>>(),
+                        expected_lsns,
+                        "Timeline {} should have the same checkpoints uploaded",
+                        sync_id,
+                    )
+                }
+            }
+        }
+    }
+
+    pub fn assert_timeline_files_match(
         harness: &RepoHarness,
         remote_timeline_id: ZTimelineId,
         remote_timeline: RemoteTimeline,
@@ -1128,9 +969,7 @@ mod tests {
             "Failed to parse metadata file contents when comparing remote and local image files",
         );
         assert!(
-            remote_timeline
-                .stored_archives()
-                .contains(&ArchiveId(local_metadata.disk_consistent_lsn())),
+            remote_timeline.contains_checkpoint_at(local_metadata.disk_consistent_lsn()),
             "Should contain local lsn among the remote ones after the upload"
         );
         reported_remote_files.insert(local_metadata_path);
@@ -1163,7 +1002,7 @@ mod tests {
         }
     }
 
-    fn create_local_timeline(
+    pub fn create_local_timeline(
         harness: &RepoHarness,
         timeline_id: ZTimelineId,
         filenames: &[&str],
@@ -1191,7 +1030,7 @@ mod tests {
         format!("contents for {}", name)
     }
 
-    fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
+    pub fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
         TimelineMetadata::new(disk_consistent_lsn, None, None, Lsn(0), Lsn(0), Lsn(0))
     }
 }

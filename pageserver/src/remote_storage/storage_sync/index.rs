@@ -1,32 +1,137 @@
-//! In-memory index to track the timeline files in the remote strorage's archives.
+//! In-memory index to track the tenant files on the remote strorage, mitigating the storage format differences between the local and remote files.
 //! Able to restore itself from the storage archive data and reconstruct archive indices on demand.
 //!
 //! The index is intended to be portable, so deliberately does not store any local paths inside.
 //! This way in the future, the index could be restored fast from its serialized stored form.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, bail, ensure, Context};
-use futures::stream::{FuturesUnordered, StreamExt};
-use tracing::error;
+use serde::{Deserialize, Serialize};
+use tracing::debug;
 use zenith_utils::{
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::{
-    layered_repository::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME},
+    layered_repository::TIMELINES_SEGMENT_NAME,
     remote_storage::{
         storage_sync::compression::{parse_archive_name, FileEntry},
-        RemoteStorage, TimelineSyncId,
+        TimelineSyncId,
     },
+    PageServerConf,
 };
 
-use super::compression::{read_archive_header, ArchiveHeader};
+use super::compression::ArchiveHeader;
 
+/// A part of the filesystem path, that needs a root to become a path again.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RelativePath(String);
+
+impl RelativePath {
+    /// Attempts to strip off the base from path, producing a relative path or an error.
+    pub fn new<P: AsRef<Path>>(base: &Path, path: P) -> anyhow::Result<Self> {
+        let relative = path
+            .as_ref()
+            .strip_prefix(base)
+            .context("path is not relative to base")?;
+        Ok(RelativePath(relative.to_string_lossy().to_string()))
+    }
+
+    /// Joins the relative path with the base path.
+    pub fn as_path(&self, base: &Path) -> PathBuf {
+        base.join(&self.0)
+    }
+}
+
+/// An index to track tenant files that exist on the remote storage.
+/// Currently, timeline archives and branch files are tracked.
+#[derive(Debug, Clone)]
+pub struct RemoteTimelineIndex {
+    branch_files: HashMap<ZTenantId, HashSet<RelativePath>>,
+    timeline_files: HashMap<TimelineSyncId, TimelineIndexEntry>,
+}
+
+impl RemoteTimelineIndex {
+    /// Attempts to parse file paths (not checking the file contents) and find files
+    /// that can be tracked wiht the index.
+    /// On parse falures, logs the error and continues, so empty index can be created from not suitable paths.
+    pub fn try_parse_descriptions_from_paths<P: AsRef<Path>>(
+        conf: &'static PageServerConf,
+        paths: impl Iterator<Item = P>,
+    ) -> Self {
+        let mut index = Self {
+            branch_files: HashMap::new(),
+            timeline_files: HashMap::new(),
+        };
+        for path in paths {
+            if let Err(e) = try_parse_index_entry(&mut index, conf, path.as_ref()) {
+                debug!(
+                    "Failed to parse path '{}' as index entry: {:#}",
+                    path.as_ref().display(),
+                    e
+                );
+            }
+        }
+        index
+    }
+
+    pub fn timeline_entry(&self, id: &TimelineSyncId) -> Option<&TimelineIndexEntry> {
+        self.timeline_files.get(id)
+    }
+
+    pub fn timeline_entry_mut(&mut self, id: &TimelineSyncId) -> Option<&mut TimelineIndexEntry> {
+        self.timeline_files.get_mut(id)
+    }
+
+    pub fn add_timeline_entry(&mut self, id: TimelineSyncId, entry: TimelineIndexEntry) {
+        self.timeline_files.insert(id, entry);
+    }
+
+    pub fn all_sync_ids(&self) -> impl Iterator<Item = TimelineSyncId> + '_ {
+        self.timeline_files.keys().copied()
+    }
+
+    pub fn add_branch_file(&mut self, tenant_id: ZTenantId, path: RelativePath) {
+        self.branch_files
+            .entry(tenant_id)
+            .or_insert_with(HashSet::new)
+            .insert(path);
+    }
+
+    pub fn branch_files(&self, tenant_id: ZTenantId) -> Option<&HashSet<RelativePath>> {
+        self.branch_files.get(&tenant_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineIndexEntry {
+    /// An archive found on the remote storage, but not yet downloaded, only a metadata from its storage path is available, without archive contents.
+    Description(BTreeMap<ArchiveId, ArchiveDescription>),
+    /// Full archive metadata, including the file list, parsed from the archive header.
+    Full(RemoteTimeline),
+}
+
+impl TimelineIndexEntry {
+    pub fn uploaded_checkpoints(&self) -> BTreeSet<Lsn> {
+        match self {
+            TimelineIndexEntry::Description(description) => {
+                description.keys().map(|archive_id| archive_id.0).collect()
+            }
+            TimelineIndexEntry::Full(remote_timeline) => remote_timeline
+                .checkpoint_archives
+                .keys()
+                .map(|archive_id| archive_id.0)
+                .collect(),
+        }
+    }
+}
+
+/// Checkpoint archive's id, corresponding to the `disk_consistent_lsn` from the timeline's metadata file during checkpointing.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct ArchiveId(pub(super) Lsn);
 
@@ -66,27 +171,21 @@ impl RemoteTimeline {
         }
     }
 
+    pub fn checkpoints(&self) -> impl Iterator<Item = Lsn> + '_ {
+        self.checkpoint_archives
+            .values()
+            .map(CheckpointArchive::disk_consistent_lsn)
+    }
+
     /// Lists all relish files in the given remote timeline. Omits the metadata file.
     pub fn stored_files(&self, timeline_dir: &Path) -> BTreeSet<PathBuf> {
         self.timeline_files
             .values()
-            .map(|file_entry| timeline_dir.join(&file_entry.subpath))
+            .map(|file_entry| file_entry.subpath.as_path(timeline_dir))
             .collect()
     }
 
-    pub fn stored_archives(&self) -> Vec<ArchiveId> {
-        self.checkpoint_archives.keys().copied().collect()
-    }
-
-    #[cfg(test)]
-    pub fn latest_disk_consistent_lsn(&self) -> Option<Lsn> {
-        self.checkpoint_archives
-            .keys()
-            .last()
-            .map(|archive_id| archive_id.0)
-    }
-
-    pub fn contains_archive(&self, disk_consistent_lsn: Lsn) -> bool {
+    pub fn contains_checkpoint_at(&self, disk_consistent_lsn: Lsn) -> bool {
         self.checkpoint_archives
             .contains_key(&ArchiveId(disk_consistent_lsn))
     }
@@ -132,8 +231,8 @@ impl RemoteTimeline {
         ))
     }
 
-    /// Updates (creates, if necessary) the data about a certain archive contents.
-    pub fn set_archive_contents(
+    /// Updates (creates, if necessary) the data about certain archive contents.
+    pub fn update_archive_contents(
         &mut self,
         disk_consistent_lsn: Lsn,
         header: ArchiveHeader,
@@ -161,178 +260,112 @@ impl RemoteTimeline {
     }
 }
 
-/// Reads remote storage file list, parses the data from the file paths and uses it to read every archive's header for every timeline,
-/// thus restoring the file list for every timeline.
-/// Due to the way headers are stored, S3 api for accessing file byte range is used, so we don't have to download an entire archive for its listing.
-pub(super) async fn reconstruct_from_storage<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    storage: &S,
-) -> anyhow::Result<HashMap<TimelineSyncId, RemoteTimeline>> {
-    let mut index = HashMap::<TimelineSyncId, RemoteTimeline>::new();
-    for (sync_id, remote_archives) in collect_archives(storage).await? {
-        let mut archive_header_downloads = remote_archives
-            .into_iter()
-            .map(|(archive_id, (archive, remote_path))| async move {
-                let mut header_buf = std::io::Cursor::new(Vec::new());
-                storage
-                    .download_range(&remote_path, 0, Some(archive.header_size), &mut header_buf)
-                    .await
-                    .map_err(|e| (e, archive_id))?;
-                let header_buf = header_buf.into_inner();
-                let header = read_archive_header(&archive.archive_name, &mut header_buf.as_slice())
-                    .await
-                    .map_err(|e| (e, archive_id))?;
-                Ok::<_, (anyhow::Error, ArchiveId)>((archive_id, archive.header_size, header))
-            })
-            .collect::<FuturesUnordered<_>>();
-
-        while let Some(header_data) = archive_header_downloads.next().await {
-            match header_data {
-                Ok((archive_id, header_size, header)) => {
-                    index
-                        .entry(sync_id)
-                        .or_insert_with(RemoteTimeline::empty)
-                        .set_archive_contents(archive_id.0, header, header_size);
-                }
-                Err((e, archive_id)) => {
-                    bail!(
-                        "Failed to download archive header for tenant {}, timeline {}, archive for Lsn {}: {}",
-                        sync_id.0, sync_id.1, archive_id.0,
-                        e
-                    );
-                }
-            }
-        }
-    }
-    Ok(index)
+/// Metadata abput timeline checkpoint archive, parsed from its remote storage path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveDescription {
+    pub header_size: u64,
+    pub disk_consistent_lsn: Lsn,
+    pub archive_name: String,
 }
 
-async fn collect_archives<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    storage: &S,
-) -> anyhow::Result<HashMap<TimelineSyncId, BTreeMap<ArchiveId, (ArchiveDescription, P)>>> {
-    let mut remote_archives =
-        HashMap::<TimelineSyncId, BTreeMap<ArchiveId, (ArchiveDescription, P)>>::new();
-    for (local_path, remote_path) in storage
-        .list()
-        .await
-        .context("Failed to list remote storage files")?
-        .into_iter()
-        .map(|remote_path| (storage.local_path(&remote_path), remote_path))
-    {
-        match local_path.and_then(|local_path| parse_archive_description(&local_path)) {
-            Ok((sync_id, archive_description)) => {
-                remote_archives.entry(sync_id).or_default().insert(
-                    ArchiveId(archive_description.disk_consistent_lsn),
-                    (archive_description, remote_path),
-                );
-            }
-            Err(e) => error!(
-                "Failed to parse archive description from path '{:?}', reason: {:#}",
-                remote_path, e
-            ),
-        }
-    }
-    Ok(remote_archives)
-}
-
-struct ArchiveDescription {
-    header_size: u64,
-    disk_consistent_lsn: Lsn,
-    archive_name: String,
-}
-
-fn parse_archive_description(
-    archive_path: &Path,
-) -> anyhow::Result<(TimelineSyncId, ArchiveDescription)> {
-    let (disk_consistent_lsn, header_size) =
-        parse_archive_name(archive_path).with_context(|| {
+fn try_parse_index_entry(
+    index: &mut RemoteTimelineIndex,
+    conf: &'static PageServerConf,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let tenants_dir = conf.tenants_path();
+    let tenant_id = path
+        .strip_prefix(&tenants_dir)
+        .with_context(|| {
             format!(
-                "Failed to parse timeline id from archive name '{}'",
-                archive_path.display()
-            )
-        })?;
-
-    let mut segments = archive_path
-        .iter()
-        .skip_while(|&segment| segment != TENANTS_SEGMENT_NAME);
-    let tenants_segment = segments.next().ok_or_else(|| {
-        anyhow!(
-            "Found no '{}' segment in the archive path '{}'",
-            TENANTS_SEGMENT_NAME,
-            archive_path.display()
-        )
-    })?;
-    ensure!(
-        tenants_segment == TENANTS_SEGMENT_NAME,
-        "Failed to extract '{}' segment from archive path '{}'",
-        TENANTS_SEGMENT_NAME,
-        archive_path.display()
-    );
-    let tenant_id = segments
-        .next()
-        .ok_or_else(|| {
-            anyhow!(
-                "Found no tenant id in the archive path '{}'",
-                archive_path.display()
+                "Path '{}' does not belong to tenants directory '{}'",
+                path.display(),
+                tenants_dir.display(),
             )
         })?
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow!("Found no tenant id in path '{}'", path.display()))?
         .to_string_lossy()
         .parse::<ZTenantId>()
-        .with_context(|| {
-            format!(
-                "Failed to parse tenant id from archive path '{}'",
-                archive_path.display()
-            )
-        })?;
+        .with_context(|| format!("Failed to parse tenant id from path '{}'", path.display()))?;
 
-    let timelines_segment = segments.next().ok_or_else(|| {
-        anyhow!(
-            "Found no '{}' segment in the archive path '{}'",
-            TIMELINES_SEGMENT_NAME,
-            archive_path.display()
-        )
-    })?;
-    ensure!(
-        timelines_segment == TIMELINES_SEGMENT_NAME,
-        "Failed to extract '{}' segment from archive path '{}'",
-        TIMELINES_SEGMENT_NAME,
-        archive_path.display()
-    );
-    let timeline_id = segments
-        .next()
-        .ok_or_else(|| {
-            anyhow!(
-                "Found no timeline id in the archive path '{}'",
-                archive_path.display()
-            )
-        })?
-        .to_string_lossy()
-        .parse::<ZTimelineId>()
-        .with_context(|| {
-            format!(
-                "Failed to parse timeline id from archive path '{}'",
-                archive_path.display()
-            )
-        })?;
+    let branches_path = conf.branches_path(&tenant_id);
+    let timelines_path = conf.timelines_path(&tenant_id);
+    match (
+        RelativePath::new(&branches_path, &path),
+        path.strip_prefix(&timelines_path),
+    ) {
+        (Ok(_), Ok(_)) => bail!(
+            "Path '{}' cannot start with both branches '{}' and the timelines '{}' prefixes",
+            path.display(),
+            branches_path.display(),
+            timelines_path.display()
+        ),
+        (Ok(branches_entry), Err(_)) => index.add_branch_file(tenant_id, branches_entry),
+        (Err(_), Ok(timelines_subpath)) => {
+            let mut segments = timelines_subpath.iter();
+            let timeline_id = segments
+                .next()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} directory of tenant {} (path '{}') is not an index entry",
+                        TIMELINES_SEGMENT_NAME,
+                        tenant_id,
+                        path.display()
+                    )
+                })?
+                .to_string_lossy()
+                .parse::<ZTimelineId>()
+                .with_context(|| {
+                    format!("Failed to parse timeline id from path '{}'", path.display())
+                })?;
 
-    let archive_name = archive_path
-        .file_name()
-        .ok_or_else(|| anyhow!("Archive '{}' has no file name", archive_path.display()))?
-        .to_string_lossy()
-        .to_string();
-    Ok((
-        TimelineSyncId(tenant_id, timeline_id),
-        ArchiveDescription {
-            header_size,
-            disk_consistent_lsn,
-            archive_name,
-        },
-    ))
+            let (disk_consistent_lsn, header_size) =
+                parse_archive_name(path).with_context(|| {
+                    format!(
+                        "Failed to parse archive name out in path '{}'",
+                        path.display()
+                    )
+                })?;
+
+            let archive_name = path
+                .file_name()
+                .ok_or_else(|| anyhow!("Archive '{}' has no file name", path.display()))?
+                .to_string_lossy()
+                .to_string();
+
+            let sync_id = TimelineSyncId(tenant_id, timeline_id);
+            let timeline_index_entry = index
+                .timeline_files
+                .entry(sync_id)
+                .or_insert_with(|| TimelineIndexEntry::Description(BTreeMap::new()));
+            match timeline_index_entry {
+                TimelineIndexEntry::Description(descriptions) => {
+                    descriptions.insert(
+                        ArchiveId(disk_consistent_lsn),
+                        ArchiveDescription {
+                            header_size,
+                            disk_consistent_lsn,
+                            archive_name,
+                        },
+                    );
+                }
+                TimelineIndexEntry::Full(_) => {
+                    bail!("Cannot add parsed archive description to its full context in index with sync id {}", sync_id)
+                }
+            }
+        }
+        (Err(branches_error), Err(timelines_strip_error)) => {
+            bail!(
+                "Path '{}' is not an index entry: it's neither parsable as a branch entry '{:#}' nor as an archive entry '{}'",
+                path.display(),
+                branches_error,
+                timelines_strip_error,
+            )
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -345,15 +378,15 @@ mod tests {
             files: vec![
                 FileEntry {
                     size: 5,
-                    subpath: "one".to_string(),
+                    subpath: RelativePath("one".to_string()),
                 },
                 FileEntry {
                     size: 1,
-                    subpath: "two".to_string(),
+                    subpath: RelativePath("two".to_string()),
                 },
                 FileEntry {
                     size: 222,
-                    subpath: "zero".to_string(),
+                    subpath: RelativePath("zero".to_string()),
                 },
             ],
             metadata_file_size: 5,
@@ -361,7 +394,7 @@ mod tests {
 
         let lsn = Lsn(1);
         let mut remote_timeline = RemoteTimeline::empty();
-        remote_timeline.set_archive_contents(lsn, header.clone(), 15);
+        remote_timeline.update_archive_contents(lsn, header.clone(), 15);
 
         let (restored_header, _) = remote_timeline
             .restore_header(ArchiveId(lsn))
