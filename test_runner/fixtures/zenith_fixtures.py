@@ -1170,6 +1170,40 @@ def test_output_dir(request: Any) -> str:
     return test_dir
 
 
+SKIP_DIRS = frozenset(('pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical'))
+
+SKIP_FILES = frozenset(('pg_internal.init',
+                        'pg.log',
+                        'zenith.signal',
+                        'postgresql.conf',
+                        'postmaster.opts',
+                        'postmaster.pid',
+                        'pg_control'))
+
+
+def should_skip_dir(dirname: str) -> bool:
+    return dirname in SKIP_DIRS
+
+
+def should_skip_file(filename: str) -> bool:
+    if filename in SKIP_FILES:
+        return True
+    # check for temp table files according to https://www.postgresql.org/docs/current/storage-file-layout.html
+    # i e "tBBB_FFF"
+    if not filename.startswith('t'):
+        return False
+
+    tmp_name = filename[1:].split('_')
+    if len(tmp_name) != 2:
+        return False
+
+    try:
+        list(map(int, tmp_name))
+    except:
+        return False
+    return True
+
+
 #
 # Test helpers
 #
@@ -1179,19 +1213,10 @@ def list_files_to_compare(pgdata_dir: str):
         for filename in filenames:
             rel_dir = os.path.relpath(root, pgdata_dir)
             # Skip some dirs and files we don't want to compare
-            skip_dirs = ['pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical']
-            skip_files = [
-                'pg_internal.init',
-                'pg.log',
-                'zenith.signal',
-                'postgresql.conf',
-                'postmaster.opts',
-                'postmaster.pid',
-                'pg_control'
-            ]
-            if rel_dir not in skip_dirs and filename not in skip_files:
-                rel_file = os.path.join(rel_dir, filename)
-                pgdata_files.append(rel_file)
+            if should_skip_dir(rel_dir) or should_skip_file(filename):
+                continue
+            rel_file = os.path.join(rel_dir, filename)
+            pgdata_files.append(rel_file)
 
     pgdata_files.sort()
     log.info(pgdata_files)
