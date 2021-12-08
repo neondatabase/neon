@@ -106,7 +106,7 @@ fn init_repo(conf: &'static PageServerConf, tenant_id: ZTenantId) {
         conf,
         Arc::new(walredo_mgr),
         tenant_id,
-        true,
+        false,
     ));
 
     let mut m = access_tenants();
