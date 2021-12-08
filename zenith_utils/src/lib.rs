@@ -40,3 +40,7 @@ pub mod logging;
 
 // Misc
 pub mod accum;
+
+// Utility for putting a raw file descriptor into non-blocking mode
+pub mod nonblock;
+

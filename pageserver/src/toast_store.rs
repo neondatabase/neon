@@ -17,7 +17,7 @@ use yakv::storage::{
 };
 
 const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
-const CACHE_SIZE: usize = 32 * 1024; // 256Mb
+const CACHE_SIZE: usize = 1024; // 8Mb
 
 ///
 /// Toast storage consistof two KV databases: one for storing main index

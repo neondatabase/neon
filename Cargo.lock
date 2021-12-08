@@ -180,9 +180,9 @@ dependencies = [
 
 [[package]]
 name = "bitflags"
-version = "1.2.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
+checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitvec"
@@ -338,7 +338,7 @@ dependencies = [
  "bytes",
  "hex",
  "lazy_static",
- "nix",
+ "nix 0.20.0",
  "pageserver",
  "postgres",
  "postgres_ffi",
@@ -886,9 +886,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.101"
+version = "0.2.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cb00336871be5ed2c8ed44b60ae9959dc5b9f08539422ed43f09e34ecaeba21"
+checksum = "f98a04dce437184842841303488f70d0188c5f51437d2a834dc097eafa909a01"
 
 [[package]]
 name = "libloading"
@@ -1053,6 +1053,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f305c2c2e4c39a82f7bf0bf65fb557f9070ce06781d4f2454295cc34b1c43188"
+dependencies = [
+ "bitflags",
+ "cc",
+ "cfg-if 1.0.0",
+ "libc",
+ "memoffset",
+]
+
+[[package]]
 name = "nom"
 version = "6.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1190,6 +1203,7 @@ dependencies = [
  "lazy_static",
  "log",
  "lz4_flex",
+ "nix 0.23.0",
  "parking_lot",
  "postgres",
  "postgres-protocol",
@@ -2620,6 +2634,7 @@ dependencies = [
  "jsonwebtoken",
  "lazy_static",
  "log",
+ "nix 0.23.0",
  "postgres",
  "rand",
  "routerify",

@@ -27,6 +27,7 @@ workspace_hack = { path = "../workspace_hack" }
 rand = "0.8.3"
 jsonwebtoken = "7"
 hex = { version = "0.4.3", features = ["serde"] }
+nix = "0.23.0"
 
 rustls = "0.19.1"
 rustls-split = "0.2.1"
