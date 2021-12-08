@@ -194,6 +194,14 @@ jobs:
           command: |
             cp -a tmp_install /tmp/zenith/pg_install
 
+      - run:
+          name: Merge coverage data
+          command: |
+            # This will speed up workspace uploads
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
+            fi
+
         # Save the rust binaries and coverage data for other jobs in this workflow.
       - persist_to_workspace:
           root: /tmp/zenith
@@ -354,6 +362,13 @@ jobs:
       # The store_test_results step tells CircleCI where to find the junit.xml file.
       - store_test_results:
           path: /tmp/test_output
+      - run:
+          name: Merge coverage data
+          command: |
+            # This will speed up workspace uploads
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
+            fi
       # Save coverage data (if any)
       - persist_to_workspace:
           root: /tmp/zenith
