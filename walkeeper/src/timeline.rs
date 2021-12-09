@@ -327,7 +327,7 @@ impl GlobalTimelines {
 #[derive(Debug)]
 struct FileStorage {
     // file used to prevent concurrent safekeepers running on the same data
-    lock_file: File,
+    _lock_file: File,
     // save timeline dir to avoid reconstructing it every time
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
@@ -432,7 +432,7 @@ impl FileStorage {
 
         Ok((
             FileStorage {
-                lock_file,
+                _lock_file: lock_file,
                 timeline_dir,
                 conf: conf.clone(),
                 persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
