@@ -162,6 +162,7 @@ impl Layer for ImageLayer {
 
         let buf = match &inner.image_type {
             ImageType::Blocky { num_blocks } => {
+                // Check if the request is beyond EOF
                 if base_blknum >= *num_blocks {
                     return Ok(PageReconstructResult::Missing(lsn));
                 }

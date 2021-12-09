@@ -41,7 +41,7 @@ use crate::layered_repository::blob::BlobWriter;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::page_versions::PageVersions;
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::virtual_file::VirtualFile;
 use crate::waldecoder;
@@ -150,6 +150,19 @@ pub struct DeltaLayerInner {
     relsizes: VecMap<Lsn, u32>,
 }
 
+impl DeltaLayerInner {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+        let slice = self
+            .relsizes
+            .slice_range((Included(&Lsn(0)), Included(&lsn)));
+        if let Some((_entry_lsn, entry)) = slice.last() {
+            Ok(*entry)
+        } else {
+            Err(anyhow::anyhow!("could not find seg size in delta layer"))
+        }
+    }
+}
+
 impl Layer for DeltaLayer {
     fn get_tenant_id(&self) -> ZTenantId {
         self.tenantid
@@ -244,6 +257,15 @@ impl Layer for DeltaLayer {
                 }
             }
 
+            // If we didn't find any records for this, check if the request is beyond EOF
+            if need_image
+                && reconstruct_data.records.is_empty()
+                && self.seg.rel.is_blocky()
+                && blknum - self.seg.segno * RELISH_SEG_SIZE >= inner.get_seg_size(lsn)?
+            {
+                return Ok(PageReconstructResult::Missing(self.start_lsn));
+            }
+
             // release metadata lock and close the file
         }
 
@@ -266,15 +288,7 @@ impl Layer for DeltaLayer {
 
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
-        let slice = inner
-            .relsizes
-            .slice_range((Included(&Lsn(0)), Included(&lsn)));
-
-        if let Some((_entry_lsn, entry)) = slice.last() {
-            Ok(*entry)
-        } else {
-            Err(anyhow::anyhow!("could not find seg size in delta layer"))
-        }
+        inner.get_seg_size(lsn)
     }
 
     /// Does this segment exist at given LSN?

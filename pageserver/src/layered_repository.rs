@@ -1737,8 +1737,8 @@ impl LayeredTimeline {
                             // We landed on the same layer again. Shouldn't happen, but if it does,
                             // don't get stuck in an infinite loop.
                             bail!(
-                                "could not find predecessor layer of segment {} at {}",
-                                seg.rel,
+                                "could not find predecessor of layer {} at {}, layer returned its own LSN",
+                                layer_ref.filename().display(),
                                 cont_lsn
                             );
                         }
@@ -1748,8 +1748,8 @@ impl LayeredTimeline {
                         continue;
                     } else {
                         bail!(
-                            "could not find predecessor layer of segment {} at {}",
-                            seg.rel,
+                            "could not find predecessor of layer {} at {}",
+                            layer_ref.filename().display(),
                             cont_lsn
                         );
                     }

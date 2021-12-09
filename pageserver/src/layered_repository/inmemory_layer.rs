@@ -193,6 +193,16 @@ impl Layer for InMemoryLayer {
                     }
                 }
             }
+
+            // If we didn't find any records for this, check if the request is beyond EOF
+            if need_image
+                && reconstruct_data.records.is_empty()
+                && self.seg.rel.is_blocky()
+                && blknum - self.seg.segno * RELISH_SEG_SIZE >= self.get_seg_size(lsn)?
+            {
+                return Ok(PageReconstructResult::Missing(self.start_lsn));
+            }
+
             // release lock on 'inner'
         }
 

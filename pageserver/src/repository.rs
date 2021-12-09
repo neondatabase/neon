@@ -949,6 +949,55 @@ mod tests {
     }
 
     #[test]
+    fn test_read_beyond_eof() -> Result<()> {
+        let harness = RepoHarness::create("test_read_beyond_eof")?;
+        let repo = harness.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        make_some_layers(&tline, Lsn(0x20))?;
+        {
+            let writer = tline.writer();
+            writer.put_page_image(
+                TESTREL_A,
+                0,
+                Lsn(0x60),
+                TEST_IMG(&format!("foo blk 0 at {}", Lsn(0x50))),
+            )?;
+            writer.advance_last_record_lsn(Lsn(0x60));
+        }
+
+        // Test read before rel creation. Should error out.
+        assert!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x10)).is_err());
+
+        // Read block beyond end of relation at different points in time.
+        // These reads should fall into different delta, image, and in-memory layers.
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x20))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x25))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x30))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x35))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x45))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x55))?, ZERO_PAGE);
+        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?, ZERO_PAGE);
+
+        // Test on an in-memory layer with no preceding layer
+        {
+            let writer = tline.writer();
+            writer.put_page_image(
+                TESTREL_B,
+                0,
+                Lsn(0x70),
+                TEST_IMG(&format!("foo blk 0 at {}", Lsn(0x70))),
+            )?;
+            writer.advance_last_record_lsn(Lsn(0x70));
+        }
+        assert_eq!(tline.get_page_at_lsn(TESTREL_B, 1, Lsn(0x70))?, ZERO_PAGE);
+
+        Ok(())
+    }
+
+    #[test]
     fn corrupt_metadata() -> Result<()> {
         const TEST_NAME: &str = "corrupt_metadata";
         let harness = RepoHarness::create(TEST_NAME)?;
