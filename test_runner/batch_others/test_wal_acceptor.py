@@ -444,7 +444,12 @@ class WalAppender:
     """Helper for appending WAL to safekeepers, keeps track of last inserted lsn."""
 
     # 0/16B9188 is good lsn to start with, it's valid and not in the segment start, nor in zero segment
-    def __init__(self, acceptors, tenant_id, timeline_id, epoch_start_lsn=0x16B9188, begin_lsn=0x16B9188):
+    def __init__(self,
+                 acceptors,
+                 tenant_id,
+                 timeline_id,
+                 epoch_start_lsn=0x16B9188,
+                 begin_lsn=0x16B9188):
         self.acceptors = acceptors
         self.epoch_start_lsn = epoch_start_lsn
         self.begin_lsn = begin_lsn
@@ -452,7 +457,7 @@ class WalAppender:
         self.timeline_id = timeline_id
         self.flush_lsns = dict()
 
-    def append(self, i, term, lm_message = "message", lm_prefix = "", set_commit_lsn = False):
+    def append(self, i, term, lm_message="message", lm_prefix="", set_commit_lsn=False):
         """Append new logical message to i'th safekeeper."""
         lsn = self.flush_lsns.get(i, self.begin_lsn)
         req = {
@@ -481,8 +486,11 @@ class WalAppender:
         for i, lsn in self.flush_lsns.items():
             print(f'end_lsn for acceptors[{i}] = {lsn_to_hex(lsn)}')
 
+
 # one safekeeper with old term and a lot of non-commited wal
-def test_sync_safekeepers_old_term_ahead(repo_dir: str, pg_bin: PgBin, wa_factory: WalAcceptorFactory):
+def test_sync_safekeepers_old_term_ahead(repo_dir: str,
+                                         pg_bin: PgBin,
+                                         wa_factory: WalAcceptorFactory):
     wa_factory.start_n_new(3)
 
     timeline_id = uuid.uuid4().hex
