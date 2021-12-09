@@ -4,15 +4,16 @@
 //!
 //! And there's another BTreeMap to track the size of the relation.
 //!
+use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::filename::DeltaFileName;
+use crate::layered_repository::image_layer::{ImageLayer, ImageLayerWriter};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
     RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
-use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
@@ -177,7 +178,7 @@ impl Layer for InMemoryLayer {
                     _ => {}
                 }
 
-                let pv = inner.page_versions.get_page_version(*pos)?;
+                let pv = inner.page_versions.read_pv(*pos)?;
                 match pv {
                     PageVersion::Page(img) => {
                         reconstruct_data.page_img = Some(img);
@@ -297,7 +298,7 @@ impl Layer for InMemoryLayer {
         }
 
         for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
-            let pv = inner.page_versions.get_page_version(pos)?;
+            let pv = inner.page_versions.read_pv(pos)?;
             let pv_description = match pv {
                 PageVersion::Page(_img) => "page",
                 PageVersion::Wal(_rec) => "wal",
@@ -596,84 +597,102 @@ impl InMemoryLayer {
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
+
+        // Since `end_lsn` is exclusive, subtract 1 to calculate the last LSN
+        // that is included.
         let end_lsn_exclusive = inner.end_lsn.unwrap();
-
-        if inner.dropped {
-            let delta_layer = DeltaLayer::create(
-                self.conf,
-                self.timelineid,
-                self.tenantid,
-                self.seg,
-                self.start_lsn,
-                end_lsn_exclusive,
-                true,
-                &inner.page_versions,
-                None,
-                inner.seg_sizes.clone(),
-            )?;
-            trace!(
-                "freeze: created delta layer for dropped segment {} {}-{}",
-                self.seg,
-                self.start_lsn,
-                end_lsn_exclusive
-            );
-            return Ok(LayersOnDisk {
-                delta_layers: vec![delta_layer],
-                image_layers: Vec::new(),
-            });
-        }
-
-        // Since `end_lsn` is inclusive, subtract 1.
-        // We want to make an ImageLayer for the last included LSN,
-        // so the DeltaLayer should exclude that LSN.
         let end_lsn_inclusive = Lsn(end_lsn_exclusive.0 - 1);
 
-        let mut delta_layers = Vec::new();
+        // Figure out if we should create a delta layer, image layer, or both.
+        let image_lsn: Option<Lsn>;
+        let delta_end_lsn: Option<Lsn>;
+        if self.is_dropped() {
+            // The segment was dropped. Create just a delta layer containing all the
+            // changes up to and including the drop.
+            delta_end_lsn = Some(end_lsn_exclusive);
+            image_lsn = None;
+        } else if self.start_lsn == end_lsn_inclusive {
+            // The layer contains exactly one LSN. It's enough to write an image
+            // layer at that LSN.
+            delta_end_lsn = None;
+            image_lsn = Some(end_lsn_inclusive);
+        } else {
+            // Create a delta layer with all the changes up to the end LSN,
+            // and an image layer at the end LSN.
+            //
+            // Note that we the delta layer does *not* include the page versions
+            // at the end LSN. They are included in the image layer, and there's
+            // no need to store them twice.
+            delta_end_lsn = Some(end_lsn_inclusive);
+            image_lsn = Some(end_lsn_inclusive);
+        }
 
-        if self.start_lsn != end_lsn_inclusive {
-            let (seg_sizes, _) = inner.seg_sizes.split_at(&end_lsn_exclusive);
-            // Write the page versions before the cutoff to disk.
-            let delta_layer = DeltaLayer::create(
+        let mut delta_layers = Vec::new();
+        let mut image_layers = Vec::new();
+
+        if let Some(delta_end_lsn) = delta_end_lsn {
+            let mut delta_layer_writer = DeltaLayerWriter::new(
                 self.conf,
                 self.timelineid,
                 self.tenantid,
                 self.seg,
                 self.start_lsn,
-                end_lsn_inclusive,
-                false,
-                &inner.page_versions,
-                Some(end_lsn_inclusive),
-                seg_sizes,
+                delta_end_lsn,
+                self.is_dropped(),
             )?;
-            delta_layers.push(delta_layer);
-            trace!(
-                "freeze: created delta layer {} {}-{}",
-                self.seg,
-                self.start_lsn,
-                end_lsn_inclusive
-            );
-        } else {
-            assert!(inner
+
+            // Write all page versions
+            let mut buf: Vec<u8> = Vec::new();
+
+            let page_versions_iter = inner
                 .page_versions
-                .ordered_page_version_iter(None)
-                .next()
-                .is_none());
+                .ordered_page_version_iter(Some(delta_end_lsn));
+            for (blknum, lsn, pos) in page_versions_iter {
+                let len = inner.page_versions.read_pv_bytes(pos, &mut buf)?;
+                delta_layer_writer.put_page_version(blknum, lsn, &buf[..len])?;
+            }
+
+            // Create seg_sizes
+            let seg_sizes = if delta_end_lsn == end_lsn_exclusive {
+                inner.seg_sizes.clone()
+            } else {
+                inner.seg_sizes.split_at(&end_lsn_exclusive).0
+            };
+
+            let delta_layer = delta_layer_writer.finish(seg_sizes)?;
+            delta_layers.push(delta_layer);
         }
 
         drop(inner);
 
         // Write a new base image layer at the cutoff point
-        let image_layer =
-            ImageLayer::create_from_src(self.conf, timeline, self, end_lsn_inclusive)?;
-        trace!(
-            "freeze: created image layer {} at {}",
-            self.seg,
-            end_lsn_inclusive
-        );
+        if let Some(image_lsn) = image_lsn {
+            let size = if self.seg.rel.is_blocky() {
+                self.get_seg_size(image_lsn)?
+            } else {
+                1
+            };
+            let mut image_layer_writer = ImageLayerWriter::new(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                self.seg,
+                image_lsn,
+                size,
+            )?;
+
+            for blknum in 0..size {
+                let img = timeline.materialize_page(self.seg, blknum, image_lsn, &*self)?;
+
+                image_layer_writer.put_page_image(&img)?;
+            }
+            let image_layer = image_layer_writer.finish()?;
+            image_layers.push(image_layer);
+        }
 
         Ok(LayersOnDisk {
             delta_layers,
-            image_layers: vec![image_layer],
+            image_layers,
         })
     }
 }

@@ -55,7 +55,6 @@ use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
-mod blob;
 mod delta_layer;
 mod ephemeral_file;
 mod filename;
