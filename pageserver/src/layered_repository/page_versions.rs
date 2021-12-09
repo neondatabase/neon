@@ -98,23 +98,39 @@ impl PageVersions {
         }
     }
 
-    /// Returns a 'Read' that reads the page version at given offset.
-    pub fn reader(&self, pos: u64) -> Result<PageVersionReader, std::io::Error> {
-        // read length
-        let mut lenbuf = [0u8; 4];
-        self.file.read_exact_at(&mut lenbuf, pos)?;
-        let len = u32::from_ne_bytes(lenbuf);
-
-        Ok(PageVersionReader {
-            file: &self.file,
-            pos: pos + 4,
-            end_pos: pos + 4 + len as u64,
-        })
+    ///
+    /// Read a page version.
+    ///
+    pub fn read_pv(&self, off: u64) -> Result<PageVersion> {
+        let mut buf = Vec::new();
+        self.read_pv_bytes(off, &mut buf)?;
+        Ok(PageVersion::des(&buf)?)
     }
 
-    pub fn get_page_version(&self, pos: u64) -> Result<PageVersion> {
-        let mut reader = self.reader(pos)?;
-        Ok(PageVersion::des_from(&mut reader)?)
+    ///
+    /// Read a page version, as raw bytes, at the given offset. The bytes
+    /// are read into 'buf', which is expanded if necessary. Returns the
+    /// size of the page version.
+    ///
+    pub fn read_pv_bytes(&self, off: u64, buf: &mut Vec<u8>) -> Result<usize> {
+        // read length
+        let mut lenbuf = [0u8; 4];
+        self.file.read_exact_at(&mut lenbuf, off)?;
+        let len = u32::from_ne_bytes(lenbuf) as usize;
+
+        // Resize the buffer to fit the data, if needed.
+        //
+        // We don't shrink the buffer if it's larger than necessary. That avoids
+        // repeatedly shrinking and expanding when you reuse the same buffer to
+        // read multiple page versions. Expanding a Vec requires initializing the
+        // new bytes, which is a waste of time because we're immediately overwriting
+        // it, but there's no way to avoid it without resorting to unsafe code.
+        if buf.len() < len {
+            buf.resize(len, 0);
+        }
+        self.file.read_exact_at(&mut buf[0..len], off + 4)?;
+
+        Ok(len)
     }
 }
 
