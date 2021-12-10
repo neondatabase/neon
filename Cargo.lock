@@ -328,23 +328,17 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
- "hex",
  "lazy_static",
  "nix",
  "pageserver",
  "postgres",
- "postgres_ffi",
- "rand",
  "regex",
  "reqwest",
  "serde",
- "serde_json",
  "tar",
  "thiserror",
  "toml",
  "url",
- "walkeeper",
  "workspace_hack",
  "zenith_utils",
 ]
@@ -2326,7 +2320,6 @@ name = "walkeeper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bincode",
  "byteorder",
  "bytes",
  "clap",
@@ -2351,7 +2344,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
- "tokio-stream",
  "tracing",
  "walkdir",
  "workspace_hack",
