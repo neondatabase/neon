@@ -44,7 +44,7 @@ use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::virtual_file::VirtualFile;
-use crate::waldecoder;
+use crate::walrecord;
 use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
@@ -363,7 +363,7 @@ impl Layer for DeltaLayer {
                     write!(&mut desc, " img {} bytes", img.len())?;
                 }
                 PageVersion::Wal(rec) => {
-                    let wal_desc = waldecoder::describe_wal_record(&rec.rec);
+                    let wal_desc = walrecord::describe_wal_record(&rec.rec);
                     write!(
                         &mut desc,
                         " rec {} bytes will_init: {} {}",

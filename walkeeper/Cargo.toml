@@ -32,8 +32,6 @@ hex = "0.4.3"
 const_format = "0.2.21"
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 
-# FIXME: 'pageserver' is needed for ZTimelineId. Refactor
-pageserver = { path = "../pageserver" }
 postgres_ffi = { path = "../postgres_ffi" }
 workspace_hack = { path = "../workspace_hack" }
 zenith_metrics = { path = "../zenith_metrics" }

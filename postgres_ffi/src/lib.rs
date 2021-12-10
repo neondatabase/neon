@@ -13,6 +13,7 @@ pub mod controlfile_utils;
 pub mod nonrelfile_utils;
 pub mod pg_constants;
 pub mod relfile_utils;
+pub mod waldecoder;
 pub mod xlog_utils;
 
 //  See TransactionIdIsNormal in transam.h

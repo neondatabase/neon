@@ -22,8 +22,8 @@ pub mod restore_local_repo;
 pub mod tenant_mgr;
 pub mod tenant_threads;
 pub mod virtual_file;
-pub mod waldecoder;
 pub mod walreceiver;
+pub mod walrecord;
 pub mod walredo;
 
 pub mod defaults {

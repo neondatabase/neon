@@ -2330,7 +2330,6 @@ dependencies = [
  "humantime",
  "hyper",
  "lazy_static",
- "pageserver",
  "postgres",
  "postgres-protocol",
  "postgres_ffi",

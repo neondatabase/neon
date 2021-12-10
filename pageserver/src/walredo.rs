@@ -43,8 +43,8 @@ use zenith_utils::zid::ZTenantId;
 
 use crate::relish::*;
 use crate::repository::WALRecord;
-use crate::waldecoder::XlMultiXactCreate;
-use crate::waldecoder::XlXactParsedRecord;
+use crate::walrecord::XlMultiXactCreate;
+use crate::walrecord::XlXactParsedRecord;
 use crate::PageServerConf;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;

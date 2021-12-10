@@ -16,9 +16,10 @@ use tracing::*;
 
 use crate::relish::*;
 use crate::repository::*;
-use crate::waldecoder::*;
+use crate::walrecord::*;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::relfile_utils::*;
+use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::Oid;
 use postgres_ffi::{pg_constants, CheckPoint, ControlFileData};

@@ -8,7 +8,7 @@ use bytes::Buf;
 use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
-use pageserver::waldecoder::WalStreamDecoder;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::xlog_utils::TimeLineID;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
