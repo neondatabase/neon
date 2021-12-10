@@ -18,7 +18,7 @@ serde_json = "1"
 tracing = "0.1.27"
 clap = "2.33.0"
 daemonize = "0.4.1"
-rust-s3 = { version = "0.27.0-rc4", features = ["no-verify-ssl"] }
+rust-s3 = { version = "0.28", features = ["no-verify-ssl"] }
 tokio = "1.11"
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
