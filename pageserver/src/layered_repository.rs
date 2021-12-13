@@ -343,19 +343,23 @@ impl Repository for LayeredRepository {
 
 fn shutdown_timeline(
     tenant_id: ZTenantId,
-    timelineid: ZTimelineId,
+    timeline_id: ZTimelineId,
     timeline: &LayeredTimelineEntry,
 ) -> Result<(), anyhow::Error> {
-    if let Some(timeline) = timeline.local_or_schedule_download(tenant_id) {
-        timeline
-            .upload_relishes
-            .store(false, atomic::Ordering::Relaxed);
-        walreceiver::stop_wal_receiver(timelineid);
-        trace!("repo shutdown. checkpoint timeline {}", timelineid);
-        timeline.checkpoint(CheckpointConfig::Forced)?;
-        //TODO Wait for walredo process to shutdown too
-    } else {
-        warn!("Skpping shutdown of a remote timeline");
+    match timeline {
+        LayeredTimelineEntry::Local(timeline) => {
+            timeline
+                .upload_relishes
+                .store(false, atomic::Ordering::Relaxed);
+            walreceiver::stop_wal_receiver(timeline_id);
+            trace!("repo shutdown. checkpoint timeline {}", timeline_id);
+            timeline.checkpoint(CheckpointConfig::Forced)?;
+            //TODO Wait for walredo process to shutdown too
+        }
+        LayeredTimelineEntry::Remote(_) => warn!(
+            "Skipping shutdown of a remote timeline {} for tenant {}",
+            timeline_id, tenant_id
+        ),
     }
     Ok(())
 }
