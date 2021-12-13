@@ -18,7 +18,7 @@ use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
-use crate::replication::{HotStandbyFeedback, END_REPLICATION_MARKER};
+use crate::replication::HotStandbyFeedback;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
     Storage, SK_FORMAT_VERSION, SK_MAGIC,
@@ -38,6 +38,8 @@ pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 /// Replica status: host standby feedback + disk consistent lsn
 #[derive(Debug, Clone, Copy)]
 pub struct ReplicaState {
+    /// last known lsn received by replica
+    pub last_received_lsn: Lsn, // None means we don't know
     /// combined disk_consistent_lsn of pageservers
     pub disk_consistent_lsn: Lsn,
     /// combined hot standby feedback from all replicas
@@ -53,6 +55,7 @@ impl Default for ReplicaState {
 impl ReplicaState {
     pub fn new() -> ReplicaState {
         ReplicaState {
+            last_received_lsn: Lsn::MAX,
             disk_consistent_lsn: Lsn(u64::MAX),
             hs_feedback: HotStandbyFeedback {
                 ts: 0,
@@ -70,6 +73,9 @@ struct SharedState {
     /// For receiving-sending wal cooperation
     /// quorum commit LSN we've notified walsenders about
     notified_commit_lsn: Lsn,
+    // Set stop_lsn to inform WAL senders that it's time to stop sending WAL,
+    // so that it send all wal up stop_lsn and can safely exit streaming connections.
+    stop_lsn: Option<Lsn>,
     /// State of replicas
     replicas: Vec<Option<ReplicaState>>,
 }
@@ -92,7 +98,7 @@ lazy_static! {
 }
 
 impl SharedState {
-    /// Get combined stateof all alive replicas
+    /// Get combined state of all alive replicas
     pub fn get_replicas_state(&self) -> ReplicaState {
         let mut acc = ReplicaState::new();
         for state in self.replicas.iter().flatten() {
@@ -101,6 +107,8 @@ impl SharedState {
             acc.hs_feedback.catalog_xmin =
                 min(acc.hs_feedback.catalog_xmin, state.hs_feedback.catalog_xmin);
             acc.disk_consistent_lsn = Lsn::min(acc.disk_consistent_lsn, state.disk_consistent_lsn);
+            // currently not used, but update it to be consistent
+            acc.last_received_lsn = Lsn::min(acc.last_received_lsn, state.last_received_lsn);
         }
         acc
     }
@@ -141,6 +149,7 @@ impl SharedState {
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
+            stop_lsn: None,
             sk: SafeKeeper::new(Lsn(flush_lsn), file_storage, state),
             replicas: Vec::new(),
         })
@@ -197,8 +206,52 @@ impl Timeline {
         }
     }
 
-    fn _stop_wal_senders(&self) {
-        self.notify_wal_senders(END_REPLICATION_MARKER);
+    // Notify WAL senders that it's time to stop sending WAL
+    pub fn stop_streaming(&self) {
+        let mut shared_state = self.mutex.lock().unwrap();
+        // Ensure that safekeeper sends WAL up to the last known committed LSN.
+        // It guarantees that pageserver will receive all the latest data
+        // before walservice disconnects.
+        shared_state.stop_lsn = Some(shared_state.notified_commit_lsn);
+        trace!(
+            "Stopping WAL senders. stop_lsn: {}",
+            shared_state.notified_commit_lsn
+        );
+    }
+
+    // Reset stop_lsn notification,
+    // so that WAL senders will continue sending WAL
+    pub fn continue_streaming(&self) {
+        let mut shared_state = self.mutex.lock().unwrap();
+        shared_state.stop_lsn = None;
+    }
+
+    // Check if it's time to stop streaming to the given replica.
+    //
+    // Do not stop streaming until replica is caught up with the stop_lsn.
+    // This is not necessary for correctness, just an optimization to
+    // be able to remove WAL from safekeeper and decrease amount of work
+    // on the next start.
+    pub fn check_stop_streaming(&self, replica_id: usize) -> bool {
+        let shared_state = self.mutex.lock().unwrap();
+
+        // If stop_lsn is set, it's time to shutdown streaming.
+        if let Some(stop_lsn_request) = shared_state.stop_lsn {
+            let replica_state = shared_state.replicas[replica_id].unwrap();
+            // There is no data to stream, so other clauses don't matter.
+            if shared_state.notified_commit_lsn == Lsn(0) {
+                return true;
+            }
+            // Lsn::MAX means that we don't know the latest LSN yet.
+            // That may be a new replica, give it a chance to catch up.
+            if replica_state.last_received_lsn != Lsn::MAX
+            // If replica is fully caught up, disconnect it.
+            && stop_lsn_request <= replica_state.last_received_lsn
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Pass arrived message to the safekeeper.
@@ -220,6 +273,7 @@ impl Timeline {
                 let state = shared_state.get_replicas_state();
                 resp.hs_feedback = state.hs_feedback;
                 resp.disk_consistent_lsn = state.disk_consistent_lsn;
+                // XXX Do we need to add state.last_received_lsn to resp?
             }
         }
         // Ping wal sender that new data might be available.
