@@ -212,6 +212,9 @@ fn walreceiver_main(
                 tenantid, timelineid,
             )
         })?;
+    let _timeline_synced_disk_consistent_lsn = tenant_mgr::get_repository_for_tenant(tenantid)?
+        .get_timeline_state(timelineid)
+        .and_then(|state| state.remote_disk_consistent_lsn());
 
     //
     // Start streaming the WAL, from where we left off previously.

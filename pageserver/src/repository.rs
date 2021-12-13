@@ -69,7 +69,11 @@ pub enum RepositoryTimeline {
     /// Loaded into pageserver's memory and ready to be used.
     Local(Arc<dyn Timeline>),
     /// Timeline, found on the pageserver's remote storage, but not yet downloaded locally.
-    Remote(ZTimelineId),
+    Remote {
+        id: ZTimelineId,
+        /// metadata contents of the latest successfully uploaded checkpoint
+        disk_consistent_lsn: Lsn,
+    },
 }
 
 impl RepositoryTimeline {
@@ -82,22 +86,38 @@ impl RepositoryTimeline {
     }
 }
 
+/// A state of the timeline synchronization with the remote storage.
+/// Contains `disk_consistent_lsn` of the corresponding remote timeline (latest checkpoint's disk_consistent_lsn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TimelineSyncState {
     /// No further downloads from the remote storage are needed.
     /// The timeline state is up-to-date or ahead of the remote storage one,
     /// ready to be used in any pageserver operation.
-    Ready,
+    Ready(Lsn),
     /// Timeline is scheduled for downloading, but its current local state is not up to date with the remote storage.
     /// The timeline is not ready to be used in any pageserver operations, otherwise it might diverge its local state from the remote version,
     /// making it impossible to sync it further.
-    AwaitsDownload,
+    AwaitsDownload(Lsn),
     /// Timeline was not in the pageserver's local working directory, but was found on the remote storage, ready to be downloaded.
     /// Cannot be used in any pageserver operations due to complete absence locally.
-    CloudOnly,
+    CloudOnly(Lsn),
     /// Timeline was evicted from the pageserver's local working directory due to conflicting remote and local states or too many errors during the synchronization.
-    /// Such timelines cannot have their state synchronized further.
-    Evicted,
+    /// Such timelines cannot have their state synchronized further and may not have the data about remote timeline's disk_consistent_lsn, since eviction may happen
+    /// due to errors before the remote timeline contents is known.
+    Evicted(Option<Lsn>),
+}
+
+impl TimelineSyncState {
+    pub fn remote_disk_consistent_lsn(&self) -> Option<Lsn> {
+        Some(match self {
+            TimelineSyncState::Evicted(None) => return None,
+            TimelineSyncState::Ready(lsn) => lsn,
+            TimelineSyncState::AwaitsDownload(lsn) => lsn,
+            TimelineSyncState::CloudOnly(lsn) => lsn,
+            TimelineSyncState::Evicted(Some(lsn)) => lsn,
+        })
+        .copied()
+    }
 }
 
 ///

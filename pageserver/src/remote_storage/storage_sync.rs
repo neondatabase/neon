@@ -95,7 +95,7 @@ use tracing::*;
 
 use self::{
     compression::ArchiveHeader,
-    download::download_timeline,
+    download::{download_timeline, DownloadedTimeline},
     index::{
         ArchiveDescription, ArchiveId, RelativePath, RemoteTimeline, RemoteTimelineIndex,
         TimelineIndexEntry,
@@ -522,7 +522,15 @@ async fn process_task<
             "Evicting task {:?} that failed {} times, exceeding the error threshold",
             task.kind, task.retries
         );
-        return Some(TimelineSyncState::Evicted);
+        return Some(TimelineSyncState::Evicted(
+            remote_assets
+                .as_ref()
+                .1
+                .read()
+                .await
+                .timeline_entry(&task.sync_id)
+                .and_then(TimelineIndexEntry::disk_consistent_lsn),
+        ));
     }
 
     if task.retries > 0 {
@@ -538,7 +546,7 @@ async fn process_task<
     let sync_name = task.kind.sync_name();
     match task.kind {
         SyncKind::Download(download_data) => {
-            let sync_status = download_timeline(
+            let download_result = download_timeline(
                 conf,
                 remote_assets,
                 task.sync_id,
@@ -546,12 +554,24 @@ async fn process_task<
                 task.retries + 1,
             )
             .await;
-            register_sync_status(sync_start, sync_name, sync_status);
 
-            if sync_status? {
-                Some(TimelineSyncState::Ready)
-            } else {
-                Some(TimelineSyncState::AwaitsDownload)
+            match download_result {
+                DownloadedTimeline::Abort => {
+                    register_sync_status(sync_start, sync_name, None);
+                    None
+                }
+                DownloadedTimeline::FailedAndRescheduled {
+                    disk_consistent_lsn,
+                } => {
+                    register_sync_status(sync_start, sync_name, Some(false));
+                    Some(TimelineSyncState::AwaitsDownload(disk_consistent_lsn))
+                }
+                DownloadedTimeline::Successful {
+                    disk_consistent_lsn,
+                } => {
+                    register_sync_status(sync_start, sync_name, Some(true));
+                    Some(TimelineSyncState::Ready(disk_consistent_lsn))
+                }
             }
         }
         SyncKind::Upload(layer_upload) => {
@@ -580,6 +600,8 @@ fn schedule_first_sync_tasks(
         VecDeque::with_capacity(local_timeline_files.len().max(local_timeline_files.len()));
 
     for (sync_id, (local_metadata, local_files)) in local_timeline_files {
+        let local_disk_consistent_lsn = local_metadata.disk_consistent_lsn();
+
         let TimelineSyncId(tenant_id, timeline_id) = sync_id;
         match index.timeline_entry(&sync_id) {
             Some(index_entry) => {
@@ -590,10 +612,18 @@ fn schedule_first_sync_tasks(
                     local_files,
                     index_entry,
                 );
-                initial_timeline_statuses
-                    .entry(tenant_id)
-                    .or_default()
-                    .insert(timeline_id, timeline_status);
+                match timeline_status {
+                    Some(timeline_status) => {
+                        initial_timeline_statuses
+                            .entry(tenant_id)
+                            .or_default()
+                            .insert(timeline_id, timeline_status);
+                    }
+                    None => error!(
+                        "Failed to compare local and remote timeline for task {}",
+                        sync_id
+                    ),
+                }
             }
             None => {
                 new_sync_tasks.push_back(SyncTask::new(
@@ -607,7 +637,10 @@ fn schedule_first_sync_tasks(
                 initial_timeline_statuses
                     .entry(tenant_id)
                     .or_default()
-                    .insert(timeline_id, TimelineSyncState::Ready);
+                    .insert(
+                        timeline_id,
+                        TimelineSyncState::Ready(local_disk_consistent_lsn),
+                    );
             }
         }
     }
@@ -624,10 +657,24 @@ fn schedule_first_sync_tasks(
         .collect::<Vec<_>>()
     {
         let TimelineSyncId(cloud_only_tenant_id, cloud_only_timeline_id) = unprocessed_remote_id;
-        initial_timeline_statuses
-            .entry(cloud_only_tenant_id)
-            .or_default()
-            .insert(cloud_only_timeline_id, TimelineSyncState::CloudOnly);
+        match index
+            .timeline_entry(&unprocessed_remote_id)
+            .and_then(TimelineIndexEntry::disk_consistent_lsn)
+        {
+            Some(remote_disk_consistent_lsn) => {
+                initial_timeline_statuses
+                    .entry(cloud_only_tenant_id)
+                    .or_default()
+                    .insert(
+                        cloud_only_timeline_id,
+                        TimelineSyncState::CloudOnly(remote_disk_consistent_lsn),
+                    );
+            }
+            None => error!(
+                "Failed to find disk consistent LSN for remote timeline {}",
+                unprocessed_remote_id
+            ),
+        }
     }
 
     new_sync_tasks.into_iter().for_each(|task| {
@@ -642,7 +689,7 @@ fn compare_local_and_remote_timeline(
     local_metadata: TimelineMetadata,
     local_files: Vec<PathBuf>,
     remote_entry: &TimelineIndexEntry,
-) -> TimelineSyncState {
+) -> Option<TimelineSyncState> {
     let local_lsn = local_metadata.disk_consistent_lsn();
     let uploads = remote_entry.uploaded_checkpoints();
 
@@ -663,7 +710,7 @@ fn compare_local_and_remote_timeline(
         .filter(|upload_lsn| upload_lsn <= &local_lsn)
         .map(ArchiveId)
         .collect();
-    if archives_to_skip.len() != uploads_count {
+    Some(if archives_to_skip.len() != uploads_count {
         new_sync_tasks.push_back(SyncTask::new(
             sync_id,
             0,
@@ -672,10 +719,10 @@ fn compare_local_and_remote_timeline(
                 archives_to_skip,
             }),
         ));
-        TimelineSyncState::AwaitsDownload
+        TimelineSyncState::AwaitsDownload(remote_entry.disk_consistent_lsn()?)
     } else {
-        TimelineSyncState::Ready
-    }
+        TimelineSyncState::Ready(remote_entry.disk_consistent_lsn().unwrap_or(local_lsn))
+    })
 }
 
 fn register_sync_status(sync_start: Instant, sync_name: &str, sync_status: Option<bool>) {

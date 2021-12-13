@@ -7,7 +7,7 @@ use anyhow::{anyhow, ensure, Context};
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::{fs, sync::RwLock};
 use tracing::{debug, error, trace, warn};
-use zenith_utils::zid::ZTenantId;
+use zenith_utils::{lsn::Lsn, zid::ZTenantId};
 
 use crate::{
     layered_repository::metadata::{metadata_path, TimelineMetadata},
@@ -26,6 +26,18 @@ use super::{
     TimelineDownload,
 };
 
+/// Timeline download result, with extra data, needed for downloading.
+pub(super) enum DownloadedTimeline {
+    /// Remote timeline data is either absent or corrupt, no download possible.
+    Abort,
+    /// Remote timeline data is found, its latest checkpoint's metadata contents (disk_consistent_lsn) is known.
+    /// Initial download failed due to some error, the download task is rescheduled for another retry.
+    FailedAndRescheduled { disk_consistent_lsn: Lsn },
+    /// Remote timeline data is found, its latest checkpoint's metadata contents (disk_consistent_lsn) is known.
+    /// Initial download successful.
+    Successful { disk_consistent_lsn: Lsn },
+}
+
 /// Attempts to download and uncompress files from all remote archives for the timeline given.
 /// Timeline files that already exist locally are skipped during the download, but the local metadata file is
 /// updated in the end of every checkpoint archive extraction.
@@ -43,8 +55,61 @@ pub(super) async fn download_timeline<
     sync_id: TimelineSyncId,
     mut download: TimelineDownload,
     retries: u32,
-) -> Option<bool> {
+) -> DownloadedTimeline {
     debug!("Downloading layers for sync id {}", sync_id);
+
+    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+    let index_read = remote_assets.1.read().await;
+    let remote_timeline = match index_read.timeline_entry(&sync_id) {
+        None => {
+            error!("Cannot download: no timeline is present in the index for given ids");
+            return DownloadedTimeline::Abort;
+        }
+        Some(index_entry) => match index_entry {
+            TimelineIndexEntry::Full(remote_timeline) => Cow::Borrowed(remote_timeline),
+            TimelineIndexEntry::Description(_) => {
+                let remote_disk_consistent_lsn = index_entry.disk_consistent_lsn();
+                drop(index_read);
+                debug!("Found timeline description for the given ids, downloading the full index");
+                match update_index_description(
+                    remote_assets.as_ref(),
+                    &conf.timeline_path(&timeline_id, &tenant_id),
+                    sync_id,
+                )
+                .await
+                {
+                    Ok(remote_timeline) => Cow::Owned(remote_timeline),
+                    Err(e) => {
+                        error!("Failed to download full timeline index: {:#}", e);
+                        return match remote_disk_consistent_lsn {
+                            Some(disk_consistent_lsn) => {
+                                sync_queue::push(SyncTask::new(
+                                    sync_id,
+                                    retries,
+                                    SyncKind::Download(download),
+                                ));
+                                DownloadedTimeline::FailedAndRescheduled {
+                                    disk_consistent_lsn,
+                                }
+                            }
+                            None => {
+                                error!("Cannot download: no disk consistent Lsn is present for the index entry");
+                                DownloadedTimeline::Abort
+                            }
+                        };
+                    }
+                }
+            }
+        },
+    };
+    let disk_consistent_lsn = match remote_timeline.checkpoints().max() {
+        Some(lsn) => lsn,
+        None => {
+            debug!("Cannot download: no disk consistent Lsn is present for the remote timeline");
+            return DownloadedTimeline::Abort;
+        }
+    };
+
     if let Err(e) = download_missing_branches(conf, remote_assets.as_ref(), sync_id.0).await {
         error!(
             "Failed to download missing branches for sync id {}: {:#}",
@@ -55,41 +120,10 @@ pub(super) async fn download_timeline<
             retries,
             SyncKind::Download(download),
         ));
-        return Some(false);
+        return DownloadedTimeline::FailedAndRescheduled {
+            disk_consistent_lsn,
+        };
     }
-
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
-
-    let index_read = remote_assets.1.read().await;
-    let remote_timeline = match index_read.timeline_entry(&sync_id) {
-        None => {
-            error!("Cannot download: no timeline is present in the index for given ids");
-            return None;
-        }
-        Some(TimelineIndexEntry::Full(remote_timeline)) => Cow::Borrowed(remote_timeline),
-        Some(TimelineIndexEntry::Description(_)) => {
-            drop(index_read);
-            debug!("Found timeline description for the given ids, downloading the full index");
-            match update_index_description(
-                remote_assets.as_ref(),
-                &conf.timeline_path(&timeline_id, &tenant_id),
-                sync_id,
-            )
-            .await
-            {
-                Ok(remote_timeline) => Cow::Owned(remote_timeline),
-                Err(e) => {
-                    error!("Failed to download full timeline index: {:#}", e);
-                    sync_queue::push(SyncTask::new(
-                        sync_id,
-                        retries,
-                        SyncKind::Download(download),
-                    ));
-                    return Some(false);
-                }
-            }
-        }
-    };
 
     debug!("Downloading timeline archives");
     let archives_to_download = remote_timeline
@@ -124,7 +158,9 @@ pub(super) async fn download_timeline<
                     retries,
                     SyncKind::Download(download),
                 ));
-                return Some(false);
+                return DownloadedTimeline::FailedAndRescheduled {
+                    disk_consistent_lsn,
+                };
             }
             Ok(()) => {
                 debug!("Successfully downloaded archive {:?}", archive_id);
@@ -134,7 +170,9 @@ pub(super) async fn download_timeline<
     }
 
     debug!("Finished downloading all timeline's archives");
-    Some(true)
+    DownloadedTimeline::Successful {
+        disk_consistent_lsn,
+    }
 }
 
 async fn try_download_archive<
@@ -160,7 +198,7 @@ async fn try_download_archive<
         Ok(local_metadata) => ensure!(
             // need to allow `<=` instead of `<` due to cases when a failed archive can be redownloaded
             local_metadata.disk_consistent_lsn() <= archive_to_download.disk_consistent_lsn(),
-            "Cannot download archive with LSN {} since it's earlier than local LSN {}",
+            "Cannot download archive with Lsn {} since it's earlier than local Lsn {}",
             archive_to_download.disk_consistent_lsn(),
             local_metadata.disk_consistent_lsn()
         ),

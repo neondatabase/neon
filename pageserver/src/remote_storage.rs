@@ -163,11 +163,16 @@ pub fn start_local_timeline_sync(
                 ZTenantId,
                 HashMap<ZTimelineId, TimelineSyncState>,
             > = HashMap::new();
-            for TimelineSyncId(tenant_id, timeline_id) in local_timeline_files.into_keys() {
+            for (TimelineSyncId(tenant_id, timeline_id), (timeline_metadata, _)) in
+                local_timeline_files
+            {
                 initial_timeline_states
                     .entry(tenant_id)
                     .or_default()
-                    .insert(timeline_id, TimelineSyncState::Ready);
+                    .insert(
+                        timeline_id,
+                        TimelineSyncState::Ready(timeline_metadata.disk_consistent_lsn()),
+                    );
             }
             Ok(SyncStartupData {
                 initial_timeline_states,
