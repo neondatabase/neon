@@ -1,9 +1,8 @@
 //! This module contains timeline id -> safekeeper state map with file-backed
 //! persistence and support for interaction between sending and receiving wal.
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use fs2::FileExt;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::{find_end_of_wal, PG_TLI};
 use std::cmp::{max, min};
@@ -33,8 +32,6 @@ use std::convert::TryInto;
 const CONTROL_FILE_NAME: &str = "safekeeper.control";
 // needed to atomically update the state using `rename`
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
-// dedicated lockfile to prevent running several safekeepers on the same data
-const LOCK_FILE_NAME: &str = "safekeeper.lock";
 const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 
@@ -120,9 +117,7 @@ impl SharedState {
         pos
     }
 
-    /// Restore SharedState from control file. Locks the control file along the
-    /// way to prevent running more than one instance of safekeeper on the same
-    /// data dir.
+    /// Restore SharedState from control file.
     /// If create=false and file doesn't exist, bails out.
     fn create_restore(
         conf: &SafeKeeperConf,
@@ -326,8 +321,6 @@ impl GlobalTimelines {
 
 #[derive(Debug)]
 struct FileStorage {
-    // file used to prevent concurrent safekeepers running on the same data
-    lock_file: File,
     // save timeline dir to avoid reconstructing it every time
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
@@ -365,25 +358,12 @@ impl FileStorage {
         let timeline_dir = conf.timeline_dir(&timelineid);
 
         let control_file_path = timeline_dir.join(CONTROL_FILE_NAME);
-        let lock_file_path = timeline_dir.join(LOCK_FILE_NAME);
 
         info!(
-            "loading control file {}, create={:?} lock file {:?}",
+            "loading control file {}, create={:?}",
             control_file_path.display(),
             create,
-            lock_file_path.display(),
         );
-
-        let lock_file = File::create(&lock_file_path).with_context(|| "failed to open lockfile")?;
-
-        // Lock file to prevent two or more active safekeepers
-        lock_file.try_lock_exclusive().map_err(|e| {
-            anyhow!(
-                "control file {:?} is locked by some other process: {}",
-                &control_file_path,
-                e
-            )
-        })?;
 
         let mut control_file = OpenOptions::new()
             .read(true)
@@ -432,7 +412,6 @@ impl FileStorage {
 
         Ok((
             FileStorage {
-                lock_file,
                 timeline_dir,
                 conf: conf.clone(),
                 persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS

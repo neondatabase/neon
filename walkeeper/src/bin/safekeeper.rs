@@ -1,10 +1,12 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
+use fs2::FileExt;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
@@ -20,6 +22,8 @@ use walkeeper::wal_service;
 use walkeeper::SafeKeeperConf;
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals;
+
+const LOCK_FILE_NAME: &str = "safekeeper.lock";
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
@@ -122,6 +126,16 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
     info!("version: {}", GIT_VERSION);
+
+    // Prevent running multiple safekeepers on the same directory
+    let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
+    let lock_file = File::create(&lock_file_path).with_context(|| "failed to open lockfile")?;
+    lock_file.try_lock_exclusive().with_context(|| {
+        format!(
+            "control file {} is locked by some other process",
+            lock_file_path.display()
+        )
+    })?;
 
     let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
