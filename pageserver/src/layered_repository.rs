@@ -78,6 +78,7 @@ use storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
 };
 
+// re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);

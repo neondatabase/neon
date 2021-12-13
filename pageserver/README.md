@@ -138,7 +138,7 @@ CLI examples:
 * AWS S3  : `${PAGESERVER_BIN} --remote-storage-s3-bucket="some-sample-bucket" --remote-storage-region="eu-north-1" --remote-storage-access-key="SOMEKEYAAAAASADSAH*#" --remote-storage-secret-access-key="SOMEsEcReTsd292v"`
 
 For Amazon AWS S3, a key id and secret access key could be located in `~/.aws/credentials` if awscli was ever configured to work with the desired bucket, on the AWS Settings page for a certain user. Also note, that the bucket names does not contain any protocols when used on AWS.
-For local S3 installations, refer to the their documentation for name format and credentials.
+For local S3 installations, refer to their documentation for name format and credentials.
 
 Similar to other pageserver settings, toml config file can be used to configure either of the storages as backup targets.
 Required sections are:

@@ -69,7 +69,7 @@ def test_write_amplification(zenith_simple_env: ZenithEnv, zenbenchmark):
                         # more memory isn't the right solution. We could
                         # demonstrate the effect also by generating the WAL
                         # slower, adding some delays in this loop.  But forcing
-                        # the the checkpointing and GC makes the test go faster,
+                        # the checkpointing and GC makes the test go faster,
                         # with the same total I/O effect.
                         pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
 

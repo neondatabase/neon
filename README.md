@@ -1,6 +1,6 @@
 # Zenith
 
-Zenith is an serverless open source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes PostgreSQL storage layer by redistributes data across a cluster of nodes. 
+Zenith is a serverless open source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
 ## Architecture overview
 
