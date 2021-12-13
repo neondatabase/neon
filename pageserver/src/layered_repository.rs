@@ -139,9 +139,13 @@ impl Repository for LayeredRepository {
         Ok(
             match self.get_or_init_timeline(timelineid, &mut timelines)? {
                 LayeredTimelineEntry::Local(local) => RepositoryTimeline::Local(local),
-                LayeredTimelineEntry::Remote(remote_timeline_id) => {
-                    RepositoryTimeline::Remote(remote_timeline_id)
-                }
+                LayeredTimelineEntry::Remote {
+                    id,
+                    disk_consistent_lsn,
+                } => RepositoryTimeline::Remote {
+                    id,
+                    disk_consistent_lsn,
+                },
             },
         )
     }
@@ -184,7 +188,7 @@ impl Repository for LayeredRepository {
         let mut timelines = self.timelines.lock().unwrap();
         let src_timeline = match self.get_or_init_timeline(src, &mut timelines)? {
             LayeredTimelineEntry::Local(timeline) => timeline,
-            LayeredTimelineEntry::Remote(_) => {
+            LayeredTimelineEntry::Remote { .. } => {
                 bail!("Cannot branch off the timeline {} that's not local", src)
             }
         };
@@ -262,7 +266,7 @@ impl Repository for LayeredRepository {
                 info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid).entered();
             match timeline {
                 LayeredTimelineEntry::Local(timeline) => timeline.checkpoint(cconf)?,
-                LayeredTimelineEntry::Remote(_) => debug!(
+                LayeredTimelineEntry::Remote { .. } => debug!(
                     "Cannot run the checkpoint for remote timeline {}",
                     timelineid
                 ),
@@ -296,17 +300,22 @@ impl Repository for LayeredRepository {
         let mut timelines_accessor = self.timelines.lock().unwrap();
 
         let timeline_to_shutdown = match new_state {
-            TimelineSyncState::Ready => {
+            TimelineSyncState::Ready(_) => {
                 let reloaded_timeline =
                     self.init_local_timeline(timeline_id, &mut timelines_accessor)?;
                 timelines_accessor
                     .insert(timeline_id, LayeredTimelineEntry::Local(reloaded_timeline));
                 None
             }
-            TimelineSyncState::Evicted => timelines_accessor.remove(&timeline_id),
-            TimelineSyncState::AwaitsDownload | TimelineSyncState::CloudOnly => {
-                timelines_accessor.insert(timeline_id, LayeredTimelineEntry::Remote(timeline_id))
-            }
+            TimelineSyncState::Evicted(_) => timelines_accessor.remove(&timeline_id),
+            TimelineSyncState::AwaitsDownload(disk_consistent_lsn)
+            | TimelineSyncState::CloudOnly(disk_consistent_lsn) => timelines_accessor.insert(
+                timeline_id,
+                LayeredTimelineEntry::Remote {
+                    id: timeline_id,
+                    disk_consistent_lsn,
+                },
+            ),
         };
         drop(timelines_accessor);
 
@@ -324,18 +333,16 @@ impl Repository for LayeredRepository {
     /// [`TimelineSyncState::Evicted`] and other non-local and non-remote states are not stored in the layered repo at all,
     /// hence their statuses cannot be returned by the repo.
     fn get_timeline_state(&self, timeline_id: ZTimelineId) -> Option<TimelineSyncState> {
+        let timelines_accessor = self.timelines.lock().unwrap();
+        let timeline_entry = timelines_accessor.get(&timeline_id)?;
         Some(
-            if self
-                .timelines
-                .lock()
-                .unwrap()
-                .get(&timeline_id)?
+            if timeline_entry
                 .local_or_schedule_download(self.tenantid)
                 .is_some()
             {
-                TimelineSyncState::Ready
+                TimelineSyncState::Ready(timeline_entry.disk_consistent_lsn())
             } else {
-                TimelineSyncState::CloudOnly
+                TimelineSyncState::CloudOnly(timeline_entry.disk_consistent_lsn())
             },
         )
     }
@@ -356,7 +363,7 @@ fn shutdown_timeline(
             timeline.checkpoint(CheckpointConfig::Forced)?;
             //TODO Wait for walredo process to shutdown too
         }
-        LayeredTimelineEntry::Remote(_) => warn!(
+        LayeredTimelineEntry::Remote { .. } => warn!(
             "Skipping shutdown of a remote timeline {} for tenant {}",
             timeline_id, tenant_id
         ),
@@ -367,14 +374,18 @@ fn shutdown_timeline(
 #[derive(Clone)]
 enum LayeredTimelineEntry {
     Local(Arc<LayeredTimeline>),
-    Remote(ZTimelineId),
+    Remote {
+        id: ZTimelineId,
+        /// metadata contents of the latest successfully uploaded checkpoint
+        disk_consistent_lsn: Lsn,
+    },
 }
 
 impl LayeredTimelineEntry {
     fn timeline_id(&self) -> ZTimelineId {
         match self {
             LayeredTimelineEntry::Local(timeline) => timeline.timelineid,
-            LayeredTimelineEntry::Remote(timeline_id) => *timeline_id,
+            LayeredTimelineEntry::Remote { id, .. } => *id,
         }
     }
 
@@ -382,7 +393,9 @@ impl LayeredTimelineEntry {
     fn local_or_schedule_download(&self, tenant_id: ZTenantId) -> Option<&LayeredTimeline> {
         match self {
             Self::Local(local) => Some(local.as_ref()),
-            Self::Remote(timeline_id) => {
+            Self::Remote {
+                id: timeline_id, ..
+            } => {
                 debug!(
                     "Accessed a remote timeline {} for tenant {}, scheduling a timeline download",
                     timeline_id, tenant_id
@@ -390,6 +403,17 @@ impl LayeredTimelineEntry {
                 schedule_timeline_download(tenant_id, *timeline_id);
                 None
             }
+        }
+    }
+
+    /// Gets a current (latest for the remote case) disk consistent Lsn for the timeline.
+    fn disk_consistent_lsn(&self) -> Lsn {
+        match self {
+            Self::Local(local) => local.disk_consistent_lsn.load(),
+            Self::Remote {
+                disk_consistent_lsn,
+                ..
+            } => *disk_consistent_lsn,
         }
     }
 }
@@ -576,7 +600,7 @@ impl LayeredRepository {
         for &timelineid in &timelineids {
             let timeline = match self.get_or_init_timeline(timelineid, &mut timelines)? {
                 LayeredTimelineEntry::Local(timeline) => timeline,
-                LayeredTimelineEntry::Remote(_) => {
+                LayeredTimelineEntry::Remote { .. } => {
                     warn!(
                         "Timeline {} is not local, cannot proceed with gc",
                         timelineid
@@ -623,7 +647,7 @@ impl LayeredRepository {
             // so this operation is just a quick map lookup.
             let timeline = match self.get_or_init_timeline(timelineid, &mut *timelines)? {
                 LayeredTimelineEntry::Local(timeline) => timeline,
-                LayeredTimelineEntry::Remote(_) => {
+                LayeredTimelineEntry::Remote { .. } => {
                     debug!("Skipping GC for non-local timeline {}", timelineid);
                     continue;
                 }

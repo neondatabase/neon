@@ -56,7 +56,7 @@ impl BranchInfo {
 
         let timeline = match repo.get_timeline(timeline_id)? {
             RepositoryTimeline::Local(local_entry) => local_entry,
-            RepositoryTimeline::Remote(_) => {
+            RepositoryTimeline::Remote { .. } => {
                 bail!("Timeline {} is remote, no branches to display", timeline_id)
             }
         };

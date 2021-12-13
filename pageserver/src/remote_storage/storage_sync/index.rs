@@ -119,14 +119,28 @@ pub enum TimelineIndexEntry {
 impl TimelineIndexEntry {
     pub fn uploaded_checkpoints(&self) -> BTreeSet<Lsn> {
         match self {
-            TimelineIndexEntry::Description(description) => {
+            Self::Description(description) => {
                 description.keys().map(|archive_id| archive_id.0).collect()
             }
-            TimelineIndexEntry::Full(remote_timeline) => remote_timeline
+            Self::Full(remote_timeline) => remote_timeline
                 .checkpoint_archives
                 .keys()
                 .map(|archive_id| archive_id.0)
                 .collect(),
+        }
+    }
+
+    /// Gets latest uploaded checkpoint's disk consisten Lsn for the corresponding timeline.
+    pub fn disk_consistent_lsn(&self) -> Option<Lsn> {
+        match self {
+            Self::Description(description) => {
+                description.keys().map(|archive_id| archive_id.0).max()
+            }
+            Self::Full(remote_timeline) => remote_timeline
+                .checkpoint_archives
+                .keys()
+                .map(|archive_id| archive_id.0)
+                .max(),
         }
     }
 }
