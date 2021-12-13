@@ -23,9 +23,9 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
+use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{repository::Repository, PageServerConf};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
-use crate::{restore_local_repo, LOG_FILE_NAME};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -230,7 +230,7 @@ fn bootstrap_timeline(
     // Initdb lsn will be equal to last_record_lsn which will be set after import.
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
     let timeline = repo.create_empty_timeline(tli, lsn)?;
-    restore_local_repo::import_timeline_from_postgres_datadir(
+    import_datadir::import_timeline_from_postgres_datadir(
         &pgdata_path,
         timeline.writer().as_ref(),
         lsn,

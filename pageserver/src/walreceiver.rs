@@ -6,10 +6,10 @@
 //! We keep one WAL receiver active per timeline.
 
 use crate::relish::*;
-use crate::restore_local_repo;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use crate::tenant_threads;
+use crate::walingest;
 use crate::walrecord::*;
 use crate::PageServerConf;
 use anyhow::{bail, Context, Error, Result};
@@ -270,7 +270,7 @@ fn walreceiver_main(
                     let mut checkpoint_modified = false;
 
                     let decoded = decode_wal_record(recdata.clone());
-                    restore_local_repo::save_decoded_record(
+                    walingest::save_decoded_record(
                         &mut checkpoint,
                         &mut checkpoint_modified,
                         writer.as_ref(),
