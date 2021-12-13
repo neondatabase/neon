@@ -78,7 +78,9 @@ impl postgres_backend::Handler for SendWalHandler {
         if query_string.starts_with(b"IDENTIFY_SYSTEM") {
             self.handle_identify_system(pgb)?;
         } else if query_string.starts_with(b"START_REPLICATION") {
-            ReplicationConn::new(pgb).run(self, pgb, &query_string)?;
+            ReplicationConn::new(pgb)
+                .run(self, pgb, &query_string)
+                .with_context(|| "failed to run ReplicationConn")?;
         } else if query_string.starts_with(b"START_WAL_PUSH") {
             // TODO: this repeats query decoding logic from page_service so it is probably
             // a good idea to refactor it in pgbackend and pass string to process query instead of bytes

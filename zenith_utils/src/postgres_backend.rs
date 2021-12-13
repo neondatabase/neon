@@ -426,6 +426,10 @@ impl PostgresBackend {
                     // send that in the ErrorResponse though, because it's not relevant to the
                     // compute node logs.
                     warn!("query handler for {:?} failed: {:#}", m.body, e);
+                    if e.to_string().contains("failed to run") {
+                        self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
+                        return Ok(ProcessMsgResult::Break);
+                    }
                     self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;
