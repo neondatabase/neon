@@ -23,10 +23,9 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
-use std::thread::sleep;
 use std::thread::JoinHandle;
 use std::thread_local;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use tracing::*;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantId;
@@ -137,36 +136,23 @@ fn thread_main(conf: &'static PageServerConf, timelineid: ZTimelineId, tenantid:
     let _enter = info_span!("WAL receiver", timeline = %timelineid, tenant = %tenantid).entered();
     info!("WAL receiver thread started");
 
-    let mut retry_count = 10;
+    // Look up the current WAL producer address
+    let wal_producer_connstr = get_wal_producer_connstr(timelineid);
 
-    //
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
-    // and start streaming WAL from it. If the connection is lost, keep retrying.
-    // TODO How long should we retry in case of losing connection?
-    // Should we retry at all or we can wait for the next callmemaybe request?
-    //
-    while !tenant_mgr::shutdown_requested() && retry_count > 0 {
-        // Look up the current WAL producer address
-        let wal_producer_connstr = get_wal_producer_connstr(timelineid);
+    // and start streaming WAL from it.
+    let res = walreceiver_main(conf, timelineid, &wal_producer_connstr, tenantid);
 
-        let res = walreceiver_main(conf, timelineid, &wal_producer_connstr, tenantid);
-
-        if let Err(e) = res {
-            info!(
-                "WAL streaming connection failed ({}), retrying in 1 second",
-                e
-            );
-            retry_count -= 1;
-            sleep(Duration::from_secs(1));
-        } else {
-            info!(
-                "walreceiver disconnected tenant {}, timelineid {}",
-                tenantid, timelineid
-            );
-            break;
-        }
+    // TODO cleanup info messages
+    if let Err(e) = res {
+        info!("WAL streaming connection failed ({})", e);
+    } else {
+        info!(
+            "walreceiver disconnected tenant {}, timelineid {}",
+            tenantid, timelineid
+        );
     }
-    info!("WAL streaming shut down");
+
     // Drop it from list of active WAL_RECEIVERS
     // so that next callmemaybe request launched a new thread
     drop_wal_receiver(timelineid, tenantid);
