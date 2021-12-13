@@ -86,11 +86,6 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
 static TIMEOUT: Duration = Duration::from_secs(60);
 
-// Taken from PG_CONTROL_MAX_SAFE_SIZE
-const METADATA_MAX_SAFE_SIZE: usize = 512;
-const METADATA_CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
-const METADATA_MAX_DATA_SIZE: usize = METADATA_MAX_SAFE_SIZE - METADATA_CHECKSUM_SIZE;
-
 // Metrics collected on operations on the storage repository.
 lazy_static! {
     static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(

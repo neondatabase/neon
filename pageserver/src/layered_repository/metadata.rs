@@ -15,10 +15,12 @@ use zenith_utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::{
-    layered_repository::{METADATA_CHECKSUM_SIZE, METADATA_MAX_DATA_SIZE, METADATA_MAX_SAFE_SIZE},
-    PageServerConf,
-};
+use crate::PageServerConf;
+
+// Taken from PG_CONTROL_MAX_SAFE_SIZE
+const METADATA_MAX_SAFE_SIZE: usize = 512;
+const METADATA_CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
+const METADATA_MAX_DATA_SIZE: usize = METADATA_MAX_SAFE_SIZE - METADATA_CHECKSUM_SIZE;
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
