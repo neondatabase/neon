@@ -3,7 +3,7 @@
 
 use crate::send_wal::SendWalHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use postgres_ffi::xlog_utils::{
     get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
@@ -29,8 +29,6 @@ use zenith_utils::sock_split::ReadStream;
 use crate::callmemaybe::CallmeEvent;
 use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
-
-pub const END_REPLICATION_MARKER: Lsn = Lsn::MAX;
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
@@ -59,7 +57,7 @@ impl HotStandbyFeedback {
 /// Standby status update
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StandbyReply {
-    pub write_lsn: Lsn, // not used
+    pub write_lsn: Lsn, // last lsn received by pageserver
     pub flush_lsn: Lsn, // not used
     pub apply_lsn: Lsn, // pageserver's disk consistent lSN
     pub reply_ts: TimestampTz,
@@ -99,7 +97,7 @@ impl Drop for ReplicationStreamGuard {
     fn drop(&mut self) {
         // the connection with pageserver is lost,
         // resume callback subscription
-        info!("Connection to pageserver is gone. Subscribe to callmemeybe again. tenantid {} timelineid {}",
+        debug!("Connection to pageserver is gone. Resume callmemeybe subsciption if necessary. tenantid {} timelineid {}",
          self.tenant_id, self.timelineid);
 
         self.tx
@@ -120,11 +118,14 @@ impl ReplicationConn {
 
     /// Handle incoming messages from the network.
     /// This is spawned into the background by `handle_start_replication`.
-    fn background_thread(mut stream_in: ReadStream, timeline: Arc<Timeline>) -> Result<()> {
+    fn background_thread(
+        mut stream_in: ReadStream,
+        timeline: Arc<Timeline>,
+        replica_id: usize,
+    ) -> Result<()> {
         let mut state = ReplicaState::new();
-        let replica = timeline.add_replica(state);
         let _guard = ReplicationConnGuard {
-            replica,
+            replica: replica_id,
             timeline: timeline.clone(),
         };
         // Wait for replica's feedback.
@@ -139,13 +140,14 @@ impl ReplicationConn {
                             // Note: deserializing is on m[1..] because we skip the tag byte.
                             state.hs_feedback = HotStandbyFeedback::des(&m[1..])
                                 .context("failed to deserialize HotStandbyFeedback")?;
-                            timeline.update_replica_state(replica, Some(state));
+                            timeline.update_replica_state(replica_id, Some(state));
                         }
                         Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
                             let reply = StandbyReply::des(&m[1..])
                                 .context("failed to deserialize StandbyReply")?;
                             state.disk_consistent_lsn = reply.apply_lsn;
-                            timeline.update_replica_state(replica, Some(state));
+                            state.last_received_lsn = reply.write_lsn;
+                            timeline.update_replica_state(replica_id, Some(state));
                         }
                         _ => warn!("unexpected message {:?}", msg),
                     }
@@ -212,12 +214,16 @@ impl ReplicationConn {
         let bg_timeline = Arc::clone(swh.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();
 
+        let state = ReplicaState::new();
+        // This replica_id is used below to check if it's time to stop replication.
+        let replica_id = bg_timeline.add_replica(state);
+
         // TODO: here we got two threads, one for writing WAL and one for receiving
         // feedback. If one of them fails, we should shutdown the other one too.
         let _ = thread::Builder::new()
             .name("HotStandbyFeedback thread".into())
             .spawn(move || {
-                if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline) {
+                if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline, replica_id) {
                     error!("Replication background thread failed: {}", err);
                 }
             })
@@ -290,9 +296,17 @@ impl ReplicationConn {
                 end_pos = stop_pos;
             } else {
                 /* Wait until we have some data to stream */
-                if let Some(lsn) = swh.timeline.get().wait_for_lsn(start_pos) {
-                    end_pos = lsn
+                let lsn = swh.timeline.get().wait_for_lsn(start_pos);
+
+                if let Some(lsn) = lsn {
+                    end_pos = lsn;
                 } else {
+                    // Is is time to end streaming to this replica?
+                    if swh.timeline.get().check_stop_streaming(replica_id) {
+                        // TODO create proper error type for this
+                        bail!("end streaming to {:?}", swh.appname);
+                    }
+
                     // timeout expired: request pageserver status
                     pgb.write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
                         sent_ptr: end_pos.0,
@@ -302,9 +316,6 @@ impl ReplicationConn {
                     .context("Failed to send KeepAlive message")?;
                     continue;
                 }
-            }
-            if end_pos == END_REPLICATION_MARKER {
-                break;
             }
 
             // Take the `File` from `wal_file`, or open a new file.
@@ -345,7 +356,7 @@ impl ReplicationConn {
 
             start_pos += send_size as u64;
 
-            debug!("sent WAL up to {}", start_pos);
+            info!("sent WAL up to {}", start_pos);
 
             // Decide whether to reuse this file. If we don't set wal_file here
             // a new file will be opened next time.

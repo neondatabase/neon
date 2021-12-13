@@ -7,7 +7,9 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use tracing::*;
 
+use crate::timeline::Timeline;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
@@ -92,6 +94,9 @@ impl<'pg> ReceiveWalConn<'pg> {
             _ => bail!("unexpected message {:?} instead of greeting", msg),
         }
 
+        // Incoming WAL stream resumed, so reset information about the timeline pause.
+        swh.timeline.get().continue_streaming();
+
         // if requested, ask pageserver to fetch wal from us
         // as long as this wal_stream is alive, callmemaybe thread
         // will send requests to pageserver
@@ -121,6 +126,7 @@ impl<'pg> ReceiveWalConn<'pg> {
                     tx: tx_clone,
                     tenant_id,
                     timelineid,
+                    timeline: Arc::clone(swh.timeline.get()),
                 })
             }
             None => None,
@@ -144,10 +150,12 @@ struct SendWalHandlerGuard {
     tx: UnboundedSender<CallmeEvent>,
     tenant_id: ZTenantId,
     timelineid: ZTimelineId,
+    timeline: Arc<Timeline>,
 }
 
 impl Drop for SendWalHandlerGuard {
     fn drop(&mut self) {
+        self.timeline.stop_streaming();
         self.tx
             .send(CallmeEvent::Unsubscribe(self.tenant_id, self.timelineid))
             .unwrap_or_else(|e| {
