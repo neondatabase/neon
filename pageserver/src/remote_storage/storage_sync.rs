@@ -135,7 +135,7 @@ lazy_static! {
 /// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoid meaningless spinning.
 mod sync_queue {
     use std::{
-        collections::BTreeSet,
+        collections::{BTreeSet, HashMap},
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -199,17 +199,16 @@ mod sync_queue {
         receiver: &mut UnboundedReceiver<SyncTask>,
         mut max_batch_size: usize,
     ) -> BTreeSet<SyncTask> {
-        let mut tasks = BTreeSet::new();
-
         if max_batch_size == 0 {
-            return tasks;
+            return BTreeSet::new();
         }
+        let mut tasks = HashMap::with_capacity(max_batch_size);
 
         loop {
             match receiver.try_recv() {
                 Ok(new_task) => {
                     LENGTH.fetch_sub(1, Ordering::Relaxed);
-                    if tasks.insert(new_task) {
+                    if tasks.insert(new_task.sync_id, new_task).is_none() {
                         max_batch_size -= 1;
                         if max_batch_size == 0 {
                             break;
@@ -227,7 +226,7 @@ mod sync_queue {
             }
         }
 
-        tasks
+        tasks.into_values().collect()
     }
 
     /// Length of the queue, assuming that all receiver counterparts were only called using the queue api.
@@ -262,6 +261,15 @@ enum SyncKind {
     /// A checkpoint outcome with possible local file updates that need actualization in the remote storage.
     /// Not necessary more fresh than the one already uploaded.
     Upload(NewCheckpoint),
+}
+
+impl SyncKind {
+    fn sync_name(&self) -> &'static str {
+        match self {
+            Self::Download(_) => "download",
+            Self::Upload(_) => "upload",
+        }
+    }
 }
 
 /// Local timeline files for upload, appeared after the new checkpoint.
@@ -405,15 +413,19 @@ fn storage_sync_loop<
 ) -> anyhow::Result<()> {
     let remote_assets = Arc::new((storage, RwLock::new(index)));
     while !crate::tenant_mgr::shutdown_requested() {
-        let new_timeline_states = runtime.block_on(loop_step(
-            conf,
-            &mut receiver,
-            Arc::clone(&remote_assets),
-            max_concurrent_sync,
-            max_sync_errors,
-        ));
+        let new_timeline_states = runtime.block_on(
+            loop_step(
+                conf,
+                &mut receiver,
+                Arc::clone(&remote_assets),
+                max_concurrent_sync,
+                max_sync_errors,
+            )
+            .instrument(debug_span!("storage_sync_loop_step")),
+        );
         // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
         set_timeline_states(conf, new_timeline_states);
+        debug!("Sync loop step completed");
     }
 
     debug!("Shutdown requested, stopping");
@@ -458,12 +470,13 @@ async fn loop_step<
         .into_iter()
         .map(|task| async {
             let sync_id = task.sync_id;
-            let extra_step = match tokio::spawn(process_task(
-                conf,
-                Arc::clone(&remote_assets),
-                task,
-                max_sync_errors,
-            ))
+            let attempt = task.retries;
+            let sync_name = task.kind.sync_name();
+
+            let extra_step = match tokio::spawn(
+                process_task(conf, Arc::clone(&remote_assets), task, max_sync_errors)
+                    .instrument(debug_span!("", sync_id = %sync_id, attempt, sync_name)),
+            )
             .await
             {
                 Ok(extra_step) => extra_step,
@@ -522,6 +535,7 @@ async fn process_task<
     }
 
     let sync_start = Instant::now();
+    let sync_name = task.kind.sync_name();
     match task.kind {
         SyncKind::Download(download_data) => {
             let sync_status = download_timeline(
@@ -532,7 +546,7 @@ async fn process_task<
                 task.retries + 1,
             )
             .await;
-            register_sync_status(sync_start, "download", sync_status);
+            register_sync_status(sync_start, sync_name, sync_status);
 
             if sync_status? {
                 Some(TimelineSyncState::Ready)
@@ -549,7 +563,7 @@ async fn process_task<
                 task.retries + 1,
             )
             .await;
-            register_sync_status(sync_start, "upload", sync_status);
+            register_sync_status(sync_start, sync_name, sync_status);
             None
         }
     }

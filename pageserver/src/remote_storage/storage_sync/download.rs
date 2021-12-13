@@ -6,7 +6,7 @@ use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 use anyhow::{anyhow, ensure, Context};
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::{fs, sync::RwLock};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 use zenith_utils::zid::ZTenantId;
 
 use crate::{
@@ -91,7 +91,8 @@ pub(super) async fn download_timeline<
         }
     };
 
-    let mut archives_to_download = remote_timeline
+    debug!("Downloading timeline archives");
+    let archives_to_download = remote_timeline
         .checkpoints()
         .map(ArchiveId)
         .filter(|remote_archive| !download.archives_to_skip.contains(remote_archive))
@@ -99,8 +100,9 @@ pub(super) async fn download_timeline<
 
     let archives_total = archives_to_download.len();
     debug!("Downloading {} archives of a timeline", archives_total);
+    trace!("Archives to download: {:?}", archives_to_download);
 
-    while let Some(archive_id) = archives_to_download.pop() {
+    for (archives_downloaded, archive_id) in archives_to_download.into_iter().enumerate() {
         match try_download_archive(
             conf,
             sync_id,
@@ -112,10 +114,10 @@ pub(super) async fn download_timeline<
         .await
         {
             Err(e) => {
-                let archives_left = archives_to_download.len();
+                let archives_left = archives_total - archives_downloaded;
                 error!(
-                    "Failed to download archive {:?} for tenant {} timeline {} : {:#}, requeueing the download ({} archives left out of {})",
-                    archive_id, tenant_id, timeline_id, e, archives_left, archives_total
+                    "Failed to download archive {:?} (archives downloaded: {}; archives left: {}) for tenant {} timeline {}, requeueing the download: {:#}",
+                    archive_id, archives_downloaded, archives_left, tenant_id, timeline_id, e
                 );
                 sync_queue::push(SyncTask::new(
                     sync_id,
@@ -302,13 +304,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_timeline() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let tempdir_path = tempdir.path();
-        let _ = zenith_utils::logging::init(tempdir_path.join("log.log"), false);
-
         let repo_harness = RepoHarness::create("test_download_timeline")?;
         let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
-        let storage = LocalFs::new(tempdir_path.to_owned(), &repo_harness.conf.workdir)?;
+        let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
         let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,
             storage
@@ -335,6 +333,21 @@ mod tests {
             regular_timeline,
         )
         .await;
+        // upload multiple checkpoints for the same timeline
+        let regular_timeline = create_local_timeline(
+            &repo_harness,
+            TIMELINE_ID,
+            &["c", "d"],
+            dummy_metadata(Lsn(0x40)),
+        )?;
+        ensure_correct_timeline_upload(
+            &repo_harness,
+            Arc::clone(&remote_assets),
+            TIMELINE_ID,
+            regular_timeline,
+        )
+        .await;
+
         fs::remove_dir_all(&regular_timeline_path).await?;
         let remote_regular_timeline = expect_timeline(index, sync_id).await;
 

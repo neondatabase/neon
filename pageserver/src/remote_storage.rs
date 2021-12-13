@@ -112,7 +112,7 @@ pub struct TimelineSyncId(ZTenantId, ZTimelineId);
 
 impl std::fmt::Display for TimelineSyncId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(tenant id: {}, timeline id: {})", self.0, self.1)
+        write!(f, "(tenant: {}, timeline: {})", self.0, self.1)
     }
 }
 
