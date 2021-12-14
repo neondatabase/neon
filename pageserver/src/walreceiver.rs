@@ -5,12 +5,10 @@
 //!
 //! We keep one WAL receiver active per timeline.
 
-use crate::relish::*;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use crate::tenant_threads;
-use crate::walingest;
-use crate::walrecord::*;
+use crate::walingest::WalIngest;
 use crate::PageServerConf;
 use anyhow::{bail, Context, Error, Result};
 use lazy_static::lazy_static;
@@ -18,7 +16,6 @@ use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::waldecoder::*;
-use postgres_ffi::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use std::cell::Cell;
@@ -240,9 +237,7 @@ fn walreceiver_main(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
-    let checkpoint_bytes = timeline.get_page_at_lsn(RelishTag::Checkpoint, 0, startpoint)?;
-    let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
-    trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
+    let mut walingest = WalIngest::new(&*timeline, startpoint)?;
 
     while let Some(replication_message) = physical_stream.next()? {
         let status_update = match replication_message {
@@ -266,34 +261,8 @@ fn walreceiver_main(
                     assert!(lsn.is_aligned());
 
                     let writer = timeline.writer();
+                    walingest.ingest_record(writer.as_ref(), recdata, lsn)?;
 
-                    let mut checkpoint_modified = false;
-
-                    let decoded = decode_wal_record(recdata.clone());
-                    walingest::save_decoded_record(
-                        &mut checkpoint,
-                        &mut checkpoint_modified,
-                        writer.as_ref(),
-                        &decoded,
-                        recdata,
-                        lsn,
-                    )?;
-
-                    // Check if checkpoint data was updated by save_decoded_record
-                    if checkpoint_modified {
-                        let new_checkpoint_bytes = checkpoint.encode();
-
-                        writer.put_page_image(
-                            RelishTag::Checkpoint,
-                            0,
-                            lsn,
-                            new_checkpoint_bytes,
-                        )?;
-                    }
-
-                    // Now that this record has been fully handled, including updating the
-                    // checkpoint data, let the repository know that it is up-to-date to this LSN
-                    writer.advance_last_record_lsn(lsn);
                     last_rec_lsn = lsn;
                 }
 
