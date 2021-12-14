@@ -180,6 +180,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
     let initdb_output = Command::new(initdb_path)
         .args(&["-D", initdbpath.to_str().unwrap()])
         .args(&["-U", &conf.superuser])
+        .args(&["-E", "utf8"])
         .arg("--no-instructions")
         // This is only used for a temporary installation that is deleted shortly after,
         // so no need to fsync it
