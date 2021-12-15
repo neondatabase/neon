@@ -224,8 +224,3 @@ impl SlruKind {
         }
     }
 }
-
-pub const FIRST_NONREL_RELISH_TAG: RelishTag = RelishTag::Slru {
-    slru: SlruKind::Clog,
-    segno: 0,
-};

@@ -1724,7 +1724,7 @@ impl LayeredTimeline {
                 continue 'outer;
             }
 
-            // 4. Does this layer serve as a tombstome for some older layer?
+            // 4. Does this layer serve as a tombstone for some older layer?
             if l.is_dropped() {
                 let prior_lsn = l.get_start_lsn().checked_sub(1u64).unwrap();
 
@@ -1784,7 +1784,7 @@ impl LayeredTimeline {
 
                 if is_tombstone {
                     info!(
-                        "keeping {} {}-{} because this layer servers as a tombstome for older layer",
+                        "keeping {} {}-{} because this layer serves as a tombstone for older layer",
                         seg,
                         l.get_start_lsn(),
                         l.get_end_lsn()
