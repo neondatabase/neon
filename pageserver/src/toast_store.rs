@@ -16,7 +16,7 @@ use yakv::storage::{
     Value,
 };
 
-const TOAST_SEGMENT_SIZE: usize = 2 * 1024;
+const TOAST_SEGMENT_SIZE: usize = 2000;
 const CACHE_SIZE: usize = 1024; // 8Mb
 
 ///
