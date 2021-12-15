@@ -1,0 +1,89 @@
+- name: discover storage nodes
+  hosts: localhost
+  connection: local
+  gather_facts: False
+
+  tasks:
+
+    - name: discover safekeepers
+      no_log: true
+      ec2_instance_info:
+        filters:
+          "tag:zenith_env": "staging"
+          "tag:zenith_service": "safekeeper"
+      register: ec2_safekeepers
+
+    - name: discover pageservers
+      no_log: true
+      ec2_instance_info:
+        filters:
+          "tag:zenith_env": "staging"
+          "tag:zenith_service": "pageserver"
+      register: ec2_pageservers
+
+    - name: add safekeepers to host group
+      no_log: true
+      add_host:
+        name: safekeeper-{{ ansible_loop.index }}
+        ansible_host: "{{ item.public_ip_address }}"
+        groups:
+          - storage
+          - safekeepers
+      with_items: "{{ ec2_safekeepers.instances }}"
+      loop_control:
+        extended: yes
+
+    - name: add pageservers to host group
+      no_log: true
+      add_host:
+        name: pageserver-{{ ansible_loop.index }}
+        ansible_host: "{{ item.public_ip_address }}"
+        groups:
+          - storage
+          - pageservers
+      with_items: "{{ ec2_pageservers.instances }}"
+      loop_control:
+        extended: yes
+
+- name: Extract Zenith binaries
+  hosts: storage
+  gather_facts: False
+  remote_user: admin
+
+  tasks:
+
+    - name: Extract Zenith binaries to /usr/local
+      ansible.builtin.unarchive:
+        src: ../zenith_install.tar.gz
+        dest: /usr/local
+      become: true
+
+- name: Restart safekeepers
+  hosts: safekeepers
+  gather_facts: False
+  remote_user: admin
+
+  tasks:
+
+    - name: Restart systemd service
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        name: safekeeper
+        enabled: yes
+        state: restarted
+      become: true
+
+- name: Restart pageservers
+  hosts: pageservers
+  gather_facts: False
+  remote_user: admin
+
+  tasks:
+
+    - name: Restart systemd service
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        name: pageserver
+        enabled: yes
+        state: restarted
+      become: true
