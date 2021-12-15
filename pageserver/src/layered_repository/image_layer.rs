@@ -16,10 +16,6 @@
 //! Only metadata is loaded into memory by the load function.
 //! When images are needed, they are read directly from disk.
 //!
-//! For blocky relishes, the images are stored in BLOCKY_IMAGES_CHAPTER.
-//! All the images are required to be BLOCK_SIZE, which allows for random access.
-//!
-//! For non-blocky relishes, the image can be found in NONBLOCKY_IMAGE_CHAPTER.
 //!
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
@@ -48,29 +44,35 @@ use zenith_utils::lsn::Lsn;
 // Magic constant to identify a Zenith segment image file
 pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
 
-/// Contains each block in block # order
-const BLOCKY_IMAGES_CHAPTER: u64 = 1;
-const NONBLOCKY_IMAGE_CHAPTER: u64 = 2;
+const IMAGES_CHAPTER: u64 = 1;
 
 /// Contains the [`Summary`] struct
-const SUMMARY_CHAPTER: u64 = 3;
+const SUMMARY_CHAPTER: u64 = 0;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
     seg: SegmentTag,
-
+    size: u64,
     lsn: Lsn,
 }
 
+impl Summary {
+    fn is_matching(&self, other: &Summary) -> bool {
+        self.tenantid == other.tenantid
+            && self.timelineid == other.timelineid
+            && self.seg == other.seg
+            && self.lsn == other.lsn
+    }
+}
 impl From<&ImageLayer> for Summary {
     fn from(layer: &ImageLayer) -> Self {
         Self {
             tenantid: layer.tenantid,
             timelineid: layer.timelineid,
             seg: layer.seg,
-
+            size: 0,
             lsn: layer.lsn,
         }
     }
@@ -167,17 +169,13 @@ impl Layer for ImageLayer {
                     return Ok(PageReconstructResult::Missing(lsn));
                 }
 
-                let mut buf = vec![0u8; BLOCK_SIZE];
-                let offset = BLOCK_SIZE as u64 * base_blknum as u64;
-
-                let chapter = inner
+                let compressed_data = inner
                     .book
                     .as_ref()
                     .unwrap()
-                    .chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
-                chapter.read_exact_at(&mut buf, offset)?;
-
-                buf
+                    .read_chapter(IMAGES_CHAPTER + base_blknum as u64)?
+                    .into_vec();
+                lz4_flex::decompress(&compressed_data, BLOCK_SIZE)?
             }
             ImageType::NonBlocky => {
                 ensure!(base_blknum == 0);
@@ -185,7 +183,7 @@ impl Layer for ImageLayer {
                     .book
                     .as_ref()
                     .unwrap()
-                    .read_chapter(NONBLOCKY_IMAGE_CHAPTER)?
+                    .read_chapter(IMAGES_CHAPTER)?
                     .into_vec()
             }
         };
@@ -238,11 +236,7 @@ impl Layer for ImageLayer {
         match inner.image_type {
             ImageType::Blocky { num_blocks } => println!("({}) blocks ", num_blocks),
             ImageType::NonBlocky => {
-                let chapter = inner
-                    .book
-                    .as_ref()
-                    .unwrap()
-                    .read_chapter(NONBLOCKY_IMAGE_CHAPTER)?;
+                let chapter = inner.book.as_ref().unwrap().read_chapter(IMAGES_CHAPTER)?;
                 println!("non-blocky ({} bytes)", chapter.len());
             }
         }
@@ -308,18 +302,22 @@ impl ImageLayer {
         let file = VirtualFile::create(&path)?;
         let buf_writer = BufWriter::new(file);
         let book = BookWriter::new(buf_writer, IMAGE_FILE_MAGIC)?;
-
+        let size: u64;
         let book = match &image_type {
             ImageType::Blocky { .. } => {
-                let mut chapter = book.new_chapter(BLOCKY_IMAGES_CHAPTER);
-                for block_bytes in base_images {
-                    assert_eq!(block_bytes.len(), BLOCK_SIZE);
-                    chapter.write_all(&block_bytes)?;
-                }
-                chapter.close()?
+                let mut blknum = 0u64;
+                size = base_images.len() as u64 * BLOCK_SIZE as u64;
+                base_images.iter().fold(Ok(book), |book, block_bytes| {
+                    let mut chapter = book?.new_chapter(IMAGES_CHAPTER + blknum);
+                    let compressed_data = lz4_flex::compress(&block_bytes);
+                    chapter.write_all(&compressed_data)?;
+                    blknum += 1;
+                    chapter.close()
+                })?
             }
             ImageType::NonBlocky => {
-                let mut chapter = book.new_chapter(NONBLOCKY_IMAGE_CHAPTER);
+                let mut chapter = book.new_chapter(IMAGES_CHAPTER);
+                size = base_images[0].len() as u64;
                 chapter.write_all(&base_images[0])?;
                 chapter.close()?
             }
@@ -330,7 +328,7 @@ impl ImageLayer {
             tenantid,
             timelineid,
             seg,
-
+            size,
             lsn,
         };
         Summary::ser_into(&summary, &mut chapter)?;
@@ -413,7 +411,7 @@ impl ImageLayer {
 
                 let expected_summary = Summary::from(self);
 
-                if actual_summary != expected_summary {
+                if !actual_summary.is_matching(&expected_summary) {
                     bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
                 }
             }
@@ -432,13 +430,11 @@ impl ImageLayer {
         }
 
         let image_type = if self.seg.rel.is_blocky() {
-            let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
-            let images_len = chapter.len();
-            ensure!(images_len % BLOCK_SIZE as u64 == 0);
-            let num_blocks: u32 = (images_len / BLOCK_SIZE as u64).try_into()?;
+            let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+            let summary = Summary::des(&chapter)?;
+            let num_blocks: u32 = (summary.size / BLOCK_SIZE as u64).try_into()?;
             ImageType::Blocky { num_blocks }
         } else {
-            let _chapter = book.chapter_reader(NONBLOCKY_IMAGE_CHAPTER)?;
             ImageType::NonBlocky
         };
 
@@ -481,6 +477,7 @@ impl ImageLayer {
     {
         let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
         let summary = Summary::des(&chapter)?;
+        let num_blocks: u32 = (summary.size / BLOCK_SIZE as u64).try_into()?;
 
         Ok(ImageLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
@@ -490,7 +487,7 @@ impl ImageLayer {
             lsn: summary.lsn,
             inner: Mutex::new(ImageLayerInner {
                 book: None,
-                image_type: ImageType::Blocky { num_blocks: 0 },
+                image_type: ImageType::Blocky { num_blocks },
             }),
         })
     }
