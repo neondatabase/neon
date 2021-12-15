@@ -309,7 +309,7 @@ impl ImageLayer {
                 size = base_images.len() as u64 * BLOCK_SIZE as u64;
                 base_images.iter().fold(Ok(book), |book, block_bytes| {
                     let mut chapter = book?.new_chapter(IMAGES_CHAPTER + blknum);
-                    let compressed_data = lz4_flex::compress(&block_bytes);
+                    let compressed_data = lz4_flex::compress(block_bytes);
                     chapter.write_all(&compressed_data)?;
                     blknum += 1;
                     chapter.close()
