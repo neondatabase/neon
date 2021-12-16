@@ -4,16 +4,10 @@
 use crate::layered_repository::storage_layer::SegmentTag;
 use crate::relish::*;
 use crate::PageServerConf;
-use crate::{ZTenantId, ZTimelineId};
 use std::fmt;
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Result;
-use log::*;
 use zenith_utils::lsn::Lsn;
-
-use super::metadata::METADATA_FILE_NAME;
 
 // Note: LayeredTimeline::load_layer_map() relies on this sort order
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
@@ -269,36 +263,6 @@ impl fmt::Display for ImageFileName {
             u64::from(self.lsn),
         )
     }
-}
-
-/// Scan timeline directory and create ImageFileName and DeltaFilename
-/// structs representing all files on disk
-///
-/// TODO: returning an Iterator would be more idiomatic
-pub fn list_files(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-) -> Result<(Vec<ImageFileName>, Vec<DeltaFileName>)> {
-    let path = conf.timeline_path(&timelineid, &tenantid);
-
-    let mut deltafiles: Vec<DeltaFileName> = Vec::new();
-    let mut imgfiles: Vec<ImageFileName> = Vec::new();
-    for direntry in fs::read_dir(path)? {
-        let fname = direntry?.file_name();
-        let fname = fname.to_str().unwrap();
-
-        if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
-            deltafiles.push(deltafilename);
-        } else if let Some(imgfilename) = ImageFileName::parse_str(fname) {
-            imgfiles.push(imgfilename);
-        } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
-            // ignore these
-        } else {
-            warn!("unrecognized filename in timeline dir: {}", fname);
-        }
-    }
-    Ok((imgfiles, deltafiles))
 }
 
 /// Helper enum to hold a PageServerConf, or a path

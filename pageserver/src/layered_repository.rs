@@ -31,7 +31,7 @@ use std::sync::atomic::{self, AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use self::metadata::{metadata_path, TimelineMetadata};
+use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::page_cache;
 use crate::relish::*;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
@@ -69,9 +69,10 @@ mod page_versions;
 mod storage_layer;
 
 use delta_layer::DeltaLayer;
-use image_layer::ImageLayer;
-
+use ephemeral_file::is_ephemeral_file;
+use filename::{DeltaFileName, ImageFileName};
 use global_layer_map::{LayerId, GLOBAL_LAYER_MAP};
+use image_layer::ImageLayer;
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use storage_layer::{
@@ -1126,52 +1127,69 @@ impl LayeredTimeline {
     fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         let mut layers = self.layers.lock().unwrap();
         let mut num_layers = 0;
-        let (imgfilenames, deltafilenames) =
-            filename::list_files(self.conf, self.timelineid, self.tenantid)?;
 
+        // Scan timeline directory and create ImageFileName and DeltaFilename
+        // structs representing all files on disk
         let timeline_path = self.conf.timeline_path(&self.timelineid, &self.tenantid);
-        // First create ImageLayer structs for each image file.
-        for filename in &imgfilenames {
-            if filename.lsn > disk_consistent_lsn {
-                warn!(
-                    "found future image layer {} on timeline {}",
-                    filename, self.timelineid
-                );
 
-                rename_to_backup(timeline_path.join(filename.to_string()))?;
-                continue;
+        for direntry in fs::read_dir(timeline_path)? {
+            let direntry = direntry?;
+            let fname = direntry.file_name();
+            let fname = fname.to_str().unwrap();
+
+            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+                // create an ImageLayer struct for each image file.
+                if imgfilename.lsn > disk_consistent_lsn {
+                    warn!(
+                        "found future image layer {} on timeline {}",
+                        imgfilename, self.timelineid
+                    );
+
+                    rename_to_backup(direntry.path())?;
+                    continue;
+                }
+
+                let layer =
+                    ImageLayer::new(self.conf, self.timelineid, self.tenantid, &imgfilename);
+
+                trace!("found layer {}", layer.filename().display());
+                layers.insert_historic(Arc::new(layer));
+                num_layers += 1;
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+                // Create a DeltaLayer struct for each delta file.
+                ensure!(deltafilename.start_lsn < deltafilename.end_lsn);
+                // The end-LSN is exclusive, while disk_consistent_lsn is
+                // inclusive. For example, if disk_consistent_lsn is 100, it is
+                // OK for a delta layer to have end LSN 101, but if the end LSN
+                // is 102, then it might not have been fully flushed to disk
+                // before crash.
+                if deltafilename.end_lsn > disk_consistent_lsn + 1 {
+                    warn!(
+                        "found future delta layer {} on timeline {}",
+                        deltafilename, self.timelineid
+                    );
+
+                    rename_to_backup(direntry.path())?;
+                    continue;
+                }
+
+                let layer =
+                    DeltaLayer::new(self.conf, self.timelineid, self.tenantid, &deltafilename);
+
+                trace!("found layer {}", layer.filename().display());
+                layers.insert_historic(Arc::new(layer));
+                num_layers += 1;
+            } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
+                // ignore these
+            } else if is_ephemeral_file(fname) {
+                // Delete any old ephemeral files
+                trace!("deleting old ephemeral file in timeline dir: {}", fname);
+                fs::remove_file(direntry.path())?;
+            } else {
+                warn!("unrecognized filename in timeline dir: {}", fname);
             }
-
-            let layer = ImageLayer::new(self.conf, self.timelineid, self.tenantid, filename);
-
-            trace!("found layer {}", layer.filename().display());
-            layers.insert_historic(Arc::new(layer));
-            num_layers += 1;
         }
 
-        for filename in &deltafilenames {
-            ensure!(filename.start_lsn < filename.end_lsn);
-            // The end-LSN is exclusive, while disk_consistent_lsn is
-            // inclusive. For example, if disk_consistent_lsn is 100, it is
-            // OK for a delta layer to have end LSN 101, but if the end LSN
-            // is 102, then it might not have been fully flushed to disk
-            // before crash.
-            if filename.end_lsn > disk_consistent_lsn + 1 {
-                warn!(
-                    "found future delta layer {} on timeline {}",
-                    filename, self.timelineid
-                );
-
-                rename_to_backup(timeline_path.join(filename.to_string()))?;
-                continue;
-            }
-
-            let layer = DeltaLayer::new(self.conf, self.timelineid, self.tenantid, filename);
-
-            trace!("found layer {}", layer.filename().display());
-            layers.insert_historic(Arc::new(layer));
-            num_layers += 1;
-        }
         info!("loaded layer map with {} layers", num_layers);
 
         Ok(())
