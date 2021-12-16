@@ -660,7 +660,7 @@ impl LayeredRepository {
                 }
             }
 
-            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
+            if let Some(mut cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
                 let branchpoints: Vec<Lsn> = all_branchpoints
                     .range((
                         Included((timelineid, Lsn(0))),
@@ -675,8 +675,12 @@ impl LayeredRepository {
                 if checkpoint_before_gc {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
+                } else {
+                    let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+                    if cutoff < disk_consistent_lsn {
+                        cutoff = disk_consistent_lsn;
+                    }
                 }
-
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
 
                 totals += result;
