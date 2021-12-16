@@ -58,8 +58,8 @@ impl HotStandbyFeedback {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StandbyReply {
     pub write_lsn: Lsn, // last lsn received by pageserver
-    pub flush_lsn: Lsn, // not used
-    pub apply_lsn: Lsn, // pageserver's disk consistent lSN
+    pub flush_lsn: Lsn, // pageserver's disk consistent lSN
+    pub apply_lsn: Lsn, // pageserver's remote consistent lSN
     pub reply_ts: TimestampTz,
     pub reply_requested: bool,
 }
@@ -145,8 +145,9 @@ impl ReplicationConn {
                         Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
                             let reply = StandbyReply::des(&m[1..])
                                 .context("failed to deserialize StandbyReply")?;
-                            state.disk_consistent_lsn = reply.apply_lsn;
                             state.last_received_lsn = reply.write_lsn;
+                            state.disk_consistent_lsn = reply.flush_lsn;
+                            state.remote_consistent_lsn = reply.apply_lsn;
                             timeline.update_replica_state(replica_id, Some(state));
                         }
                         _ => warn!("unexpected message {:?}", msg),
