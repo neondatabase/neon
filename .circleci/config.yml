@@ -454,6 +454,47 @@ jobs:
             docker build -t zenithdb/compute-node:latest vendor/postgres && docker push zenithdb/compute-node:latest
             docker tag zenithdb/compute-node:latest zenithdb/compute-node:${DOCKER_TAG} && docker push zenithdb/compute-node:${DOCKER_TAG}
 
+  deploy-staging:
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Get Zenith binaries
+          command: |
+            rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz
+            mkdir zenith_install
+            DOCKER_TAG=$(git log --oneline|wc -l)
+            docker pull --quiet zenithdb/zenith:${DOCKER_TAG}
+            ID=$(docker create zenithdb/zenith:${DOCKER_TAG})
+            docker cp $ID:/data/postgres_install.tar.gz .
+            tar -xzf postgres_install.tar.gz -C zenith_install && rm postgres_install.tar.gz
+            docker cp $ID:/usr/local/bin/pageserver zenith_install/bin/
+            docker cp $ID:/usr/local/bin/safekeeper zenith_install/bin/
+            docker cp $ID:/usr/local/bin/proxy zenith_install/bin/
+            docker cp $ID:/usr/local/bin/postgres zenith_install/bin/
+            docker rm -v $ID
+            echo ${DOCKER_TAG} | tee zenith_install/.zenith_current_version
+            tar -czf zenith_install.tar.gz -C zenith_install .
+            ls -la zenith_install.tar.gz
+      - run:
+          name: Setup ansible
+          command: |
+            pip install --progress-bar off --user ansible boto
+            ansible-galaxy collection install amazon.aws
+      - run:
+          name: Apply re-deploy playbook
+          environment:
+            ANSIBLE_HOST_KEY_CHECKING: false
+          command: |
+            echo "${STAGING_SSH_KEY}" | base64 --decode | ssh-add -
+            export AWS_REGION=${STAGING_AWS_REGION}
+            export AWS_ACCESS_KEY_ID=${STAGING_AWS_ACCESS_KEY_ID}
+            export AWS_SECRET_ACCESS_KEY=${STAGING_AWS_SECRET_ACCESS_KEY}
+            ansible-playbook .circleci/storage-redeploy.playbook.yml
+            rm -f zenith_install.tar.gz
+
   # Trigger a new remote CI job
   remote-ci-trigger:
     docker:
@@ -568,6 +609,16 @@ workflows:
           requires:
             - pg_regress-tests-release
             - other-tests-release
+      - deploy-staging:
+          # Context gives an ability to login
+          context: Docker Hub
+          # Build image only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - docker-image
       - remote-ci-trigger:
           # Context passes credentials for gh api
           context: CI_ACCESS_TOKEN
