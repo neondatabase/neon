@@ -1708,7 +1708,11 @@ impl LayeredTimeline {
             }
 
             // 3. Is there a later on-disk layer for this relation?
-            if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), Lsn::max(l.get_end_lsn(), disk_consistent_lsn))
+            if !l.is_dropped()
+                && !layers.newer_image_layer_exists(
+                    l.get_seg_tag(),
+                    Lsn::max(l.get_end_lsn(), disk_consistent_lsn),
+                )
             {
                 info!(
                     "keeping {} {}-{} because it is the latest layer",
