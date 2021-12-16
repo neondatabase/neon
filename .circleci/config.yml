@@ -465,8 +465,9 @@ jobs:
           command: |
             rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz
             mkdir zenith_install
-            docker pull --quiet zenithdb/zenith:latest
-            ID=$(docker create zenithdb/zenith:latest)
+            DOCKER_TAG=$(git log --oneline|wc -l)
+            docker pull --quiet zenithdb/zenith:${DOCKER_TAG}
+            ID=$(docker create zenithdb/zenith:${DOCKER_TAG})
             docker cp $ID:/data/postgres_install.tar.gz .
             tar -xzf postgres_install.tar.gz -C zenith_install && rm postgres_install.tar.gz
             docker cp $ID:/usr/local/bin/pageserver zenith_install/bin/
@@ -474,6 +475,7 @@ jobs:
             docker cp $ID:/usr/local/bin/proxy zenith_install/bin/
             docker cp $ID:/usr/local/bin/postgres zenith_install/bin/
             docker rm -v $ID
+            echo ${DOCKER_TAG} | tee zenith_install/.zenith_current_version
             tar -czf zenith_install.tar.gz -C zenith_install .
             ls -la zenith_install.tar.gz
       - run:

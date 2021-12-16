@@ -45,6 +45,40 @@
       loop_control:
         extended: yes
 
+- name: Retrive versions
+  hosts: storage
+  gather_facts: False
+  remote_user: admin
+
+  tasks:
+
+    - name: Get current version of binaries
+      set_fact:
+        current_version: "{{lookup('file', '../zenith_install/.zenith_current_version') }}"
+
+    - name: Check that file with version exists on host
+      stat:
+        path: /usr/local/.zenith_current_version
+      register: version_file
+
+    - name: Try to get current version from the host
+      when: version_file.stat.exists
+      ansible.builtin.fetch:
+        src: /usr/local/.zenith_current_version
+        dest: .remote_version.{{ inventory_hostname }}
+        fail_on_missing: no
+        flat: yes
+
+    - name: Store remote version to variable
+      when: version_file.stat.exists
+      set_fact:
+        remote_version: "{{ lookup('file', '.remote_version.{{ inventory_hostname }}') }}"
+
+    - name: Store default value of remote version to variable in case when remote version file not found
+      when: not version_file.stat.exists
+      set_fact:
+        remote_version: "000"
+
 - name: Extract Zenith binaries
   hosts: storage
   gather_facts: False
@@ -52,7 +86,12 @@
 
   tasks:
 
+    - name: Skip binaries upload on version conflict
+      when: current_version <= remote_version
+      debug: msg="Current version {{ current_version }} LE than remote {{ remote_version }}"
+
     - name: Extract Zenith binaries to /usr/local
+      when: current_version > remote_version
       ansible.builtin.unarchive:
         src: ../zenith_install.tar.gz
         dest: /usr/local
@@ -65,7 +104,12 @@
 
   tasks:
 
+    - name: Skip restart on version conflict
+      when: current_version <= remote_version
+      debug: msg="Current version {{ current_version }} LE than remote {{ remote_version }}"
+
     - name: Restart systemd service
+      when: current_version > remote_version
       ansible.builtin.systemd:
         daemon_reload: yes
         name: safekeeper
@@ -80,7 +124,12 @@
 
   tasks:
 
+    - name: Skip restart on version conflict
+      when: current_version <= remote_version
+      debug: msg="Current version {{ current_version }} LE than remote {{ remote_version }}"
+
     - name: Restart systemd service
+      when: current_version > remote_version
       ansible.builtin.systemd:
         daemon_reload: yes
         name: pageserver
