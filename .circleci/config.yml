@@ -481,7 +481,7 @@ jobs:
       - run:
           name: Setup ansible
           command: |
-            pip install --progress-bar off --user ansible boto
+            pip install --progress-bar off --user ansible boto3
             ansible-galaxy collection install amazon.aws
       - run:
           name: Apply re-deploy playbook

@@ -86,7 +86,7 @@
 
   tasks:
 
-    - name: Skip binaries upload on version conflict
+    - name: Inform about version conflict
       when: current_version <= remote_version
       debug: msg="Current version {{ current_version }} LE than remote {{ remote_version }}"
 
@@ -104,7 +104,7 @@
 
   tasks:
 
-    - name: Skip restart on version conflict
+    - name: Inform about version conflict
       when: current_version <= remote_version
       debug: msg="Current version {{ current_version }} LE than remote {{ remote_version }}"
 
@@ -124,7 +124,7 @@
 
   tasks:
 
-    - name: Skip restart on version conflict
+    - name: Inform about version conflict
       when: current_version <= remote_version
       debug: msg="Current version {{ current_version }} LE than remote {{ remote_version }}"
 
