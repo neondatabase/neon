@@ -42,6 +42,8 @@ pub struct ReplicaState {
     pub last_received_lsn: Lsn, // None means we don't know
     /// combined disk_consistent_lsn of pageservers
     pub disk_consistent_lsn: Lsn,
+    /// combined remote consistent lsn of pageservers
+    pub remote_consistent_lsn: Lsn,
     /// combined hot standby feedback from all replicas
     pub hs_feedback: HotStandbyFeedback,
 }
@@ -57,6 +59,7 @@ impl ReplicaState {
         ReplicaState {
             last_received_lsn: Lsn::MAX,
             disk_consistent_lsn: Lsn(u64::MAX),
+            remote_consistent_lsn: Lsn(u64::MAX),
             hs_feedback: HotStandbyFeedback {
                 ts: 0,
                 xmin: u64::MAX,
@@ -109,6 +112,10 @@ impl SharedState {
             acc.disk_consistent_lsn = Lsn::min(acc.disk_consistent_lsn, state.disk_consistent_lsn);
             // currently not used, but update it to be consistent
             acc.last_received_lsn = Lsn::min(acc.last_received_lsn, state.last_received_lsn);
+            // When at least one replica has preserved data up to remote_consistent_lsn,
+            // safekeeper is free to delete it, so chose max of all replicas.
+            acc.remote_consistent_lsn =
+                Lsn::max(acc.remote_consistent_lsn, state.remote_consistent_lsn);
         }
         acc
     }
