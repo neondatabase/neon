@@ -95,6 +95,15 @@ impl EphemeralFile {
     }
 }
 
+/// Does the given filename look like an ephemeral file?
+pub fn is_ephemeral_file(filename: &str) -> bool {
+    if let Some(rest) = filename.strip_prefix("ephemeral-") {
+        rest.parse::<u32>().is_ok()
+    } else {
+        false
+    }
+}
+
 impl FileExt for EphemeralFile {
     fn read_at(&self, dstbuf: &mut [u8], offset: u64) -> Result<usize, Error> {
         // Look up the right page
