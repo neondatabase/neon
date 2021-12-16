@@ -794,8 +794,8 @@ impl Timeline for LayeredTimeline {
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
                 format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, disk consistent LSN={}",
-                    lsn, self.get_disk_consistent_lsn()
+                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
+                    lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
                 )
             })?;
 

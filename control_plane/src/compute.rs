@@ -300,8 +300,6 @@ impl PostgresNode {
         // wal_sender_timeout is the maximum time to wait for WAL replication.
         // It also defines how often the walreciever will send a feedback message to the wal sender.
         conf.append("wal_sender_timeout", "5s");
-        conf.append("max_replication_flush_lag", "160MB");
-        conf.append("max_replication_apply_lag", "1500MB");
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
 
@@ -343,6 +341,11 @@ impl PostgresNode {
         conf.append_line("");
 
         if !self.env.safekeepers.is_empty() {
+            // Configure backpressure
+            // In setup with safekeepers apply_lag depends on
+            // speed of data checkpointing on pageserver (see disk_consistent_lsn).
+            conf.append("max_replication_apply_lag", "1500MB");
+
             // Configure the node to connect to the safekeepers
             conf.append("synchronous_standby_names", "walproposer");
 
@@ -355,6 +358,16 @@ impl PostgresNode {
                 .join(",");
             conf.append("wal_acceptors", &wal_acceptors);
         } else {
+            // Configure backpressure
+            // In setup without safekeepers, flush_lag depends on
+            // speed of of data checkpointing on pageserver (see disk_consistent_lsn)
+            conf.append("max_replication_flush_lag", "1500MB");
+
+            // We only use setup without safekeepers for tests,
+            // and don't care about data durability on pageserver,
+            // so set more relaxed synchronous_commit.
+            conf.append("synchronous_commit", "remote_write");
+
             // Configure the node to stream WAL directly to the pageserver
             // This isn't really a supported configuration, but can be useful for
             // testing.
