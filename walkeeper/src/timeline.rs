@@ -40,6 +40,8 @@ pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 pub struct ReplicaState {
     /// combined disk_consistent_lsn of pageservers
     pub disk_consistent_lsn: Lsn,
+    /// combined remote consistent lsn of pageservers
+    pub remote_consistent_lsn: Lsn,
     /// combined hot standby feedback from all replicas
     pub hs_feedback: HotStandbyFeedback,
 }
@@ -54,6 +56,7 @@ impl ReplicaState {
     pub fn new() -> ReplicaState {
         ReplicaState {
             disk_consistent_lsn: Lsn(u64::MAX),
+            remote_consistent_lsn: Lsn(u64::MAX),
             hs_feedback: HotStandbyFeedback {
                 ts: 0,
                 xmin: u64::MAX,
@@ -101,6 +104,10 @@ impl SharedState {
             acc.hs_feedback.catalog_xmin =
                 min(acc.hs_feedback.catalog_xmin, state.hs_feedback.catalog_xmin);
             acc.disk_consistent_lsn = Lsn::min(acc.disk_consistent_lsn, state.disk_consistent_lsn);
+            // When at least one replica has preserved data up to remote_consistent_lsn,
+            // safekeeper is free to delete it, so chose max of all replicas.
+            acc.remote_consistent_lsn =
+                Lsn::max(acc.remote_consistent_lsn, state.remote_consistent_lsn);
         }
         acc
     }
