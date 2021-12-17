@@ -1711,7 +1711,8 @@ impl LayeredTimeline {
             if !l.is_dropped()
                 && !layers.newer_image_layer_exists(
                     l.get_seg_tag(),
-                    Lsn::max(l.get_end_lsn(), disk_consistent_lsn),
+                    l.get_end_lsn(),
+                    disk_consistent_lsn,
                 )
             {
                 info!(
