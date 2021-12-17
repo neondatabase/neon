@@ -18,7 +18,7 @@ use tracing::*;
 
 use lazy_static::lazy_static;
 
-use crate::replication::HotStandbyFeedback;
+use crate::send_wal::HotStandbyFeedback;
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
 use zenith_metrics::{
     register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,

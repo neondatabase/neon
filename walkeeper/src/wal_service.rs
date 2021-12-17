@@ -9,7 +9,7 @@ use std::thread;
 use tracing::*;
 
 use crate::callmemaybe::CallmeEvent;
-use crate::send_wal::SendWalHandler;
+use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
 use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::postgres_backend::{AuthType, PostgresBackend};
@@ -60,7 +60,7 @@ fn handle_socket(
 
     socket.set_nodelay(true)?;
 
-    let mut conn_handler = SendWalHandler::new(conf, tx);
+    let mut conn_handler = SafekeeperPostgresHandler::new(conf, tx);
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, false)?;
     // libpq replication protocol between safekeeper and replicas/pagers
     pgbackend.run(&mut conn_handler)?;

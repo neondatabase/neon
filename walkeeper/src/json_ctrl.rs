@@ -12,12 +12,12 @@ use crc32c::crc32c_append;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 
+use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{
     AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected, ProposerGreeting,
 };
 use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermSwitchEntry};
-use crate::send_wal::SendWalHandler;
 use crate::timeline::TimelineTools;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils;
@@ -57,7 +57,7 @@ struct AppendResult {
 /// content, and then append it with specified term and lsn. This
 /// function is used to test safekeepers in different scenarios.
 pub fn handle_json_ctrl(
-    swh: &mut SendWalHandler,
+    spg: &mut SafekeeperPostgresHandler,
     pgb: &mut PostgresBackend,
     cmd: &Bytes,
 ) -> Result<()> {
@@ -71,16 +71,16 @@ pub fn handle_json_ctrl(
     info!("JSON_CTRL request: {:?}", append_request);
 
     // need to init safekeeper state before AppendRequest
-    prepare_safekeeper(swh)?;
+    prepare_safekeeper(spg)?;
 
     // if send_proposer_elected is true, we need to update local history
     if append_request.send_proposer_elected {
-        send_proposer_elected(swh, append_request.term, append_request.epoch_start_lsn)?;
+        send_proposer_elected(spg, append_request.term, append_request.epoch_start_lsn)?;
     }
 
-    let inserted_wal = append_logical_message(swh, append_request)?;
+    let inserted_wal = append_logical_message(spg, append_request)?;
     let response = AppendResult {
-        state: swh.timeline.get().get_info(),
+        state: spg.timeline.get().get_info(),
         inserted_wal,
     };
     let response_data = serde_json::to_vec(&response)?;
@@ -98,28 +98,28 @@ pub fn handle_json_ctrl(
 
 /// Prepare safekeeper to process append requests without crashes,
 /// by sending ProposerGreeting with default server.wal_seg_size.
-fn prepare_safekeeper(swh: &mut SendWalHandler) -> Result<()> {
+fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
     let greeting_request = ProposerAcceptorMessage::Greeting(ProposerGreeting {
         protocol_version: 1, // current protocol
         pg_version: 0,       // unknown
         proposer_id: [0u8; 16],
         system_id: 0,
-        ztli: swh.timelineid.unwrap(),
-        tenant_id: swh.tenantid.unwrap(),
+        ztli: spg.timelineid.unwrap(),
+        tenant_id: spg.tenantid.unwrap(),
         tli: 0,
         wal_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
     });
 
-    let response = swh.timeline.get().process_msg(&greeting_request)?;
+    let response = spg.timeline.get().process_msg(&greeting_request)?;
     match response {
         Some(AcceptorProposerMessage::Greeting(_)) => Ok(()),
         _ => anyhow::bail!("not GreetingResponse"),
     }
 }
 
-fn send_proposer_elected(swh: &mut SendWalHandler, term: Term, lsn: Lsn) -> Result<()> {
+fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: Lsn) -> Result<()> {
     // add new term to existing history
-    let history = swh.timeline.get().get_info().acceptor_state.term_history;
+    let history = spg.timeline.get().get_info().acceptor_state.term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());
     let mut history_entries = history.0;
     history_entries.push(TermSwitchEntry { term, lsn });
@@ -131,7 +131,7 @@ fn send_proposer_elected(swh: &mut SendWalHandler, term: Term, lsn: Lsn) -> Resu
         term_history: history,
     });
 
-    swh.timeline.get().process_msg(&proposer_elected_request)?;
+    spg.timeline.get().process_msg(&proposer_elected_request)?;
     Ok(())
 }
 
@@ -145,11 +145,11 @@ struct InsertedWAL {
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
 fn append_logical_message(
-    swh: &mut SendWalHandler,
+    spg: &mut SafekeeperPostgresHandler,
     msg: AppendLogicalMessage,
 ) -> Result<InsertedWAL> {
     let wal_data = encode_logical_message(msg.lm_prefix, msg.lm_message);
-    let sk_state = swh.timeline.get().get_info();
+    let sk_state = spg.timeline.get().get_info();
 
     let begin_lsn = msg.begin_lsn;
     let end_lsn = begin_lsn + wal_data.len() as u64;
@@ -173,7 +173,7 @@ fn append_logical_message(
         wal_data: Bytes::from(wal_data),
     });
 
-    let response = swh.timeline.get().process_msg(&append_request)?;
+    let response = spg.timeline.get().process_msg(&append_request)?;
 
     let append_response = match response {
         Some(AcceptorProposerMessage::AppendResponse(resp)) => resp,
