@@ -15,9 +15,6 @@ on:
 
   workflow_dispatch: # adds ability to run this manually
 
-env:
-  BASE_URL: "https://console.zenith.tech"
-
 jobs:
   bench:
     # this workflow runs on self hosteed runner
@@ -62,25 +59,14 @@ jobs:
     # So use pre created cluster. It needs to be started manually, but stop is automatic after 5 minutes of inactivity
     - name: Setup cluster
       env:
-        BENCHMARK_CONSOLE_USER_PASSWORD: "${{ secrets.BENCHMARK_CONSOLE_USER_PASSWORD }}"
-        BENCHMARK_CONSOLE_ACCESS_TOKEN: "${{ secrets.BENCHMARK_CONSOLE_ACCESS_TOKEN }}"
-        BENCHMARK_CLUSTER_ID: "${{ secrets.BENCHMARK_CLUSTER_ID }}"
+        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
       shell: bash
       run: |
         set -e
 
         echo "Starting cluster"
-        CLUSTER=$(curl -s --fail --show-error -X POST $BASE_URL/api/v1/clusters/$BENCHMARK_CLUSTER_ID/start \
-            -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN")
-        echo $CLUSTER | python -m json.tool
-
-        echo "Waiting for cluster to become ready"
-        sleep 10
-
-        echo "CLUSTER_ID=$BENCHMARK_CLUSTER_ID" >> $GITHUB_ENV
-        CLUSTER=$(curl -s --fail --show-error -X GET $BASE_URL/api/v1/clusters/$BENCHMARK_CLUSTER_ID.json \
-            -H "Authorization: Bearer $BENCHMARK_CONSOLE_ACCESS_TOKEN")
-        echo $CLUSTER | python -m json.tool
+        # wake up the cluster
+        $PG_BIN/psql $BENCHMARK_CONNSTR -c "SELECT 1"
 
     - name: Run benchmark
       # pgbench is installed system wide from official repo
@@ -100,7 +86,6 @@ jobs:
         TEST_PG_BENCH_TRANSACTIONS_MATRIX: "5000,10000,20000"
         TEST_PG_BENCH_SCALES_MATRIX: "10,15"
         PLATFORM: "zenith-staging"
-        BENCHMARK_CONSOLE_ACCESS_TOKEN: "${{ secrets.BENCHMARK_CONSOLE_ACCESS_TOKEN }}"
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
       run: |
