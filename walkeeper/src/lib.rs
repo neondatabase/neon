@@ -5,10 +5,10 @@ use std::time::Duration;
 use zenith_utils::zid::ZTimelineId;
 
 pub mod callmemaybe;
+pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod receive_wal;
-pub mod replication;
 pub mod s3_offload;
 pub mod safekeeper;
 pub mod send_wal;

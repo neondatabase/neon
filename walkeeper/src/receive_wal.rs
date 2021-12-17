@@ -1,4 +1,4 @@
-//! Safekeeper communication endpoint to wal proposer (compute node).
+//! Safekeeper communication endpoint to WAL proposer (compute node).
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 
-use crate::send_wal::SendWalHandler;
+use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::TimelineTools;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage};
@@ -71,8 +71,8 @@ impl<'pg> ReceiveWalConn<'pg> {
     }
 
     /// Receive WAL from wal_proposer
-    pub fn run(&mut self, swh: &mut SendWalHandler) -> Result<()> {
-        let _enter = info_span!("WAL acceptor", timeline = %swh.timelineid.unwrap()).entered();
+    pub fn run(&mut self, spg: &mut SafekeeperPostgresHandler) -> Result<()> {
+        let _enter = info_span!("WAL acceptor", timeline = %spg.timelineid.unwrap()).entered();
 
         // Notify the libpq client that it's allowed to send `CopyData` messages
         self.pg_backend
@@ -95,7 +95,7 @@ impl<'pg> ReceiveWalConn<'pg> {
         }
 
         // Incoming WAL stream resumed, so reset information about the timeline pause.
-        swh.timeline.get().continue_streaming();
+        spg.timeline.get().continue_streaming();
 
         // if requested, ask pageserver to fetch wal from us
         // as long as this wal_stream is alive, callmemaybe thread
@@ -105,10 +105,10 @@ impl<'pg> ReceiveWalConn<'pg> {
                 // Need to establish replication channel with page server.
                 // Add far as replication in postgres is initiated by receiver
                 // we should use callmemaybe mechanism.
-                let timelineid = swh.timeline.get().timelineid;
-                let tx_clone = swh.tx.clone();
+                let timelineid = spg.timeline.get().timelineid;
+                let tx_clone = spg.tx.clone();
                 let pageserver_connstr = pageserver_connstr.to_owned();
-                swh.tx
+                spg.tx
                     .send(CallmeEvent::Subscribe(
                         tenant_id,
                         timelineid,
@@ -126,14 +126,14 @@ impl<'pg> ReceiveWalConn<'pg> {
                     tx: tx_clone,
                     tenant_id,
                     timelineid,
-                    timeline: Arc::clone(swh.timeline.get()),
+                    timeline: Arc::clone(spg.timeline.get()),
                 })
             }
             None => None,
         };
 
         loop {
-            let reply = swh
+            let reply = spg
                 .timeline
                 .get()
                 .process_msg(&msg)
