@@ -32,6 +32,14 @@ lazy_static! {
             .expect("failed to define a metric");
 }
 
+//
+// Struct used for caching most recent blocky relation size.
+//
+struct RelishSize {
+    last_segno: u32,
+    lsn: Lsn,
+}
+
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
@@ -39,6 +47,9 @@ lazy_static! {
 pub struct LayerMap {
     /// All the layers keyed by segment tag
     segs: HashMap<SegmentTag, SegEntry>,
+
+    /// Cache for fast location of last relation segment
+    last_seg: HashMap<RelishTag, RelishSize>,
 
     /// All in-memory layers, ordered by 'oldest_lsn' and generation
     /// of each layer. This allows easy access to the in-memory layer that
@@ -136,7 +147,17 @@ impl LayerMap {
     /// Insert an on-disk layer
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        let segentry = self.segs.entry(layer.get_seg_tag()).or_default();
+        let tag = layer.get_seg_tag();
+        let segentry = self.segs.entry(tag).or_default();
+
+        let mut e = self.last_seg.entry(tag.rel).or_insert(RelishSize {
+            lsn: layer.get_end_lsn(),
+            last_segno: tag.segno,
+        });
+        if e.last_segno < tag.segno {
+            e.last_segno = tag.segno;
+            e.lsn = layer.get_end_lsn();
+        }
         segentry.insert_historic(layer);
 
         NUM_ONDISK_LAYERS.inc();
@@ -152,8 +173,28 @@ impl LayerMap {
 
         if let Some(segentry) = self.segs.get_mut(&tag) {
             segentry.historic.remove(&layer);
+            if tag.segno != 0 {
+                self.last_seg.insert(
+                    tag.rel,
+                    RelishSize {
+                        lsn: layer.get_end_lsn(),
+                        last_segno: tag.segno - 1,
+                    },
+                );
+            } else {
+                self.last_seg.remove(&tag.rel);
+            }
         }
         NUM_ONDISK_LAYERS.dec();
+    }
+
+    pub fn get_last_segno(&self, rel: RelishTag, lsn: Lsn) -> Option<u32> {
+        if let Some(entry) = self.last_seg.get(&rel) {
+            if lsn >= entry.lsn {
+                return Some(entry.last_segno);
+            }
+        }
+        None
     }
 
     // List relations along with a flag that marks if they exist at the given lsn.
