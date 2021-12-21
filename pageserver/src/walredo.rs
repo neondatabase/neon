@@ -351,19 +351,16 @@ impl PostgresRedoManager {
                 if parsed_xact.info == pg_constants::XLOG_XACT_COMMIT
                     || parsed_xact.info == pg_constants::XLOG_XACT_COMMIT_PREPARED
                 {
-                    transaction_id_set_status(
-                        parsed_xact.xid,
-                        pg_constants::TRANSACTION_STATUS_COMMITTED,
-                        &mut page,
-                    );
-                    for subxact in &parsed_xact.subxacts {
-                        let pageno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                    // Iterate the main XID, followed by all the subxids.
+                    for xid in std::iter::once(&parsed_xact.xid).chain(parsed_xact.subxacts.iter())
+                    {
+                        let pageno = *xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
                         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                         let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                         // only update xids on the requested page
                         if rec_segno == segno && blknum == rpageno {
                             transaction_id_set_status(
-                                *subxact,
+                                *xid,
                                 pg_constants::TRANSACTION_STATUS_COMMITTED,
                                 &mut page,
                             );
@@ -372,19 +369,16 @@ impl PostgresRedoManager {
                 } else if parsed_xact.info == pg_constants::XLOG_XACT_ABORT
                     || parsed_xact.info == pg_constants::XLOG_XACT_ABORT_PREPARED
                 {
-                    transaction_id_set_status(
-                        parsed_xact.xid,
-                        pg_constants::TRANSACTION_STATUS_ABORTED,
-                        &mut page,
-                    );
-                    for subxact in &parsed_xact.subxacts {
-                        let pageno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                    // Iterate the main XID, followed by all the subxids.
+                    for xid in std::iter::once(&parsed_xact.xid).chain(parsed_xact.subxacts.iter())
+                    {
+                        let pageno = *xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
                         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                         let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                         // only update xids on the requested page
                         if rec_segno == segno && blknum == rpageno {
                             transaction_id_set_status(
-                                *subxact,
+                                *xid,
                                 pg_constants::TRANSACTION_STATUS_ABORTED,
                                 &mut page,
                             );
