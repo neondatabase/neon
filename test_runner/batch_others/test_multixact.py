@@ -28,16 +28,25 @@ def test_multixact(zenith_simple_env: ZenithEnv, test_output_dir):
     cur.execute('SELECT next_multixact_id FROM pg_control_checkpoint()')
     next_multixact_id_old = cur.fetchone()[0]
 
-    # Lock entries in parallel connections to set multixact
-    nclients = 3
+    # Lock entries using parallel connections in a round-robin fashion.
+    nclients = 20
     connections = []
     for i in range(nclients):
         # Do not turn on autocommit. We want to hold the key-share locks.
         conn = pg.connect(autocommit=False)
-        conn.cursor().execute('select * from t1 for key share')
         connections.append(conn)
 
-    # We should have a multixact now. We can close the connections.
+    # On each iteration, we commit the previous transaction on a connection,
+    # and issue antoher select. Each SELECT generates a new multixact that
+    # includes the new XID, and the XIDs of all the other parallel transactions.
+    # This generates enough traffic on both multixact offsets and members SLRUs
+    # to cross page boundaries.
+    for i in range(5000):
+        conn = connections[i % nclients]
+        conn.commit()
+        conn.cursor().execute('select * from t1 for key share')
+
+    # We have multixacts now. We can close the connections.
     for c in connections:
         c.close()
 
@@ -66,5 +75,5 @@ def test_multixact(zenith_simple_env: ZenithEnv, test_output_dir):
     # Check that we restored pg_controlfile correctly
     assert next_multixact_id_new == next_multixact_id
 
-    # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(test_output_dir, env, pg_new)
+    # Check that we can restore the content of the datadir correctly
+    check_restored_datadir_content(test_output_dir, env, pg)

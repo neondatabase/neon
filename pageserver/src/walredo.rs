@@ -403,12 +403,13 @@ impl PostgresRedoManager {
                     {
                         if slru == SlruKind::MultiXactMembers {
                             for i in 0..xlrec.nmembers {
-                                let pageno = i / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+                                let offset = xlrec.moff + i;
+                                let pageno =
+                                    offset / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
                                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                                 if segno == rec_segno && rpageno == blknum {
                                     // update only target block
-                                    let offset = xlrec.moff + i;
                                     let memberoff = mx_offset_to_member_offset(offset);
                                     let flagsoff = mx_offset_to_flags_offset(offset);
                                     let bshift = mx_offset_to_flags_bitshift(offset);
