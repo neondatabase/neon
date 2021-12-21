@@ -10,9 +10,8 @@ from fixtures.log_helper import log
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-# Check that dead minority doesn't prevent the commits: execute insert n_inserts
-# times, with fault_probability chance of getting a wal acceptor down or up
-# along the way. 2 of 3 are always alive, so the work keeps going.
+# Test restarting page server, while safekeeper and compute node keep
+# running.
 def test_pageserver_restart(zenith_env_builder: ZenithEnvBuilder):
     # One safekeeper is enough for this test.
     zenith_env_builder.num_safekeepers = 1
