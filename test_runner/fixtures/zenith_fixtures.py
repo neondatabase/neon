@@ -104,7 +104,7 @@ def pytest_configure(config):
 
     numprocesses = config.getoption('numprocesses')
     if numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 32768:  # do not use ephemeral ports
-        raise Exception('Too many workers configured. Cannot distrubute ports for services.')
+        raise Exception('Too many workers configured. Cannot distribute ports for services.')
 
     # find the base directory (currently this is the git root)
     global base_dir
