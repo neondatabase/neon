@@ -40,6 +40,7 @@ signal-hook = "0.3.10"
 url = "2"
 nix = "0.23"
 once_cell = "1.8.0"
+parking_lot = "0.11.2"
 
 rust-s3 = { version = "0.28", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls"] }
 async-compression = {version = "0.3", features = ["zstd", "tokio"]}

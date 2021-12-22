@@ -12,6 +12,7 @@ use crate::walingest::WalIngest;
 use crate::PageServerConf;
 use anyhow::{bail, Context, Error, Result};
 use lazy_static::lazy_static;
+use parking_lot::FairMutex;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
@@ -21,7 +22,6 @@ use postgres_types::PgLsn;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::thread;
 use std::thread::JoinHandle;
 use std::thread_local;
@@ -41,8 +41,8 @@ struct WalReceiverEntry {
 }
 
 lazy_static! {
-    static ref WAL_RECEIVERS: Mutex<HashMap<ZTimelineId, WalReceiverEntry>> =
-        Mutex::new(HashMap::new());
+    static ref WAL_RECEIVERS: FairMutex<HashMap<ZTimelineId, WalReceiverEntry>> =
+        FairMutex::new(HashMap::new());
 }
 
 thread_local! {
@@ -58,7 +58,7 @@ thread_local! {
 // per tenant/timeline to cancel inactive walreceivers.
 // TODO deal with blocking pg connections
 pub fn stop_wal_receiver(timelineid: ZTimelineId) {
-    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    let mut receivers = WAL_RECEIVERS.lock();
     if let Some(r) = receivers.get_mut(&timelineid) {
         r.wal_receiver_handle.take();
         // r.wal_receiver_handle.take().map(JoinHandle::join);
@@ -66,7 +66,7 @@ pub fn stop_wal_receiver(timelineid: ZTimelineId) {
 }
 
 pub fn drop_wal_receiver(timelineid: ZTimelineId, tenantid: ZTenantId) {
-    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    let mut receivers = WAL_RECEIVERS.lock();
     receivers.remove(&timelineid);
 
     // Check if it was the last walreceiver of the tenant.
@@ -89,7 +89,7 @@ pub fn launch_wal_receiver(
     wal_producer_connstr: &str,
     tenantid: ZTenantId,
 ) {
-    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    let mut receivers = WAL_RECEIVERS.lock();
 
     match receivers.get_mut(&timelineid) {
         Some(receiver) => {
@@ -120,7 +120,7 @@ pub fn launch_wal_receiver(
 
 // Look up current WAL producer connection string in the hash table
 fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
-    let receivers = WAL_RECEIVERS.lock().unwrap();
+    let receivers = WAL_RECEIVERS.lock();
 
     receivers
         .get(&timelineid)
