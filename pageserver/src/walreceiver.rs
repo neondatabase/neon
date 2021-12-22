@@ -12,7 +12,7 @@ use crate::walingest::WalIngest;
 use crate::PageServerConf;
 use anyhow::{bail, Context, Error, Result};
 use lazy_static::lazy_static;
-use parking_lot::FairMutex;
+use parking_lot::Mutex;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
@@ -41,8 +41,8 @@ struct WalReceiverEntry {
 }
 
 lazy_static! {
-    static ref WAL_RECEIVERS: FairMutex<HashMap<ZTimelineId, WalReceiverEntry>> =
-        FairMutex::new(HashMap::new());
+    static ref WAL_RECEIVERS: Mutex<HashMap<ZTimelineId, WalReceiverEntry>> =
+        Mutex::new(HashMap::new());
 }
 
 thread_local! {
