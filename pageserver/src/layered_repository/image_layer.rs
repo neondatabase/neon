@@ -23,7 +23,7 @@
 //!
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, SegmentTag,
+    Layer, PageReconstructData, PageReconstructResult, SegmentBlk, SegmentTag,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::RELISH_SEG_SIZE;
@@ -99,7 +99,7 @@ pub struct ImageLayer {
 
 #[derive(Clone)]
 enum ImageType {
-    Blocky { num_blocks: u32 },
+    Blocky { num_blocks: SegmentBlk },
     NonBlocky,
 }
 
@@ -144,11 +144,12 @@ impl Layer for ImageLayer {
     /// Look up given page in the file
     fn get_page_reconstruct_data(
         &self,
-        blknum: u32,
+        blknum: SegmentBlk,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
+        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
         assert!(lsn >= self.lsn);
 
         match cached_img_lsn {
@@ -158,17 +159,15 @@ impl Layer for ImageLayer {
 
         let inner = self.load()?;
 
-        let base_blknum = blknum % RELISH_SEG_SIZE;
-
         let buf = match &inner.image_type {
             ImageType::Blocky { num_blocks } => {
                 // Check if the request is beyond EOF
-                if base_blknum >= *num_blocks {
+                if blknum >= *num_blocks {
                     return Ok(PageReconstructResult::Missing(lsn));
                 }
 
                 let mut buf = vec![0u8; BLOCK_SIZE];
-                let offset = BLOCK_SIZE as u64 * base_blknum as u64;
+                let offset = BLOCK_SIZE as u64 * blknum as u64;
 
                 let chapter = inner
                     .book
@@ -180,7 +179,7 @@ impl Layer for ImageLayer {
                 buf
             }
             ImageType::NonBlocky => {
-                ensure!(base_blknum == 0);
+                ensure!(blknum == 0);
                 inner
                     .book
                     .as_ref()
@@ -195,7 +194,7 @@ impl Layer for ImageLayer {
     }
 
     /// Get size of the segment
-    fn get_seg_size(&self, _lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, _lsn: Lsn) -> Result<SegmentBlk> {
         let inner = self.load()?;
         match inner.image_type {
             ImageType::Blocky { num_blocks } => Ok(num_blocks),
@@ -276,7 +275,7 @@ impl ImageLayer {
         base_images: Vec<Bytes>,
     ) -> Result<ImageLayer> {
         let image_type = if seg.rel.is_blocky() {
-            let num_blocks: u32 = base_images.len().try_into()?;
+            let num_blocks: SegmentBlk = base_images.len().try_into()?;
             ImageType::Blocky { num_blocks }
         } else {
             assert_eq!(base_images.len(), 1);
@@ -358,15 +357,11 @@ impl ImageLayer {
         let seg = src.get_seg_tag();
         let timelineid = timeline.timelineid;
 
-        let startblk;
-        let size;
-        if seg.rel.is_blocky() {
-            size = src.get_seg_size(lsn)?;
-            startblk = seg.segno * RELISH_SEG_SIZE;
+        let size = if seg.rel.is_blocky() {
+            src.get_seg_size(lsn)?
         } else {
-            size = 1;
-            startblk = 0;
-        }
+            1
+        };
 
         trace!(
             "creating new ImageLayer for {} on timeline {} at {}",
@@ -376,7 +371,7 @@ impl ImageLayer {
         );
 
         let mut base_images: Vec<Bytes> = Vec::new();
-        for blknum in startblk..(startblk + size) {
+        for blknum in 0..size {
             let img = timeline.materialize_page(seg, blknum, lsn, &*src)?;
 
             base_images.push(img);
@@ -435,7 +430,7 @@ impl ImageLayer {
             let chapter = book.chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
             let images_len = chapter.len();
             ensure!(images_len % BLOCK_SIZE as u64 == 0);
-            let num_blocks: u32 = (images_len / BLOCK_SIZE as u64).try_into()?;
+            let num_blocks: SegmentBlk = (images_len / BLOCK_SIZE as u64).try_into()?;
             ImageType::Blocky { num_blocks }
         } else {
             let _chapter = book.chapter_reader(NONBLOCKY_IMAGE_CHAPTER)?;

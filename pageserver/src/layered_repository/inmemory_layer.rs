@@ -7,7 +7,8 @@
 use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::filename::DeltaFileName;
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
+    RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
@@ -64,13 +65,13 @@ pub struct InMemoryLayerInner {
     page_versions: PageVersions,
 
     ///
-    /// `segsizes` tracks the size of the segment at different points in time.
+    /// `seg_sizes` tracks the size of the segment at different points in time.
     ///
     /// For a blocky rel, there is always one entry, at the layer's start_lsn,
     /// so that determining the size never depends on the predecessor layer. For
-    /// a non-blocky rel, 'segsizes' is not used and is always empty.
+    /// a non-blocky rel, 'seg_sizes' is not used and is always empty.
     ///
-    segsizes: VecMap<Lsn, u32>,
+    seg_sizes: VecMap<Lsn, SegmentBlk>,
 }
 
 impl InMemoryLayerInner {
@@ -78,9 +79,9 @@ impl InMemoryLayerInner {
         assert!(self.end_lsn.is_none());
     }
 
-    fn get_seg_size(&self, lsn: Lsn) -> u32 {
+    fn get_seg_size(&self, lsn: Lsn) -> SegmentBlk {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let slice = self.segsizes.slice_range(..=lsn);
+        let slice = self.seg_sizes.slice_range(..=lsn);
 
         // We make sure there is always at least one entry
         if let Some((_entry_lsn, entry)) = slice.last() {
@@ -150,14 +151,14 @@ impl Layer for InMemoryLayer {
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
-        blknum: u32,
+        blknum: SegmentBlk,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.seg.blknum_in_seg(blknum));
+        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         {
             let inner = self.inner.read().unwrap();
@@ -198,7 +199,7 @@ impl Layer for InMemoryLayer {
             if need_image
                 && reconstruct_data.records.is_empty()
                 && self.seg.rel.is_blocky()
-                && blknum - self.seg.segno * RELISH_SEG_SIZE >= self.get_seg_size(lsn)?
+                && blknum >= self.get_seg_size(lsn)?
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -220,7 +221,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
         assert!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
@@ -291,8 +292,8 @@ impl Layer for InMemoryLayer {
             self.timelineid, self.seg, self.start_lsn, end_str, inner.dropped,
         );
 
-        for (k, v) in inner.segsizes.as_slice() {
-            println!("segsizes {}: {}", k, v);
+        for (k, v) in inner.seg_sizes.as_slice() {
+            println!("seg_sizes {}: {}", k, v);
         }
 
         for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
@@ -339,10 +340,10 @@ impl InMemoryLayer {
             start_lsn
         );
 
-        // The segment is initially empty, so initialize 'segsizes' with 0.
-        let mut segsizes = VecMap::default();
+        // The segment is initially empty, so initialize 'seg_sizes' with 0.
+        let mut seg_sizes = VecMap::default();
         if seg.rel.is_blocky() {
-            segsizes.append(start_lsn, 0).unwrap();
+            seg_sizes.append(start_lsn, 0).unwrap();
         }
 
         let file = EphemeralFile::create(conf, tenantid, timelineid)?;
@@ -359,7 +360,7 @@ impl InMemoryLayer {
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::new(file),
-                segsizes,
+                seg_sizes,
             }),
         })
     }
@@ -367,19 +368,19 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, lsn: Lsn, blknum: u32, rec: WALRecord) -> Result<u32> {
+    pub fn put_wal_record(&self, lsn: Lsn, blknum: SegmentBlk, rec: WALRecord) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Wal(rec))
     }
 
     /// Remember new page version, as a full page image
-    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<u32> {
+    pub fn put_page_image(&self, blknum: SegmentBlk, lsn: Lsn, img: Bytes) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Page(img))
     }
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<u32> {
-        assert!(self.seg.blknum_in_seg(blknum));
+    pub fn put_page_version(&self, blknum: SegmentBlk, lsn: Lsn, pv: PageVersion) -> Result<u32> {
+        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         trace!(
             "put_page_version blk {} of {} at {}/{}",
@@ -404,7 +405,7 @@ impl InMemoryLayer {
 
         // Also update the relation size, if this extended the relation.
         if self.seg.rel.is_blocky() {
-            let newsize = blknum - self.seg.segno * RELISH_SEG_SIZE + 1;
+            let newsize = blknum + 1;
 
             // use inner get_seg_size, since calling self.get_seg_size will try to acquire the lock,
             // which we've just acquired above
@@ -426,8 +427,7 @@ impl InMemoryLayer {
                 // PostgreSQL writes its WAL records and there's no guarantee of it. If it does
                 // happen, we would hit the "page version already exists" warning above on the
                 // subsequent call to initialize the gap page.
-                let gapstart = self.seg.segno * RELISH_SEG_SIZE + oldsize;
-                for gapblknum in gapstart..blknum {
+                for gapblknum in oldsize..blknum {
                     let zeropv = PageVersion::Page(ZERO_PAGE.clone());
                     trace!(
                         "filling gap blk {} with zeros for write of {}",
@@ -441,13 +441,13 @@ impl InMemoryLayer {
 
                     if old.is_some() {
                         warn!(
-                            "Page version of rel {} blk {} at {} already exists",
-                            self.seg.rel, blknum, lsn
+                            "Page version of seg {} blk {} at {} already exists",
+                            self.seg, blknum, lsn
                         );
                     }
                 }
 
-                inner.segsizes.append_or_update_last(lsn, newsize).unwrap();
+                inner.seg_sizes.append_or_update_last(lsn, newsize).unwrap();
                 return Ok(newsize - oldsize);
             }
         }
@@ -456,7 +456,7 @@ impl InMemoryLayer {
     }
 
     /// Remember that the relation was truncated at given LSN
-    pub fn put_truncation(&self, lsn: Lsn, segsize: u32) {
+    pub fn put_truncation(&self, lsn: Lsn, new_size: SegmentBlk) {
         assert!(
             self.seg.rel.is_blocky(),
             "put_truncation() called on a non-blocky rel"
@@ -466,10 +466,13 @@ impl InMemoryLayer {
         inner.assert_writeable();
 
         // check that this we truncate to a smaller size than segment was before the truncation
-        let oldsize = inner.get_seg_size(lsn);
-        assert!(segsize < oldsize);
+        let old_size = inner.get_seg_size(lsn);
+        assert!(new_size < old_size);
 
-        let (old, _delta_size) = inner.segsizes.append_or_update_last(lsn, segsize).unwrap();
+        let (old, _delta_size) = inner
+            .seg_sizes
+            .append_or_update_last(lsn, new_size)
+            .unwrap();
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -515,10 +518,10 @@ impl InMemoryLayer {
         );
 
         // Copy the segment size at the start LSN from the predecessor layer.
-        let mut segsizes = VecMap::default();
+        let mut seg_sizes = VecMap::default();
         if seg.rel.is_blocky() {
             let size = src.get_seg_size(start_lsn)?;
-            segsizes.append(start_lsn, size).unwrap();
+            seg_sizes.append(start_lsn, size).unwrap();
         }
 
         let file = EphemeralFile::create(conf, tenantid, timelineid)?;
@@ -535,7 +538,7 @@ impl InMemoryLayer {
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::new(file),
-                segsizes,
+                seg_sizes,
             }),
         })
     }
@@ -558,7 +561,7 @@ impl InMemoryLayer {
             assert!(self.start_lsn < end_lsn + 1);
             inner.end_lsn = Some(Lsn(end_lsn.0 + 1));
 
-            if let Some((lsn, _)) = inner.segsizes.as_slice().last() {
+            if let Some((lsn, _)) = inner.seg_sizes.as_slice().last() {
                 assert!(lsn <= &end_lsn, "{:?} {:?}", lsn, end_lsn);
             }
 
@@ -606,7 +609,7 @@ impl InMemoryLayer {
                 true,
                 &inner.page_versions,
                 None,
-                inner.segsizes.clone(),
+                inner.seg_sizes.clone(),
             )?;
             trace!(
                 "freeze: created delta layer for dropped segment {} {}-{}",
@@ -628,7 +631,7 @@ impl InMemoryLayer {
         let mut delta_layers = Vec::new();
 
         if self.start_lsn != end_lsn_inclusive {
-            let (segsizes, _) = inner.segsizes.split_at(&end_lsn_exclusive);
+            let (seg_sizes, _) = inner.seg_sizes.split_at(&end_lsn_exclusive);
             // Write the page versions before the cutoff to disk.
             let delta_layer = DeltaLayer::create(
                 self.conf,
@@ -640,7 +643,7 @@ impl InMemoryLayer {
                 false,
                 &inner.page_versions,
                 Some(end_lsn_inclusive),
-                segsizes,
+                seg_sizes,
             )?;
             delta_layers.push(delta_layer);
             trace!(

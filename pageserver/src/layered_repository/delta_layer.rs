@@ -11,7 +11,7 @@
 //! can happen when you create a new branch in the middle of a delta layer, and the WAL
 //! records on the new branch are put in a new delta layer.
 //!
-//! When a delta file needs to be accessed, we slurp the metadata and relsize chapters
+//! When a delta file needs to be accessed, we slurp the metadata and segsize chapters
 //! into memory, into the DeltaLayerInner struct. See load() and unload() functions.
 //! To access a page/WAL record, we search `page_version_metas` for the block # and LSN.
 //! The byte ranges in the metadata can be used to find the page/WAL record in
@@ -35,13 +35,14 @@
 //! file contents in any way.
 //!
 //! A detlta file is constructed using the 'bookfile' crate. Each file consists of two
-//! parts: the page versions and the relation sizes. They are stored as separate chapters.
+//! parts: the page versions and the segment sizes. They are stored as separate chapters.
 //!
 use crate::layered_repository::blob::BlobWriter;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::page_versions::PageVersions;
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
+    RELISH_SEG_SIZE,
 };
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
@@ -76,7 +77,7 @@ static PAGE_VERSION_METAS_CHAPTER: u64 = 1;
 /// Page/WAL bytes - cannot be interpreted
 /// without PAGE_VERSION_METAS_CHAPTER
 static PAGE_VERSIONS_CHAPTER: u64 = 2;
-static REL_SIZES_CHAPTER: u64 = 3;
+static SEG_SIZES_CHAPTER: u64 = 3;
 
 /// Contains the [`Summary`] struct
 static SUMMARY_CHAPTER: u64 = 4;
@@ -136,7 +137,7 @@ pub struct DeltaLayer {
 }
 
 pub struct DeltaLayerInner {
-    /// If false, the 'page_version_metas' and 'relsizes' have not been
+    /// If false, the 'page_version_metas' and 'seg_sizes' have not been
     /// loaded into memory yet.
     loaded: bool,
 
@@ -144,16 +145,16 @@ pub struct DeltaLayerInner {
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
-    page_version_metas: VecMap<(u32, Lsn), BlobRange>,
+    page_version_metas: VecMap<(SegmentBlk, Lsn), BlobRange>,
 
-    /// `relsizes` tracks the size of the relation at different points in time.
-    relsizes: VecMap<Lsn, u32>,
+    /// `seg_sizes` tracks the size of the relation at different points in time.
+    seg_sizes: VecMap<Lsn, SegmentBlk>,
 }
 
 impl DeltaLayerInner {
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
         let slice = self
-            .relsizes
+            .seg_sizes
             .slice_range((Included(&Lsn(0)), Included(&lsn)));
         if let Some((_entry_lsn, entry)) = slice.last() {
             Ok(*entry)
@@ -195,14 +196,14 @@ impl Layer for DeltaLayer {
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
-        blknum: u32,
+        blknum: SegmentBlk,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.seg.blknum_in_seg(blknum));
+        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         match &cached_img_lsn {
             Some(cached_lsn) if &self.end_lsn <= cached_lsn => {
@@ -261,7 +262,7 @@ impl Layer for DeltaLayer {
             if need_image
                 && reconstruct_data.records.is_empty()
                 && self.seg.rel.is_blocky()
-                && blknum - self.seg.segno * RELISH_SEG_SIZE >= inner.get_seg_size(lsn)?
+                && blknum >= inner.get_seg_size(lsn)?
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -279,7 +280,7 @@ impl Layer for DeltaLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
         assert!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
@@ -309,7 +310,7 @@ impl Layer for DeltaLayer {
     fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.page_version_metas = VecMap::default();
-        inner.relsizes = VecMap::default();
+        inner.seg_sizes = VecMap::default();
         inner.loaded = false;
 
         // Note: we keep the Book open. Is that a good idea? The virtual file
@@ -340,9 +341,9 @@ impl Layer for DeltaLayer {
             self.tenantid, self.timelineid, self.seg, self.start_lsn, self.end_lsn
         );
 
-        println!("--- relsizes ---");
+        println!("--- seg sizes ---");
         let inner = self.load()?;
-        for (k, v) in inner.relsizes.as_slice() {
+        for (k, v) in inner.seg_sizes.as_slice() {
             println!("  {}: {}", k, v);
         }
         println!("--- page versions ---");
@@ -396,12 +397,12 @@ impl DeltaLayer {
         }
     }
 
-    /// Create a new delta file, using the given page versions and relsizes.
+    /// Create a new delta file, using the given page versions and seg_sizes.
     /// The page versions are passed in a PageVersions struct. If 'cutoff' is
     /// given, only page versions with LSN < cutoff are included.
     ///
     /// This is used to write the in-memory layer to disk. The page_versions and
-    /// relsizes are thus passed in the same format as they are in the in-memory
+    /// seg_sizes are thus passed in the same format as they are in the in-memory
     /// layer, as that's expedient.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
@@ -414,10 +415,10 @@ impl DeltaLayer {
         dropped: bool,
         page_versions: &PageVersions,
         cutoff: Option<Lsn>,
-        relsizes: VecMap<Lsn, u32>,
+        seg_sizes: VecMap<Lsn, SegmentBlk>,
     ) -> Result<DeltaLayer> {
         if seg.rel.is_blocky() {
-            assert!(!relsizes.is_empty());
+            assert!(!seg_sizes.is_empty());
         }
 
         let delta_layer = DeltaLayer {
@@ -432,7 +433,7 @@ impl DeltaLayer {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
-                relsizes,
+                seg_sizes,
             }),
         };
         let mut inner = delta_layer.inner.lock().unwrap();
@@ -471,9 +472,9 @@ impl DeltaLayer {
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
-        // and relsizes to separate chapter
-        let mut chapter = book.new_chapter(REL_SIZES_CHAPTER);
-        let buf = VecMap::ser(&inner.relsizes)?;
+        // and seg_sizes to separate chapter
+        let mut chapter = book.new_chapter(SEG_SIZES_CHAPTER);
+        let buf = VecMap::ser(&inner.seg_sizes)?;
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
@@ -550,13 +551,13 @@ impl DeltaLayer {
         let chapter = book.read_chapter(PAGE_VERSION_METAS_CHAPTER)?;
         let page_version_metas = VecMap::des(&chapter)?;
 
-        let chapter = book.read_chapter(REL_SIZES_CHAPTER)?;
-        let relsizes = VecMap::des(&chapter)?;
+        let chapter = book.read_chapter(SEG_SIZES_CHAPTER)?;
+        let seg_sizes = VecMap::des(&chapter)?;
 
         debug!("loaded from {}", &path.display());
 
         inner.page_version_metas = page_version_metas;
-        inner.relsizes = relsizes;
+        inner.seg_sizes = seg_sizes;
         inner.loaded = true;
 
         Ok(inner)
@@ -581,7 +582,7 @@ impl DeltaLayer {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
-                relsizes: VecMap::default(),
+                seg_sizes: VecMap::default(),
             }),
         }
     }
@@ -608,7 +609,7 @@ impl DeltaLayer {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
-                relsizes: VecMap::default(),
+                seg_sizes: VecMap::default(),
             }),
         })
     }
