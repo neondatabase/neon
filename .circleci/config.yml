@@ -495,6 +495,27 @@ jobs:
             ansible-playbook .circleci/storage-redeploy.playbook.yml
             rm -f zenith_install.tar.gz
 
+  deploy-staging-proxy:
+    docker:
+      - image: cimg/base:2021.04
+    environment:
+      KUBECONFIG: .kubeconfig
+    steps:
+      - checkout
+      - run:
+          name: Store kubeconfig file
+          command: echo "${STAGING_KUBECONFIG_DATA}" | base64 --decode >.kubeconfig
+      - run:
+          name: Setup helm v3
+          command: |
+            curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            helm repo add zenithdb https://zenithdb.github.io/helm-charts
+      - run:
+          name: Re-deploy proxy
+          command: |
+            DOCKER_TAG=$(git log --oneline|wc -l)
+            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f proxy.staging.yaml --set image.tag=${DOCKER_TAG} --wait
+
   # Trigger a new remote CI job
   remote-ci-trigger:
     docker:
@@ -595,6 +616,7 @@ workflows:
             branches:
               only:
                 - main
+                - feature/proxy-deploy
           requires:
             - pg_regress-tests-release
             - other-tests-release
@@ -612,11 +634,20 @@ workflows:
       - deploy-staging:
           # Context gives an ability to login
           context: Docker Hub
-          # Build image only for commits to main
+          # deploy only for commits to main
           filters:
             branches:
               only:
                 - main
+          requires:
+            - docker-image
+      - deploy-staging-proxy:
+          # deploy only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+                - feature/proxy-deploy
           requires:
             - docker-image
       - remote-ci-trigger:
