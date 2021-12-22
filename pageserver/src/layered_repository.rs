@@ -1224,11 +1224,19 @@ impl LayeredTimeline {
     }
 
     ///
-    /// Try to get cached last segment number visible at givin LSN
+    /// Try to get cached last segment number visible at given LSN
     ///
     fn get_last_segno(&self, rel: RelishTag, lsn: Lsn) -> Option<u32> {
         let self_layers = self.layers.lock().unwrap();
         self_layers.get_last_segno(rel, lsn)
+    }
+
+    ///
+    /// Mark segment as dropped in layer map
+    ///
+    fn drop_layer(&self, tag: &SegmentTag, lsn: Lsn) {
+        let mut self_layers = self.layers.lock().unwrap();
+        self_layers.drop_layer(tag, lsn);
     }
 
     ///
@@ -2265,7 +2273,9 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                 rel,
                 segno: remove_segno,
             };
-
+            if remove_segno == last_remain_seg + 1 {
+                self.tl.drop_layer(&seg, lsn);
+            }
             let layer = self.tl.get_layer_for_write(seg, lsn)?;
             layer.drop_segment(lsn);
         }
@@ -2304,6 +2314,9 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
                         rel,
                         segno: remove_segno,
                     };
+                    if remove_segno == 0 {
+                        self.tl.drop_layer(&seg, lsn);
+                    }
                     let layer = self.tl.get_layer_for_write(seg, lsn)?;
                     layer.drop_segment(lsn);
                 }

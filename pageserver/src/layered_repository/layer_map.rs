@@ -173,21 +173,33 @@ impl LayerMap {
 
         if let Some(segentry) = self.segs.get_mut(&tag) {
             segentry.historic.remove(&layer);
-            if tag.segno != 0 {
-                self.last_seg.insert(
-                    tag.rel,
-                    RelishSize {
-                        lsn: layer.get_end_lsn(),
-                        last_segno: tag.segno - 1,
-                    },
-                );
-            } else {
-                self.last_seg.remove(&tag.rel);
-            }
         }
         NUM_ONDISK_LAYERS.dec();
     }
 
+    ///
+    /// Update last segment cache.
+    /// This method is not actually removing something (it is responsibility of
+    /// remove_historic/remove_open), it just update cache to let get_last_segno
+    /// return correct number.
+    ///
+    pub fn drop_layer(&mut self, tag: &SegmentTag, lsn: Lsn) {
+        if tag.segno != 0 {
+            self.last_seg.insert(
+                tag.rel,
+                RelishSize {
+                    lsn,
+                    last_segno: tag.segno - 1,
+                },
+            );
+        } else {
+            self.last_seg.remove(&tag.rel);
+        }
+    }
+
+    ///
+    /// Get last segment number
+    ///
     pub fn get_last_segno(&self, rel: RelishTag, lsn: Lsn) -> Option<u32> {
         if let Some(entry) = self.last_seg.get(&rel) {
             if lsn >= entry.lsn {
