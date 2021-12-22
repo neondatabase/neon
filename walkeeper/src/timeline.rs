@@ -27,6 +27,7 @@ use crate::upgrade::upgrade_control_file;
 use crate::SafeKeeperConf;
 use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 use std::convert::TryInto;
+use zenith_utils::pq_proto::ZenithFeedback;
 
 // contains persistent metadata for safekeeper
 const CONTROL_FILE_NAME: &str = "safekeeper.control";
@@ -35,17 +36,17 @@ const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
 const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 
-/// Replica status: host standby feedback + disk consistent lsn
+/// Replica status update + hot standby feedback
 #[derive(Debug, Clone, Copy)]
 pub struct ReplicaState {
     /// last known lsn received by replica
     pub last_received_lsn: Lsn, // None means we don't know
-    /// combined disk_consistent_lsn of pageservers
-    pub disk_consistent_lsn: Lsn,
     /// combined remote consistent lsn of pageservers
     pub remote_consistent_lsn: Lsn,
     /// combined hot standby feedback from all replicas
     pub hs_feedback: HotStandbyFeedback,
+    /// Zenith specific feedback received from pageserver, if any
+    pub zenith_feedback: Option<ZenithFeedback>,
 }
 
 impl Default for ReplicaState {
@@ -58,13 +59,13 @@ impl ReplicaState {
     pub fn new() -> ReplicaState {
         ReplicaState {
             last_received_lsn: Lsn::MAX,
-            disk_consistent_lsn: Lsn(u64::MAX),
-            remote_consistent_lsn: Lsn(u64::MAX),
+            remote_consistent_lsn: Lsn(0),
             hs_feedback: HotStandbyFeedback {
                 ts: 0,
                 xmin: u64::MAX,
                 catalog_xmin: u64::MAX,
             },
+            zenith_feedback: None,
         }
     }
 }
@@ -109,13 +110,40 @@ impl SharedState {
             acc.hs_feedback.xmin = min(acc.hs_feedback.xmin, state.hs_feedback.xmin);
             acc.hs_feedback.catalog_xmin =
                 min(acc.hs_feedback.catalog_xmin, state.hs_feedback.catalog_xmin);
-            acc.disk_consistent_lsn = Lsn::min(acc.disk_consistent_lsn, state.disk_consistent_lsn);
-            // currently not used, but update it to be consistent
-            acc.last_received_lsn = Lsn::min(acc.last_received_lsn, state.last_received_lsn);
-            // When at least one replica has preserved data up to remote_consistent_lsn,
-            // safekeeper is free to delete it, so chose max of all replicas.
-            acc.remote_consistent_lsn =
-                Lsn::max(acc.remote_consistent_lsn, state.remote_consistent_lsn);
+
+            // FIXME
+            // If multiple pageservers are streaming WAL and send feedback for the same timeline simultaneously,
+            // this code is not correct.
+            // Now the most advanced feedback is used.
+            // If one pageserver lags when another doesn't, the backpressure won't be activated on compute and lagging
+            // pageserver is prone to timeout errors.
+            //
+            // To choose what feedback to use and resend to compute node,
+            // we need to know which pageserver compute node considers to be main.
+            // See https://github.com/zenithdb/zenith/issues/1171
+            //
+            if let Some(zenith_feedback) = state.zenith_feedback {
+                if let Some(acc_feedback) = acc.zenith_feedback {
+                    if acc_feedback.ps_writelsn < zenith_feedback.ps_writelsn {
+                        warn!("More than one pageserver is streaming WAL for the timeline. Feedback resolving is not fully supported yet.");
+                        acc.zenith_feedback = Some(zenith_feedback);
+                    }
+                } else {
+                    acc.zenith_feedback = Some(zenith_feedback);
+                }
+
+                // last lsn received by pageserver
+                // FIXME if multiple pageservers are streaming WAL, last_received_lsn must be tracked per pageserver.
+                // See https://github.com/zenithdb/zenith/issues/1171
+                acc.last_received_lsn = Lsn::from(zenith_feedback.ps_writelsn);
+
+                // When at least one pageserver has preserved data up to remote_consistent_lsn,
+                // safekeeper is free to delete it, so choose max of all pageservers.
+                acc.remote_consistent_lsn = max(
+                    Lsn::from(zenith_feedback.ps_applylsn),
+                    acc.remote_consistent_lsn,
+                );
+            }
         }
         acc
     }
@@ -280,8 +308,9 @@ impl Timeline {
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
                 let state = shared_state.get_replicas_state();
                 resp.hs_feedback = state.hs_feedback;
-                resp.disk_consistent_lsn = state.disk_consistent_lsn;
-                // XXX Do we need to add state.last_received_lsn to resp?
+                if let Some(zenith_feedback) = state.zenith_feedback {
+                    resp.zenith_feedback = zenith_feedback;
+                }
             }
         }
         // Ping wal sender that new data might be available.

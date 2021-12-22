@@ -9,6 +9,8 @@ use postgres_ffi::xlog_utils::{
     get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
 };
 
+use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fs::File;
@@ -19,20 +21,21 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{str, thread};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody};
+use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody, ZenithFeedback};
 use zenith_utils::sock_split::ReadStream;
 
-use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
-use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
 const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
+// zenith extension of replication protocol
+const ZENITH_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 
 type FullTransactionId = u64;
 
@@ -139,8 +142,8 @@ impl ReplicationConn {
         while let Some(msg) = FeMessage::read(&mut stream_in)? {
             match &msg {
                 FeMessage::CopyData(m) => {
-                    // There's two possible data messages that the client is supposed to send here:
-                    // `HotStandbyFeedback` and `StandbyStatusUpdate`.
+                    // There's three possible data messages that the client is supposed to send here:
+                    // `HotStandbyFeedback` and `StandbyStatusUpdate` and `ZenithStandbyFeedback`.
 
                     match m.first().cloned() {
                         Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
@@ -150,11 +153,25 @@ impl ReplicationConn {
                             timeline.update_replica_state(replica_id, state);
                         }
                         Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
-                            let reply = StandbyReply::des(&m[1..])
+                            let _reply = StandbyReply::des(&m[1..])
                                 .context("failed to deserialize StandbyReply")?;
-                            state.last_received_lsn = reply.write_lsn;
-                            state.disk_consistent_lsn = reply.flush_lsn;
-                            state.remote_consistent_lsn = reply.apply_lsn;
+                            // This must be a regular postgres replica,
+                            // because pageserver doesn't send this type of messages to safekeeper.
+                            // Currently this is not implemented, so this message is ignored.
+
+                            warn!("unexpected StandbyReply. Read-only postgres replicas are not supported in safekeepers yet.");
+                            // timeline.update_replica_state(replica_id, Some(state));
+                        }
+                        Some(ZENITH_STATUS_UPDATE_TAG_BYTE) => {
+                            // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
+                            let buf = Bytes::copy_from_slice(&m[9..]);
+                            let reply = ZenithFeedback::parse(buf);
+
+                            info!("ZenithFeedback is {:?}", reply);
+                            // Only pageserver sends ZenithFeedback, so set the flag.
+                            // This replica is the source of information to resend to compute.
+                            state.zenith_feedback = Some(reply);
+
                             timeline.update_replica_state(replica_id, state);
                         }
                         _ => warn!("unexpected message {:?}", msg),
