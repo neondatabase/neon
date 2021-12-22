@@ -10,6 +10,7 @@ use std::{
     str::FromStr,
     thread,
 };
+
 use tracing::*;
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
 
@@ -28,6 +29,7 @@ use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals::{self, Signal};
 
 use const_format::formatcp;
+use fail::FailScenario;
 
 /// String arguments that can be declared via CLI or config file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -488,6 +490,8 @@ fn main() -> Result<()> {
     // as a ref.
     let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
+    let scenario = FailScenario::setup();
+
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
 
@@ -506,10 +510,11 @@ fn main() -> Result<()> {
                 cfg_file_path.display()
             )
         })?;
-        Ok(())
     } else {
-        start_pageserver(conf).context("Failed to start pageserver")
+        start_pageserver(conf).context("Failed to start pageserver")?;
     }
+    scenario.teardown();
+    Ok(())
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> Result<()> {

@@ -431,6 +431,10 @@ default_tenantid = '{self.initial_tenant}'
 pg_port = {pageserver_port.pg}
 http_port = {pageserver_port.http}
 auth_type = '{pageserver_auth_type}'
+gc_period = '1s'
+gc_horizon = 65536
+checkpoint_period = '1s'
+checkpoint_distance = 1048576
         """
 
         # Create a corresponding ZenithPageserver object

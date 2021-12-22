@@ -99,6 +99,8 @@ impl PageServerNode {
     pub fn init(&self, create_tenant: Option<&str>) -> anyhow::Result<()> {
         let listen_pg = format!("localhost:{}", self.env.pageserver.pg_port);
         let listen_http = format!("localhost:{}", self.env.pageserver.http_port);
+        let checkpoint_distance = self.env.pageserver.checkpoint_distance.to_string();
+        let gc_horizon = self.env.pageserver.gc_horizon.to_string();
         let mut args = vec![
             "--init",
             "-D",
@@ -109,6 +111,14 @@ impl PageServerNode {
             &listen_pg,
             "--listen-http",
             &listen_http,
+            "--checkpoint_distance",
+            &checkpoint_distance,
+            "--checkpoint_period",
+            &self.env.pageserver.checkpoint_period,
+            "--gc_period",
+            &self.env.pageserver.gc_period,
+            "--gc_horizon",
+            &gc_horizon,
         ];
 
         let auth_type_str = &self.env.pageserver.auth_type.to_string();

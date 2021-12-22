@@ -15,3 +15,7 @@ members = [
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
 debug = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

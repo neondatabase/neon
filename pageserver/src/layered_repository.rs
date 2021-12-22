@@ -14,6 +14,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
+use fail::fail_point;
 use lazy_static::lazy_static;
 use postgres_ffi::pg_constants::BLCKSZ;
 use tracing::*;
@@ -1504,6 +1505,8 @@ impl LayeredTimeline {
         drop(layers);
         drop(write_guard);
 
+        fail_point!("checkpoint-before-sync");
+
         if !layer_uploads.is_empty() {
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
@@ -1511,6 +1514,8 @@ impl LayeredTimeline {
                 File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
             timeline_dir.sync_all()?;
         }
+
+        fail_point!("checkpoint-after-sync");
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
