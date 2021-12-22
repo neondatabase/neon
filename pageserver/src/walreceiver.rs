@@ -11,6 +11,7 @@ use crate::tenant_mgr::TenantState;
 use crate::tenant_threads;
 use crate::walingest::WalIngest;
 use anyhow::{bail, Context, Error, Result};
+use bytes::BytesMut;
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use postgres_ffi::waldecoder::*;
@@ -30,9 +31,9 @@ use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
 use tracing::*;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::pq_proto::ZenithFeedback;
 use zenith_utils::zid::ZTenantId;
 use zenith_utils::zid::ZTimelineId;
-
 //
 // We keep one WAL Receiver active per timeline.
 //
@@ -339,7 +340,6 @@ fn walreceiver_main(
         };
 
         if let Some(last_lsn) = status_update {
-            let last_lsn = PgLsn::from(u64::from(last_lsn));
             let timeline_synced_disk_consistent_lsn =
                 tenant_mgr::get_repository_for_tenant(tenantid)?
                     .get_timeline_state(timelineid)
@@ -347,19 +347,41 @@ fn walreceiver_main(
                     .unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
-            let write_lsn = last_lsn;
+            let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
+            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
-            let apply_lsn = PgLsn::from(u64::from(timeline_synced_disk_consistent_lsn));
+            let apply_lsn = u64::from(timeline_synced_disk_consistent_lsn);
             let ts = SystemTime::now();
-            const NO_REPLY: u8 = 0;
+
+            info!(
+                "standby_status_update write_lsn {}, flush_lsn {}, apply_lsn {}",
+                write_lsn, flush_lsn, apply_lsn
+            );
+
+            // Send zenith feedback message.
+            // Regular standby_status_update fields are put into this message.
+            let zenith_status_update = ZenithFeedback {
+                current_instance_size: timeline.get_current_logical_size() as u64,
+                ps_writelsn: write_lsn,
+                ps_flushlsn: flush_lsn,
+                ps_applylsn: apply_lsn,
+                ps_replytime: ts,
+            };
+
+            let mut data = BytesMut::new();
+            zenith_status_update.serialize(&mut data)?;
             runtime.block_on(
                 physical_stream
                     .as_mut()
-                    .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY),
+                    .zenith_status_update(data.len() as u64, &data),
             )?;
+        }
+
+        if tenant_mgr::shutdown_requested() {
+            debug!("stop walreceiver because pageserver shutdown is requested");
+            break;
         }
     }
 

@@ -1320,7 +1320,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 [[package]]
 name = "postgres"
 version = "0.19.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7#2949d98df52587d562986aad155dd4e889e408b7"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -1334,7 +1334,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7#2949d98df52587d562986aad155dd4e889e408b7"
 dependencies = [
  "base64 0.13.0",
  "byteorder",
@@ -1352,7 +1352,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7#2949d98df52587d562986aad155dd4e889e408b7"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -2082,7 +2082,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7#2949d98df52587d562986aad155dd4e889e408b7"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -2615,6 +2615,7 @@ dependencies = [
  "lazy_static",
  "nix",
  "postgres",
+ "postgres-protocol",
  "rand",
  "routerify",
  "rustls 0.19.1",

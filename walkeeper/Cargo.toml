@@ -20,8 +20,8 @@ clap = "2.33.0"
 daemonize = "0.4.1"
 rust-s3 = { version = "0.28", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls"] }
 tokio = "1.11"
-postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
+postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 anyhow = "1.0"
 crc32c = "0.6.0"
 humantime = "2.1.0"
@@ -30,7 +30,7 @@ signal-hook = "0.3.10"
 serde = { version = "1.0", features = ["derive"] }
 hex = "0.4.3"
 const_format = "0.2.21"
-tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
+tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 
 postgres_ffi = { path = "../postgres_ffi" }
 workspace_hack = { path = "../workspace_hack" }
