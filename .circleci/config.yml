@@ -618,7 +618,6 @@ workflows:
             branches:
               only:
                 - main
-                - feature/proxy-deploy
           requires:
             - pg_regress-tests-release
             - other-tests-release
@@ -649,7 +648,6 @@ workflows:
             branches:
               only:
                 - main
-                - feature/proxy-deploy
           requires:
             - docker-image
       - remote-ci-trigger:
