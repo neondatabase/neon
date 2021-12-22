@@ -504,7 +504,9 @@ jobs:
       - checkout
       - run:
           name: Store kubeconfig file
-          command: echo "${STAGING_KUBECONFIG_DATA}" | base64 --decode >.kubeconfig
+          command: |
+            echo "${STAGING_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
+            chmod 0600 ${KUBECONFIG}
       - run:
           name: Setup helm v3
           command: |
@@ -514,7 +516,7 @@ jobs:
           name: Re-deploy proxy
           command: |
             DOCKER_TAG=$(git log --oneline|wc -l)
-            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f proxy.staging.yaml --set image.tag=${DOCKER_TAG} --wait
+            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f .circleci/proxy.staging.yaml --set image.tag=${DOCKER_TAG} --wait
 
   # Trigger a new remote CI job
   remote-ci-trigger:
