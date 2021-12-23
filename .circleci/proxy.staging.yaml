@@ -1,0 +1,13 @@
+# Helm chart values for zenith-proxy.
+# This is a YAML-formatted file.
+
+settings:
+  authEndpoint: "https://console.stage.zenith.tech/authenticate_proxy_request/"
+  uri: "https://console.stage.zenith.tech/psql_session/"
+
+exposedService:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    external-dns.alpha.kubernetes.io/hostname: start.stage.zenith.tech
