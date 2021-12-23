@@ -1180,6 +1180,7 @@ dependencies = [
  "log",
  "nix",
  "once_cell",
+ "parking_lot",
  "postgres",
  "postgres-protocol",
  "postgres-types",
