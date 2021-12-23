@@ -6,7 +6,7 @@
 //! modifications in tests.
 //!
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 use crc32c::crc32c_append;
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
 
 #[derive(Serialize, Deserialize, Debug)]
-struct AppendLogicalMessage {
+pub struct AppendLogicalMessage {
     // prefix and message to build LogicalMessage
     lm_prefix: String,
     lm_message: String,
@@ -59,15 +59,8 @@ struct AppendResult {
 pub fn handle_json_ctrl(
     spg: &mut SafekeeperPostgresHandler,
     pgb: &mut PostgresBackend,
-    cmd: &Bytes,
+    append_request: &AppendLogicalMessage,
 ) -> Result<()> {
-    let cmd = cmd
-        .strip_prefix(b"JSON_CTRL")
-        .ok_or_else(|| anyhow!("invalid prefix"))?;
-    // trim zeroes in the end
-    let cmd = cmd.strip_suffix(&[0u8]).unwrap_or(cmd);
-
-    let append_request: AppendLogicalMessage = serde_json::from_slice(cmd)?;
     info!("JSON_CTRL request: {:?}", append_request);
 
     // need to init safekeeper state before AppendRequest
@@ -104,8 +97,8 @@ fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
         pg_version: 0,       // unknown
         proposer_id: [0u8; 16],
         system_id: 0,
-        ztli: spg.timelineid.unwrap(),
-        tenant_id: spg.tenantid.unwrap(),
+        ztli: spg.ztimelineid.unwrap(),
+        tenant_id: spg.ztenantid.unwrap(),
         tli: 0,
         wal_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
     });
@@ -146,9 +139,9 @@ struct InsertedWAL {
 /// create AppendRequest with new WAL and pass it to safekeeper.
 fn append_logical_message(
     spg: &mut SafekeeperPostgresHandler,
-    msg: AppendLogicalMessage,
+    msg: &AppendLogicalMessage,
 ) -> Result<InsertedWAL> {
-    let wal_data = encode_logical_message(msg.lm_prefix, msg.lm_message);
+    let wal_data = encode_logical_message(&msg.lm_prefix, &msg.lm_message);
     let sk_state = spg.timeline.get().get_info();
 
     let begin_lsn = msg.begin_lsn;
@@ -206,7 +199,7 @@ impl XlLogicalMessage {
 /// Create new WAL record for non-transactional logical message.
 /// Used for creating artificial WAL for tests, as LogicalMessage
 /// record is basically no-op.
-fn encode_logical_message(prefix: String, message: String) -> Vec<u8> {
+fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
     let mut prefix_bytes = BytesMut::with_capacity(prefix.len() + 1);
     prefix_bytes.put(prefix.as_bytes());
     prefix_bytes.put_u8(0);
@@ -270,6 +263,6 @@ fn test_encode_logical_message() {
         0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 112, 114, 101, 102,
         105, 120, 0, 109, 101, 115, 115, 97, 103, 101,
     ];
-    let actual = encode_logical_message("prefix".to_string(), "message".to_string());
+    let actual = encode_logical_message("prefix", "message");
     assert_eq!(expected, actual[..]);
 }

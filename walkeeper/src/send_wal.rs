@@ -4,11 +4,11 @@
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use anyhow::{anyhow, bail, Context, Result};
-use bytes::Bytes;
+
 use postgres_ffi::xlog_utils::{
     get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
 };
-use regex::Regex;
+
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fs::File;
@@ -170,18 +170,6 @@ impl ReplicationConn {
         Ok(())
     }
 
-    /// Helper function that parses a single LSN.
-    fn parse_start(cmd: &[u8]) -> Result<Lsn> {
-        let re = Regex::new(r"([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
-        let caps = re.captures_iter(str::from_utf8(cmd)?);
-        let mut lsns = caps.map(|cap| cap[1].parse::<Lsn>());
-        let start_pos = lsns
-            .next()
-            .ok_or_else(|| anyhow!("Failed to parse start LSN from command"))??;
-        assert!(lsns.next().is_none());
-        Ok(start_pos)
-    }
-
     /// Helper function for opening a wal file.
     fn open_wal_file(wal_file_path: &Path) -> Result<File> {
         // First try to open the .partial file.
@@ -207,9 +195,9 @@ impl ReplicationConn {
         &mut self,
         spg: &mut SafekeeperPostgresHandler,
         pgb: &mut PostgresBackend,
-        cmd: &Bytes,
+        mut start_pos: Lsn,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.timelineid.unwrap()).entered();
+        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap()).entered();
 
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(spg.timeline.get());
@@ -229,8 +217,6 @@ impl ReplicationConn {
                 }
             })
             .unwrap();
-
-        let mut start_pos = Self::parse_start(cmd)?;
 
         let mut wal_seg_size: usize;
         loop {
@@ -266,7 +252,7 @@ impl ReplicationConn {
                 None
             } else {
                 let timelineid = spg.timeline.get().timelineid;
-                let tenant_id = spg.tenantid.unwrap();
+                let tenant_id = spg.ztenantid.unwrap();
                 let tx_clone = spg.tx.clone();
                 spg.tx
                     .send(CallmeEvent::Pause(tenant_id, timelineid))
