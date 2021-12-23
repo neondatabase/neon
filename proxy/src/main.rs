@@ -9,7 +9,10 @@ use anyhow::bail;
 use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
 use std::thread;
-use zenith_utils::{tcp_listener, GIT_VERSION};
+use zenith_utils::{
+    tcp_listener::{self, to_blocking_listener},
+    GIT_VERSION,
+};
 
 mod cplane_api;
 mod mgmt;
@@ -102,10 +105,10 @@ fn main() -> anyhow::Result<()> {
         // for each connection.
         thread::Builder::new()
             .name("Listener thread".into())
-            .spawn(move || proxy::thread_main(state, pageserver_listener))?,
+            .spawn(move || proxy::thread_main(state, to_blocking_listener(pageserver_listener)?))?,
         thread::Builder::new()
             .name("Mgmt thread".into())
-            .spawn(move || mgmt::thread_main(state, mgmt_listener))?,
+            .spawn(move || mgmt::thread_main(state, to_blocking_listener(mgmt_listener)?))?,
     ];
 
     for t in threads {

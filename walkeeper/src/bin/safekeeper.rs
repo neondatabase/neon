@@ -137,16 +137,20 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         )
     })?;
 
-    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
-        error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
-        e
-    })?;
+    let http_listener = tcp_listener::to_blocking_listener(
+        tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
+            error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
+            e
+        })?,
+    )?;
 
     info!("Starting safekeeper on {}", conf.listen_pg_addr);
-    let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
-        error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
-        e
-    })?;
+    let pg_listener = tcp_listener::to_blocking_listener(
+        tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
+            error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
+            e
+        })?,
+    )?;
 
     // XXX: Don't spawn any threads before daemonizing!
     if conf.daemonize {

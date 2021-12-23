@@ -161,7 +161,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         "Starting pageserver http handler on {}",
         conf.listen_http_addr
     );
-    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone())?;
+    let http_listener =
+        tcp_listener::to_blocking_listener(tcp_listener::bind(conf.listen_http_addr.clone())?)?;
 
     info!(
         "Starting pageserver pg protocol handler on {}",

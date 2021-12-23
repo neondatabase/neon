@@ -14,12 +14,12 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::{io, net::TcpStream};
+use tokio::net::TcpListener;
 use tracing::*;
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
@@ -190,12 +190,18 @@ pub fn thread_main(
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
     let mut join_handles = Vec::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
 
     while !tenant_mgr::shutdown_requested() {
-        let (socket, peer_addr) = listener.accept()?;
+        let (socket, peer_addr) = runtime.block_on(listener.accept())?;
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
         let local_auth = auth.clone();
+
+        let socket = socket.into_std()?;
+        socket.set_nonblocking(false)?;
 
         let handle = thread::Builder::new()
             .name("serving Page Service thread".into())
