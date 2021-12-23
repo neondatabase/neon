@@ -256,7 +256,7 @@ async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<(String, tokio::
 
     tokio::pin!(query, conn);
 
-    let version: String = tokio::select!(
+    let version = tokio::select!(
         x = query => x?.try_get(0)?,
         _ = conn => bail!("connection closed too early"),
     );
