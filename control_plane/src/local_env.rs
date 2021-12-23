@@ -93,10 +93,10 @@ impl Default for PageServerConf {
             http_port: 0,
             auth_type: AuthType::Trust,
             auth_token: "".to_string(),
-            gc_period: "1s".to_string(),
-            gc_horizon: 64 * 1024,
+            gc_period: "100s".to_string(),
+            gc_horizon: 64 * 1024 * 1024,
             checkpoint_period: "1s".to_string(),
-            checkpoint_distance: 1024 * 1024,
+            checkpoint_distance: 256 * 1024 * 1024,
         }
     }
 }
