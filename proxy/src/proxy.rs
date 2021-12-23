@@ -69,7 +69,8 @@ impl ProxyConnection {
             let (username, dbname) = self.handle_startup()?;
 
             // Both scenarios here should end up producing database credentials
-            if username.ends_with("@zenith") {
+            // HACK, will remove this before PR, just ignore it
+            if true || username.ends_with("@zenith") {
                 self.handle_existing_user(&username, &dbname)
             } else {
                 self.handle_new_user()
@@ -84,6 +85,9 @@ impl ProxyConnection {
                 bail!("failed to handle client: {:?}", e);
             }
         };
+
+        // TODO send BackendKeyData with CancelToken.
+        //      Should I add a variant to BeMessage?
 
         // We'll get rid of this once migration to async is complete
         let (pg_version, db_stream) = {
@@ -144,8 +148,19 @@ impl ProxyConnection {
 
                     return Ok((get_param("user")?, get_param("database")?));
                 }
-                // TODO: implement proper stmt cancellation
-                StartupRequestCode::Cancel => bail!("query cancellation is not supported"),
+                StartupRequestCode::Cancel => {
+                    bail!("Cancel message has no key data, ignoring.")
+                    // TODO After connecting using tokio_postgres, send that cancel
+                    //      token to the client. It must happen after AuthenticationOk
+                    //      but before ReadyForQuery.
+                    //      See https://www.postgresql.org/docs/7.2/protocol-protocol.html
+                    //      for more details (ctrl-f for "cancel" and "security").
+
+                    // TODO if msg.params has a good cancel token, call
+                    //      token.cancel_query(NoTls) on it.
+                    //      TODO why NoTls? Currently i'm cargo-culting from how
+                    //           we initialize connect_raw.
+                }
             }
         }
     }
@@ -170,14 +185,22 @@ impl ProxyConnection {
             .split_last()
             .ok_or_else(|| anyhow!("unexpected password message"))?;
 
-        let cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
-        let db_info = cplane.authenticate_proxy_request(
-            user,
-            db,
-            md5_response,
-            &md5_salt,
-            &self.psql_session_id,
-        )?;
+        // HACK, will remove this before PR, just ignore it
+        // let cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
+        // let db_info = cplane.authenticate_proxy_request(
+        //     user,
+        //     db,
+        //     md5_response,
+        //     &md5_salt,
+        //     &self.psql_session_id,
+        // )?;
+        let db_info = DatabaseInfo {
+            host: "localhost".into(),
+            port: 5432,
+            dbname: "postgres".into(),
+            user: "postgres".into(),
+            password: Some("postgres".into()),
+        };
 
         self.pgb
             .write_message_noflush(&Be::AuthenticationOk)?
@@ -233,11 +256,12 @@ async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<(String, tokio::
 
     tokio::pin!(query, conn);
 
-    let version = tokio::select!(
+    let version: String = tokio::select!(
         x = query => x?.try_get(0)?,
         _ = conn => bail!("connection closed too early"),
     );
 
+    // TODO return client.cancel_token() too
     Ok((version, socket))
 }
 
