@@ -35,7 +35,7 @@ lazy_static! {
 fn ssl() {
     let (mut client_sock, server_sock) = make_tcp_pair();
 
-    const QUERY: &[u8] = b"hello world";
+    const QUERY: &str = "hello world";
 
     let client_jh = std::thread::spawn(move || {
         // SSLRequest
@@ -82,7 +82,7 @@ fn ssl() {
         stream
             .write_u32::<BigEndian>(4u32 + QUERY.len() as u32)
             .unwrap();
-        stream.write_all(QUERY).unwrap();
+        stream.write_all(QUERY.as_ref()).unwrap();
         stream.flush().unwrap();
 
         // ReadyForQuery
@@ -97,9 +97,9 @@ fn ssl() {
         fn process_query(
             &mut self,
             _pgb: &mut PostgresBackend,
-            query_string: bytes::Bytes,
+            query_string: &str,
         ) -> anyhow::Result<()> {
-            self.got_query = query_string.as_ref() == QUERY;
+            self.got_query = query_string == QUERY;
             Ok(())
         }
     }
@@ -142,7 +142,7 @@ fn no_ssl() {
         fn process_query(
             &mut self,
             _pgb: &mut PostgresBackend,
-            _query_string: bytes::Bytes,
+            _query_string: &str,
         ) -> anyhow::Result<()> {
             panic!()
         }
@@ -202,7 +202,7 @@ fn server_forces_ssl() {
         fn process_query(
             &mut self,
             _pgb: &mut PostgresBackend,
-            _query_string: bytes::Bytes,
+            _query_string: &str,
         ) -> anyhow::Result<()> {
             panic!()
         }
