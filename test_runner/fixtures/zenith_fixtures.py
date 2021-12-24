@@ -432,7 +432,7 @@ pg_port = {pageserver_port.pg}
 http_port = {pageserver_port.http}
 auth_type = '{pageserver_auth_type}'
 gc_period = '1s'
-gc_horizon = 1048576
+gc_horizon = 67108864
 checkpoint_period = '1s'
 checkpoint_distance = 1048576
         """
