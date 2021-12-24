@@ -1,12 +1,24 @@
 use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
 use anyhow::{anyhow, bail};
+use lazy_static::lazy_static;
+use parking_lot::Mutex;
+use rand::Rng;
+use std::collections::HashMap;
 use std::net::TcpStream;
 use std::{io, thread};
-use tokio_postgres::NoTls;
+use tokio_postgres::{CancelToken, NoTls};
 use zenith_utils::postgres_backend::{self, PostgresBackend, ProtoState, Stream};
 use zenith_utils::pq_proto::{BeMessage as Be, FeMessage as Fe, *};
 use zenith_utils::sock_split::{ReadStream, WriteStream};
+
+lazy_static! {
+    // NOTE including DatabaseInfo in the value would be unnecessary if I can figure out
+    //      how to use cancel_token.cancel_query. For now I rely on cancel_query_raw,
+    //      which needs the DatabaseInfo.
+    static ref CANCEL_MAP: Mutex<HashMap<(i32, i32), (CancelToken, DatabaseInfo)>> =
+        Mutex::new(HashMap::new());
+}
 
 ///
 /// Main proxy listener loop.
@@ -51,7 +63,10 @@ pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow:
         )?,
     };
 
-    let (client, server) = conn.handle_client()?;
+    let (client, server) = match conn.handle_client()? {
+        Some(x) => x,
+        None => return Ok(())
+    };
 
     let server = zenith_utils::sock_split::BidiStream::from_tcp(server);
 
@@ -64,21 +79,30 @@ pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow:
 }
 
 impl ProxyConnection {
-    fn handle_client(mut self) -> anyhow::Result<(Stream, TcpStream)> {
+    // TODO all this Result<Option<_>> nesting is getting hairy.
+    //      Consider simplifying before asking for review.
+    //      Maybe compose these functions instead of nesting them?
+    //      If not at least document what None means everywhere
+    //      (successfully closed connection).
+    fn handle_client(mut self) -> anyhow::Result<Option<(Stream, TcpStream)>> {
         let mut authenticate = || {
-            let (username, dbname) = self.handle_startup()?;
+            let (username, dbname) = match self.handle_startup()? {
+                Some(x) => x,
+                None => return Ok(None)
+            };
 
             // Both scenarios here should end up producing database credentials
             // HACK, will remove this before PR, just ignore it
             if true || username.ends_with("@zenith") {
-                self.handle_existing_user(&username, &dbname)
+                self.handle_existing_user(&username, &dbname).map(|x| Some(x))
             } else {
-                self.handle_new_user()
+                self.handle_new_user().map(|x| Some(x))
             }
         };
 
         let conn = match authenticate() {
-            Ok(db_info) => connect_to_db(db_info),
+            Ok(Some(db_info)) => connect_to_db(db_info),
+            Ok(None) => return Ok(None),
             Err(e) => {
                 // Report the error to the client
                 self.pgb.write_message(&Be::ErrorResponse(e.to_string()))?;
@@ -86,16 +110,14 @@ impl ProxyConnection {
             }
         };
 
-        // TODO send BackendKeyData with CancelToken.
-        //      Should I add a variant to BeMessage?
-
         // We'll get rid of this once migration to async is complete
         let (pg_version, db_stream) = {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
 
-            let (pg_version, stream) = runtime.block_on(conn)?;
+            let (pg_version, stream, cancel_key_data) = runtime.block_on(conn)?;
+            self.pgb.write_message(&BeMessage::BackendKeyData(cancel_key_data.0, cancel_key_data.1))?;
             let stream = stream.into_std()?;
             stream.set_nonblocking(false)?;
 
@@ -109,10 +131,10 @@ impl ProxyConnection {
             ))?
             .write_message(&Be::ReadyForQuery)?;
 
-        Ok((self.pgb.into_stream(), db_stream))
+        Ok(Some((self.pgb.into_stream(), db_stream)))
     }
 
-    fn handle_startup(&mut self) -> anyhow::Result<(String, String)> {
+    fn handle_startup(&mut self) -> anyhow::Result<Option<(String, String)>> {
         let have_tls = self.pgb.tls_config.is_some();
         let mut encrypted = false;
 
@@ -146,20 +168,38 @@ impl ProxyConnection {
                             .ok_or_else(|| anyhow!("{} is missing in startup packet", key))
                     };
 
-                    return Ok((get_param("user")?, get_param("database")?));
+                    return Ok(Some((get_param("user")?, get_param("database")?)));
                 }
                 StartupRequestCode::Cancel => {
-                    bail!("Cancel message has no key data, ignoring.")
-                    // TODO After connecting using tokio_postgres, send that cancel
-                    //      token to the client. It must happen after AuthenticationOk
-                    //      but before ReadyForQuery.
-                    //      See https://www.postgresql.org/docs/7.2/protocol-protocol.html
-                    //      for more details (ctrl-f for "cancel" and "security").
+                    // NOTE using unwrap instead of ? because I don't want to send an
+                    //      unauthenticated user surprisingly transparent errors.
+                    let backend_pid: i32 = msg.params["backend_pid"].parse().unwrap();
+                    let cancel_key: i32 = msg.params["cancel_key"].parse().unwrap();
+                    if let Some((cancel_token, db_info)) = CANCEL_MAP.lock().get(&(backend_pid, cancel_key)) {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build().unwrap();
 
-                    // TODO if msg.params has a good cancel token, call
-                    //      token.cancel_query(NoTls) on it.
-                    //      TODO why NoTls? Currently i'm cargo-culting from how
-                    //           we initialize connect_raw.
+                        // TODO why NoTls? Currently i'm cargo-culting from how
+                        //      we initialize connect_raw.
+                        // if let Err(e) = runtime.block_on(cancel_token.cancel_query(NoTls)) {
+                            // Error {
+                            //     kind: Connect,
+                            //     cause: Some(
+                            //         Custom {
+                            //             kind: InvalidInput,
+                            //             error: "unknown host",
+                            //         },
+                            //     ),
+                            // }
+                            // dbg!(e);
+                        // }
+
+                        // TODO figure out cancel_token.cancel_query (see commented code above)
+                        let socket = runtime.block_on(tokio::net::TcpStream::connect(db_info.socket_addr().unwrap())).unwrap();
+                        runtime.block_on(cancel_token.cancel_query_raw(socket, NoTls)).unwrap();
+                    }
+                    return Ok(None);
                 }
             }
         }
@@ -247,10 +287,14 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
 }
 
 /// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
-async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<(String, tokio::net::TcpStream)> {
+async fn connect_to_db(db_info: DatabaseInfo) ->
+    anyhow::Result<(String, tokio::net::TcpStream, (i32, i32))> {
     let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()?).await?;
-    let config = tokio_postgres::Config::from(db_info);
+    let config = tokio_postgres::Config::from(db_info.clone());
     let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
+
+    // NOTE We effectively ignore any ParameterStatus and NoticeResponse
+    //      messages here. Not sure if that could break something.
 
     let query = client.query_one("select current_setting('server_version')", &[]);
 
@@ -261,8 +305,20 @@ async fn connect_to_db(db_info: DatabaseInfo) -> anyhow::Result<(String, tokio::
         _ = conn => bail!("connection closed too early"),
     );
 
-    // TODO return client.cancel_token() too
-    Ok((version, socket))
+    // TODO clean this up
+    let cancel_key_data = {
+        // let backend_pid: i32 = client.query_one("select pg_backend_pid()", &[])
+            // .await?.try_get(0)?;
+        // TODO query the pid instead.
+        let backend_pid = rand::thread_rng().gen::<i32>();
+
+        // TODO use secure random!!!
+        let cancel_key = rand::thread_rng().gen::<i32>();
+        (backend_pid, cancel_key)
+    };
+
+    CANCEL_MAP.lock().insert(cancel_key_data, (client.cancel_token(), db_info.clone()));
+    Ok((version, socket, cancel_key_data))
 }
 
 /// Concurrently proxy both directions of the client and server connections

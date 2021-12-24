@@ -8,6 +8,7 @@ use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 // use postgres_ffi::xlog_utils::TimestampTz;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::io;
 use std::io::Read;
 use std::str;
@@ -36,12 +37,14 @@ pub enum FeMessage {
     PasswordMessage(Bytes),
 }
 
+// TODO Make this an enum
 #[derive(Debug)]
 pub struct FeStartupMessage {
-    pub version: u32,
+    pub version: u32,  // TODO only valid if kind == Normal
     pub kind: StartupRequestCode,
     // optional params arriving in startup packet
-    pub params: HashMap<String, String>,
+    pub params: HashMap<String, String>, // TODO only valid if kind == Normal
+    // TODO I need (i32, i32) when kind == Cancel
 }
 
 #[derive(Debug)]
@@ -182,25 +185,45 @@ impl FeStartupMessage {
         let mut params_bytes = vec![0u8; params_len];
         stream.read_exact(params_bytes.as_mut())?;
 
-        // Then null-terminated (String) pairs of param name / param value go.
-        let params_str = str::from_utf8(&params_bytes).unwrap();
-        let params = params_str.split('\0');
-        let mut params_hash: HashMap<String, String> = HashMap::new();
-        for pair in params.collect::<Vec<_>>().chunks_exact(2) {
-            let name = pair[0];
-            let value = pair[1];
-            if name == "options" {
-                // deprecated way of passing params as cmd line args
-                for cmdopt in value.split(' ') {
-                    let nameval: Vec<&str> = cmdopt.split('=').collect();
-                    if nameval.len() == 2 {
-                        params_hash.insert(nameval[0].to_string(), nameval[1].to_string());
+        let params_hash = match kind {
+            StartupRequestCode::Normal => {
+                // Parse null-terminated (String) pairs of param name / param value
+                let params_str = str::from_utf8(&params_bytes).unwrap();
+                let params = params_str.split('\0');
+                let mut params_hash: HashMap<String, String> = HashMap::new();
+                for pair in params.collect::<Vec<_>>().chunks_exact(2) {
+                    let name = pair[0];
+                    let value = pair[1];
+                    if name == "options" {
+                        // deprecated way of passing params as cmd line args
+                        for cmdopt in value.split(' ') {
+                            let nameval: Vec<&str> = cmdopt.split('=').collect();
+                            if nameval.len() == 2 {
+                                params_hash.insert(nameval[0].to_string(), nameval[1].to_string());
+                            }
+                        }
+                    } else {
+                        params_hash.insert(name.to_string(), value.to_string());
                     }
                 }
-            } else {
-                params_hash.insert(name.to_string(), value.to_string());
-            }
-        }
+                params_hash
+            },
+            StartupRequestCode::Cancel => {
+                // Parse (i32, i32)
+                let backend_pid_bytes: [u8; 4] = params_bytes[0..4].try_into().unwrap();
+                let backend_pid = i32::from_be_bytes(backend_pid_bytes);
+
+                let cancel_key_bytes: [u8; 4] = params_bytes[4..8].try_into().unwrap();
+                let cancel_key = i32::from_be_bytes(cancel_key_bytes);
+
+                // HACK going with this string hashmap until I fix the StartupRequest struct
+                let mut params_hash: HashMap<String, String> = HashMap::new();
+                params_hash.insert("backend_pid".into(), backend_pid.to_string());
+                params_hash.insert("cancel_key".into(), cancel_key.to_string());
+                params_hash
+            },
+            _ => HashMap::new()
+        };
 
         Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
             version,
@@ -336,6 +359,8 @@ pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationMD5Password(&'a [u8; 4]),
     AuthenticationCleartextPassword,
+    // backend_pid, cancel key
+    BackendKeyData(i32, i32),
     BindComplete,
     CommandComplete(&'a [u8]),
     CopyData(&'a [u8]),
@@ -530,6 +555,16 @@ impl<'a> BeMessage<'a> {
                     Ok::<_, io::Error>(())
                 })
                 .unwrap(); // write into BytesMut can't fail
+            }
+
+            BeMessage::BackendKeyData(backend_pid, cancel_key) => {
+                buf.put_u8(b'K');
+                write_body(buf, |buf| {
+                    buf.put_i32(*backend_pid);
+                    buf.put_i32(*cancel_key);
+                    Ok::<_, io::Error>(())
+                })?;
+
             }
 
             BeMessage::BindComplete => {
