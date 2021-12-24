@@ -1486,7 +1486,8 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let mut this_layer_uploads = self.evict_layer(oldest_layer_id)?;
+            let mut this_layer_uploads =
+                self.evict_layer(oldest_layer_id, checkpoint_distance == 0)?;
             layer_uploads.append(&mut this_layer_uploads);
 
             write_guard = self.write_lock.lock().unwrap();
@@ -1566,7 +1567,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn evict_layer(&self, layer_id: LayerId) -> Result<Vec<PathBuf>> {
+    fn evict_layer(&self, layer_id: LayerId, enforced: bool) -> Result<Vec<PathBuf>> {
         // Mark the layer as no longer accepting writes and record the end_lsn.
         // This happens in-place, no new layers are created now.
         // We call `get_last_record_lsn` again, which may be different from the
@@ -1591,7 +1592,7 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let new_historics = oldest_layer.write_to_disk(self)?;
+            let new_historics = oldest_layer.write_to_disk(self, enforced)?;
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
