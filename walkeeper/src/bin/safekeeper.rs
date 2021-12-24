@@ -6,7 +6,10 @@ use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
+
+use std::fs;
 use std::fs::File;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
@@ -14,16 +17,18 @@ use zenith_utils::http::endpoint;
 use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
 use tokio::sync::mpsc;
-use walkeeper::callmemaybe;
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::SafeKeeperConf;
+use walkeeper::SafekeeperId;
+use walkeeper::{callmemaybe, MY_ID};
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals;
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
+const ID_FILE_NAME: &str = "safekeeper.id";
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
@@ -137,6 +142,9 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         )
     })?;
 
+    // Generate or read our ID.
+    set_id(&conf)?;
+
     let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
         e
@@ -237,4 +245,35 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         );
         std::process::exit(111);
     })
+}
+
+fn set_id(conf: &SafeKeeperConf) -> Result<()> {
+    let id_file_path = conf.workdir.join(ID_FILE_NAME);
+
+    let my_id: SafekeeperId;
+    // If ID exists, read it in; otherwise generate & write a new one.
+    match fs::read(&id_file_path) {
+        Ok(id_hex) => {
+            my_id = SafekeeperId::from_slice(id_hex)?;
+            info!("safekeeper ID {}", my_id);
+        }
+        Err(error) => match error.kind() {
+            ErrorKind::NotFound => {
+                my_id = SafekeeperId::generate();
+                let mut f = File::create(&id_file_path)?;
+                f.write_all(hex::encode(my_id.0).as_bytes())?;
+                f.sync_all()?;
+                info!("generated new safekeeper ID {}", my_id);
+            }
+            _ => {
+                return Err(error.into());
+            }
+        },
+    }
+    // Safety: the main thread sets ID in the beginning, everyone else only
+    // reads it.
+    unsafe {
+        MY_ID = my_id;
+    }
+    Ok(())
 }

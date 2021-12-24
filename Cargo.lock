@@ -2335,6 +2335,7 @@ dependencies = [
  "postgres",
  "postgres-protocol",
  "postgres_ffi",
+ "rand",
  "regex",
  "routerify",
  "rust-s3",

@@ -1,4 +1,7 @@
-//
+use hex::FromHex;
+use hex::FromHexError;
+use rand::Rng;
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -68,3 +71,30 @@ impl Default for SafeKeeperConf {
         }
     }
 }
+
+/// Safekeeper unique 64 bit ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SafekeeperId(pub [u8; 8]);
+
+impl SafekeeperId {
+    pub fn generate() -> Self {
+        let mut tli_buf = [0u8; 8];
+        rand::thread_rng().fill(&mut tli_buf);
+        SafekeeperId(tli_buf)
+    }
+
+    pub fn from_slice<T: AsRef<[u8]>>(data: T) -> Result<Self, FromHexError> {
+        let decoded = <[u8; 8]>::from_hex(data)?;
+        Ok(Self(decoded))
+    }
+}
+
+// Display the ID as hex.
+impl fmt::Display for SafekeeperId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
+
+/// This safekeeper ID.
+pub static mut MY_ID: SafekeeperId = SafekeeperId([0u8; 8]);
