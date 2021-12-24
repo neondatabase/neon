@@ -1,0 +1,205 @@
+{
+    "format_version": 1.0,
+
+    "timestamp": "2021-05-23T18:25:43.511Z",
+    "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8b",
+
+    "cluster": {
+        "cluster_id": 42,
+        "name": "Zenith Test",
+        "state": "restarted",
+        "roles": [
+            {
+                "name": "postgres",
+                "encrypted_password": "6b1d16b78004bbd51fa06af9eda75972",
+                "options": null
+            },
+            {
+                "name": "alexk",
+                "encrypted_password": null,
+                "options": null
+            },
+            {
+                "name": "zenith \"new\"",
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972",
+                "options": null
+            },
+            {
+                "name": "zen",
+                "encrypted_password": "9b1d16b78004bbd51fa06af9eda75972"
+            },
+            {
+                "name": "\"name\";\\n select 1;",
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972"
+            },
+            {
+                "name": "MyRole",
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972"
+            }
+        ],
+        "databases": [
+            {
+                "name": "DB2",
+                "owner": "alexk",
+                "options": [
+                    {
+                        "name": "LC_COLLATE",
+                        "value": "C",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "LC_CTYPE",
+                        "value": "C",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "TEMPLATE",
+                        "value": "template0",
+                        "vartype": "enum"
+                    }
+                ]
+            },
+            {
+                "name": "zenith",
+                "owner": "MyRole"
+            },
+            {
+                "name": "zen",
+                "owner": "zen"
+            }
+        ],
+        "settings": [
+            {
+                "name": "fsync",
+                "value": "off",
+                "vartype": "bool"
+            },
+            {
+                "name": "wal_level",
+                "value": "replica",
+                "vartype": "enum"
+            },
+            {
+                "name": "hot_standby",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "wal_acceptors",
+                "value": "127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501",
+                "vartype": "string"
+            },
+            {
+                "name": "wal_log_hints",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "log_connections",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "shared_buffers",
+                "value": "32768",
+                "vartype": "integer"
+            },
+            {
+                "name": "port",
+                "value": "55432",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_connections",
+                "value": "100",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_wal_senders",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "listen_addresses",
+                "value": "0.0.0.0",
+                "vartype": "string"
+            },
+            {
+                "name": "wal_sender_timeout",
+                "value": "0",
+                "vartype": "integer"
+            },
+            {
+                "name": "password_encryption",
+                "value": "md5",
+                "vartype": "enum"
+            },
+            {
+                "name": "maintenance_work_mem",
+                "value": "65536",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_parallel_workers",
+                "value": "8",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_worker_processes",
+                "value": "8",
+                "vartype": "integer"
+            },
+            {
+                "name": "zenith.zenith_tenant",
+                "value": "b0554b632bd4d547a63b86c3630317e8",
+                "vartype": "string"
+            },
+            {
+                "name": "max_replication_slots",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "zenith.zenith_timeline",
+                "value": "2414a61ffc94e428f14b5758fe308e13",
+                "vartype": "string"
+            },
+            {
+                "name": "shared_preload_libraries",
+                "value": "zenith",
+                "vartype": "string"
+            },
+            {
+                "name": "synchronous_standby_names",
+                "value": "walproposer",
+                "vartype": "string"
+            },
+            {
+                "name": "zenith.page_server_connstring",
+                "value": "host=127.0.0.1 port=6400",
+                "vartype": "string"
+            }
+        ]
+    },
+
+    "delta_operations": [
+        {
+            "action": "delete_db",
+            "name": "zenith_test"
+        },
+        {
+            "action": "rename_db",
+            "name": "DB",
+            "new_name": "DB2"
+        },
+        {
+            "action": "delete_role",
+            "name": "zenith2"
+        },
+        {
+            "action": "rename_role",
+            "name": "zenith new",
+            "new_name": "zenith \"new\""
+        }
+    ]
+}
