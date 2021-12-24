@@ -126,7 +126,7 @@ jobs:
             fi
 
             export CARGO_INCREMENTAL=0
-            "${cov_prefix[@]}" cargo build $CARGO_FLAGS --bins --tests
+            "${cov_prefix[@]}" cargo build $CARGO_FLAGS --features fail/failpoints --bins --tests
 
       - save_cache:
           name: Save rust cache
