@@ -113,31 +113,31 @@ impl ProxyConnection {
         let mut encrypted = false;
 
         loop {
-            let mut msg = match self.pgb.read_message()? {
-                Some(Fe::StartupMessage(msg)) => msg,
+            let msg = match self.pgb.read_message()? {
+                Some(Fe::InitialMessage(msg)) => msg,
                 None => bail!("connection is lost"),
                 bad => bail!("unexpected message type: {:?}", bad),
             };
             println!("got message: {:?}", msg);
 
-            match msg.kind {
-                StartupRequestCode::NegotiateGss => {
+            match msg {
+                FeInitialMessage::GSSENCRequest => {
                     self.pgb.write_message(&Be::EncryptionResponse(false))?;
                 }
-                StartupRequestCode::NegotiateSsl => {
+                FeInitialMessage::SSLRequest => {
                     self.pgb.write_message(&Be::EncryptionResponse(have_tls))?;
                     if have_tls {
                         self.pgb.start_tls()?;
                         encrypted = true;
                     }
                 }
-                StartupRequestCode::Normal => {
+                FeInitialMessage::StartupMessage(_, mut params) => {
                     if have_tls && !encrypted {
                         bail!("must connect with TLS");
                     }
 
                     let mut get_param = |key| {
-                        msg.params
+                        params
                             .remove(key)
                             .ok_or_else(|| anyhow!("{} is missing in startup packet", key))
                     };
@@ -145,7 +145,9 @@ impl ProxyConnection {
                     return Ok((get_param("user")?, get_param("database")?));
                 }
                 // TODO: implement proper stmt cancellation
-                StartupRequestCode::Cancel => bail!("query cancellation is not supported"),
+                FeInitialMessage::CancelRequest(_, _) => {
+                    bail!("query cancellation is not supported")
+                }
             }
         }
     }

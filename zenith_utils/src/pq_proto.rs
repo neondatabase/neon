@@ -2,12 +2,13 @@
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use byteorder::{BigEndian, ByteOrder};
 use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 // use postgres_ffi::xlog_utils::TimestampTz;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::io;
 use std::io::Read;
 use std::str;
@@ -21,7 +22,7 @@ pub const TEXT_OID: Oid = 25;
 
 #[derive(Debug)]
 pub enum FeMessage {
-    StartupMessage(FeStartupMessage),
+    InitialMessage(FeInitialMessage),
     Query(FeQueryMessage), // Simple query
     Parse(FeParseMessage), // Extended query protocol
     Describe(FeDescribeMessage),
@@ -37,19 +38,13 @@ pub enum FeMessage {
 }
 
 #[derive(Debug)]
-pub struct FeStartupMessage {
-    pub version: u32,
-    pub kind: StartupRequestCode,
-    // optional params arriving in startup packet
-    pub params: HashMap<String, String>,
-}
-
-#[derive(Debug)]
-pub enum StartupRequestCode {
-    Cancel,
-    NegotiateSsl,
-    NegotiateGss,
-    Normal,
+pub enum FeInitialMessage {
+    // backend_pid, cancel_key
+    CancelRequest(i32, i32),
+    SSLRequest,
+    GSSENCRequest,
+    // version, params
+    StartupMessage(u32, HashMap<String, String>),
 }
 
 #[derive(Debug)]
@@ -147,7 +142,7 @@ impl FeMessage {
     }
 }
 
-impl FeStartupMessage {
+impl FeInitialMessage {
     /// Read startup message from the stream.
     pub fn read(stream: &mut impl std::io::Read) -> anyhow::Result<Option<FeMessage>> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
@@ -169,44 +164,53 @@ impl FeStartupMessage {
             bail!("invalid message length");
         }
 
-        let version = stream.read_u32::<BE>()?;
-        let kind = match version {
-            CANCEL_REQUEST_CODE => StartupRequestCode::Cancel,
-            NEGOTIATE_SSL_CODE => StartupRequestCode::NegotiateSsl,
-            NEGOTIATE_GSS_CODE => StartupRequestCode::NegotiateGss,
-            _ => StartupRequestCode::Normal,
-        };
+        let request_code = stream.read_u32::<BE>()?;
 
         // the rest of startup packet are params
         let params_len = len - 8;
         let mut params_bytes = vec![0u8; params_len];
         stream.read_exact(params_bytes.as_mut())?;
 
-        // Then null-terminated (String) pairs of param name / param value go.
-        let params_str = str::from_utf8(&params_bytes).unwrap();
-        let params = params_str.split('\0');
-        let mut params_hash: HashMap<String, String> = HashMap::new();
-        for pair in params.collect::<Vec<_>>().chunks_exact(2) {
-            let name = pair[0];
-            let value = pair[1];
-            if name == "options" {
-                // deprecated way of passing params as cmd line args
-                for cmdopt in value.split(' ') {
-                    let nameval: Vec<&str> = cmdopt.split('=').collect();
-                    if nameval.len() == 2 {
-                        params_hash.insert(nameval[0].to_string(), nameval[1].to_string());
+        // Parse params depending on request code
+        let message = match request_code {
+            CANCEL_REQUEST_CODE => {
+                let parse_i32_big_endian = |byte_slice: &[u8]| {
+                    let byte_array: [u8; 4] = byte_slice.try_into().unwrap();
+                    i32::from_be_bytes(byte_array)
+                };
+
+                ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
+                let backend_pid = parse_i32_big_endian(&params_bytes[0..4]);
+                let cancel_key = parse_i32_big_endian(&params_bytes[4..8]);
+                FeInitialMessage::CancelRequest(backend_pid, cancel_key)
+            }
+            NEGOTIATE_SSL_CODE => FeInitialMessage::SSLRequest,
+            NEGOTIATE_GSS_CODE => FeInitialMessage::GSSENCRequest,
+            _ => {
+                // Then null-terminated (String) pairs of param name / param value go.
+                let params_str = str::from_utf8(&params_bytes).unwrap();
+                let params = params_str.split('\0');
+                let mut params_hash: HashMap<String, String> = HashMap::new();
+                for pair in params.collect::<Vec<_>>().chunks_exact(2) {
+                    let name = pair[0];
+                    let value = pair[1];
+                    if name == "options" {
+                        // deprecated way of passing params as cmd line args
+                        for cmdopt in value.split(' ') {
+                            let nameval: Vec<&str> = cmdopt.split('=').collect();
+                            if nameval.len() == 2 {
+                                params_hash.insert(nameval[0].to_string(), nameval[1].to_string());
+                            }
+                        }
+                    } else {
+                        params_hash.insert(name.to_string(), value.to_string());
                     }
                 }
-            } else {
-                params_hash.insert(name.to_string(), value.to_string());
+                let version = request_code;
+                FeInitialMessage::StartupMessage(version, params_hash)
             }
-        }
-
-        Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
-            version,
-            kind,
-            params: params_hash,
-        })))
+        };
+        Ok(Some(FeMessage::InitialMessage(message)))
     }
 }
 

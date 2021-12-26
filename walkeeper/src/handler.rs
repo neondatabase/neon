@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor, INT4_OID, TEXT_OID};
+use zenith_utils::pq_proto::{BeMessage, FeInitialMessage, RowDescriptor, INT4_OID, TEXT_OID};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
@@ -33,24 +33,27 @@ pub struct SafekeeperPostgresHandler {
 }
 
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
-    fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupMessage) -> Result<()> {
-        let ztimelineid = sm
-            .params
-            .get("ztimelineid")
-            .ok_or_else(|| anyhow!("timelineid is required"))?;
-        self.timelineid = Some(ZTimelineId::from_str(ztimelineid)?);
+    fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeInitialMessage) -> Result<()> {
+        if let FeInitialMessage::StartupMessage(version, params) = sm {
+            let ztimelineid = params
+                .get("ztimelineid")
+                .ok_or_else(|| anyhow!("timelineid is required"))?;
+            self.timelineid = Some(ZTimelineId::from_str(ztimelineid)?);
 
-        let ztenantid = sm
-            .params
-            .get("ztenantid")
-            .ok_or_else(|| anyhow!("tenantid is required"))?;
-        self.tenantid = Some(ZTenantId::from_str(ztenantid)?);
+            let ztenantid = params
+                .get("ztenantid")
+                .ok_or_else(|| anyhow!("tenantid is required"))?;
+            self.tenantid = Some(ZTenantId::from_str(ztenantid)?);
 
-        if let Some(app_name) = sm.params.get("application_name") {
-            self.appname = Some(app_name.clone());
+            if let Some(app_name) = params.get("application_name") {
+                self.appname = Some(app_name.clone());
+            }
+
+            Ok(())
+        } else {
+            unreachable!("Walkeeper received unexpected initial message: {:?}", sm);
         }
 
-        Ok(())
     }
 
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()> {

@@ -3,9 +3,7 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::pq_proto::{
-    BeMessage, BeParameterStatusMessage, FeMessage, FeStartupMessage, StartupRequestCode,
-};
+use crate::pq_proto::{BeMessage, BeParameterStatusMessage, FeInitialMessage, FeMessage};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
@@ -34,7 +32,7 @@ pub trait Handler {
     /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
     /// creation is the proxy code. That is quite hacky and ad-hoc solution, may be we could allow
     /// to override whole init logic in implementations.
-    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupMessage) -> Result<()> {
+    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeInitialMessage) -> Result<()> {
         Ok(())
     }
 
@@ -226,7 +224,7 @@ impl PostgresBackend {
 
         use ProtoState::*;
         match state {
-            Initialization | Encrypted => FeStartupMessage::read(stream),
+            Initialization | Encrypted => FeInitialMessage::read(stream),
             Authentication | Established => FeMessage::read(stream),
         }
     }
@@ -318,7 +316,7 @@ impl PostgresBackend {
             ensure!(
                 matches!(
                     msg,
-                    FeMessage::PasswordMessage(_) | FeMessage::StartupMessage(_)
+                    FeMessage::PasswordMessage(_) | FeMessage::InitialMessage(_)
                 ),
                 "protocol violation"
             );
@@ -326,11 +324,11 @@ impl PostgresBackend {
 
         let have_tls = self.tls_config.is_some();
         match msg {
-            FeMessage::StartupMessage(m) => {
+            FeMessage::InitialMessage(m) => {
                 trace!("got startup message {:?}", m);
 
-                match m.kind {
-                    StartupRequestCode::NegotiateSsl => {
+                match m {
+                    FeInitialMessage::SSLRequest => {
                         info!("SSL requested");
 
                         self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
@@ -339,11 +337,11 @@ impl PostgresBackend {
                             self.state = ProtoState::Encrypted;
                         }
                     }
-                    StartupRequestCode::NegotiateGss => {
+                    FeInitialMessage::GSSENCRequest => {
                         info!("GSS requested");
                         self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
-                    StartupRequestCode::Normal => {
+                    FeInitialMessage::StartupMessage(_, _) => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
                             self.write_message(&BeMessage::ErrorResponse(
                                 "must connect with TLS".to_string(),
@@ -376,7 +374,7 @@ impl PostgresBackend {
                             }
                         }
                     }
-                    StartupRequestCode::Cancel => {
+                    FeInitialMessage::CancelRequest(_, _) => {
                         return Ok(ProcessMsgResult::Break);
                     }
                 }
