@@ -46,7 +46,8 @@ pub enum FeInitialMessage {
     SSLRequest,
     GSSENCRequest,
     StartupMessage {
-        version: u32,
+        major_version: u32,
+        minor_version: u32,
         params: HashMap<String, String>,
     },
 }
@@ -150,9 +151,10 @@ impl FeInitialMessage {
     /// Read startup message from the stream.
     pub fn read(stream: &mut impl std::io::Read) -> anyhow::Result<Option<FeMessage>> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
-        const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
-        const NEGOTIATE_SSL_CODE: u32 = (1234 << 16) | 5679;
-        const NEGOTIATE_GSS_CODE: u32 = (1234 << 16) | 5680;
+        const RESERVED_INVALID_MAJOR_VERSION: u32 = 1234;
+        const CANCEL_REQUEST_CODE: u32 = 5678;
+        const NEGOTIATE_SSL_CODE: u32 = 5679;
+        const NEGOTIATE_GSS_CODE: u32 = 5680;
 
         // Read length. If the connection is closed before reading anything (or before
         // reading 4 bytes, to be precise), return None to indicate that the connection
@@ -176,8 +178,10 @@ impl FeInitialMessage {
         stream.read_exact(params_bytes.as_mut())?;
 
         // Parse params depending on request code
-        let message = match request_code {
-            CANCEL_REQUEST_CODE => {
+        let most_sig_16_bits = request_code >> 16;
+        let least_sig_16_bits = request_code & ((1 << 16) - 1);
+        let message = match (most_sig_16_bits, least_sig_16_bits) {
+            (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
                 let parse_i32_big_endian = |byte_slice: &[u8]| {
                     let byte_array: [u8; 4] = byte_slice.try_into().unwrap();
                     i32::from_be_bytes(byte_array)
@@ -191,10 +195,14 @@ impl FeInitialMessage {
                     cancel_key,
                 }
             }
-            NEGOTIATE_SSL_CODE => FeInitialMessage::SSLRequest,
-            NEGOTIATE_GSS_CODE => FeInitialMessage::GSSENCRequest,
-            _ => {
-                // Then null-terminated (String) pairs of param name / param value go.
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeInitialMessage::SSLRequest,
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => FeInitialMessage::GSSENCRequest,
+            (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
+                bail!("Unrecognized request code {}", unrecognized_code)
+            }
+            (major_version, minor_version) => {
+                // TODO bail if protocol major_version is not 3?
+                // Parse null-terminated (String) pairs of param name / param value
                 let params_str = str::from_utf8(&params_bytes).unwrap();
                 let params_tokens = params_str.split('\0');
                 let mut params: HashMap<String, String> = HashMap::new();
@@ -213,8 +221,11 @@ impl FeInitialMessage {
                         params.insert(name.to_string(), value.to_string());
                     }
                 }
-                let version = request_code;
-                FeInitialMessage::StartupMessage { version, params }
+                FeInitialMessage::StartupMessage {
+                    major_version,
+                    minor_version,
+                    params,
+                }
             }
         };
         Ok(Some(FeMessage::InitialMessage(message)))
