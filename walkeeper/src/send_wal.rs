@@ -4,11 +4,11 @@
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use anyhow::{anyhow, bail, Context, Result};
-use bytes::Bytes;
+
 use postgres_ffi::xlog_utils::{
     get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
 };
-use regex::Regex;
+
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fs::File;
@@ -58,8 +58,8 @@ impl HotStandbyFeedback {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StandbyReply {
     pub write_lsn: Lsn, // last lsn received by pageserver
-    pub flush_lsn: Lsn, // not used
-    pub apply_lsn: Lsn, // pageserver's disk consistent lSN
+    pub flush_lsn: Lsn, // pageserver's disk consistent lSN
+    pub apply_lsn: Lsn, // pageserver's remote consistent lSN
     pub reply_ts: TimestampTz,
     pub reply_requested: bool,
 }
@@ -145,8 +145,9 @@ impl ReplicationConn {
                         Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
                             let reply = StandbyReply::des(&m[1..])
                                 .context("failed to deserialize StandbyReply")?;
-                            state.disk_consistent_lsn = reply.apply_lsn;
                             state.last_received_lsn = reply.write_lsn;
+                            state.disk_consistent_lsn = reply.flush_lsn;
+                            state.remote_consistent_lsn = reply.apply_lsn;
                             timeline.update_replica_state(replica_id, Some(state));
                         }
                         _ => warn!("unexpected message {:?}", msg),
@@ -167,18 +168,6 @@ impl ReplicationConn {
         }
 
         Ok(())
-    }
-
-    /// Helper function that parses a single LSN.
-    fn parse_start(cmd: &[u8]) -> Result<Lsn> {
-        let re = Regex::new(r"([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
-        let caps = re.captures_iter(str::from_utf8(cmd)?);
-        let mut lsns = caps.map(|cap| cap[1].parse::<Lsn>());
-        let start_pos = lsns
-            .next()
-            .ok_or_else(|| anyhow!("Failed to parse start LSN from command"))??;
-        assert!(lsns.next().is_none());
-        Ok(start_pos)
     }
 
     /// Helper function for opening a wal file.
@@ -206,9 +195,9 @@ impl ReplicationConn {
         &mut self,
         spg: &mut SafekeeperPostgresHandler,
         pgb: &mut PostgresBackend,
-        cmd: &Bytes,
+        mut start_pos: Lsn,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.timelineid.unwrap()).entered();
+        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap()).entered();
 
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(spg.timeline.get());
@@ -228,8 +217,6 @@ impl ReplicationConn {
                 }
             })
             .unwrap();
-
-        let mut start_pos = Self::parse_start(cmd)?;
 
         let mut wal_seg_size: usize;
         loop {
@@ -265,7 +252,7 @@ impl ReplicationConn {
                 None
             } else {
                 let timelineid = spg.timeline.get().timelineid;
-                let tenant_id = spg.tenantid.unwrap();
+                let tenant_id = spg.ztenantid.unwrap();
                 let tx_clone = spg.tx.clone();
                 spg.tx
                     .send(CallmeEvent::Pause(tenant_id, timelineid))

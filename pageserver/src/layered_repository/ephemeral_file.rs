@@ -1,11 +1,11 @@
 //! Implementation of append-only file data structure
 //! used to keep in-memory layers spilled on disk.
 
+use crate::config::PageServerConf;
 use crate::page_cache;
 use crate::page_cache::PAGE_SZ;
 use crate::page_cache::{ReadBufResult, WriteBufResult};
 use crate::virtual_file::VirtualFile;
-use crate::PageServerConf;
 use lazy_static::lazy_static;
 use std::cmp::min;
 use std::collections::HashMap;

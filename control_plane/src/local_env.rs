@@ -1,10 +1,9 @@
-//
-// This module is responsible for locating and loading paths in a local setup.
-//
-// Now it also provides init method which acts like a stub for proper installation
-// script which will use local paths.
-//
-use anyhow::{Context, Result};
+//! This module is responsible for locating and loading paths in a local setup.
+//!
+//! Now it also provides init method which acts like a stub for proper installation
+//! script which will use local paths.
+
+use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt::Write;
@@ -64,8 +63,8 @@ pub struct LocalEnv {
 #[serde(default)]
 pub struct PageServerConf {
     // Pageserver connection settings
-    pub pg_port: u16,
-    pub http_port: u16,
+    pub listen_pg_addr: String,
+    pub listen_http_addr: String,
 
     // used to determine which auth type is used
     pub auth_type: AuthType,
@@ -77,10 +76,10 @@ pub struct PageServerConf {
 impl Default for PageServerConf {
     fn default() -> Self {
         Self {
-            pg_port: 0,
-            http_port: 0,
+            listen_pg_addr: String::new(),
+            listen_http_addr: String::new(),
             auth_type: AuthType::Trust,
-            auth_token: "".to_string(),
+            auth_token: String::new(),
         }
     }
 }
@@ -97,7 +96,7 @@ pub struct SafekeeperConf {
 impl Default for SafekeeperConf {
     fn default() -> Self {
         Self {
-            name: "".to_string(),
+            name: String::new(),
             pg_port: 0,
             http_port: 0,
             sync: true,
@@ -114,11 +113,11 @@ impl LocalEnv {
         self.pg_distrib_dir.join("lib")
     }
 
-    pub fn pageserver_bin(&self) -> Result<PathBuf> {
+    pub fn pageserver_bin(&self) -> anyhow::Result<PathBuf> {
         Ok(self.zenith_distrib_dir.join("pageserver"))
     }
 
-    pub fn safekeeper_bin(&self) -> Result<PathBuf> {
+    pub fn safekeeper_bin(&self) -> anyhow::Result<PathBuf> {
         Ok(self.zenith_distrib_dir.join("safekeeper"))
     }
 
@@ -145,7 +144,7 @@ impl LocalEnv {
     ///
     /// Unlike 'load_config', this function fills in any defaults that are missing
     /// from the config file.
-    pub fn create_config(toml: &str) -> Result<LocalEnv> {
+    pub fn create_config(toml: &str) -> anyhow::Result<Self> {
         let mut env: LocalEnv = toml::from_str(toml)?;
 
         // Find postgres binaries.
@@ -159,7 +158,7 @@ impl LocalEnv {
             }
         }
         if !env.pg_distrib_dir.join("bin/postgres").exists() {
-            anyhow::bail!(
+            bail!(
                 "Can't find postgres binary at {}",
                 env.pg_distrib_dir.display()
             );
@@ -169,11 +168,14 @@ impl LocalEnv {
         if env.zenith_distrib_dir == Path::new("") {
             env.zenith_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
         }
-        if !env.zenith_distrib_dir.join("pageserver").exists() {
-            anyhow::bail!("Can't find pageserver binary.");
-        }
-        if !env.zenith_distrib_dir.join("safekeeper").exists() {
-            anyhow::bail!("Can't find safekeeper binary.");
+        for binary in ["pageserver", "safekeeper"] {
+            if !env.zenith_distrib_dir.join(binary).exists() {
+                bail!(
+                    "Can't find binary '{}' in zenith distrib dir '{}'",
+                    binary,
+                    env.zenith_distrib_dir.display()
+                );
+            }
         }
 
         // If no initial tenant ID was given, generate it.
@@ -187,11 +189,11 @@ impl LocalEnv {
     }
 
     /// Locate and load config
-    pub fn load_config() -> Result<LocalEnv> {
+    pub fn load_config() -> anyhow::Result<Self> {
         let repopath = base_path();
 
         if !repopath.exists() {
-            anyhow::bail!(
+            bail!(
                 "Zenith config is not found in {}. You need to run 'zenith init' first",
                 repopath.to_str().unwrap()
             );
@@ -209,7 +211,7 @@ impl LocalEnv {
     }
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
-    pub fn generate_auth_token(&self, claims: &Claims) -> Result<String> {
+    pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
         let private_key_path = if self.private_key_path.is_absolute() {
             self.private_key_path.to_path_buf()
         } else {
@@ -223,14 +225,14 @@ impl LocalEnv {
     //
     // Initialize a new Zenith repository
     //
-    pub fn init(&mut self) -> Result<()> {
+    pub fn init(&mut self) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         if base_path == Path::new("") {
-            anyhow::bail!("repository base path is missing");
+            bail!("repository base path is missing");
         }
         if base_path.exists() {
-            anyhow::bail!(
+            bail!(
                 "directory '{}' already exists. Perhaps already initialized?",
                 base_path.to_str().unwrap()
             );
@@ -251,12 +253,12 @@ impl LocalEnv {
                 .output()
                 .with_context(|| "failed to generate auth private key")?;
             if !keygen_output.status.success() {
-                anyhow::bail!(
+                bail!(
                     "openssl failed: '{}'",
                     String::from_utf8_lossy(&keygen_output.stderr)
                 );
             }
-            self.private_key_path = Path::new("auth_private_key.pem").to_path_buf();
+            self.private_key_path = PathBuf::from("auth_private_key.pem");
 
             let public_key_path = base_path.join("auth_public_key.pem");
             // openssl rsa -in private_key.pem -pubout -outform PEM -out public_key.pem
@@ -270,7 +272,7 @@ impl LocalEnv {
                 .output()
                 .with_context(|| "failed to generate auth private key")?;
             if !keygen_output.status.success() {
-                anyhow::bail!(
+                bail!(
                     "openssl failed: '{}'",
                     String::from_utf8_lossy(&keygen_output.stderr)
                 );
@@ -282,7 +284,7 @@ impl LocalEnv {
 
         fs::create_dir_all(self.pg_data_dirs_path())?;
 
-        for safekeeper in self.safekeepers.iter() {
+        for safekeeper in &self.safekeepers {
             fs::create_dir_all(self.safekeeper_data_dir(&safekeeper.name))?;
         }
 

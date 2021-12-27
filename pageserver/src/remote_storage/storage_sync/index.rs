@@ -18,12 +18,12 @@ use zenith_utils::{
 };
 
 use crate::{
+    config::PageServerConf,
     layered_repository::TIMELINES_SEGMENT_NAME,
     remote_storage::{
         storage_sync::compression::{parse_archive_name, FileEntry},
         TimelineSyncId,
     },
-    PageServerConf,
 };
 
 use super::compression::ArchiveHeader;

@@ -740,7 +740,7 @@ where
         /*
          * Update truncate and commit LSN in control file.
          * To avoid negative impact on performance of extra fsync, do it only
-         * when restart_lsn delta exceeds WAL segment size.
+         * when truncate_lsn delta exceeds WAL segment size.
          */
         sync_control_file |=
             self.s.truncate_lsn + (self.s.server.wal_seg_size as u64) < self.truncate_lsn;

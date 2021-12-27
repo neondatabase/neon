@@ -3,10 +3,9 @@ use std::{
     thread,
 };
 
-use bytes::Bytes;
 use serde::Deserialize;
 use zenith_utils::{
-    postgres_backend::{self, query_from_cstring, AuthType, PostgresBackend},
+    postgres_backend::{self, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
 };
 
@@ -79,7 +78,7 @@ impl postgres_backend::Handler for MgmtHandler<'_> {
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
-        query_string: Bytes,
+        query_string: &str,
     ) -> anyhow::Result<()> {
         let res = try_process_query(self, pgb, query_string);
         // intercept and log error message
@@ -93,12 +92,11 @@ impl postgres_backend::Handler for MgmtHandler<'_> {
 fn try_process_query(
     mgmt: &mut MgmtHandler,
     pgb: &mut PostgresBackend,
-    query_string: Bytes,
+    query_string: &str,
 ) -> anyhow::Result<()> {
-    let query_string = query_from_cstring(query_string);
-    println!("Got mgmt query: '{}'", std::str::from_utf8(&query_string)?);
+    println!("Got mgmt query: '{}'", query_string);
 
-    let resp: PsqlSessionResponse = serde_json::from_slice(&query_string)?;
+    let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 
     use PsqlSessionResult::*;
     let msg = match resp.result {

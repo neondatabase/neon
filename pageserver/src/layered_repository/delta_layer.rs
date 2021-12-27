@@ -11,7 +11,7 @@
 //! can happen when you create a new branch in the middle of a delta layer, and the WAL
 //! records on the new branch are put in a new delta layer.
 //!
-//! When a delta file needs to be accessed, we slurp the metadata and relsize chapters
+//! When a delta file needs to be accessed, we slurp the metadata and segsize chapters
 //! into memory, into the DeltaLayerInner struct. See load() and unload() functions.
 //! To access a page/WAL record, we search `page_version_metas` for the block # and LSN.
 //! The byte ranges in the metadata can be used to find the page/WAL record in
@@ -35,17 +35,16 @@
 //! file contents in any way.
 //!
 //! A detlta file is constructed using the 'bookfile' crate. Each file consists of two
-//! parts: the page versions and the relation sizes. They are stored as separate chapters.
+//! parts: the page versions and the segment sizes. They are stored as separate chapters.
 //!
-use crate::layered_repository::blob::BlobWriter;
+use crate::config::PageServerConf;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
-use crate::layered_repository::page_versions::PageVersions;
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
+    RELISH_SEG_SIZE,
 };
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
 use log::*;
@@ -57,15 +56,14 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use bookfile::{Book, BookWriter};
+use bookfile::{Book, BookWriter, BoundedReader, ChapterWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
-
-use super::blob::{read_blob, BlobRange};
 
 // Magic constant to identify a Zenith delta file
 pub const DELTA_FILE_MAGIC: u32 = 0x5A616E01;
@@ -76,7 +74,7 @@ static PAGE_VERSION_METAS_CHAPTER: u64 = 1;
 /// Page/WAL bytes - cannot be interpreted
 /// without PAGE_VERSION_METAS_CHAPTER
 static PAGE_VERSIONS_CHAPTER: u64 = 2;
-static REL_SIZES_CHAPTER: u64 = 3;
+static SEG_SIZES_CHAPTER: u64 = 3;
 
 /// Contains the [`Summary`] struct
 static SUMMARY_CHAPTER: u64 = 4;
@@ -108,6 +106,18 @@ impl From<&DeltaLayer> for Summary {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct BlobRange {
+    offset: u64,
+    size: usize,
+}
+
+fn read_blob<F: FileExt>(reader: &BoundedReader<&'_ F>, range: &BlobRange) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; range.size];
+    reader.read_exact_at(&mut buf, range.offset)?;
+    Ok(buf)
+}
+
 ///
 /// DeltaLayer is the in-memory data structure associated with an
 /// on-disk delta file.  We keep a DeltaLayer in memory for each
@@ -136,7 +146,7 @@ pub struct DeltaLayer {
 }
 
 pub struct DeltaLayerInner {
-    /// If false, the 'page_version_metas' and 'relsizes' have not been
+    /// If false, the 'page_version_metas' and 'seg_sizes' have not been
     /// loaded into memory yet.
     loaded: bool,
 
@@ -144,16 +154,17 @@ pub struct DeltaLayerInner {
 
     /// All versions of all pages in the file are are kept here.
     /// Indexed by block number and LSN.
-    page_version_metas: VecMap<(u32, Lsn), BlobRange>,
+    page_version_metas: VecMap<(SegmentBlk, Lsn), BlobRange>,
 
-    /// `relsizes` tracks the size of the relation at different points in time.
-    relsizes: VecMap<Lsn, u32>,
+    /// `seg_sizes` tracks the size of the segment at different points in time.
+    seg_sizes: VecMap<Lsn, SegmentBlk>,
 }
 
 impl DeltaLayerInner {
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
+        // Scan the VecMap backwards, starting from the given entry.
         let slice = self
-            .relsizes
+            .seg_sizes
             .slice_range((Included(&Lsn(0)), Included(&lsn)));
         if let Some((_entry_lsn, entry)) = slice.last() {
             Ok(*entry)
@@ -195,14 +206,14 @@ impl Layer for DeltaLayer {
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
-        blknum: u32,
+        blknum: SegmentBlk,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.seg.blknum_in_seg(blknum));
+        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         match &cached_img_lsn {
             Some(cached_lsn) if &self.end_lsn <= cached_lsn => {
@@ -220,7 +231,7 @@ impl Layer for DeltaLayer {
                 .expect("should be loaded in load call above")
                 .chapter_reader(PAGE_VERSIONS_CHAPTER)?;
 
-            // Scan the metadata BTreeMap backwards, starting from the given entry.
+            // Scan the metadata VecMap backwards, starting from the given entry.
             let minkey = (blknum, Lsn(0));
             let maxkey = (blknum, lsn);
             let iter = inner
@@ -261,7 +272,7 @@ impl Layer for DeltaLayer {
             if need_image
                 && reconstruct_data.records.is_empty()
                 && self.seg.rel.is_blocky()
-                && blknum - self.seg.segno * RELISH_SEG_SIZE >= inner.get_seg_size(lsn)?
+                && blknum >= inner.get_seg_size(lsn)?
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -279,14 +290,13 @@ impl Layer for DeltaLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
         assert!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
             "get_seg_size() called on a non-blocky rel"
         );
 
-        // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
         inner.get_seg_size(lsn)
     }
@@ -309,7 +319,7 @@ impl Layer for DeltaLayer {
     fn unload(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.page_version_metas = VecMap::default();
-        inner.relsizes = VecMap::default();
+        inner.seg_sizes = VecMap::default();
         inner.loaded = false;
 
         // Note: we keep the Book open. Is that a good idea? The virtual file
@@ -340,9 +350,9 @@ impl Layer for DeltaLayer {
             self.tenantid, self.timelineid, self.seg, self.start_lsn, self.end_lsn
         );
 
-        println!("--- relsizes ---");
+        println!("--- seg sizes ---");
         let inner = self.load()?;
-        for (k, v) in inner.relsizes.as_slice() {
+        for (k, v) in inner.seg_sizes.as_slice() {
             println!("  {}: {}", k, v);
         }
         println!("--- page versions ---");
@@ -396,112 +406,6 @@ impl DeltaLayer {
         }
     }
 
-    /// Create a new delta file, using the given page versions and relsizes.
-    /// The page versions are passed in a PageVersions struct. If 'cutoff' is
-    /// given, only page versions with LSN < cutoff are included.
-    ///
-    /// This is used to write the in-memory layer to disk. The page_versions and
-    /// relsizes are thus passed in the same format as they are in the in-memory
-    /// layer, as that's expedient.
-    #[allow(clippy::too_many_arguments)]
-    pub fn create(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-        seg: SegmentTag,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
-        dropped: bool,
-        page_versions: &PageVersions,
-        cutoff: Option<Lsn>,
-        relsizes: VecMap<Lsn, u32>,
-    ) -> Result<DeltaLayer> {
-        if seg.rel.is_blocky() {
-            assert!(!relsizes.is_empty());
-        }
-
-        let delta_layer = DeltaLayer {
-            path_or_conf: PathOrConf::Conf(conf),
-            timelineid,
-            tenantid,
-            seg,
-            start_lsn,
-            end_lsn,
-            dropped,
-            inner: Mutex::new(DeltaLayerInner {
-                loaded: false,
-                book: None,
-                page_version_metas: VecMap::default(),
-                relsizes,
-            }),
-        };
-        let mut inner = delta_layer.inner.lock().unwrap();
-
-        // Write the data into a file
-        //
-        // Note: Because we open the file in write-only mode, we cannot
-        // reuse the same VirtualFile for reading later. That's why we don't
-        // set inner.book here. The first read will have to re-open it.
-        //
-        // Note: This overwrites any existing file. There shouldn't be any.
-        // FIXME: throw an error instead?
-        let path = delta_layer.path();
-        let file = VirtualFile::create(&path)?;
-        let buf_writer = BufWriter::new(file);
-        let book = BookWriter::new(buf_writer, DELTA_FILE_MAGIC)?;
-
-        let mut page_version_writer = BlobWriter::new(book, PAGE_VERSIONS_CHAPTER);
-
-        let page_versions_iter = page_versions.ordered_page_version_iter(cutoff);
-        for (blknum, lsn, pos) in page_versions_iter {
-            let blob_range =
-                page_version_writer.write_blob_from_reader(&mut page_versions.reader(pos)?)?;
-
-            inner
-                .page_version_metas
-                .append((blknum, lsn), blob_range)
-                .unwrap();
-        }
-
-        let book = page_version_writer.close()?;
-
-        // Write out page versions
-        let mut chapter = book.new_chapter(PAGE_VERSION_METAS_CHAPTER);
-        let buf = VecMap::ser(&inner.page_version_metas)?;
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
-
-        // and relsizes to separate chapter
-        let mut chapter = book.new_chapter(REL_SIZES_CHAPTER);
-        let buf = VecMap::ser(&inner.relsizes)?;
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
-
-        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
-        let summary = Summary {
-            tenantid,
-            timelineid,
-            seg,
-
-            start_lsn,
-            end_lsn,
-
-            dropped,
-        };
-        Summary::ser_into(&summary, &mut chapter)?;
-        let book = chapter.close()?;
-
-        // This flushes the underlying 'buf_writer'.
-        let writer = book.close()?;
-        writer.get_ref().sync_all()?;
-
-        trace!("saved {}", &path.display());
-
-        drop(inner);
-
-        Ok(delta_layer)
-    }
-
     ///
     /// Load the contents of the file into memory
     ///
@@ -550,13 +454,13 @@ impl DeltaLayer {
         let chapter = book.read_chapter(PAGE_VERSION_METAS_CHAPTER)?;
         let page_version_metas = VecMap::des(&chapter)?;
 
-        let chapter = book.read_chapter(REL_SIZES_CHAPTER)?;
-        let relsizes = VecMap::des(&chapter)?;
+        let chapter = book.read_chapter(SEG_SIZES_CHAPTER)?;
+        let seg_sizes = VecMap::des(&chapter)?;
 
         debug!("loaded from {}", &path.display());
 
         inner.page_version_metas = page_version_metas;
-        inner.relsizes = relsizes;
+        inner.seg_sizes = seg_sizes;
         inner.loaded = true;
 
         Ok(inner)
@@ -581,7 +485,7 @@ impl DeltaLayer {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
-                relsizes: VecMap::default(),
+                seg_sizes: VecMap::default(),
             }),
         }
     }
@@ -608,7 +512,7 @@ impl DeltaLayer {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
-                relsizes: VecMap::default(),
+                seg_sizes: VecMap::default(),
             }),
         })
     }
@@ -630,5 +534,173 @@ impl DeltaLayer {
             self.tenantid,
             &self.layer_name(),
         )
+    }
+}
+
+/// A builder object for constructing a new delta layer.
+///
+/// Usage:
+///
+/// 1. Create the DeltaLayerWriter by calling DeltaLayerWriter::new(...)
+///
+/// 2. Write the contents by calling `put_page_version` for every page
+///    version to store in the layer.
+///
+/// 3. Call `finish`.
+///
+pub struct DeltaLayerWriter {
+    conf: &'static PageServerConf,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
+    seg: SegmentTag,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+    dropped: bool,
+
+    page_version_writer: ChapterWriter<BufWriter<VirtualFile>>,
+    pv_offset: u64,
+
+    page_version_metas: VecMap<(SegmentBlk, Lsn), BlobRange>,
+}
+
+impl DeltaLayerWriter {
+    ///
+    /// Start building a new delta layer.
+    ///
+    pub fn new(
+        conf: &'static PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        seg: SegmentTag,
+        start_lsn: Lsn,
+        end_lsn: Lsn,
+        dropped: bool,
+    ) -> Result<DeltaLayerWriter> {
+        // Create the file
+        //
+        // Note: This overwrites any existing file. There shouldn't be any.
+        // FIXME: throw an error instead?
+        let path = DeltaLayer::path_for(
+            &PathOrConf::Conf(conf),
+            timelineid,
+            tenantid,
+            &DeltaFileName {
+                seg,
+                start_lsn,
+                end_lsn,
+                dropped,
+            },
+        );
+        let file = VirtualFile::create(&path)?;
+        let buf_writer = BufWriter::new(file);
+        let book = BookWriter::new(buf_writer, DELTA_FILE_MAGIC)?;
+
+        // Open the page-versions chapter for writing. The calls to
+        // `put_page_version` will use this to write the contents.
+        let page_version_writer = book.new_chapter(PAGE_VERSIONS_CHAPTER);
+
+        Ok(DeltaLayerWriter {
+            conf,
+            timelineid,
+            tenantid,
+            seg,
+            start_lsn,
+            end_lsn,
+            dropped,
+            page_version_writer,
+            page_version_metas: VecMap::default(),
+            pv_offset: 0,
+        })
+    }
+
+    ///
+    /// Append a page version to the file.
+    ///
+    /// 'buf' is a serialized PageVersion.
+    /// The page versions must be appended in blknum, lsn order.
+    ///
+    pub fn put_page_version(&mut self, blknum: SegmentBlk, lsn: Lsn, buf: &[u8]) -> Result<()> {
+        // Remember the offset and size metadata. The metadata is written
+        // to a separate chapter, in `finish`.
+        let blob_range = BlobRange {
+            offset: self.pv_offset,
+            size: buf.len(),
+        };
+        self.page_version_metas
+            .append((blknum, lsn), blob_range)
+            .unwrap();
+
+        // write the page version
+        self.page_version_writer.write_all(buf)?;
+        self.pv_offset += buf.len() as u64;
+
+        Ok(())
+    }
+
+    ///
+    /// Finish writing the delta layer.
+    ///
+    /// 'seg_sizes' is a list of size changes to store with the actual data.
+    ///
+    pub fn finish(self, seg_sizes: VecMap<Lsn, SegmentBlk>) -> Result<DeltaLayer> {
+        // Close the page-versions chapter
+        let book = self.page_version_writer.close()?;
+
+        // Write out page versions metadata
+        let mut chapter = book.new_chapter(PAGE_VERSION_METAS_CHAPTER);
+        let buf = VecMap::ser(&self.page_version_metas)?;
+        chapter.write_all(&buf)?;
+        let book = chapter.close()?;
+
+        if self.seg.rel.is_blocky() {
+            assert!(!seg_sizes.is_empty());
+        }
+
+        // and seg_sizes to separate chapter
+        let mut chapter = book.new_chapter(SEG_SIZES_CHAPTER);
+        let buf = VecMap::ser(&seg_sizes)?;
+        chapter.write_all(&buf)?;
+        let book = chapter.close()?;
+
+        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
+        let summary = Summary {
+            tenantid: self.tenantid,
+            timelineid: self.timelineid,
+            seg: self.seg,
+
+            start_lsn: self.start_lsn,
+            end_lsn: self.end_lsn,
+
+            dropped: self.dropped,
+        };
+        Summary::ser_into(&summary, &mut chapter)?;
+        let book = chapter.close()?;
+
+        // This flushes the underlying 'buf_writer'.
+        let writer = book.close()?;
+        writer.get_ref().sync_all()?;
+
+        // Note: Because we opened the file in write-only mode, we cannot
+        // reuse the same VirtualFile for reading later. That's why we don't
+        // set inner.book here. The first read will have to re-open it.
+        let layer = DeltaLayer {
+            path_or_conf: PathOrConf::Conf(self.conf),
+            tenantid: self.tenantid,
+            timelineid: self.timelineid,
+            seg: self.seg,
+            start_lsn: self.start_lsn,
+            end_lsn: self.end_lsn,
+            dropped: self.dropped,
+            inner: Mutex::new(DeltaLayerInner {
+                loaded: false,
+                book: None,
+                page_version_metas: VecMap::default(),
+                seg_sizes: VecMap::default(),
+            }),
+        };
+
+        trace!("created delta layer {}", &layer.path().display());
+
+        Ok(layer)
     }
 }

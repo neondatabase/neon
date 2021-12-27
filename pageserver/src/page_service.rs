@@ -35,11 +35,11 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::basebackup;
 use crate::branches;
+use crate::config::PageServerConf;
 use crate::relish::*;
 use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::walreceiver;
-use crate::PageServerConf;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
@@ -532,16 +532,9 @@ impl postgres_backend::Handler for PageServerHandler {
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
-        query_string: Bytes,
+        query_string: &str,
     ) -> anyhow::Result<()> {
         debug!("process query {:?}", query_string);
-
-        // remove null terminator, if any
-        let mut query_string = query_string;
-        if query_string.last() == Some(&0) {
-            query_string.truncate(query_string.len() - 1);
-        }
-        let query_string = std::str::from_utf8(&query_string)?;
 
         if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
