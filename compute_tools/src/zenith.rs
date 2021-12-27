@@ -37,7 +37,7 @@ pub struct ClusterSpec {
 /// like Rails web console.
 #[derive(Clone, Deserialize)]
 pub struct Cluster {
-    pub cluster_id: i64,
+    pub cluster_id: String,
     pub name: String,
     pub state: Option<String>,
     pub roles: Vec<Role>,
