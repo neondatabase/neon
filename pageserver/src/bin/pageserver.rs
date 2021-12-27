@@ -64,10 +64,10 @@ fn main() -> Result<()> {
         .get_matches();
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
-    let cfg_file_path = workdir
+    let workdir = workdir
         .canonicalize()
-        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?
-        .join("pageserver.toml");
+        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
+    let cfg_file_path = workdir.join("pageserver.toml");
 
     let init = arg_matches.is_present("init");
     let create_tenant = arg_matches.value_of("create-tenant");
@@ -119,7 +119,7 @@ fn main() -> Result<()> {
         }
     }
     trace!("Resulting toml: {}", toml);
-    let conf = PageServerConf::parse_and_validate(&toml, workdir)
+    let conf = PageServerConf::parse_and_validate(&toml, &workdir)
         .context("Failed to parse pageserver configuration")?;
 
     // The configuration is all set up now. Turn it into a 'static

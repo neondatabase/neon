@@ -32,8 +32,8 @@ fn default_conf() -> String {
         r#"
 # Default built-in configuration, defined in main.rs
 [pageserver]
-listen_pg_addr = {pageserver_pg_addr}
-listen_http_addr = {pageserver_http_addr}
+listen_pg_addr = '{pageserver_pg_addr}'
+listen_http_addr = '{pageserver_http_addr}'
 auth_type = '{pageserver_auth_type}'
 
 [[safekeepers]]
