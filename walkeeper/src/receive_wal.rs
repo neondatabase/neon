@@ -123,9 +123,9 @@ impl<'pg> ReceiveWalConn<'pg> {
 
                 // create a guard to unsubscribe callback, when this wal_stream will exit
                 Some(SendWalHandlerGuard {
-                    tx: tx_clone,
-                    tenant_id,
-                    timelineid,
+                    _tx: tx_clone,
+                    _tenant_id: tenant_id,
+                    _timelineid: timelineid,
                     timeline: Arc::clone(spg.timeline.get()),
                 })
             }
@@ -147,22 +147,22 @@ impl<'pg> ReceiveWalConn<'pg> {
 }
 
 struct SendWalHandlerGuard {
-    tx: UnboundedSender<CallmeEvent>,
-    tenant_id: ZTenantId,
-    timelineid: ZTimelineId,
+    _tx: UnboundedSender<CallmeEvent>,
+    _tenant_id: ZTenantId,
+    _timelineid: ZTimelineId,
     timeline: Arc<Timeline>,
 }
 
 impl Drop for SendWalHandlerGuard {
     fn drop(&mut self) {
         self.timeline.stop_streaming();
-        self.tx
-            .send(CallmeEvent::Unsubscribe(self.tenant_id, self.timelineid))
-            .unwrap_or_else(|e| {
-                error!(
-                    "failed to send Unsubscribe request to callmemaybe thread {}",
-                    e
-                );
-            });
+        // self.tx
+        //     .send(CallmeEvent::Unsubscribe(self.tenant_id, self.timelineid))
+        //     .unwrap_or_else(|e| {
+        //         error!(
+        //             "failed to send Unsubscribe request to callmemaybe thread {}",
+        //             e
+        //         );
+        //     });
     }
 }
