@@ -25,7 +25,7 @@ async fn request_callback(
     timelineid: ZTimelineId,
     tenantid: ZTenantId,
 ) -> Result<()> {
-    debug!(
+    info!(
         "callmemaybe request_callback Connecting to pageserver {}",
         &pageserver_connstr
     );
@@ -75,6 +75,7 @@ pub enum CallmeEvent {
     Resume(ZTenantId, ZTimelineId),
 }
 
+#[derive(Debug)]
 struct SubscriptionState {
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
@@ -136,7 +137,7 @@ impl SubscriptionState {
     fn call(&mut self, recall_period: Duration, listen_pg_addr: String) {
         // Ignore call request if this subscription is paused
         if self.paused {
-            debug!(
+            info!(
                 "ignore call request for paused subscription
                 tenantid: {}, timelineid: {}",
                 self.tenantid, self.timelineid
@@ -146,7 +147,7 @@ impl SubscriptionState {
 
         // Check if it too early to recall
         if self.handle.is_some() && self.last_call_time.elapsed() < recall_period {
-            debug!(
+            info!(
                 "too early to recall. self.last_call_time.elapsed: {:?}, recall_period: {:?}
                 tenantid: {}, timelineid: {}",
                 self.last_call_time, recall_period, self.tenantid, self.timelineid
@@ -174,7 +175,7 @@ impl SubscriptionState {
 
         // Update last_call_time
         self.last_call_time = Instant::now();
-        debug!(
+        info!(
             "new call spawned. time {:?}
             tenantid: {}, timelineid: {}",
             self.last_call_time, self.tenantid, self.timelineid
@@ -201,18 +202,22 @@ pub async fn main_loop(conf: SafeKeeperConf, mut rx: UnboundedReceiver<CallmeEve
                     CallmeEvent::Subscribe(tenantid, timelineid, pageserver_connstr) =>
                     {
                         let mut subscriptions = subscriptions.lock().unwrap();
+                        if let Some(sub) = subscriptions.get(&(tenantid, timelineid))
+                        {
+                            info!("callmemaybe. subscription already exists {:?}", sub);
+                        }
                         if let Some(mut sub) = subscriptions.insert((tenantid, timelineid),
                             SubscriptionState::new(tenantid, timelineid, pageserver_connstr))
                         {
                             sub.call(conf.recall_period, conf.listen_pg_addr.clone());
                         }
-                        debug!("callmemaybe. thread_main. subscribe callback request for timelineid={} tenantid={}",
+                        info!("callmemaybe. thread_main. subscribe callback request for timelineid={} tenantid={}",
                         timelineid, tenantid);
                     },
                     CallmeEvent::Unsubscribe(tenantid, timelineid) => {
                         let mut subscriptions = subscriptions.lock().unwrap();
                         subscriptions.remove(&(tenantid, timelineid));
-                        debug!("callmemaybe. thread_main. unsubscribe callback request for timelineid={} tenantid={}",
+                        info!("callmemaybe. thread_main. unsubscribe callback. request for timelineid={} tenantid={}",
                         timelineid, tenantid);
                     },
                     CallmeEvent::Pause(tenantid, timelineid) => {
@@ -221,7 +226,7 @@ pub async fn main_loop(conf: SafeKeeperConf, mut rx: UnboundedReceiver<CallmeEve
                         {
                             sub.pause();
                         };
-                        debug!("callmemaybe. thread_main. pause callback request for timelineid={} tenantid={}",
+                        info!("callmemaybe. thread_main. pause callback request for timelineid={} tenantid={}",
                         timelineid, tenantid);
                     },
                     CallmeEvent::Resume(tenantid, timelineid) => {
@@ -232,7 +237,7 @@ pub async fn main_loop(conf: SafeKeeperConf, mut rx: UnboundedReceiver<CallmeEve
                             sub.call(conf.recall_period, conf.listen_pg_addr.clone());
                         };
 
-                        debug!("callmemaybe. thread_main. resume callback request for timelineid={} tenantid={}",
+                        info!("callmemaybe. thread_main. resume callback request for timelineid={} tenantid={}",
                         timelineid, tenantid);
                     },
                 }
