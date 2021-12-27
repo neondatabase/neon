@@ -131,7 +131,7 @@ impl ProxyConnection {
                         encrypted = true;
                     }
                 }
-                FeInitialMessage::StartupMessage(_, mut params) => {
+                FeInitialMessage::StartupMessage { mut params, .. } => {
                     if have_tls && !encrypted {
                         bail!("must connect with TLS");
                     }
@@ -145,7 +145,7 @@ impl ProxyConnection {
                     return Ok((get_param("user")?, get_param("database")?));
                 }
                 // TODO: implement proper stmt cancellation
-                FeInitialMessage::CancelRequest(_, _) => {
+                FeInitialMessage::CancelRequest { .. } => {
                     bail!("query cancellation is not supported")
                 }
             }

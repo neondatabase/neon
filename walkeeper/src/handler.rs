@@ -74,7 +74,7 @@ fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
     // ztenant id and ztimeline id are passed in connection string params
     fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeInitialMessage) -> Result<()> {
-        if let FeInitialMessage::StartupMessage(_, params) = sm {
+        if let FeInitialMessage::StartupMessage { params, .. } = sm {
             self.ztenantid = match params.get("ztenantid") {
                 Some(z) => Some(ZTenantId::from_str(z)?), // just curious, can I do that from .map?
                 _ => None,

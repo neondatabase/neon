@@ -352,7 +352,7 @@ impl PostgresBackend {
                         info!("GSS requested");
                         self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
-                    FeInitialMessage::StartupMessage(_, _) => {
+                    FeInitialMessage::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
                             self.write_message(&BeMessage::ErrorResponse(
                                 "must connect with TLS".to_string(),
@@ -385,7 +385,7 @@ impl PostgresBackend {
                             }
                         }
                     }
-                    FeInitialMessage::CancelRequest(_, _) => {
+                    FeInitialMessage::CancelRequest { .. } => {
                         return Ok(ProcessMsgResult::Break);
                     }
                 }

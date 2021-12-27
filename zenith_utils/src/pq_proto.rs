@@ -39,12 +39,16 @@ pub enum FeMessage {
 
 #[derive(Debug)]
 pub enum FeInitialMessage {
-    // backend_pid, cancel_key
-    CancelRequest(i32, i32),
+    CancelRequest {
+        backend_pid: i32,
+        cancel_key: i32,
+    },
     SSLRequest,
     GSSENCRequest,
-    // version, params
-    StartupMessage(u32, HashMap<String, String>),
+    StartupMessage {
+        version: u32,
+        params: HashMap<String, String>,
+    },
 }
 
 #[derive(Debug)]
@@ -182,16 +186,19 @@ impl FeInitialMessage {
                 ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
                 let backend_pid = parse_i32_big_endian(&params_bytes[0..4]);
                 let cancel_key = parse_i32_big_endian(&params_bytes[4..8]);
-                FeInitialMessage::CancelRequest(backend_pid, cancel_key)
+                FeInitialMessage::CancelRequest {
+                    backend_pid,
+                    cancel_key,
+                }
             }
             NEGOTIATE_SSL_CODE => FeInitialMessage::SSLRequest,
             NEGOTIATE_GSS_CODE => FeInitialMessage::GSSENCRequest,
             _ => {
                 // Then null-terminated (String) pairs of param name / param value go.
                 let params_str = str::from_utf8(&params_bytes).unwrap();
-                let params = params_str.split('\0');
-                let mut params_hash: HashMap<String, String> = HashMap::new();
-                for pair in params.collect::<Vec<_>>().chunks_exact(2) {
+                let params_tokens = params_str.split('\0');
+                let mut params: HashMap<String, String> = HashMap::new();
+                for pair in params_tokens.collect::<Vec<_>>().chunks_exact(2) {
                     let name = pair[0];
                     let value = pair[1];
                     if name == "options" {
@@ -199,15 +206,15 @@ impl FeInitialMessage {
                         for cmdopt in value.split(' ') {
                             let nameval: Vec<&str> = cmdopt.split('=').collect();
                             if nameval.len() == 2 {
-                                params_hash.insert(nameval[0].to_string(), nameval[1].to_string());
+                                params.insert(nameval[0].to_string(), nameval[1].to_string());
                             }
                         }
                     } else {
-                        params_hash.insert(name.to_string(), value.to_string());
+                        params.insert(name.to_string(), value.to_string());
                     }
                 }
                 let version = request_code;
-                FeInitialMessage::StartupMessage(version, params_hash)
+                FeInitialMessage::StartupMessage { version, params }
             }
         };
         Ok(Some(FeMessage::InitialMessage(message)))
