@@ -336,6 +336,7 @@ pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationMD5Password(&'a [u8; 4]),
     AuthenticationCleartextPassword,
+    BackendKeyData { backend_pid: i32, cancel_key: i32 },
     BindComplete,
     CommandComplete(&'a [u8]),
     CopyData(&'a [u8]),
@@ -530,6 +531,19 @@ impl<'a> BeMessage<'a> {
                     Ok::<_, io::Error>(())
                 })
                 .unwrap(); // write into BytesMut can't fail
+            }
+
+            BeMessage::BackendKeyData {
+                backend_pid,
+                cancel_key,
+            } => {
+                buf.put_u8(b'K');
+                write_body(buf, |buf| {
+                    buf.put_i32(*backend_pid);
+                    buf.put_i32(*cancel_key);
+                    Ok(())
+                })
+                .unwrap();
             }
 
             BeMessage::BindComplete => {
