@@ -8,7 +8,6 @@ use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 // use postgres_ffi::xlog_utils::TimestampTz;
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::io;
 use std::io::Read;
 use std::str;
