@@ -182,17 +182,10 @@ impl FeInitialMessage {
         let least_sig_16_bits = request_code & ((1 << 16) - 1);
         let message = match (most_sig_16_bits, least_sig_16_bits) {
             (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
-                let parse_i32_big_endian = |byte_slice: &[u8]| {
-                    let byte_array: [u8; 4] = byte_slice.try_into().unwrap();
-                    i32::from_be_bytes(byte_array)
-                };
-
                 ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
-                let backend_pid = parse_i32_big_endian(&params_bytes[0..4]);
-                let cancel_key = parse_i32_big_endian(&params_bytes[4..8]);
                 FeInitialMessage::CancelRequest {
-                    backend_pid,
-                    cancel_key,
+                    backend_pid: byteorder::BigEndian::read_i32(&params_bytes[0..4]),
+                    cancel_key: byteorder::BigEndian::read_i32(&params_bytes[4..8]),
                 }
             }
             (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeInitialMessage::SSLRequest,
