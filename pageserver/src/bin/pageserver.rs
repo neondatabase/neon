@@ -19,28 +19,11 @@ use zenith_utils::postgres_backend;
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals::{self, Signal};
 
-use const_format::formatcp;
-
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(GIT_VERSION)
-        .arg(
-            Arg::with_name("listen_pg_addr")
-                .short("l")
-                .long("listen_pg_addr")
-                .aliases(&["listen", "listen-pg"]) // keep some compatibility
-                .takes_value(true)
-                .help(formatcp!("listen for incoming page requests on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
-        )
-        .arg(
-            Arg::with_name("listen_http_addr")
-                .long("listen_http_addr")
-                .aliases(&["http_endpoint", "listen-http"]) // keep some compatibility
-                .takes_value(true)
-                .help(formatcp!("http endpoint address for metrics and management API calls on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
-        )
         .arg(
             Arg::with_name("daemonize")
                 .short("d")
