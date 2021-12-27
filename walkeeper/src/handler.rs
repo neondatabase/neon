@@ -34,7 +34,7 @@ pub struct SafekeeperPostgresHandler {
 
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
     fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeInitialMessage) -> Result<()> {
-        if let FeInitialMessage::StartupMessage(version, params) = sm {
+        if let FeInitialMessage::StartupMessage(_, params) = sm {
             let ztimelineid = params
                 .get("ztimelineid")
                 .ok_or_else(|| anyhow!("timelineid is required"))?;
