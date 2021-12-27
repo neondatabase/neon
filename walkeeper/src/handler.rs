@@ -53,7 +53,6 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         } else {
             bail!("Walkeeper received unexpected initial message: {:?}", sm);
         }
-
     }
 
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()> {
