@@ -55,12 +55,6 @@ pub struct CancelKeyData {
 }
 
 #[derive(Debug)]
-pub struct CancelKeyData {
-    pub backend_pid: i32,
-    pub cancel_key: i32,
-}
-
-#[derive(Debug)]
 pub struct FeQueryMessage {
     pub body: Bytes,
 }
