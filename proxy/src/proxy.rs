@@ -3,7 +3,9 @@ use crate::ProxyState;
 use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
-use rand::Rng;
+use rand::prelude::StdRng;
+use rand::{CryptoRng, Rng, SeedableRng};
+use tokio::try_join;
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::{io, thread};
@@ -292,32 +294,31 @@ async fn connect_to_db(db_info: DatabaseInfo) ->
     let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()?).await?;
     let config = tokio_postgres::Config::from(db_info.clone());
     let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
+    let cancel_token = client.cancel_token().clone();
 
     // NOTE We effectively ignore any ParameterStatus and NoticeResponse
     //      messages here. Not sure if that could break something.
 
-    let query = client.query_one("select current_setting('server_version')", &[]);
-
-    tokio::pin!(query, conn);
-
-    let version = tokio::select!(
-        x = query => x?.try_get(0)?,
-        _ = conn => bail!("connection closed too early"),
-    );
-
-    // TODO clean this up
-    let cancel_key_data = {
-        // let backend_pid: i32 = client.query_one("select pg_backend_pid()", &[])
-            // .await?.try_get(0)?;
-        // TODO query the pid instead.
-        let backend_pid = rand::thread_rng().gen::<i32>();
-
-        // TODO use secure random!!!
-        let cancel_key = rand::thread_rng().gen::<i32>();
-        (backend_pid, cancel_key)
+    let get_version_and_backend = || async {
+        let pipeline = try_join!(
+            client.query_one("select current_setting('server_version')", &[]),
+            client.query_one("select pg_backend_pid()", &[]))?;
+        let version: String = pipeline.0.try_get(0)?;
+        let backend_pid: i32 = pipeline.1.try_get(0)?;
+        Result::<(String, i32), tokio_postgres::Error>::Ok((version, backend_pid))
     };
 
-    CANCEL_MAP.lock().insert(cancel_key_data, (client.cancel_token(), db_info.clone()));
+    // Allow conn to talk with pg until we get our results back
+    let (version, backend_pid) = tokio::select! {
+        x = get_version_and_backend() => x?,
+        _ = conn => bail!("connection closed too early"),
+    };
+
+    let mut rng = rand::rngs::StdRng::from_entropy();
+    let cancel_key: i32 = rng.gen();
+    let cancel_key_data = (backend_pid, cancel_key);
+
+    CANCEL_MAP.lock().insert(cancel_key_data, (cancel_token, db_info.clone()));
     Ok((version, socket, cancel_key_data))
 }
 
