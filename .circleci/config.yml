@@ -443,11 +443,20 @@ jobs:
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
+      # Build zenithdb/compute-tools:latest image and push it to Docker hub
+      # TODO: this should probably also use versioned tag, not just :latest.
+      # XXX: but should it? We build and use it only locally now.
+      - run:
+          name: Build and push compute-tools Docker image
+          command: |
+            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            docker build -t zenithdb/compute-tools:latest ./compute_tools/
+            docker push zenithdb/compute-tools:latest
       - run:
           name: Init postgres submodule
           command: git submodule update --init --depth 1
       - run:
-          name: Build and push Docker image
+          name: Build and push compute-node Docker image
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
@@ -562,6 +571,55 @@ jobs:
                 }
               }"
 
+  #
+  #
+  # compute-tools jobs
+  # TODO: unify with main build_and_test pipeline
+  #
+  #
+  compute-tools-test:
+    executor: zenith-build-executor
+    working_directory: ~/repo/compute_tools
+    steps:
+      - checkout:
+          path: ~/repo
+
+      - restore_cache:
+          name: Restore rust cache
+          keys:
+            # Require an exact match. While an out of date cache might speed up the build,
+            # there's no way to clean out old packages, so the cache grows every time something
+            # changes.
+            - v03-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
+
+      # Build the rust code, including test binaries
+      - run:
+          name: Rust build
+          environment:
+            CARGO_INCREMENTAL: 0
+          command: cargo build --bins --tests
+
+      - save_cache:
+          name: Save rust cache
+          key: v03-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+            - target
+
+      # Run Rust formatting checks
+      - run:
+          name: cargo fmt check
+          command: cargo fmt --all -- --check
+
+      # Run Rust linter (clippy)
+      - run:
+          name: cargo clippy check
+          command: cargo clippy --all --all-targets -- -Dwarnings -Drust-2018-idioms
+
+      # Run Rust integration and unittests
+      - run: cargo test
+
 workflows:
   build_and_test:
     jobs:
@@ -610,6 +668,7 @@ workflows:
           requires:
             # TODO: consider adding more
             - other-tests-debug
+      - compute-tools-test
       - docker-image:
           # Context gives an ability to login
           context: Docker Hub
@@ -632,6 +691,7 @@ workflows:
           requires:
             - pg_regress-tests-release
             - other-tests-release
+            - compute-tools-test
       - deploy-staging:
           # Context gives an ability to login
           context: Docker Hub
