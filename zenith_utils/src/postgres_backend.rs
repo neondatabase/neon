@@ -3,9 +3,7 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::pq_proto::{
-    BeMessage, BeParameterStatusMessage, FeMessage, FeStartupMessage, StartupRequestCode,
-};
+use crate::pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Bytes, BytesMut};
@@ -27,14 +25,14 @@ pub trait Handler {
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care).
-    fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()>;
+    fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()>;
 
     /// Called on startup packet receival, allows to process params.
     ///
     /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
     /// creation is the proxy code. That is quite hacky and ad-hoc solution, may be we could allow
     /// to override whole init logic in implementations.
-    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupMessage) -> Result<()> {
+    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupPacket) -> Result<()> {
         Ok(())
     }
 
@@ -59,7 +57,7 @@ pub enum ProtoState {
     Established,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub enum AuthType {
     Trust,
     MD5,
@@ -164,6 +162,17 @@ pub fn is_socket_read_timed_out(error: &anyhow::Error) -> bool {
     false
 }
 
+// Truncate 0 from C string in Bytes and stringify it (returns slice, no allocations)
+// PG protocol strings are always C strings.
+fn cstr_to_str(b: &Bytes) -> Result<&str> {
+    let without_null = if b.last() == Some(&0) {
+        &b[..b.len() - 1]
+    } else {
+        &b[..]
+    };
+    std::str::from_utf8(without_null).map_err(|e| e.into())
+}
+
 impl PostgresBackend {
     pub fn new(
         socket: TcpStream,
@@ -226,7 +235,7 @@ impl PostgresBackend {
 
         use ProtoState::*;
         match state {
-            Initialization | Encrypted => FeStartupMessage::read(stream),
+            Initialization | Encrypted => FeStartupPacket::read(stream),
             Authentication | Established => FeMessage::read(stream),
         }
     }
@@ -318,7 +327,7 @@ impl PostgresBackend {
             ensure!(
                 matches!(
                     msg,
-                    FeMessage::PasswordMessage(_) | FeMessage::StartupMessage(_)
+                    FeMessage::PasswordMessage(_) | FeMessage::StartupPacket(_)
                 ),
                 "protocol violation"
             );
@@ -326,11 +335,11 @@ impl PostgresBackend {
 
         let have_tls = self.tls_config.is_some();
         match msg {
-            FeMessage::StartupMessage(m) => {
+            FeMessage::StartupPacket(m) => {
                 trace!("got startup message {:?}", m);
 
-                match m.kind {
-                    StartupRequestCode::NegotiateSsl => {
+                match m {
+                    FeStartupPacket::SslRequest => {
                         info!("SSL requested");
 
                         self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
@@ -339,11 +348,11 @@ impl PostgresBackend {
                             self.state = ProtoState::Encrypted;
                         }
                     }
-                    StartupRequestCode::NegotiateGss => {
+                    FeStartupPacket::GssEncRequest => {
                         info!("GSS requested");
                         self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
-                    StartupRequestCode::Normal => {
+                    FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
                             self.write_message(&BeMessage::ErrorResponse(
                                 "must connect with TLS".to_string(),
@@ -376,7 +385,7 @@ impl PostgresBackend {
                             }
                         }
                     }
-                    StartupRequestCode::Cancel => {
+                    FeStartupPacket::CancelRequest { .. } => {
                         return Ok(ProcessMsgResult::Break);
                     }
                 }
@@ -417,15 +426,18 @@ impl PostgresBackend {
             }
 
             FeMessage::Query(m) => {
-                trace!("got query {:?}", m.body);
+                // remove null terminator
+                let query_string = cstr_to_str(&m.body)?;
+
+                trace!("got query {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
-                if let Err(e) = handler.process_query(self, m.body.clone()) {
+                if let Err(e) = handler.process_query(self, query_string) {
                     let errmsg = format!("{}", e);
                     // ":#" uses the alternate formatting style, which makes anyhow display the
                     // full cause of the error, not just the top-level context. We don't want to
                     // send that in the ErrorResponse though, because it's not relevant to the
                     // compute node logs.
-                    warn!("query handler for {:?} failed: {:#}", m.body, e);
+                    warn!("query handler for {} failed: {:#}", query_string, e);
                     if e.to_string().contains("failed to run") {
                         self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
                         return Ok(ProcessMsgResult::Break);
@@ -454,15 +466,13 @@ impl PostgresBackend {
             }
 
             FeMessage::Execute(_) => {
-                trace!("got execute {:?}", unnamed_query_string);
+                let query_string = cstr_to_str(unnamed_query_string)?;
+                trace!("got execute {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
-                if let Err(e) = handler.process_query(self, unnamed_query_string.clone()) {
+                if let Err(e) = handler.process_query(self, query_string) {
                     let errmsg = format!("{}", e);
 
-                    warn!(
-                        "query handler for {:?} failed: {:#}",
-                        unnamed_query_string, e
-                    );
+                    warn!("query handler for {:?} failed: {:#}", query_string, e);
                     self.write_message(&BeMessage::ErrorResponse(errmsg))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used

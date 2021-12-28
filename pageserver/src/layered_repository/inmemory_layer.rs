@@ -4,16 +4,18 @@
 //!
 //! And there's another BTreeMap to track the size of the relation.
 //!
+use crate::config::PageServerConf;
+use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::filename::DeltaFileName;
+use crate::layered_repository::image_layer::{ImageLayer, ImageLayerWriter};
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentTag, RELISH_SEG_SIZE,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
+    RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
-use crate::layered_repository::{DeltaLayer, ImageLayer};
 use crate::repository::WALRecord;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
@@ -64,13 +66,13 @@ pub struct InMemoryLayerInner {
     page_versions: PageVersions,
 
     ///
-    /// `segsizes` tracks the size of the segment at different points in time.
+    /// `seg_sizes` tracks the size of the segment at different points in time.
     ///
     /// For a blocky rel, there is always one entry, at the layer's start_lsn,
     /// so that determining the size never depends on the predecessor layer. For
-    /// a non-blocky rel, 'segsizes' is not used and is always empty.
+    /// a non-blocky rel, 'seg_sizes' is not used and is always empty.
     ///
-    segsizes: VecMap<Lsn, u32>,
+    seg_sizes: VecMap<Lsn, SegmentBlk>,
 }
 
 impl InMemoryLayerInner {
@@ -78,9 +80,9 @@ impl InMemoryLayerInner {
         assert!(self.end_lsn.is_none());
     }
 
-    fn get_seg_size(&self, lsn: Lsn) -> u32 {
+    fn get_seg_size(&self, lsn: Lsn) -> SegmentBlk {
         // Scan the BTreeMap backwards, starting from the given entry.
-        let slice = self.segsizes.slice_range(..=lsn);
+        let slice = self.seg_sizes.slice_range(..=lsn);
 
         // We make sure there is always at least one entry
         if let Some((_entry_lsn, entry)) = slice.last() {
@@ -150,14 +152,14 @@ impl Layer for InMemoryLayer {
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
-        blknum: u32,
+        blknum: SegmentBlk,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.seg.blknum_in_seg(blknum));
+        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         {
             let inner = self.inner.read().unwrap();
@@ -176,7 +178,7 @@ impl Layer for InMemoryLayer {
                     _ => {}
                 }
 
-                let pv = inner.page_versions.get_page_version(*pos)?;
+                let pv = inner.page_versions.read_pv(*pos)?;
                 match pv {
                     PageVersion::Page(img) => {
                         reconstruct_data.page_img = Some(img);
@@ -198,7 +200,7 @@ impl Layer for InMemoryLayer {
             if need_image
                 && reconstruct_data.records.is_empty()
                 && self.seg.rel.is_blocky()
-                && blknum - self.seg.segno * RELISH_SEG_SIZE >= self.get_seg_size(lsn)?
+                && blknum >= self.get_seg_size(lsn)?
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -220,7 +222,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
         assert!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
@@ -291,12 +293,12 @@ impl Layer for InMemoryLayer {
             self.timelineid, self.seg, self.start_lsn, end_str, inner.dropped,
         );
 
-        for (k, v) in inner.segsizes.as_slice() {
-            println!("segsizes {}: {}", k, v);
+        for (k, v) in inner.seg_sizes.as_slice() {
+            println!("seg_sizes {}: {}", k, v);
         }
 
         for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
-            let pv = inner.page_versions.get_page_version(pos)?;
+            let pv = inner.page_versions.read_pv(pos)?;
             let pv_description = match pv {
                 PageVersion::Page(_img) => "page",
                 PageVersion::Wal(_rec) => "wal",
@@ -339,10 +341,10 @@ impl InMemoryLayer {
             start_lsn
         );
 
-        // The segment is initially empty, so initialize 'segsizes' with 0.
-        let mut segsizes = VecMap::default();
+        // The segment is initially empty, so initialize 'seg_sizes' with 0.
+        let mut seg_sizes = VecMap::default();
         if seg.rel.is_blocky() {
-            segsizes.append(start_lsn, 0).unwrap();
+            seg_sizes.append(start_lsn, 0).unwrap();
         }
 
         let file = EphemeralFile::create(conf, tenantid, timelineid)?;
@@ -359,7 +361,7 @@ impl InMemoryLayer {
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::new(file),
-                segsizes,
+                seg_sizes,
             }),
         })
     }
@@ -367,19 +369,19 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, lsn: Lsn, blknum: u32, rec: WALRecord) -> Result<u32> {
+    pub fn put_wal_record(&self, lsn: Lsn, blknum: SegmentBlk, rec: WALRecord) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Wal(rec))
     }
 
     /// Remember new page version, as a full page image
-    pub fn put_page_image(&self, blknum: u32, lsn: Lsn, img: Bytes) -> Result<u32> {
+    pub fn put_page_image(&self, blknum: SegmentBlk, lsn: Lsn, img: Bytes) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Page(img))
     }
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_page_version(&self, blknum: u32, lsn: Lsn, pv: PageVersion) -> Result<u32> {
-        assert!(self.seg.blknum_in_seg(blknum));
+    pub fn put_page_version(&self, blknum: SegmentBlk, lsn: Lsn, pv: PageVersion) -> Result<u32> {
+        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         trace!(
             "put_page_version blk {} of {} at {}/{}",
@@ -404,7 +406,7 @@ impl InMemoryLayer {
 
         // Also update the relation size, if this extended the relation.
         if self.seg.rel.is_blocky() {
-            let newsize = blknum - self.seg.segno * RELISH_SEG_SIZE + 1;
+            let newsize = blknum + 1;
 
             // use inner get_seg_size, since calling self.get_seg_size will try to acquire the lock,
             // which we've just acquired above
@@ -426,8 +428,7 @@ impl InMemoryLayer {
                 // PostgreSQL writes its WAL records and there's no guarantee of it. If it does
                 // happen, we would hit the "page version already exists" warning above on the
                 // subsequent call to initialize the gap page.
-                let gapstart = self.seg.segno * RELISH_SEG_SIZE + oldsize;
-                for gapblknum in gapstart..blknum {
+                for gapblknum in oldsize..blknum {
                     let zeropv = PageVersion::Page(ZERO_PAGE.clone());
                     trace!(
                         "filling gap blk {} with zeros for write of {}",
@@ -441,13 +442,13 @@ impl InMemoryLayer {
 
                     if old.is_some() {
                         warn!(
-                            "Page version of rel {} blk {} at {} already exists",
-                            self.seg.rel, blknum, lsn
+                            "Page version of seg {} blk {} at {} already exists",
+                            self.seg, blknum, lsn
                         );
                     }
                 }
 
-                inner.segsizes.append_or_update_last(lsn, newsize).unwrap();
+                inner.seg_sizes.append_or_update_last(lsn, newsize).unwrap();
                 return Ok(newsize - oldsize);
             }
         }
@@ -456,7 +457,7 @@ impl InMemoryLayer {
     }
 
     /// Remember that the relation was truncated at given LSN
-    pub fn put_truncation(&self, lsn: Lsn, segsize: u32) {
+    pub fn put_truncation(&self, lsn: Lsn, new_size: SegmentBlk) {
         assert!(
             self.seg.rel.is_blocky(),
             "put_truncation() called on a non-blocky rel"
@@ -466,10 +467,13 @@ impl InMemoryLayer {
         inner.assert_writeable();
 
         // check that this we truncate to a smaller size than segment was before the truncation
-        let oldsize = inner.get_seg_size(lsn);
-        assert!(segsize < oldsize);
+        let old_size = inner.get_seg_size(lsn);
+        assert!(new_size < old_size);
 
-        let (old, _delta_size) = inner.segsizes.append_or_update_last(lsn, segsize).unwrap();
+        let (old, _delta_size) = inner
+            .seg_sizes
+            .append_or_update_last(lsn, new_size)
+            .unwrap();
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -515,10 +519,10 @@ impl InMemoryLayer {
         );
 
         // Copy the segment size at the start LSN from the predecessor layer.
-        let mut segsizes = VecMap::default();
+        let mut seg_sizes = VecMap::default();
         if seg.rel.is_blocky() {
             let size = src.get_seg_size(start_lsn)?;
-            segsizes.append(start_lsn, size).unwrap();
+            seg_sizes.append(start_lsn, size).unwrap();
         }
 
         let file = EphemeralFile::create(conf, tenantid, timelineid)?;
@@ -535,7 +539,7 @@ impl InMemoryLayer {
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::new(file),
-                segsizes,
+                seg_sizes,
             }),
         })
     }
@@ -558,7 +562,7 @@ impl InMemoryLayer {
             assert!(self.start_lsn < end_lsn + 1);
             inner.end_lsn = Some(Lsn(end_lsn.0 + 1));
 
-            if let Some((lsn, _)) = inner.segsizes.as_slice().last() {
+            if let Some((lsn, _)) = inner.seg_sizes.as_slice().last() {
                 assert!(lsn <= &end_lsn, "{:?} {:?}", lsn, end_lsn);
             }
 
@@ -593,84 +597,102 @@ impl InMemoryLayer {
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
+
+        // Since `end_lsn` is exclusive, subtract 1 to calculate the last LSN
+        // that is included.
         let end_lsn_exclusive = inner.end_lsn.unwrap();
-
-        if inner.dropped {
-            let delta_layer = DeltaLayer::create(
-                self.conf,
-                self.timelineid,
-                self.tenantid,
-                self.seg,
-                self.start_lsn,
-                end_lsn_exclusive,
-                true,
-                &inner.page_versions,
-                None,
-                inner.segsizes.clone(),
-            )?;
-            trace!(
-                "freeze: created delta layer for dropped segment {} {}-{}",
-                self.seg,
-                self.start_lsn,
-                end_lsn_exclusive
-            );
-            return Ok(LayersOnDisk {
-                delta_layers: vec![delta_layer],
-                image_layers: Vec::new(),
-            });
-        }
-
-        // Since `end_lsn` is inclusive, subtract 1.
-        // We want to make an ImageLayer for the last included LSN,
-        // so the DeltaLayer should exclude that LSN.
         let end_lsn_inclusive = Lsn(end_lsn_exclusive.0 - 1);
 
-        let mut delta_layers = Vec::new();
+        // Figure out if we should create a delta layer, image layer, or both.
+        let image_lsn: Option<Lsn>;
+        let delta_end_lsn: Option<Lsn>;
+        if self.is_dropped() {
+            // The segment was dropped. Create just a delta layer containing all the
+            // changes up to and including the drop.
+            delta_end_lsn = Some(end_lsn_exclusive);
+            image_lsn = None;
+        } else if self.start_lsn == end_lsn_inclusive {
+            // The layer contains exactly one LSN. It's enough to write an image
+            // layer at that LSN.
+            delta_end_lsn = None;
+            image_lsn = Some(end_lsn_inclusive);
+        } else {
+            // Create a delta layer with all the changes up to the end LSN,
+            // and an image layer at the end LSN.
+            //
+            // Note that we the delta layer does *not* include the page versions
+            // at the end LSN. They are included in the image layer, and there's
+            // no need to store them twice.
+            delta_end_lsn = Some(end_lsn_inclusive);
+            image_lsn = Some(end_lsn_inclusive);
+        }
 
-        if self.start_lsn != end_lsn_inclusive {
-            let (segsizes, _) = inner.segsizes.split_at(&end_lsn_exclusive);
-            // Write the page versions before the cutoff to disk.
-            let delta_layer = DeltaLayer::create(
+        let mut delta_layers = Vec::new();
+        let mut image_layers = Vec::new();
+
+        if let Some(delta_end_lsn) = delta_end_lsn {
+            let mut delta_layer_writer = DeltaLayerWriter::new(
                 self.conf,
                 self.timelineid,
                 self.tenantid,
                 self.seg,
                 self.start_lsn,
-                end_lsn_inclusive,
-                false,
-                &inner.page_versions,
-                Some(end_lsn_inclusive),
-                segsizes,
+                delta_end_lsn,
+                self.is_dropped(),
             )?;
-            delta_layers.push(delta_layer);
-            trace!(
-                "freeze: created delta layer {} {}-{}",
-                self.seg,
-                self.start_lsn,
-                end_lsn_inclusive
-            );
-        } else {
-            assert!(inner
+
+            // Write all page versions
+            let mut buf: Vec<u8> = Vec::new();
+
+            let page_versions_iter = inner
                 .page_versions
-                .ordered_page_version_iter(None)
-                .next()
-                .is_none());
+                .ordered_page_version_iter(Some(delta_end_lsn));
+            for (blknum, lsn, pos) in page_versions_iter {
+                let len = inner.page_versions.read_pv_bytes(pos, &mut buf)?;
+                delta_layer_writer.put_page_version(blknum, lsn, &buf[..len])?;
+            }
+
+            // Create seg_sizes
+            let seg_sizes = if delta_end_lsn == end_lsn_exclusive {
+                inner.seg_sizes.clone()
+            } else {
+                inner.seg_sizes.split_at(&end_lsn_exclusive).0
+            };
+
+            let delta_layer = delta_layer_writer.finish(seg_sizes)?;
+            delta_layers.push(delta_layer);
         }
 
         drop(inner);
 
         // Write a new base image layer at the cutoff point
-        let image_layer =
-            ImageLayer::create_from_src(self.conf, timeline, self, end_lsn_inclusive)?;
-        trace!(
-            "freeze: created image layer {} at {}",
-            self.seg,
-            end_lsn_inclusive
-        );
+        if let Some(image_lsn) = image_lsn {
+            let size = if self.seg.rel.is_blocky() {
+                self.get_seg_size(image_lsn)?
+            } else {
+                1
+            };
+            let mut image_layer_writer = ImageLayerWriter::new(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                self.seg,
+                image_lsn,
+                size,
+            )?;
+
+            for blknum in 0..size {
+                let img = timeline.materialize_page(self.seg, blknum, image_lsn, &*self)?;
+
+                image_layer_writer.put_page_image(&img)?;
+            }
+            let image_layer = image_layer_writer.finish()?;
+            image_layers.push(image_layer);
+        }
 
         Ok(LayersOnDisk {
             delta_layers,
-            image_layers: vec![image_layer],
+            image_layers,
         })
     }
 }

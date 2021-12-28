@@ -32,19 +32,19 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
+use crate::config::PageServerConf;
 use crate::page_cache;
 use crate::relish::*;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use crate::repository::{
-    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState, TimelineWriter,
-    WALRecord,
+    BlockNumber, GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState,
+    TimelineWriter, WALRecord,
 };
 use crate::tenant_mgr;
 use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::PageServerConf;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{
@@ -55,7 +55,6 @@ use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
-mod blob;
 mod delta_layer;
 mod ephemeral_file;
 mod filename;
@@ -76,7 +75,7 @@ use image_layer::ImageLayer;
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, SegmentTag, RELISH_SEG_SIZE,
+    Layer, PageReconstructData, PageReconstructResult, SegmentBlk, SegmentTag, RELISH_SEG_SIZE,
 };
 
 // re-export this function so that page_cache.rs can use it.
@@ -795,8 +794,8 @@ impl Timeline for LayeredTimeline {
             .wait_for_timeout(lsn, TIMEOUT)
             .with_context(|| {
                 format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, disk consistent LSN={}",
-                    lsn, self.get_disk_consistent_lsn()
+                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
+                    lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
                 )
             })?;
 
@@ -804,11 +803,11 @@ impl Timeline for LayeredTimeline {
     }
 
     /// Look up given page version.
-    fn get_page_at_lsn(&self, rel: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes> {
-        if !rel.is_blocky() && blknum != 0 {
+    fn get_page_at_lsn(&self, rel: RelishTag, rel_blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
+        if !rel.is_blocky() && rel_blknum != 0 {
             bail!(
                 "invalid request for block {} for non-blocky relish {}",
-                blknum,
+                rel_blknum,
                 rel
             );
         }
@@ -821,18 +820,18 @@ impl Timeline for LayeredTimeline {
             lsn, latest_gc_cutoff_lsn
         );
 
-        let seg = SegmentTag::from_blknum(rel, blknum);
+        let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
             RECONSTRUCT_TIME
-                .observe_closure_duration(|| self.materialize_page(seg, blknum, lsn, &*layer))
+                .observe_closure_duration(|| self.materialize_page(seg, seg_blknum, lsn, &*layer))
         } else {
             // FIXME: This can happen if PostgreSQL extends a relation but never writes
             // the page. See https://github.com/zenithdb/zenith/issues/841
             //
             // Would be nice to detect that situation better.
             if seg.segno > 0 && self.get_rel_exists(rel, lsn)? {
-                warn!("Page {} blk {} at {} not found", seg.rel, blknum, lsn);
+                warn!("Page {} blk {} at {} not found", rel, rel_blknum, lsn);
                 return Ok(ZERO_PAGE.clone());
             }
 
@@ -840,7 +839,7 @@ impl Timeline for LayeredTimeline {
         }
     }
 
-    fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<u32>> {
+    fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<BlockNumber>> {
         if !rel.is_blocky() {
             bail!(
                 "invalid get_relish_size request for non-blocky relish {}",
@@ -1774,7 +1773,8 @@ impl LayeredTimeline {
                         );
                         match ancestor.get_relish_size(seg.rel, prior_lsn).unwrap() {
                             Some(size) => {
-                                let last_live_seg = SegmentTag::from_blknum(seg.rel, size - 1);
+                                let (last_live_seg, _rel_blknum) =
+                                    SegmentTag::from_blknum(seg.rel, size - 1);
                                 info!(
                                     "blocky rel size is {} last_live_seg.segno {} seg.segno {}",
                                     size, last_live_seg.segno, seg.segno
@@ -1851,14 +1851,19 @@ impl LayeredTimeline {
         Ok(result)
     }
 
-    fn lookup_cached_page(&self, seg: &SegmentTag, blknum: u32, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+    fn lookup_cached_page(
+        &self,
+        rel: &RelishTag,
+        rel_blknum: BlockNumber,
+        lsn: Lsn,
+    ) -> Option<(Lsn, Bytes)> {
         let cache = page_cache::get();
-        if let RelishTag::Relation(rel_tag) = &seg.rel {
+        if let RelishTag::Relation(rel_tag) = &rel {
             let (lsn, read_guard) = cache.lookup_materialized_page(
                 self.tenantid,
                 self.timelineid,
                 *rel_tag,
-                blknum,
+                rel_blknum,
                 lsn,
             )?;
             let img = Bytes::from(read_guard.to_vec());
@@ -1874,7 +1879,7 @@ impl LayeredTimeline {
     fn materialize_page(
         &self,
         seg: SegmentTag,
-        blknum: u32,
+        seg_blknum: SegmentBlk,
         lsn: Lsn,
         layer: &dyn Layer,
     ) -> Result<Bytes> {
@@ -1882,7 +1887,10 @@ impl LayeredTimeline {
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
         // for redo.
-        let (cached_lsn_opt, cached_page_opt) = match self.lookup_cached_page(&seg, blknum, lsn) {
+        let rel = seg.rel;
+        let rel_blknum = seg.segno * RELISH_SEG_SIZE + seg_blknum;
+        let (cached_lsn_opt, cached_page_opt) = match self.lookup_cached_page(&rel, rel_blknum, lsn)
+        {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     cmp::Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
@@ -1909,13 +1917,13 @@ impl LayeredTimeline {
         let mut curr_lsn = lsn;
         loop {
             let result = layer_ref
-                .get_page_reconstruct_data(blknum, curr_lsn, cached_lsn_opt, &mut data)
+                .get_page_reconstruct_data(seg_blknum, curr_lsn, cached_lsn_opt, &mut data)
                 .with_context(|| {
                     format!(
                         "Failed to get reconstruct data {} {:?} {} {} {:?}",
                         layer_ref.get_seg_tag(),
                         layer_ref.filename(),
-                        blknum,
+                        seg_blknum,
                         curr_lsn,
                         cached_lsn_opt,
                     )
@@ -1953,13 +1961,13 @@ impl LayeredTimeline {
                         // but never writes the page.
                         //
                         // Would be nice to detect that situation better.
-                        warn!("Page {} blk {} at {} not found", seg.rel, blknum, lsn);
+                        warn!("Page {} blk {} at {} not found", rel, rel_blknum, lsn);
                         return Ok(ZERO_PAGE.clone());
                     }
                     bail!(
                         "No base image found for page {} blk {} at {}/{}",
-                        seg.rel,
-                        blknum,
+                        rel,
+                        rel_blknum,
                         self.timelineid,
                         lsn,
                     );
@@ -1977,7 +1985,7 @@ impl LayeredTimeline {
             }
         }
 
-        self.reconstruct_page(seg.rel, blknum, lsn, data)
+        self.reconstruct_page(rel, rel_blknum, lsn, data)
     }
 
     ///
@@ -1986,7 +1994,7 @@ impl LayeredTimeline {
     fn reconstruct_page(
         &self,
         rel: RelishTag,
-        blknum: u32,
+        rel_blknum: BlockNumber,
         request_lsn: Lsn,
         mut data: PageReconstructData,
     ) -> Result<Bytes> {
@@ -1998,14 +2006,17 @@ impl LayeredTimeline {
             if let Some(img) = &data.page_img {
                 trace!(
                     "found page image for blk {} in {} at {}, no WAL redo required",
-                    blknum,
+                    rel_blknum,
                     rel,
                     request_lsn
                 );
                 Ok(img.clone())
             } else {
                 // FIXME: this ought to be an error?
-                warn!("Page {} blk {} at {} not found", rel, blknum, request_lsn);
+                warn!(
+                    "Page {} blk {} at {} not found",
+                    rel, rel_blknum, request_lsn
+                );
                 Ok(ZERO_PAGE.clone())
             }
         } else {
@@ -2018,23 +2029,23 @@ impl LayeredTimeline {
                 warn!(
                     "Base image for page {}/{} at {} not found, but got {} WAL records",
                     rel,
-                    blknum,
+                    rel_blknum,
                     request_lsn,
                     data.records.len()
                 );
                 Ok(ZERO_PAGE.clone())
             } else {
                 if data.page_img.is_some() {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}, performing WAL redo", data.records.len(), blknum, rel, request_lsn);
+                    trace!("found {} WAL records and a base image for blk {} in {} at {}, performing WAL redo", data.records.len(), rel_blknum, rel, request_lsn);
                 } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}, performing WAL redo", data.records.len(), blknum, rel, request_lsn);
+                    trace!("found {} WAL records that will init the page for blk {} in {} at {}, performing WAL redo", data.records.len(), rel_blknum, rel, request_lsn);
                 }
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
                 let img = self.walredo_mgr.request_redo(
                     rel,
-                    blknum,
+                    rel_blknum,
                     request_lsn,
                     data.page_img.clone(),
                     data.records,
@@ -2046,7 +2057,7 @@ impl LayeredTimeline {
                         self.tenantid,
                         self.timelineid,
                         *rel_tag,
-                        blknum,
+                        rel_blknum,
                         last_rec_lsn,
                         &img,
                     );
@@ -2106,45 +2117,57 @@ impl Deref for LayeredTimelineWriter<'_> {
 }
 
 impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
-    fn put_wal_record(&self, lsn: Lsn, rel: RelishTag, blknum: u32, rec: WALRecord) -> Result<()> {
-        if !rel.is_blocky() && blknum != 0 {
+    fn put_wal_record(
+        &self,
+        lsn: Lsn,
+        rel: RelishTag,
+        rel_blknum: BlockNumber,
+        rec: WALRecord,
+    ) -> Result<()> {
+        if !rel.is_blocky() && rel_blknum != 0 {
             bail!(
                 "invalid request for block {} for non-blocky relish {}",
-                blknum,
+                rel_blknum,
                 rel
             );
         }
         ensure!(lsn.is_aligned(), "unaligned record LSN");
 
-        let seg = SegmentTag::from_blknum(rel, blknum);
+        let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_wal_record(lsn, blknum, rec)?;
+        let delta_size = layer.put_wal_record(lsn, seg_blknum, rec)?;
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
     }
 
-    fn put_page_image(&self, rel: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()> {
-        if !rel.is_blocky() && blknum != 0 {
+    fn put_page_image(
+        &self,
+        rel: RelishTag,
+        rel_blknum: BlockNumber,
+        lsn: Lsn,
+        img: Bytes,
+    ) -> Result<()> {
+        if !rel.is_blocky() && rel_blknum != 0 {
             bail!(
                 "invalid request for block {} for non-blocky relish {}",
-                blknum,
+                rel_blknum,
                 rel
             );
         }
         ensure!(lsn.is_aligned(), "unaligned record LSN");
 
-        let seg = SegmentTag::from_blknum(rel, blknum);
+        let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
 
         let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_page_image(blknum, lsn, img)?;
+        let delta_size = layer.put_page_image(seg_blknum, lsn, img)?;
 
         self.tl
             .increase_current_logical_size(delta_size * BLCKSZ as u32);
         Ok(())
     }
 
-    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: u32) -> Result<()> {
+    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: BlockNumber) -> Result<()> {
         if !rel.is_blocky() {
             bail!("invalid truncation for non-blocky relish {}", rel);
         }
@@ -2232,7 +2255,7 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
             }
         } else {
             // TODO handle TwoPhase relishes
-            let seg = SegmentTag::from_blknum(rel, 0);
+            let (seg, _seg_blknum) = SegmentTag::from_blknum(rel, 0);
             let layer = self.tl.get_layer_for_write(seg, lsn)?;
             layer.drop_segment(lsn);
         }

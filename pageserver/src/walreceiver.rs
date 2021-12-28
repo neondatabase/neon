@@ -5,13 +5,14 @@
 //!
 //! We keep one WAL receiver active per timeline.
 
+use crate::config::PageServerConf;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use crate::tenant_threads;
 use crate::walingest::WalIngest;
-use crate::PageServerConf;
 use anyhow::{bail, Context, Error, Result};
 use lazy_static::lazy_static;
+use parking_lot::Mutex;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::replication::ReplicationIter;
 use postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
@@ -21,7 +22,6 @@ use postgres_types::PgLsn;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::thread;
 use std::thread::JoinHandle;
 use std::thread_local;
@@ -58,7 +58,7 @@ thread_local! {
 // per tenant/timeline to cancel inactive walreceivers.
 // TODO deal with blocking pg connections
 pub fn stop_wal_receiver(timelineid: ZTimelineId) {
-    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    let mut receivers = WAL_RECEIVERS.lock();
     if let Some(r) = receivers.get_mut(&timelineid) {
         r.wal_receiver_handle.take();
         // r.wal_receiver_handle.take().map(JoinHandle::join);
@@ -66,7 +66,7 @@ pub fn stop_wal_receiver(timelineid: ZTimelineId) {
 }
 
 pub fn drop_wal_receiver(timelineid: ZTimelineId, tenantid: ZTenantId) {
-    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    let mut receivers = WAL_RECEIVERS.lock();
     receivers.remove(&timelineid);
 
     // Check if it was the last walreceiver of the tenant.
@@ -89,7 +89,7 @@ pub fn launch_wal_receiver(
     wal_producer_connstr: &str,
     tenantid: ZTenantId,
 ) {
-    let mut receivers = WAL_RECEIVERS.lock().unwrap();
+    let mut receivers = WAL_RECEIVERS.lock();
 
     match receivers.get_mut(&timelineid) {
         Some(receiver) => {
@@ -120,7 +120,7 @@ pub fn launch_wal_receiver(
 
 // Look up current WAL producer connection string in the hash table
 fn get_wal_producer_connstr(timelineid: ZTimelineId) -> String {
-    let receivers = WAL_RECEIVERS.lock().unwrap();
+    let receivers = WAL_RECEIVERS.lock();
 
     receivers
         .get(&timelineid)
@@ -195,9 +195,6 @@ fn walreceiver_main(
                 tenantid, timelineid,
             )
         })?;
-    let _timeline_synced_disk_consistent_lsn = tenant_mgr::get_repository_for_tenant(tenantid)?
-        .get_timeline_state(timelineid)
-        .and_then(|state| state.remote_disk_consistent_lsn());
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -287,23 +284,19 @@ fn walreceiver_main(
 
         if let Some(last_lsn) = status_update {
             let last_lsn = PgLsn::from(u64::from(last_lsn));
+            let timeline_synced_disk_consistent_lsn =
+                tenant_mgr::get_repository_for_tenant(tenantid)?
+                    .get_timeline_state(timelineid)
+                    .and_then(|state| state.remote_disk_consistent_lsn())
+                    .unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = last_lsn;
-            // This value doesn't guarantee data durability, but it's ok.
-            // In setup with WAL service, pageserver durability is guaranteed by safekeepers.
-            // In setup without WAL service, we just don't care.
-            let flush_lsn = write_lsn;
-            // `disk_consistent_lsn` is the LSN at which page server guarantees persistence of all received data
-            // Depending on the setup we recieve WAL directly from Compute Node or
-            // from a WAL service.
-            //
-            // Senders use the feedback to determine if we are caught up:
-            // - Safekeepers are free to remove WAL preceding `apply_lsn`,
-            // as it will never be requested by this page server.
-            // - Compute Node uses 'apply_lsn' to calculate a lag for back pressure mechanism
-            // (delay WAL inserts to avoid lagging pageserver responses and WAL overflow).
-            let apply_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
+            // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
+            let flush_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
+            // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
+            // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
+            let apply_lsn = PgLsn::from(u64::from(timeline_synced_disk_consistent_lsn));
             let ts = SystemTime::now();
             const NO_REPLY: u8 = 0;
             physical_stream.standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY)?;

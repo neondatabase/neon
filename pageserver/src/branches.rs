@@ -23,8 +23,8 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
+use crate::{config::PageServerConf, repository::Repository};
 use crate::{import_datadir, LOG_FILE_NAME};
-use crate::{repository::Repository, PageServerConf};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
 
 #[derive(Serialize, Deserialize, Clone)]

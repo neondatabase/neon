@@ -1,9 +1,9 @@
 //!
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
+use crate::config::PageServerConf;
 use crate::layered_repository::storage_layer::SegmentTag;
 use crate::relish::*;
-use crate::PageServerConf;
 use std::fmt;
 use std::path::PathBuf;
 

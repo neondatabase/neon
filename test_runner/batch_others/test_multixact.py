@@ -53,7 +53,8 @@ def test_multixact(zenith_simple_env: ZenithEnv, test_output_dir):
     # force wal flush
     cur.execute('checkpoint')
 
-    cur.execute('SELECT next_multixact_id, pg_current_wal_flush_lsn() FROM pg_control_checkpoint()')
+    cur.execute(
+        'SELECT next_multixact_id, pg_current_wal_insert_lsn() FROM pg_control_checkpoint()')
     res = cur.fetchone()
     next_multixact_id = res[0]
     lsn = res[1]

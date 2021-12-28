@@ -26,7 +26,7 @@ use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
 use crate::repository::TimelineSyncState;
-use crate::{branches, tenant_mgr, PageServerConf, ZTenantId};
+use crate::{branches, config::PageServerConf, tenant_mgr, ZTenantId};
 
 #[derive(Debug)]
 struct State {

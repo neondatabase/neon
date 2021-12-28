@@ -3,7 +3,7 @@
 //!
 
 use crate::relish::RelishTag;
-use crate::repository::WALRecord;
+use crate::repository::{BlockNumber, WALRecord};
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use bytes::Bytes;
@@ -26,6 +26,18 @@ pub struct SegmentTag {
     pub segno: u32,
 }
 
+/// SegmentBlk represents a block number within a segment, or the size of segment.
+///
+/// This is separate from BlockNumber, which is used for block number within the
+/// whole relish. Since this is just a type alias, the compiler will let you mix
+/// them freely, but we use the type alias as documentation to make it clear
+/// which one we're dealing with.
+///
+/// (We could turn this into "struct SegmentBlk(u32)" to forbid accidentally
+/// assigning a BlockNumber to SegmentBlk or vice versa, but that makes
+/// operations more verbose).
+pub type SegmentBlk = u32;
+
 impl fmt::Display for SegmentTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}", self.rel, self.segno)
@@ -33,15 +45,16 @@ impl fmt::Display for SegmentTag {
 }
 
 impl SegmentTag {
-    pub const fn from_blknum(rel: RelishTag, blknum: u32) -> SegmentTag {
-        SegmentTag {
-            rel,
-            segno: blknum / RELISH_SEG_SIZE,
-        }
-    }
-
-    pub fn blknum_in_seg(&self, blknum: u32) -> bool {
-        blknum / RELISH_SEG_SIZE == self.segno
+    /// Given a relish and block number, calculate the corresponding segment and
+    /// block number within the segment.
+    pub const fn from_blknum(rel: RelishTag, blknum: BlockNumber) -> (SegmentTag, SegmentBlk) {
+        (
+            SegmentTag {
+                rel,
+                segno: blknum / RELISH_SEG_SIZE,
+            },
+            blknum % RELISH_SEG_SIZE,
+        )
     }
 }
 
@@ -125,10 +138,6 @@ pub trait Layer: Send + Sync {
     /// It is up to the caller to collect more data from previous layer and
     /// perform WAL redo, if necessary.
     ///
-    /// Note that the 'blknum' is the offset of the page from the beginning
-    /// of the *relish*, not the beginning of the segment. The requested
-    /// 'blknum' must be covered by this segment.
-    ///
     /// `cached_img_lsn` should be set to a cached page image's lsn < `lsn`.
     /// This function will only return data after `cached_img_lsn`.
     ///
@@ -139,14 +148,14 @@ pub trait Layer: Send + Sync {
     /// to collect more data.
     fn get_page_reconstruct_data(
         &self,
-        blknum: u32,
+        blknum: SegmentBlk,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult>;
 
     /// Return size of the segment at given LSN. (Only for blocky relations.)
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32>;
+    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk>;
 
     /// Does the segment exist at given LSN? Or was it dropped before it.
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;

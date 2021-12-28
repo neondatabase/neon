@@ -78,58 +78,68 @@ impl PageServerNode {
             ""
         };
 
-        PageServerNode {
+        Self {
             pg_connection_config: Self::pageserver_connection_config(
                 password,
-                env.pageserver.pg_port,
+                &env.pageserver.listen_pg_addr,
             ),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: format!("http://localhost:{}/v1", env.pageserver.http_port),
+            http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
         }
     }
 
     /// Construct libpq connection string for connecting to the pageserver.
-    fn pageserver_connection_config(password: &str, port: u16) -> Config {
-        format!("postgresql://no_user:{}@localhost:{}/no_db", password, port)
+    fn pageserver_connection_config(password: &str, listen_addr: &str) -> Config {
+        format!("postgresql://no_user:{}@{}/no_db", password, listen_addr)
             .parse()
             .unwrap()
     }
 
     pub fn init(&self, create_tenant: Option<&str>) -> anyhow::Result<()> {
-        let listen_pg = format!("localhost:{}", self.env.pageserver.pg_port);
-        let listen_http = format!("localhost:{}", self.env.pageserver.http_port);
-        let mut args = vec![
-            "--init",
-            "-D",
-            self.env.base_data_dir.to_str().unwrap(),
-            "--postgres-distrib",
-            self.env.pg_distrib_dir.to_str().unwrap(),
-            "--listen-pg",
-            &listen_pg,
-            "--listen-http",
-            &listen_http,
-        ];
-
-        let auth_type_str = &self.env.pageserver.auth_type.to_string();
-        if self.env.pageserver.auth_type != AuthType::Trust {
-            args.extend(&["--auth-validation-public-key-path", "auth_public_key.pem"]);
-        }
-        args.extend(&["--auth-type", auth_type_str]);
-
-        if let Some(tenantid) = create_tenant {
-            args.extend(&["--create-tenant", tenantid])
-        }
-
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        cmd.args(args).env_clear().env("RUST_BACKTRACE", "1");
-
         let var = "LLVM_PROFILE_FILE";
         if let Some(val) = std::env::var_os(var) {
             cmd.env(var, val);
         }
 
-        if !cmd.status()?.success() {
+        // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
+        let mut args = vec![
+            "--init".to_string(),
+            "-D".to_string(),
+            self.env.base_data_dir.display().to_string(),
+            "-c".to_string(),
+            format!("pg_distrib_dir='{}'", self.env.pg_distrib_dir.display()),
+            "-c".to_string(),
+            format!("auth_type='{}'", self.env.pageserver.auth_type),
+            "-c".to_string(),
+            format!(
+                "listen_http_addr='{}'",
+                self.env.pageserver.listen_http_addr
+            ),
+            "-c".to_string(),
+            format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr),
+        ];
+
+        if self.env.pageserver.auth_type != AuthType::Trust {
+            args.extend([
+                "-c".to_string(),
+                "auth_validation_public_key_path='auth_public_key.pem'".to_string(),
+            ]);
+        }
+
+        if let Some(tenantid) = create_tenant {
+            args.extend(["--create-tenant".to_string(), tenantid.to_string()])
+        }
+
+        let status = cmd
+            .args(args)
+            .env_clear()
+            .env("RUST_BACKTRACE", "1")
+            .status()
+            .expect("pageserver init failed");
+
+        if !status.success() {
             bail!("pageserver init failed");
         }
 

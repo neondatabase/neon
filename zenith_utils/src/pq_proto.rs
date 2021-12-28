@@ -2,15 +2,14 @@
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use byteorder::{BigEndian, ByteOrder};
 use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 // use postgres_ffi::xlog_utils::TimestampTz;
 use std::collections::HashMap;
-use std::convert::TryInto;
-use std::io;
 use std::io::Read;
+use std::io::{self, Cursor};
 use std::str;
 
 pub type Oid = u32;
@@ -22,7 +21,7 @@ pub const TEXT_OID: Oid = 25;
 
 #[derive(Debug)]
 pub enum FeMessage {
-    StartupMessage(FeStartupMessage),
+    StartupPacket(FeStartupPacket),
     Query(FeQueryMessage), // Simple query
     Parse(FeParseMessage), // Extended query protocol
     Describe(FeDescribeMessage),
@@ -37,22 +36,22 @@ pub enum FeMessage {
     PasswordMessage(Bytes),
 }
 
-// TODO Make this an enum
 #[derive(Debug)]
-pub struct FeStartupMessage {
-    pub version: u32,  // TODO only valid if kind == Normal
-    pub kind: StartupRequestCode,
-    // optional params arriving in startup packet
-    pub params: HashMap<String, String>, // TODO only valid if kind == Normal
-    // TODO I need (i32, i32) when kind == Cancel
+pub enum FeStartupPacket {
+    CancelRequest(CancelKeyData),
+    SslRequest,
+    GssEncRequest,
+    StartupMessage {
+        major_version: u32,
+        minor_version: u32,
+        params: HashMap<String, String>,
+    },
 }
 
-#[derive(Debug)]
-pub enum StartupRequestCode {
-    Cancel,
-    NegotiateSsl,
-    NegotiateGss,
-    Normal,
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct CancelKeyData {
+    pub backend_pid: i32,
+    pub cancel_key: i32,
 }
 
 #[derive(Debug)]
@@ -150,13 +149,14 @@ impl FeMessage {
     }
 }
 
-impl FeStartupMessage {
+impl FeStartupPacket {
     /// Read startup message from the stream.
     pub fn read(stream: &mut impl std::io::Read) -> anyhow::Result<Option<FeMessage>> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
-        const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
-        const NEGOTIATE_SSL_CODE: u32 = (1234 << 16) | 5679;
-        const NEGOTIATE_GSS_CODE: u32 = (1234 << 16) | 5680;
+        const RESERVED_INVALID_MAJOR_VERSION: u32 = 1234;
+        const CANCEL_REQUEST_CODE: u32 = 5678;
+        const NEGOTIATE_SSL_CODE: u32 = 5679;
+        const NEGOTIATE_GSS_CODE: u32 = 5680;
 
         // Read length. If the connection is closed before reading anything (or before
         // reading 4 bytes, to be precise), return None to indicate that the connection
@@ -172,64 +172,60 @@ impl FeStartupMessage {
             bail!("invalid message length");
         }
 
-        let version = stream.read_u32::<BE>()?;
-        let kind = match version {
-            CANCEL_REQUEST_CODE => StartupRequestCode::Cancel,
-            NEGOTIATE_SSL_CODE => StartupRequestCode::NegotiateSsl,
-            NEGOTIATE_GSS_CODE => StartupRequestCode::NegotiateGss,
-            _ => StartupRequestCode::Normal,
-        };
+        let request_code = stream.read_u32::<BE>()?;
 
         // the rest of startup packet are params
         let params_len = len - 8;
         let mut params_bytes = vec![0u8; params_len];
         stream.read_exact(params_bytes.as_mut())?;
 
-        let params_hash = match kind {
-            StartupRequestCode::Normal => {
+        // Parse params depending on request code
+        let most_sig_16_bits = request_code >> 16;
+        let least_sig_16_bits = request_code & ((1 << 16) - 1);
+        let message = match (most_sig_16_bits, least_sig_16_bits) {
+            (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
+                ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
+                let mut cursor = Cursor::new(params_bytes);
+                FeStartupPacket::CancelRequest(CancelKeyData {
+                    backend_pid: cursor.read_i32::<BigEndian>()?,
+                    cancel_key: cursor.read_i32::<BigEndian>()?,
+                })
+            }
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeStartupPacket::SslRequest,
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => FeStartupPacket::GssEncRequest,
+            (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
+                bail!("Unrecognized request code {}", unrecognized_code)
+            }
+            (major_version, minor_version) => {
+                // TODO bail if protocol major_version is not 3?
                 // Parse null-terminated (String) pairs of param name / param value
                 let params_str = str::from_utf8(&params_bytes).unwrap();
-                let params = params_str.split('\0');
-                let mut params_hash: HashMap<String, String> = HashMap::new();
-                for pair in params.collect::<Vec<_>>().chunks_exact(2) {
-                    let name = pair[0];
-                    let value = pair[1];
+                let mut params_tokens = params_str.split('\0');
+                let mut params: HashMap<String, String> = HashMap::new();
+                while let Some(name) = params_tokens.next() {
+                    let value = params_tokens.next().ok_or_else(|| {
+                        anyhow!("expected even number of params in StartupMessage")
+                    })?;
                     if name == "options" {
                         // deprecated way of passing params as cmd line args
                         for cmdopt in value.split(' ') {
                             let nameval: Vec<&str> = cmdopt.split('=').collect();
                             if nameval.len() == 2 {
-                                params_hash.insert(nameval[0].to_string(), nameval[1].to_string());
+                                params.insert(nameval[0].to_string(), nameval[1].to_string());
                             }
                         }
                     } else {
-                        params_hash.insert(name.to_string(), value.to_string());
+                        params.insert(name.to_string(), value.to_string());
                     }
                 }
-                params_hash
-            },
-            StartupRequestCode::Cancel => {
-                // Parse (i32, i32)
-                let backend_pid_bytes: [u8; 4] = params_bytes[0..4].try_into().unwrap();
-                let backend_pid = i32::from_be_bytes(backend_pid_bytes);
-
-                let cancel_key_bytes: [u8; 4] = params_bytes[4..8].try_into().unwrap();
-                let cancel_key = i32::from_be_bytes(cancel_key_bytes);
-
-                // HACK going with this string hashmap until I fix the StartupRequest struct
-                let mut params_hash: HashMap<String, String> = HashMap::new();
-                params_hash.insert("backend_pid".into(), backend_pid.to_string());
-                params_hash.insert("cancel_key".into(), cancel_key.to_string());
-                params_hash
-            },
-            _ => HashMap::new()
+                FeStartupPacket::StartupMessage {
+                    major_version,
+                    minor_version,
+                    params,
+                }
+            }
         };
-
-        Ok(Some(FeMessage::StartupMessage(FeStartupMessage {
-            version,
-            kind,
-            params: params_hash,
-        })))
+        Ok(Some(FeMessage::StartupPacket(message)))
     }
 }
 
@@ -359,8 +355,7 @@ pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationMD5Password(&'a [u8; 4]),
     AuthenticationCleartextPassword,
-    // backend_pid, cancel key
-    BackendKeyData(i32, i32),
+    BackendKeyData(CancelKeyData),
     BindComplete,
     CommandComplete(&'a [u8]),
     CopyData(&'a [u8]),
@@ -557,14 +552,14 @@ impl<'a> BeMessage<'a> {
                 .unwrap(); // write into BytesMut can't fail
             }
 
-            BeMessage::BackendKeyData(backend_pid, cancel_key) => {
+            BeMessage::BackendKeyData(key_data) => {
                 buf.put_u8(b'K');
                 write_body(buf, |buf| {
-                    buf.put_i32(*backend_pid);
-                    buf.put_i32(*cancel_key);
-                    Ok::<_, io::Error>(())
-                })?;
-
+                    buf.put_i32(key_data.backend_pid);
+                    buf.put_i32(key_data.cancel_key);
+                    Ok(())
+                })
+                .unwrap();
             }
 
             BeMessage::BindComplete => {

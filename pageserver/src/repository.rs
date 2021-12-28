@@ -10,6 +10,9 @@ use std::time::Duration;
 use zenith_utils::lsn::{Lsn, RecordLsn};
 use zenith_utils::zid::ZTimelineId;
 
+/// Block number within a relish. This matches PostgreSQL's BlockNumber type.
+pub type BlockNumber = u32;
+
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
@@ -180,10 +183,10 @@ pub trait Timeline: Send + Sync {
     fn wait_lsn(&self, lsn: Lsn) -> Result<()>;
 
     /// Look up given page version.
-    fn get_page_at_lsn(&self, tag: RelishTag, blknum: u32, lsn: Lsn) -> Result<Bytes>;
+    fn get_page_at_lsn(&self, tag: RelishTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes>;
 
     /// Get size of a relish
-    fn get_relish_size(&self, tag: RelishTag, lsn: Lsn) -> Result<Option<u32>>;
+    fn get_relish_size(&self, tag: RelishTag, lsn: Lsn) -> Result<Option<BlockNumber>>;
 
     /// Does relation exist?
     fn get_rel_exists(&self, tag: RelishTag, lsn: Lsn) -> Result<bool>;
@@ -255,13 +258,25 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(&self, lsn: Lsn, tag: RelishTag, blknum: u32, rec: WALRecord) -> Result<()>;
+    fn put_wal_record(
+        &self,
+        lsn: Lsn,
+        tag: RelishTag,
+        blknum: BlockNumber,
+        rec: WALRecord,
+    ) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(&self, tag: RelishTag, blknum: u32, lsn: Lsn, img: Bytes) -> Result<()>;
+    fn put_page_image(
+        &self,
+        tag: RelishTag,
+        blknum: BlockNumber,
+        lsn: Lsn,
+        img: Bytes,
+    ) -> Result<()>;
 
     /// Truncate relation
-    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: u32) -> Result<()>;
+    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: BlockNumber) -> Result<()>;
 
     /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
     fn drop_relish(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
@@ -289,9 +304,9 @@ pub mod repo_harness {
     use std::{fs, path::PathBuf};
 
     use crate::{
+        config::PageServerConf,
         layered_repository::{LayeredRepository, TIMELINES_SEGMENT_NAME},
         walredo::{WalRedoError, WalRedoManager},
-        PageServerConf,
     };
 
     use super::*;
@@ -360,7 +375,7 @@ pub mod repo_harness {
         fn request_redo(
             &self,
             rel: RelishTag,
-            blknum: u32,
+            blknum: BlockNumber,
             lsn: Lsn,
             base_img: Option<Bytes>,
             records: Vec<(Lsn, WALRecord)>,
@@ -690,7 +705,7 @@ mod tests {
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 0x10;
-            writer.put_page_image(TESTREL_A, blknum as u32, Lsn(lsn), img)?;
+            writer.put_page_image(TESTREL_A, blknum as BlockNumber, Lsn(lsn), img)?;
         }
         writer.advance_last_record_lsn(Lsn(lsn));
 
@@ -726,11 +741,11 @@ mod tests {
         let mut size: i32 = 3000;
         while size >= 0 {
             lsn += 0x10;
-            writer.put_truncation(TESTREL_A, Lsn(lsn), size as u32)?;
+            writer.put_truncation(TESTREL_A, Lsn(lsn), size as BlockNumber)?;
             writer.advance_last_record_lsn(Lsn(lsn));
             assert_eq!(
                 tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
-                size as u32
+                size as BlockNumber
             );
 
             size -= 1;

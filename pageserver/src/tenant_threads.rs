@@ -1,9 +1,9 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as checkpointer and GC
+use crate::config::PageServerConf;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use crate::CheckpointConfig;
-use crate::PageServerConf;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use std::collections::HashMap;

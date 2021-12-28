@@ -10,6 +10,7 @@ use tracing::{debug, error, trace, warn};
 use zenith_utils::{lsn::Lsn, zid::ZTenantId};
 
 use crate::{
+    config::PageServerConf,
     layered_repository::metadata::{metadata_path, TimelineMetadata},
     remote_storage::{
         storage_sync::{
@@ -18,7 +19,6 @@ use crate::{
         },
         RemoteStorage, TimelineSyncId,
     },
-    PageServerConf,
 };
 
 use super::{

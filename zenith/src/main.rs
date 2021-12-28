@@ -6,9 +6,9 @@ use control_plane::local_env;
 use control_plane::local_env::LocalEnv;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage::PageServerNode;
-use pageserver::defaults::{
-    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
+use pageserver::config::defaults::{
+    DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
+    DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
 };
 use std::collections::HashMap;
 use std::process::exit;
@@ -32,8 +32,8 @@ fn default_conf() -> String {
         r#"
 # Default built-in configuration, defined in main.rs
 [pageserver]
-pg_port = {pageserver_pg_port}
-http_port = {pageserver_http_port}
+listen_pg_addr = '{pageserver_pg_addr}'
+listen_http_addr = '{pageserver_http_addr}'
 auth_type = '{pageserver_auth_type}'
 
 [[safekeepers]]
@@ -41,8 +41,8 @@ name = '{safekeeper_name}'
 pg_port = {safekeeper_pg_port}
 http_port = {safekeeper_http_port}
 "#,
-        pageserver_pg_port = DEFAULT_PAGESERVER_PG_PORT,
-        pageserver_http_port = DEFAULT_PAGESERVER_HTTP_PORT,
+        pageserver_pg_addr = DEFAULT_PAGESERVER_PG_ADDR,
+        pageserver_http_addr = DEFAULT_PAGESERVER_HTTP_ADDR,
         pageserver_auth_type = AuthType::Trust,
         safekeeper_name = DEFAULT_SAFEKEEPER_NAME,
         safekeeper_pg_port = DEFAULT_SAFEKEEPER_PG_PORT,

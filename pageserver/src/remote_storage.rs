@@ -100,9 +100,9 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use self::{local_fs::LocalFs, rust_s3::S3};
 use crate::{
+    config::{PageServerConf, RemoteStorageKind},
     layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
     repository::TimelineSyncState,
-    PageServerConf, RemoteStorageKind,
 };
 
 /// Any timeline has its own id and its own tenant it belongs to,
