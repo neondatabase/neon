@@ -114,24 +114,24 @@ impl ProxyConnection {
 
         loop {
             let msg = match self.pgb.read_message()? {
-                Some(Fe::InitialMessage(msg)) => msg,
+                Some(Fe::StartupPacket(msg)) => msg,
                 None => bail!("connection is lost"),
                 bad => bail!("unexpected message type: {:?}", bad),
             };
             println!("got message: {:?}", msg);
 
             match msg {
-                FeInitialMessage::GSSENCRequest => {
+                FeStartupPacket::GssEncRequest => {
                     self.pgb.write_message(&Be::EncryptionResponse(false))?;
                 }
-                FeInitialMessage::SSLRequest => {
+                FeStartupPacket::SslRequest => {
                     self.pgb.write_message(&Be::EncryptionResponse(have_tls))?;
                     if have_tls {
                         self.pgb.start_tls()?;
                         encrypted = true;
                     }
                 }
-                FeInitialMessage::StartupMessage { mut params, .. } => {
+                FeStartupPacket::StartupMessage { mut params, .. } => {
                     if have_tls && !encrypted {
                         bail!("must connect with TLS");
                     }
@@ -145,7 +145,7 @@ impl ProxyConnection {
                     return Ok((get_param("user")?, get_param("database")?));
                 }
                 // TODO: implement proper stmt cancellation
-                FeInitialMessage::CancelRequest { .. } => {
+                FeStartupPacket::CancelRequest { .. } => {
                     bail!("query cancellation is not supported")
                 }
             }

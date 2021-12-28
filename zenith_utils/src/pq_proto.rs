@@ -21,7 +21,7 @@ pub const TEXT_OID: Oid = 25;
 
 #[derive(Debug)]
 pub enum FeMessage {
-    InitialMessage(FeInitialMessage),
+    StartupPacket(FeStartupPacket),
     Query(FeQueryMessage), // Simple query
     Parse(FeParseMessage), // Extended query protocol
     Describe(FeDescribeMessage),
@@ -37,10 +37,10 @@ pub enum FeMessage {
 }
 
 #[derive(Debug)]
-pub enum FeInitialMessage {
+pub enum FeStartupPacket {
     CancelRequest(CancelKeyData),
-    SSLRequest,
-    GSSENCRequest,
+    SslRequest,
+    GssEncRequest,
     StartupMessage {
         major_version: u32,
         minor_version: u32,
@@ -149,7 +149,7 @@ impl FeMessage {
     }
 }
 
-impl FeInitialMessage {
+impl FeStartupPacket {
     /// Read startup message from the stream.
     pub fn read(stream: &mut impl std::io::Read) -> anyhow::Result<Option<FeMessage>> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
@@ -186,13 +186,13 @@ impl FeInitialMessage {
             (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
                 ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
                 let mut cursor = Cursor::new(params_bytes);
-                FeInitialMessage::CancelRequest(CancelKeyData {
+                FeStartupPacket::CancelRequest(CancelKeyData {
                     backend_pid: cursor.read_i32::<BigEndian>()?,
                     cancel_key: cursor.read_i32::<BigEndian>()?,
                 })
             }
-            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeInitialMessage::SSLRequest,
-            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => FeInitialMessage::GSSENCRequest,
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeStartupPacket::SslRequest,
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => FeStartupPacket::GssEncRequest,
             (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
                 bail!("Unrecognized request code {}", unrecognized_code)
             }
@@ -218,14 +218,14 @@ impl FeInitialMessage {
                         params.insert(name.to_string(), value.to_string());
                     }
                 }
-                FeInitialMessage::StartupMessage {
+                FeStartupPacket::StartupMessage {
                     major_version,
                     minor_version,
                     params,
                 }
             }
         };
-        Ok(Some(FeMessage::InitialMessage(message)))
+        Ok(Some(FeMessage::StartupPacket(message)))
     }
 }
 

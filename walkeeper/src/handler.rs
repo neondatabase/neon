@@ -15,7 +15,7 @@ use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeInitialMessage, RowDescriptor, INT4_OID, TEXT_OID};
+use zenith_utils::pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
@@ -73,8 +73,8 @@ fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
 
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
     // ztenant id and ztimeline id are passed in connection string params
-    fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeInitialMessage) -> Result<()> {
-        if let FeInitialMessage::StartupMessage { params, .. } = sm {
+    fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupPacket) -> Result<()> {
+        if let FeStartupPacket::StartupMessage { params, .. } = sm {
             self.ztenantid = match params.get("ztenantid") {
                 Some(z) => Some(ZTenantId::from_str(z)?), // just curious, can I do that from .map?
                 _ => None,
