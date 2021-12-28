@@ -15,7 +15,7 @@ use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeStartupMessage, RowDescriptor, INT4_OID, TEXT_OID};
+use zenith_utils::pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
@@ -73,22 +73,26 @@ fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
 
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
     // ztenant id and ztimeline id are passed in connection string params
-    fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupMessage) -> Result<()> {
-        self.ztenantid = match sm.params.get("ztenantid") {
-            Some(z) => Some(ZTenantId::from_str(z)?), // just curious, can I do that from .map?
-            _ => None,
-        };
+    fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupPacket) -> Result<()> {
+        if let FeStartupPacket::StartupMessage { params, .. } = sm {
+            self.ztenantid = match params.get("ztenantid") {
+                Some(z) => Some(ZTenantId::from_str(z)?), // just curious, can I do that from .map?
+                _ => None,
+            };
 
-        self.ztimelineid = match sm.params.get("ztimelineid") {
-            Some(z) => Some(ZTimelineId::from_str(z)?),
-            _ => None,
-        };
+            self.ztimelineid = match params.get("ztimelineid") {
+                Some(z) => Some(ZTimelineId::from_str(z)?),
+                _ => None,
+            };
 
-        if let Some(app_name) = sm.params.get("application_name") {
-            self.appname = Some(app_name.clone());
+            if let Some(app_name) = params.get("application_name") {
+                self.appname = Some(app_name.clone());
+            }
+
+            Ok(())
+        } else {
+            bail!("Walkeeper received unexpected initial message: {:?}", sm);
         }
-
-        Ok(())
     }
 
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()> {
