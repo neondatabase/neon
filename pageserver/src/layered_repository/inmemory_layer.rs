@@ -575,7 +575,7 @@ impl InMemoryLayer {
     /// Write the this frozen in-memory layer to disk.
     ///
     /// Returns new layers that replace this one.
-    /// If not dropped, returns a new image layer containing the page versions
+    /// If not dropped and reconstruct_pages is true, returns a new image layer containing the page versions
     /// at the `end_lsn`. Can also return a DeltaLayer that includes all the
     /// WAL records between start and end LSN. (The delta layer is not needed
     /// when a new relish is created with a single LSN, so that the start and
@@ -583,7 +583,7 @@ impl InMemoryLayer {
     pub fn write_to_disk(
         &self,
         timeline: &LayeredTimeline,
-        enforced: bool,
+        reconstruct_pages: bool,
     ) -> Result<LayersOnDisk> {
         trace!(
             "write_to_disk {} get_end_lsn is {}",
@@ -610,7 +610,7 @@ impl InMemoryLayer {
         // Figure out if we should create a delta layer, image layer, or both.
         let image_lsn: Option<Lsn>;
         let delta_end_lsn: Option<Lsn>;
-        if self.is_dropped() || enforced {
+        if self.is_dropped() || !reconstruct_pages {
             // The segment was dropped. Create just a delta layer containing all the
             // changes up to and including the drop.
             delta_end_lsn = Some(end_lsn_exclusive);

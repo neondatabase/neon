@@ -38,5 +38,7 @@ pub enum CheckpointConfig {
     // Flush in-memory data that is older than this
     Distance(u64),
     // Flush all in-memory data
+    Flush,
+    // Flush all in-memory data and reconstruct all page images
     Forced,
 }
