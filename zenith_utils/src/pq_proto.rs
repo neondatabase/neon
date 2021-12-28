@@ -38,10 +38,7 @@ pub enum FeMessage {
 
 #[derive(Debug)]
 pub enum FeInitialMessage {
-    CancelRequest {
-        backend_pid: i32,
-        cancel_key: i32,
-    },
+    CancelRequest(CancelKeyData),
     SSLRequest,
     GSSENCRequest,
     StartupMessage {
@@ -49,6 +46,12 @@ pub enum FeInitialMessage {
         minor_version: u32,
         params: HashMap<String, String>,
     },
+}
+
+#[derive(Debug)]
+pub struct CancelKeyData {
+    pub backend_pid: i32,
+    pub cancel_key: i32,
 }
 
 #[derive(Debug)]
@@ -182,10 +185,10 @@ impl FeInitialMessage {
         let message = match (most_sig_16_bits, least_sig_16_bits) {
             (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
                 ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
-                FeInitialMessage::CancelRequest {
+                FeInitialMessage::CancelRequest(CancelKeyData {
                     backend_pid: byteorder::BigEndian::read_i32(&params_bytes[0..4]),
                     cancel_key: byteorder::BigEndian::read_i32(&params_bytes[4..8]),
-                }
+                })
             }
             (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeInitialMessage::SSLRequest,
             (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => FeInitialMessage::GSSENCRequest,
