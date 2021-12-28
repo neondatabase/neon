@@ -200,11 +200,12 @@ impl FeInitialMessage {
                 // TODO bail if protocol major_version is not 3?
                 // Parse null-terminated (String) pairs of param name / param value
                 let params_str = str::from_utf8(&params_bytes).unwrap();
-                let params_tokens = params_str.split('\0');
+                let mut params_tokens = params_str.split('\0');
                 let mut params: HashMap<String, String> = HashMap::new();
-                for pair in params_tokens.collect::<Vec<_>>().chunks_exact(2) {
-                    let name = pair[0];
-                    let value = pair[1];
+                while let Some(name) = params_tokens.next() {
+                    let value = params_tokens.next().ok_or_else(|| {
+                        anyhow!("expected even number of params in StartupMessage")
+                    })?;
                     if name == "options" {
                         // deprecated way of passing params as cmd line args
                         for cmdopt in value.split(' ') {
