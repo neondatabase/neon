@@ -8,8 +8,8 @@ use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 // use postgres_ffi::xlog_utils::TimestampTz;
 use std::collections::HashMap;
-use std::io;
 use std::io::Read;
+use std::io::{self, Cursor};
 use std::str;
 
 pub type Oid = u32;
@@ -185,9 +185,10 @@ impl FeInitialMessage {
         let message = match (most_sig_16_bits, least_sig_16_bits) {
             (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
                 ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
+                let mut cursor = Cursor::new(params_bytes);
                 FeInitialMessage::CancelRequest(CancelKeyData {
-                    backend_pid: byteorder::BigEndian::read_i32(&params_bytes[0..4]),
-                    cancel_key: byteorder::BigEndian::read_i32(&params_bytes[4..8]),
+                    backend_pid: cursor.read_i32::<BigEndian>()?,
+                    cancel_key: cursor.read_i32::<BigEndian>()?,
                 })
             }
             (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeInitialMessage::SSLRequest,
