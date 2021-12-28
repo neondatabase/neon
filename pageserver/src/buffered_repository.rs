@@ -182,9 +182,12 @@ struct BrinTag {
 //
 // Relish store consists of persistent KV store and transient metadata cache loadedon demand
 //
-struct BufferedTimelineInner {
-    meta: Option<HashMap<RelishTag, MetadataSnapshot>>,
-    brin: BTreeMap<BrinTag, Lsn>,
+struct BufferedTimelineMetadata {
+    rels_info: Option<HashMap<RelishTag, MetadataSnapshot>>,
+}
+
+struct BufferedTimelineBrin {
+    last_updated: BTreeMap<BrinTag, Lsn>,
     last_checkpoint: Lsn,
     last_gc: Lsn,
 }
@@ -721,7 +724,8 @@ pub struct BufferedTimeline {
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
 
-    inner: RwLock<BufferedTimelineInner>,
+    meta: RwLock<BufferedTimelineMetadata>,
+    brin: RwLock<BufferedTimelineBrin>,
     store: ToastStore,
 
     // WAL redo manager
@@ -915,10 +919,10 @@ impl Timeline for BufferedTimeline {
         debug_assert!(lsn <= self.get_last_record_lsn());
 
         {
-            let inner = self.inner.read();
+            let meta = self.meta.read();
             // Use metadata hash only if it was loaded
-            if let Some(hash) = &inner.meta {
-                if let Some(snap) = hash.get(&rel) {
+            if let Some(rels_info) = &meta.rels_info {
+                if let Some(snap) = rels_info.get(&rel) {
                     // We can used cached version only of requested LSN is >= than LSN of last version.
                     // Otherwise extract historical value from KV storage.
                     if snap.lsn <= lsn {
@@ -1241,12 +1245,9 @@ impl Timeline for BufferedTimeline {
     }
 }
 
-impl BufferedTimelineInner {
-    fn get_metadata(
-        &mut self,
-        store: &ToastStore,
-    ) -> Result<&'_ mut HashMap<RelishTag, MetadataSnapshot>> {
-        if self.meta.is_none() {
+impl BufferedTimelineMetadata {
+    fn load(&mut self, store: &ToastStore) -> Result<&'_ mut HashMap<RelishTag, MetadataSnapshot>> {
+        if self.rels_info.is_none() {
             let mut meta: HashMap<RelishTag, MetadataSnapshot> = HashMap::new();
             let mut till = StoreKey::Metadata(MetadataKey {
                 rel: RelishTag::Checkpoint,
@@ -1283,13 +1284,13 @@ impl BufferedTimelineInner {
                     break;
                 }
             }
-            self.meta = Some(meta)
+            self.rels_info = Some(meta)
         }
-        Ok(self.meta.as_mut().unwrap())
+        Ok(self.rels_info.as_mut().unwrap())
     }
 
     fn _unget_metadata(&mut self) {
-        self.meta = None;
+        self.rels_info = None;
     }
 }
 
@@ -1314,9 +1315,9 @@ impl BufferedTimeline {
             timelineid,
             tenantid,
             store: ToastStore::new(&path)?,
-            inner: RwLock::new(BufferedTimelineInner {
-                meta: None,
-                brin: BTreeMap::new(),
+            meta: RwLock::new(BufferedTimelineMetadata { rels_info: None }),
+            brin: RwLock::new(BufferedTimelineBrin {
+                last_updated: BTreeMap::new(),
                 last_checkpoint: Lsn(0),
                 last_gc: Lsn(0),
             }),
@@ -1459,15 +1460,15 @@ impl BufferedTimeline {
     }
 
     fn make_snapshot(&self) -> Result<()> {
-        let inner = self.inner.read();
+        let meta = self.meta.read();
         let now = Instant::now();
-        if let Some(meta_hash) = &inner.meta {
-            // Create copy of relation map to avoid holding lock in inner for a long time
-            let snapshot: Vec<(RelishTag, u32)> = meta_hash
+        if let Some(rels_info) = &meta.rels_info {
+            // Create copy of relation map to avoid holding lock of metadata for a long time
+            let snapshot: Vec<(RelishTag, u32)> = rels_info
                 .iter()
                 .map(|(rel, meta)| (*rel, meta.size))
                 .collect();
-            drop(inner);
+            drop(meta);
             let lsn = self.get_last_record_lsn();
             for (rel, size) in snapshot {
                 for segno in 0..(size + RELISH_SEG_SIZE - 1) / RELISH_SEG_SIZE {
@@ -1526,9 +1527,9 @@ impl BufferedTimeline {
         let mut n_reconstructed_pages = 0;
         let last_checkpoint;
         {
-            let mut inner = self.inner.write();
-            last_checkpoint = inner.last_checkpoint;
-            inner.last_checkpoint = self.get_last_record_lsn();
+            let mut brin = self.brin.write();
+            last_checkpoint = brin.last_checkpoint;
+            brin.last_checkpoint = self.get_last_record_lsn();
         }
         'outer: loop {
             let snapshot = self.store.take_snapshot();
@@ -1544,15 +1545,15 @@ impl BufferedTimeline {
                     };
                     // At first iteration we need to scan the whole storage, because BRIN does't have enough information
                     {
-                        let inner = self.inner.read();
+                        let brin = self.brin.read();
                         if last_checkpoint != Lsn(0)
-                            && inner
-                                .brin
+                            && brin
+                                .last_updated
                                 .get(&seg_tag)
                                 .map_or(true, |lsn| *lsn <= last_checkpoint)
                         {
                             // This segment was not update since last checkpoint: jump to next one
-                            let mut iter = inner.brin.range(..seg_tag);
+                            let mut iter = brin.last_updated.range(..seg_tag);
                             while let Some((next_seg, lsn)) = iter.next_back() {
                                 if *lsn > last_checkpoint {
                                     till = StoreKey::Data(DataKey {
@@ -1666,6 +1667,7 @@ impl BufferedTimeline {
                 // });
             }
         }
+        info!("Checkpoint completed");
         Ok(())
     }
 
@@ -1710,9 +1712,9 @@ impl BufferedTimeline {
 
         let last_gc;
         {
-            let mut inner = self.inner.write();
-            last_gc = inner.last_gc;
-            inner.last_gc = self.get_last_record_lsn();
+            let mut brin = self.brin.write();
+            last_gc = brin.last_gc;
+            brin.last_gc = self.get_last_record_lsn();
         }
 
         'meta: loop {
@@ -1806,12 +1808,15 @@ impl BufferedTimeline {
                     // At first iteration we need to scan the whole storage,
                     // because BRIN does't have enough information
                     {
-                        let inner = self.inner.read();
+                        let brin = self.brin.read();
                         if last_gc != Lsn(0)
-                            && inner.brin.get(&seg_tag).map_or(true, |lsn| *lsn <= last_gc)
+                            && brin
+                                .last_updated
+                                .get(&seg_tag)
+                                .map_or(true, |lsn| *lsn <= last_gc)
                         {
                             // This segment was not update since last GC: jump to next one
-                            let iter = inner.brin.range((Excluded(seg_tag), Unbounded));
+                            let iter = brin.last_updated.range((Excluded(seg_tag), Unbounded));
                             for (next_seg, lsn) in iter {
                                 if *lsn > last_gc {
                                     from = StoreKey::Data(DataKey {
@@ -1984,34 +1989,37 @@ impl<'a> BufferedTimelineWriter<'a> {
         ensure!(lsn.is_aligned(), "unaligned record LSN");
         let key = StoreKey::Data(DataKey { rel, blknum, lsn });
         self.tl.store.put(key.ser()?, ver.ser()?)?;
-        let mut inner = self.tl.inner.write();
-        inner.brin.insert(
-            BrinTag {
-                rel,
-                seg: blknum / BRIN_SEGMENT_SIZE,
-            },
-            lsn,
-        );
+        {
+            let mut brin = self.tl.brin.write();
+            brin.last_updated.insert(
+                BrinTag {
+                    rel,
+                    seg: blknum / BRIN_SEGMENT_SIZE,
+                },
+                lsn,
+            );
+        }
 
         // Update metadata
-        let meta_hash = inner.get_metadata(&self.tl.store)?;
-        let rel_size = meta_hash.get(&rel).map(|m| m.size).unwrap_or(0);
+        let mut meta = self.tl.meta.write();
+        let rels_info = meta.load(&self.tl.store)?;
+        let rel_size = rels_info.get(&rel).map(|m| m.size).unwrap_or(0);
         if rel_size <= blknum {
-            meta_hash.insert(
+            rels_info.insert(
                 rel,
                 MetadataSnapshot {
                     size: blknum + 1,
                     lsn,
                 },
             );
-            drop(inner);
+            drop(meta);
             let mk = StoreKey::Metadata(MetadataKey { rel, lsn });
             let mv = MetadataValue {
                 size: Some(blknum + 1),
             };
             self.tl.store.put(mk.ser()?, mv.ser()?)?;
         } else {
-            drop(inner);
+            drop(meta);
         }
         if self.tl.disk_consistent_lsn.load() + self.tl.conf.checkpoint_distance < lsn {
             self.tl.checkpoint_internal()?
@@ -2094,9 +2102,9 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         };
         self.tl.store.put(mk.ser()?, mv.ser()?)?;
 
-        let mut inner = self.tl.inner.write();
-        let meta_hash = inner.get_metadata(&self.tl.store)?;
-        meta_hash.insert(rel, MetadataSnapshot { size: relsize, lsn });
+        let mut meta = self.tl.meta.write();
+        let rels_info = meta.load(&self.tl.store)?;
+        rels_info.insert(rel, MetadataSnapshot { size: relsize, lsn });
 
         Ok(())
     }
@@ -2108,9 +2116,9 @@ impl<'a> TimelineWriter for BufferedTimelineWriter<'a> {
         let mv = MetadataValue { size: None }; // None indicates dropped relation
         self.tl.store.put(mk.ser()?, mv.ser()?)?;
 
-        let mut inner = self.tl.inner.write();
-        let meta_hash = inner.get_metadata(&self.tl.store)?;
-        meta_hash.remove(&rel);
+        let mut meta = self.tl.meta.write();
+        let rels_info = meta.load(&self.tl.store)?;
+        rels_info.remove(&rel);
 
         Ok(())
     }
