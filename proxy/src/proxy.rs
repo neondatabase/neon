@@ -94,11 +94,7 @@ pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow:
 }
 
 impl ProxyConnection {
-    // TODO all this Result<Option<_>> nesting is getting hairy.
-    //      Consider simplifying before asking for review.
-    //      Maybe compose these functions instead of nesting them?
-    //      If not at least document what None means everywhere
-    //      (successfully closed connection).
+    /// Returns Ok(None) when connection was successfully closed.
     fn handle_client(mut self) -> anyhow::Result<Option<(Stream, TcpStream)>> {
         let mut authenticate = || {
             let (username, dbname) = match self.handle_startup()? {
@@ -149,6 +145,7 @@ impl ProxyConnection {
         Ok(Some((self.pgb.into_stream(), db_stream)))
     }
 
+    /// Returns Ok(None) when connection was successfully closed.
     fn handle_startup(&mut self) -> anyhow::Result<Option<(String, String)>> {
         let have_tls = self.pgb.tls_config.is_some();
         let mut encrypted = false;
