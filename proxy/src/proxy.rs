@@ -7,19 +7,29 @@ use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use tokio::try_join;
 use std::collections::HashMap;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::{io, thread};
 use tokio_postgres::{CancelToken, NoTls};
 use zenith_utils::postgres_backend::{self, PostgresBackend, ProtoState, Stream};
 use zenith_utils::pq_proto::{BeMessage as Be, FeMessage as Fe, *};
 use zenith_utils::sock_split::{ReadStream, WriteStream};
 
+struct CancelClosure {
+    socket_addr: SocketAddr,
+    cancel_token: tokio_postgres::CancelToken,
+}
+
+impl CancelClosure {
+    async fn try_cancel_query(&self) {
+        if let Ok(socket) = tokio::net::TcpStream::connect(self.socket_addr).await {
+            self.cancel_token.cancel_query_raw(socket, NoTls);
+        }
+    }
+}
+
 lazy_static! {
-    // NOTE including DatabaseInfo in the value would be unnecessary if I can figure out
-    //      how to use cancel_token.cancel_query. For now I rely on cancel_query_raw,
-    //      which needs the DatabaseInfo.
-    static ref CANCEL_MAP: Mutex<HashMap<CancelKeyData, (CancelToken, DatabaseInfo)>> =
-        Mutex::new(HashMap::new());
+    // Enables serving CancelRequests
+    static ref CANCEL_MAP: Mutex<HashMap<CancelKeyData, CancelClosure>> = Mutex::new(HashMap::new());
 }
 
 ///
@@ -173,31 +183,11 @@ impl ProxyConnection {
                     return Ok(Some((get_param("user")?, get_param("database")?)));
                 }
                 FeStartupPacket::CancelRequest(cancel_key_data) => {
-                    // NOTE using unwrap instead of ? because I don't want to send an
-                    //      unauthenticated user surprisingly transparent errors.
-                    if let Some((cancel_token, db_info)) = CANCEL_MAP.lock().get(&cancel_key_data) {
+                    if let Some(cancel_closure) = CANCEL_MAP.lock().get(&cancel_key_data) {
                         let runtime = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build().unwrap();
-
-                        // TODO why NoTls? Currently i'm cargo-culting from how
-                        //      we initialize connect_raw.
-                        // if let Err(e) = runtime.block_on(cancel_token.cancel_query(NoTls)) {
-                            // Error {
-                            //     kind: Connect,
-                            //     cause: Some(
-                            //         Custom {
-                            //             kind: InvalidInput,
-                            //             error: "unknown host",
-                            //         },
-                            //     ),
-                            // }
-                            // dbg!(e);
-                        // }
-
-                        // TODO figure out cancel_token.cancel_query (see commented code above)
-                        let socket = runtime.block_on(tokio::net::TcpStream::connect(db_info.socket_addr().unwrap())).unwrap();
-                        runtime.block_on(cancel_token.cancel_query_raw(socket, NoTls)).unwrap();
+                        runtime.block_on(cancel_closure.try_cancel_query());
                     }
                     return Ok(None);
                 }
@@ -289,8 +279,9 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
 /// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
 async fn connect_to_db(db_info: DatabaseInfo) ->
     anyhow::Result<(String, tokio::net::TcpStream, CancelKeyData)> {
-    let mut socket = tokio::net::TcpStream::connect(db_info.socket_addr()?).await?;
-    let config = tokio_postgres::Config::from(db_info.clone());
+    let socket_addr = db_info.socket_addr()?;
+    let mut socket = tokio::net::TcpStream::connect(socket_addr).await?;
+    let config = tokio_postgres::Config::from(db_info);
     let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
     let cancel_token = client.cancel_token().clone();
 
@@ -312,11 +303,13 @@ async fn connect_to_db(db_info: DatabaseInfo) ->
         _ = conn => bail!("connection closed too early"),
     };
 
+    // Info for potentially cancelling the query later
     let mut rng = StdRng::from_entropy();
     let cancel_key: i32 = rng.gen();
     let cancel_key_data = CancelKeyData{backend_pid, cancel_key};
+    let cancel_closure = CancelClosure{socket_addr, cancel_token};
+    CANCEL_MAP.lock().insert(cancel_key_data, cancel_closure);
 
-    CANCEL_MAP.lock().insert(cancel_key_data, (cancel_token, db_info.clone()));
     Ok((version, socket, cancel_key_data))
 }
 

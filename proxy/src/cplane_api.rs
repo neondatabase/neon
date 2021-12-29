@@ -4,7 +4,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 
 use crate::state::ProxyWaiters;
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct DatabaseInfo {
     pub host: String,
     pub port: u16,
