@@ -96,7 +96,11 @@ impl PageServerNode {
             .unwrap()
     }
 
-    pub fn init(&self, create_tenant: Option<&str>) -> anyhow::Result<()> {
+    pub fn init(
+        &self,
+        create_tenant: Option<&str>,
+        config_overrides: &[&str],
+    ) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
         let var = "LLVM_PROFILE_FILE";
         if let Some(val) = std::env::var_os(var) {
@@ -104,32 +108,38 @@ impl PageServerNode {
         }
 
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
-        let mut args = vec![
-            "--init".to_string(),
-            "-D".to_string(),
-            self.env.base_data_dir.display().to_string(),
-            "-c".to_string(),
-            format!("pg_distrib_dir='{}'", self.env.pg_distrib_dir.display()),
-            "-c".to_string(),
-            format!("auth_type='{}'", self.env.pageserver.auth_type),
-            "-c".to_string(),
-            format!(
-                "listen_http_addr='{}'",
-                self.env.pageserver.listen_http_addr
-            ),
-            "-c".to_string(),
-            format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr),
-        ];
+        let base_data_dir_param = self.env.base_data_dir.display().to_string();
+        let pg_distrib_dir_param =
+            format!("pg_distrib_dir='{}'", self.env.pg_distrib_dir.display());
+        let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
+        let listen_http_addr_param = format!(
+            "listen_http_addr='{}'",
+            self.env.pageserver.listen_http_addr
+        );
+        let listen_pg_addr_param =
+            format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let mut args = Vec::with_capacity(20);
+
+        args.push("--init");
+        args.extend(["-D", &base_data_dir_param]);
+        args.extend(["-c", &pg_distrib_dir_param]);
+        args.extend(["-c", &authg_type_param]);
+        args.extend(["-c", &listen_http_addr_param]);
+        args.extend(["-c", &listen_pg_addr_param]);
+
+        for config_override in config_overrides {
+            args.extend(["-c", config_override]);
+        }
 
         if self.env.pageserver.auth_type != AuthType::Trust {
             args.extend([
-                "-c".to_string(),
-                "auth_validation_public_key_path='auth_public_key.pem'".to_string(),
+                "-c",
+                "auth_validation_public_key_path='auth_public_key.pem'",
             ]);
         }
 
         if let Some(tenantid) = create_tenant {
-            args.extend(["--create-tenant".to_string(), tenantid.to_string()])
+            args.extend(["--create-tenant", tenantid])
         }
 
         let status = cmd
@@ -154,7 +164,7 @@ impl PageServerNode {
         self.repo_path().join("pageserver.pid")
     }
 
-    pub fn start(&self) -> anyhow::Result<()> {
+    pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         print!(
             "Starting pageserver at '{}' in '{}'",
             connection_address(&self.pg_connection_config),
@@ -163,7 +173,15 @@ impl PageServerNode {
         io::stdout().flush().unwrap();
 
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        cmd.args(&["-D", self.repo_path().to_str().unwrap()])
+
+        let repo_path = self.repo_path();
+        let mut args = vec!["-D", repo_path.to_str().unwrap()];
+
+        for config_override in config_overrides {
+            args.extend(["-c", config_override]);
+        }
+
+        cmd.args(&args)
             .arg("--daemonize")
             .env_clear()
             .env("RUST_BACKTRACE", "1");
