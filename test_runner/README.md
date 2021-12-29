@@ -47,6 +47,9 @@ Useful environment variables:
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
+`ZENITH_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
+`--pageserver-config-override=${value}` parameter values when zenith cli is invoked
+`RUST_LOG`: logging configuration to pass into Zenith CLI
 
 Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
 `pytest -s --log-cli-level=INFO ...`
