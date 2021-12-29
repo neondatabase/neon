@@ -53,12 +53,12 @@ fn main() -> Result<()> {
         )
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
-            Arg::with_name("config-option")
+            Arg::with_name("config-override")
                 .short("c")
                 .takes_value(true)
                 .number_of_values(1)
                 .multiple(true)
-                .help("Additional configuration options or overrides of the ones from the toml config file.
+                .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
                 Any option has to be a valid toml document, example: `-c \"foo='hey'\"` `-c \"foo={value=1}\"`"),
         )
         .get_matches();
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
     };
 
     // Process any extra options given with -c
-    if let Some(values) = arg_matches.values_of("config-option") {
+    if let Some(values) = arg_matches.values_of("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
                 format!(
