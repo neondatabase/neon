@@ -5,11 +5,11 @@ use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
-use tokio::try_join;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::{io, thread};
-use tokio_postgres::{CancelToken, NoTls};
+use tokio::try_join;
+use tokio_postgres::NoTls;
 use zenith_utils::postgres_backend::{self, PostgresBackend, ProtoState, Stream};
 use zenith_utils::pq_proto::{BeMessage as Be, FeMessage as Fe, *};
 use zenith_utils::sock_split::{ReadStream, WriteStream};
@@ -80,7 +80,7 @@ pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow:
 
     let (client, server) = match conn.handle_client()? {
         Some(x) => x,
-        None => return Ok(())
+        None => return Ok(()),
     };
 
     let server = zenith_utils::sock_split::BidiStream::from_tcp(server);
@@ -99,14 +99,14 @@ impl ProxyConnection {
         let mut authenticate = || {
             let (username, dbname) = match self.handle_startup()? {
                 Some(x) => x,
-                None => return Ok(None)
+                None => return Ok(None),
             };
 
             // Both scenarios here should end up producing database credentials
             if username.ends_with("@zenith") {
-                self.handle_existing_user(&username, &dbname).map(|x| Some(x))
+                self.handle_existing_user(&username, &dbname).map(Some)
             } else {
-                self.handle_new_user().map(|x| Some(x))
+                self.handle_new_user().map(Some)
             }
         };
 
@@ -127,7 +127,8 @@ impl ProxyConnection {
                 .build()?;
 
             let (pg_version, stream, cancel_key_data) = runtime.block_on(conn)?;
-            self.pgb.write_message(&BeMessage::BackendKeyData(cancel_key_data))?;
+            self.pgb
+                .write_message(&BeMessage::BackendKeyData(cancel_key_data))?;
             let stream = stream.into_std()?;
             stream.set_nonblocking(false)?;
 
@@ -185,7 +186,8 @@ impl ProxyConnection {
                     if let Some(cancel_closure) = CANCEL_MAP.lock().get(&cancel_key_data) {
                         let runtime = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
-                            .build().unwrap();
+                            .build()
+                            .unwrap();
                         runtime.block_on(cancel_closure.try_cancel_query());
                     }
                     return Ok(None);
@@ -268,8 +270,9 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
 }
 
 /// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
-async fn connect_to_db(db_info: DatabaseInfo) ->
-    anyhow::Result<(String, tokio::net::TcpStream, CancelKeyData)> {
+async fn connect_to_db(
+    db_info: DatabaseInfo,
+) -> anyhow::Result<(String, tokio::net::TcpStream, CancelKeyData)> {
     let socket_addr = db_info.socket_addr()?;
     let mut socket = tokio::net::TcpStream::connect(socket_addr).await?;
     let config = tokio_postgres::Config::from(db_info);
@@ -282,7 +285,8 @@ async fn connect_to_db(db_info: DatabaseInfo) ->
     let get_version_and_backend = || async {
         let pipeline = try_join!(
             client.query_one("select current_setting('server_version')", &[]),
-            client.query_one("select pg_backend_pid()", &[]))?;
+            client.query_one("select pg_backend_pid()", &[])
+        )?;
         let version: String = pipeline.0.try_get(0)?;
         let backend_pid: i32 = pipeline.1.try_get(0)?;
         Result::<(String, i32), tokio_postgres::Error>::Ok((version, backend_pid))
@@ -297,8 +301,14 @@ async fn connect_to_db(db_info: DatabaseInfo) ->
     // Info for potentially cancelling the query later
     let mut rng = StdRng::from_entropy();
     let cancel_key: i32 = rng.gen();
-    let cancel_key_data = CancelKeyData{backend_pid, cancel_key};
-    let cancel_closure = CancelClosure{socket_addr, cancel_token};
+    let cancel_key_data = CancelKeyData {
+        backend_pid,
+        cancel_key,
+    };
+    let cancel_closure = CancelClosure {
+        socket_addr,
+        cancel_token,
+    };
     CANCEL_MAP.lock().insert(cancel_key_data, cancel_closure);
 
     Ok((version, socket, cancel_key_data))
