@@ -5,7 +5,7 @@
     "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8b",
 
     "cluster": {
-        "cluster_id": 42,
+        "cluster_id": "test-cluster-42",
         "name": "Zenith Test",
         "state": "restarted",
         "roles": [
