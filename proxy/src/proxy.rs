@@ -22,7 +22,10 @@ struct CancelClosure {
 impl CancelClosure {
     async fn try_cancel_query(&self) {
         if let Ok(socket) = tokio::net::TcpStream::connect(self.socket_addr).await {
-            self.cancel_token.cancel_query_raw(socket, NoTls);
+            // NOTE ignoring the result because:
+            // 1. This is a best effort attempt, the database doesn't have to listen
+            // 2. Being opaque about errors here helps avoid leaking info to unauthenticated user
+            let _ = self.cancel_token.cancel_query_raw(socket, NoTls).await;
         }
     }
 }
