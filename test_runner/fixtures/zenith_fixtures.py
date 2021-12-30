@@ -678,9 +678,8 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def timeline_details(self, tenant_id: uuid.UUID, timeline_id: str) -> Dict[Any, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id}")
+    def timeline_details(self, tenant_id: str, timeline_id: str) -> Dict[Any, Any]:
+        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
         res.raise_for_status()
         res_json = res.json()
         assert isinstance(res_json, dict)
