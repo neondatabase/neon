@@ -93,7 +93,7 @@ use std::{
 };
 
 use anyhow::{bail, Context};
-use tokio::io;
+use tokio::{io, sync};
 use tracing::{error, info};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -135,6 +135,7 @@ pub struct SyncStartupData {
 /// Along with that, scans tenant files local and remote (if the sync gets enabled) to check the initial timeline states.
 pub fn start_local_timeline_sync(
     config: &'static PageServerConf,
+    shutdown_hook: sync::watch::Receiver<()>,
 ) -> anyhow::Result<SyncStartupData> {
     let local_timeline_files = local_tenant_timeline_files(config)
         .context("Failed to collect local tenant timeline files")?;
@@ -142,6 +143,7 @@ pub fn start_local_timeline_sync(
     match &config.remote_storage_config {
         Some(storage_config) => match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => storage_sync::spawn_storage_sync_thread(
+                shutdown_hook,
                 config,
                 local_timeline_files,
                 LocalFs::new(root.clone(), &config.workdir)?,
@@ -149,6 +151,7 @@ pub fn start_local_timeline_sync(
                 storage_config.max_sync_errors,
             ),
             RemoteStorageKind::AwsS3(s3_config) => storage_sync::spawn_storage_sync_thread(
+                shutdown_hook,
                 config,
                 local_timeline_files,
                 S3::new(s3_config, &config.workdir)?,
