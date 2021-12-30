@@ -202,7 +202,7 @@ async fn try_download_archive<
             archive_to_download.disk_consistent_lsn(),
             local_metadata.disk_consistent_lsn()
         ),
-        Err(e) => warn!("Failed to read local metadata file, assuing it's safe to override its with the download. Read: {:#}", e),
+        Err(e) => warn!("Failed to read local metadata file, assuming it's safe to override its with the download. Read: {:#}", e),
     }
     compression::uncompress_file_stream_with_index(
         conf.timeline_path(&timeline_id, &tenant_id),

@@ -198,7 +198,7 @@ pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Reposito
 
     match &tenant.repo {
         Some(repo) => Ok(Arc::clone(repo)),
-        None => anyhow::bail!("Repository for tenant {} is not yet valid", tenantid),
+        None => bail!("Repository for tenant {} is not yet valid", tenantid),
     }
 }
 
