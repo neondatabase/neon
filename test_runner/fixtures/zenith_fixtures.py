@@ -671,6 +671,21 @@ class ZenithPageserverHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
+    def timeline_list(self, tenant_id: uuid.UUID) -> List[str]:
+        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
+
+    def timeline_details(self, tenant_id: uuid.UUID, timeline_id: str) -> Dict[Any, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         res.raise_for_status()

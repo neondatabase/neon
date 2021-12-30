@@ -1,5 +1,5 @@
 import json
-from uuid import uuid4
+from uuid import uuid4, UUID
 import pytest
 import psycopg2
 import requests
@@ -95,6 +95,15 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: str):
     tenant_id = uuid4()
     client.tenant_create(tenant_id)
     assert tenant_id.hex in {t['id'] for t in client.tenant_list()}
+
+    # check its timelines
+    timelines = client.timeline_list(tenant_id)
+    assert len(timelines) > 0
+    for timeline_id_str in timelines:
+        timeline_details = client.timeline_details(tenant_id.hex, timeline_id_str)
+        assert timeline_details['type'] == 'Local'
+        assert timeline_details['tenant_id'] == tenant_id.hex
+        assert timeline_details['timeline_id'] == timeline_id_str
 
     # create branch
     branch_name = uuid4().hex
