@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
@@ -190,18 +190,27 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 }
 
 #[derive(Debug, Serialize)]
-struct TimelineInfo {
-    #[serde(with = "hex")]
-    timeline_id: ZTimelineId,
-    #[serde(with = "hex")]
-    tenant_id: ZTenantId,
-    #[serde(with = "opt_display_serde")]
-    ancestor_timeline_id: Option<ZTimelineId>,
-    last_record_lsn: Lsn,
-    prev_record_lsn: Lsn,
-    start_lsn: Lsn,
-    disk_consistent_lsn: Lsn,
-    timeline_state: Option<TimelineSyncState>,
+#[serde(tag = "type")]
+enum TimelineInfo {
+    Local {
+        #[serde(with = "hex")]
+        timeline_id: ZTimelineId,
+        #[serde(with = "hex")]
+        tenant_id: ZTenantId,
+        #[serde(with = "opt_display_serde")]
+        ancestor_timeline_id: Option<ZTimelineId>,
+        last_record_lsn: Lsn,
+        prev_record_lsn: Lsn,
+        start_lsn: Lsn,
+        disk_consistent_lsn: Lsn,
+        timeline_state: Option<TimelineSyncState>,
+    },
+    Remote {
+        #[serde(with = "hex")]
+        timeline_id: ZTimelineId,
+        #[serde(with = "hex")]
+        tenant_id: ZTenantId,
+    },
 }
 
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -215,9 +224,12 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id)
                 .entered();
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        match repo.get_timeline(timeline_id)?.local_timeline() {
-            None => bail!("Timeline with id {} is not present locally", timeline_id),
-            Some(timeline) => Ok::<_, anyhow::Error>(TimelineInfo {
+        Ok::<_, anyhow::Error>(match repo.get_timeline(timeline_id)?.local_timeline() {
+            None => TimelineInfo::Remote {
+                timeline_id,
+                tenant_id,
+            },
+            Some(timeline) => TimelineInfo::Local {
                 timeline_id,
                 tenant_id,
                 ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
@@ -226,8 +238,8 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
                 prev_record_lsn: timeline.get_prev_record_lsn(),
                 start_lsn: timeline.get_start_lsn(),
                 timeline_state: repo.get_timeline_state(timeline_id),
-            }),
-        }
+            },
+        })
     })
     .await
     .map_err(ApiError::from_err)??;
