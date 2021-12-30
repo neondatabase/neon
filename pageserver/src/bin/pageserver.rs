@@ -195,9 +195,10 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     }
 
     let signals = signals::install_shutdown_handlers()?;
+    let (async_shutdown_tx, async_shutdown_rx) = tokio::sync::watch::channel(());
     let mut threads = Vec::new();
 
-    let sync_startup = remote_storage::start_local_timeline_sync(conf)
+    let sync_startup = remote_storage::start_local_timeline_sync(conf, async_shutdown_rx)
         .context("Failed to set up local files sync with external storage")?;
 
     if let Some(handle) = sync_startup.sync_loop_handle {
@@ -255,6 +256,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 signal.name()
             );
 
+            async_shutdown_tx.send(())?;
             postgres_backend::set_pgbackend_shutdown_requested();
             tenant_mgr::shutdown_all_tenants()?;
             endpoint::shutdown();

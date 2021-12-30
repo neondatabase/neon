@@ -45,14 +45,16 @@ impl BranchInfo {
         repo: &Arc<dyn Repository>,
         include_non_incremental_logical_size: bool,
     ) -> Result<Self> {
-        let name = path
-            .as_ref()
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let timeline_id = std::fs::read_to_string(path)?.parse::<ZTimelineId>()?;
+        let path = path.as_ref();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let timeline_id = std::fs::read_to_string(path)
+            .with_context(|| {
+                format!(
+                    "Failed to read branch file contents at path '{}'",
+                    path.display()
+                )
+            })?
+            .parse::<ZTimelineId>()?;
 
         let timeline = match repo.get_timeline(timeline_id)? {
             RepositoryTimeline::Local(local_entry) => local_entry,

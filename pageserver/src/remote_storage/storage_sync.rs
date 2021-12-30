@@ -86,10 +86,15 @@ use std::{
 use anyhow::{bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
-use tokio::{fs, sync::RwLock};
 use tokio::{
-    sync::mpsc::{self, UnboundedReceiver},
-    time::Instant,
+    fs,
+    runtime::Runtime,
+    sync::{
+        mpsc::{self, UnboundedReceiver},
+        watch::Receiver,
+        RwLock,
+    },
+    time::{Duration, Instant},
 };
 use tracing::*;
 
@@ -346,6 +351,7 @@ pub(super) fn spawn_storage_sync_thread<
     P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
+    shutdown_hook: Receiver<()>,
     conf: &'static PageServerConf,
     local_timeline_files: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>,
     storage: S,
@@ -384,6 +390,7 @@ pub(super) fn spawn_storage_sync_thread<
         .spawn(move || {
             storage_sync_loop(
                 runtime,
+                shutdown_hook,
                 conf,
                 receiver,
                 remote_index,
@@ -399,11 +406,18 @@ pub(super) fn spawn_storage_sync_thread<
     })
 }
 
+enum LoopStep {
+    NewStates(HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>>),
+    Shutdown,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn storage_sync_loop<
     P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    runtime: tokio::runtime::Runtime,
+    runtime: Runtime,
+    mut shutdown_hook: Receiver<()>,
     conf: &'static PageServerConf,
     mut receiver: UnboundedReceiver<SyncTask>,
     index: RemoteTimelineIndex,
@@ -413,19 +427,28 @@ fn storage_sync_loop<
 ) -> anyhow::Result<()> {
     let remote_assets = Arc::new((storage, RwLock::new(index)));
     while !crate::tenant_mgr::shutdown_requested() {
-        let new_timeline_states = runtime.block_on(
-            loop_step(
-                conf,
-                &mut receiver,
-                Arc::clone(&remote_assets),
-                max_concurrent_sync,
-                max_sync_errors,
-            )
-            .instrument(debug_span!("storage_sync_loop_step")),
-        );
-        // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-        set_timeline_states(conf, new_timeline_states);
-        debug!("Sync loop step completed");
+        let loop_step = runtime.block_on(async {
+            tokio::select! {
+                new_timeline_states = loop_step(
+                    conf,
+                    &mut receiver,
+                    Arc::clone(&remote_assets),
+                    max_concurrent_sync,
+                    max_sync_errors,
+                )
+                .instrument(debug_span!("storage_sync_loop_step")) => LoopStep::NewStates(new_timeline_states),
+                _ = shutdown_hook.changed() => LoopStep::Shutdown,
+            }
+        });
+
+        match loop_step {
+            LoopStep::NewStates(new_timeline_states) => {
+                // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
+                set_timeline_states(conf, new_timeline_states);
+                debug!("Sync loop step completed");
+            }
+            LoopStep::Shutdown => {}
+        }
     }
 
     debug!("Shutdown requested, stopping");
@@ -539,7 +562,7 @@ async fn process_task<
             "Waiting {} seconds before starting the task",
             seconds_to_wait
         );
-        tokio::time::sleep(tokio::time::Duration::from_secs_f64(seconds_to_wait)).await;
+        tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
     }
 
     let sync_start = Instant::now();
