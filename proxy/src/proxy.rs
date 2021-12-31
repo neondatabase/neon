@@ -8,7 +8,6 @@ use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::{io, thread};
-use tokio::try_join;
 use tokio_postgres::NoTls;
 use zenith_utils::postgres_backend::{self, PostgresBackend, ProtoState, Stream};
 use zenith_utils::pq_proto::{BeMessage as Be, FeMessage as Fe, *};
@@ -273,45 +272,33 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
 async fn connect_to_db(
     db_info: DatabaseInfo,
 ) -> anyhow::Result<(String, tokio::net::TcpStream, CancelKeyData)> {
+    // Make raw connection. When connect_raw finishes we've received ReadyForQuery.
     let socket_addr = db_info.socket_addr()?;
     let mut socket = tokio::net::TcpStream::connect(socket_addr).await?;
     let config = tokio_postgres::Config::from(db_info);
-    let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
-    let cancel_token = client.cancel_token().clone();
-
-    // NOTE We effectively ignore any ParameterStatus and NoticeResponse
+    // NOTE We effectively ignore some ParameterStatus and NoticeResponse
     //      messages here. Not sure if that could break something.
+    let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
 
-    let get_version_and_backend = || async {
-        let pipeline = try_join!(
-            client.query_one("select current_setting('server_version')", &[]),
-            client.query_one("select pg_backend_pid()", &[])
-        )?;
-        let version: String = pipeline.0.try_get(0)?;
-        let backend_pid: i32 = pipeline.1.try_get(0)?;
-        Result::<(String, i32), tokio_postgres::Error>::Ok((version, backend_pid))
-    };
-
-    // Allow conn to talk with pg until we get our results back
-    let (version, backend_pid) = tokio::select! {
-        x = get_version_and_backend() => x?,
-        _ = conn => bail!("connection closed too early"),
-    };
-
-    // Info for potentially cancelling the query later
+    // Save info for potentially cancelling the query later
     let mut rng = StdRng::from_entropy();
-    let cancel_key: i32 = rng.gen();
     let cancel_key_data = CancelKeyData {
-        backend_pid,
-        cancel_key,
+        // HACK We'd rather get the real backend_pid but tokio_postgres doesn't
+        //      expose it and we don't want to do another roundtrip to query
+        //      for it. The client will be able to notice that this is not the
+        //      actual backend_pid, but backend_pid is not used for anything
+        //      so it doesn't matter.
+        backend_pid: rng.gen(),
+        cancel_key: rng.gen(),
     };
     let cancel_closure = CancelClosure {
         socket_addr,
-        cancel_token,
+        cancel_token: client.cancel_token(),
     };
     CANCEL_MAP.lock().insert(cancel_key_data, cancel_closure);
 
-    Ok((version, socket, cancel_key_data))
+    let version = conn.parameter("server_version").unwrap();
+    Ok((version.into(), socket, cancel_key_data))
 }
 
 /// Concurrently proxy both directions of the client and server connections
