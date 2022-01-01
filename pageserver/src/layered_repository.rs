@@ -360,7 +360,8 @@ fn shutdown_timeline(
                 .store(false, atomic::Ordering::Relaxed);
             walreceiver::stop_wal_receiver(timeline_id);
             trace!("repo shutdown. checkpoint timeline {}", timeline_id);
-            timeline.checkpoint(CheckpointConfig::Forced)?;
+            // Do not reconstruct pages to reduce shutdown time
+            timeline.checkpoint(CheckpointConfig::Flush)?;
             //TODO Wait for walredo process to shutdown too
         }
         LayeredTimelineEntry::Remote { .. } => warn!(
@@ -974,12 +975,15 @@ impl Timeline for LayeredTimeline {
     /// metrics collection.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
         match cconf {
+            CheckpointConfig::Flush => STORAGE_TIME
+                .with_label_values(&["flush checkpoint"])
+                .observe_closure_duration(|| self.checkpoint_internal(0, false)),
             CheckpointConfig::Forced => STORAGE_TIME
                 .with_label_values(&["forced checkpoint"])
-                .observe_closure_duration(|| self.checkpoint_internal(0)),
+                .observe_closure_duration(|| self.checkpoint_internal(0, true)),
             CheckpointConfig::Distance(distance) => STORAGE_TIME
                 .with_label_values(&["checkpoint"])
-                .observe_closure_duration(|| self.checkpoint_internal(distance)),
+                .observe_closure_duration(|| self.checkpoint_internal(distance, true)),
         }
     }
 
@@ -1428,7 +1432,7 @@ impl LayeredTimeline {
     /// Flush to disk all data that was written with the put_* functions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    fn checkpoint_internal(&self, checkpoint_distance: u64) -> Result<()> {
+    fn checkpoint_internal(&self, checkpoint_distance: u64, reconstruct_pages: bool) -> Result<()> {
         let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
@@ -1485,7 +1489,7 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let mut this_layer_uploads = self.evict_layer(oldest_layer_id)?;
+            let mut this_layer_uploads = self.evict_layer(oldest_layer_id, reconstruct_pages)?;
             layer_uploads.append(&mut this_layer_uploads);
 
             write_guard = self.write_lock.lock().unwrap();
@@ -1565,7 +1569,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn evict_layer(&self, layer_id: LayerId) -> Result<Vec<PathBuf>> {
+    fn evict_layer(&self, layer_id: LayerId, reconstruct_pages: bool) -> Result<Vec<PathBuf>> {
         // Mark the layer as no longer accepting writes and record the end_lsn.
         // This happens in-place, no new layers are created now.
         // We call `get_last_record_lsn` again, which may be different from the
@@ -1590,7 +1594,7 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let new_historics = oldest_layer.write_to_disk(self)?;
+            let new_historics = oldest_layer.write_to_disk(self, reconstruct_pages)?;
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
