@@ -135,6 +135,8 @@ pub struct S3Config {
     pub bucket_name: String,
     /// The region where the bucket is located at.
     pub bucket_region: String,
+    /// A "subfolder" in the bucket, to use the same bucket separately by multiple pageservers at once.
+    pub prefix_in_bucket: Option<String>,
     /// "Login" to use when connecting to bucket.
     /// Can be empty for cases like AWS k8s IAM
     /// where we can allow certain pods to connect
@@ -149,6 +151,7 @@ impl std::fmt::Debug for S3Config {
         f.debug_struct("S3Config")
             .field("bucket_name", &self.bucket_name)
             .field("bucket_region", &self.bucket_region)
+            .field("prefix_in_bucket", &self.prefix_in_bucket)
             .finish()
     }
 }
@@ -332,18 +335,26 @@ impl PageServerConf {
                 bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
             }
             (None, Some(bucket_name), Some(bucket_region)) => RemoteStorageKind::AwsS3(S3Config {
-                bucket_name: bucket_name.as_str().unwrap().to_string(),
-                bucket_region: bucket_region.as_str().unwrap().to_string(),
+                bucket_name: parse_toml_string("bucket_name", bucket_name)?,
+                bucket_region: parse_toml_string("bucket_region", bucket_region)?,
                 access_key_id: toml
                     .get("access_key_id")
-                    .map(|x| x.as_str().unwrap().to_string()),
+                    .map(|access_key_id| parse_toml_string("access_key_id", access_key_id))
+                    .transpose()?,
                 secret_access_key: toml
                     .get("secret_access_key")
-                    .map(|x| x.as_str().unwrap().to_string()),
+                    .map(|secret_access_key| {
+                        parse_toml_string("secret_access_key", secret_access_key)
+                    })
+                    .transpose()?,
+                prefix_in_bucket: toml
+                    .get("prefix_in_bucket")
+                    .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
+                    .transpose()?,
             }),
-            (Some(local_path), None, None) => {
-                RemoteStorageKind::LocalFs(PathBuf::from(local_path.as_str().unwrap()))
-            }
+            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
+                parse_toml_string("local_path", local_path)?,
+            )),
             (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
         };
 
@@ -585,6 +596,7 @@ pg_distrib_dir='{}'
 
         let bucket_name = "some-sample-bucket".to_string();
         let bucket_region = "eu-north-1".to_string();
+        let prefix_in_bucket = "test_prefix".to_string();
         let access_key_id = "SOMEKEYAAAAASADSAH*#".to_string();
         let secret_access_key = "SOMEsEcReTsd292v".to_string();
         let max_concurrent_sync = NonZeroUsize::new(111).unwrap();
@@ -597,13 +609,14 @@ max_concurrent_sync = {}
 max_sync_errors = {}
 bucket_name = '{}'
 bucket_region = '{}'
+prefix_in_bucket = '{}'
 access_key_id = '{}'
 secret_access_key = '{}'"#,
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, access_key_id, secret_access_key
+                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key
             ),
             format!(
-                "remote_storage={{max_concurrent_sync = {}, max_sync_errors = {}, bucket_name='{}', bucket_region='{}', access_key_id='{}', secret_access_key='{}'}}",
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, access_key_id, secret_access_key
+                "remote_storage={{max_concurrent_sync={}, max_sync_errors={}, bucket_name='{}', bucket_region='{}', prefix_in_bucket='{}', access_key_id='{}', secret_access_key='{}'}}",
+                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key
             ),
         ];
 
@@ -637,6 +650,7 @@ pg_distrib_dir='{}'
                         bucket_region: bucket_region.clone(),
                         access_key_id: Some(access_key_id.clone()),
                         secret_access_key: Some(secret_access_key.clone()),
+                        prefix_in_bucket: Some(prefix_in_bucket.clone())
                     }),
                 },
                 "Remote storage config should correctly parse the S3 config"

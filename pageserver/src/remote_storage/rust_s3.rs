@@ -1,6 +1,8 @@
 //! AWS S3 storage wrapper around `rust_s3` library.
-//! Currently does not allow multiple pageservers to use the same bucket concurrently: objects are
-//! placed in the root of the bucket.
+//!
+//! Respects `prefix_in_bucket` property from [`S3Config`],
+//! allowing multiple pageservers to independently work with the same S3 bucket, if
+//! their bucket prefixes are both specified and different.
 
 use std::path::{Path, PathBuf};
 
@@ -23,8 +25,26 @@ impl S3ObjectKey {
         &self.0
     }
 
-    fn download_destination(&self, pageserver_workdir: &Path) -> PathBuf {
-        pageserver_workdir.join(self.0.split(S3_FILE_SEPARATOR).collect::<PathBuf>())
+    fn download_destination(
+        &self,
+        pageserver_workdir: &Path,
+        prefix_to_strip: Option<&str>,
+    ) -> PathBuf {
+        let path_without_prefix = match prefix_to_strip {
+            Some(prefix) => self.0.strip_prefix(prefix).unwrap_or_else(|| {
+                panic!(
+                    "Could not strip prefix '{}' from S3 object key '{}'",
+                    prefix, self.0
+                )
+            }),
+            None => &self.0,
+        };
+
+        pageserver_workdir.join(
+            path_without_prefix
+                .split(S3_FILE_SEPARATOR)
+                .collect::<PathBuf>(),
+        )
     }
 }
 
@@ -32,6 +52,7 @@ impl S3ObjectKey {
 pub struct S3 {
     pageserver_workdir: &'static Path,
     bucket: Bucket,
+    prefix_in_bucket: Option<String>,
 }
 
 impl S3 {
@@ -49,6 +70,20 @@ impl S3 {
             None,
         )
         .context("Failed to create the s3 credentials")?;
+
+        let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
+            let mut prefix = prefix;
+            while prefix.starts_with(S3_FILE_SEPARATOR) {
+                prefix = &prefix[1..]
+            }
+
+            let mut prefix = prefix.to_string();
+            while prefix.ends_with(S3_FILE_SEPARATOR) {
+                prefix.pop();
+            }
+            prefix
+        });
+
         Ok(Self {
             bucket: Bucket::new_with_path_style(
                 aws_config.bucket_name.as_str(),
@@ -57,6 +92,7 @@ impl S3 {
             )
             .context("Failed to create the s3 bucket")?,
             pageserver_workdir,
+            prefix_in_bucket,
         })
     }
 }
@@ -67,7 +103,7 @@ impl RemoteStorage for S3 {
 
     fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::StoragePath> {
         let relative_path = strip_path_prefix(self.pageserver_workdir, local_path)?;
-        let mut key = String::new();
+        let mut key = self.prefix_in_bucket.clone().unwrap_or_default();
         for segment in relative_path {
             key.push(S3_FILE_SEPARATOR);
             key.push_str(&segment.to_string_lossy());
@@ -76,13 +112,14 @@ impl RemoteStorage for S3 {
     }
 
     fn local_path(&self, storage_path: &Self::StoragePath) -> anyhow::Result<PathBuf> {
-        Ok(storage_path.download_destination(self.pageserver_workdir))
+        Ok(storage_path
+            .download_destination(self.pageserver_workdir, self.prefix_in_bucket.as_deref()))
     }
 
     async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
         let list_response = self
             .bucket
-            .list(String::new(), None)
+            .list(self.prefix_in_bucket.clone().unwrap_or_default(), None)
             .await
             .context("Failed to list s3 objects")?;
 
@@ -225,7 +262,7 @@ mod tests {
 
         assert_eq!(
             local_path,
-            key.download_destination(&repo_harness.conf.workdir),
+            key.download_destination(&repo_harness.conf.workdir, None),
             "Download destination should consist of s3 path joined with the pageserver workdir prefix"
         );
 
@@ -239,14 +276,18 @@ mod tests {
         let segment_1 = "matching";
         let segment_2 = "file";
         let local_path = &repo_harness.conf.workdir.join(segment_1).join(segment_2);
+
+        let storage = dummy_storage(&repo_harness.conf.workdir);
+
         let expected_key = S3ObjectKey(format!(
-            "{SEPARATOR}{}{SEPARATOR}{}",
+            "{}{SEPARATOR}{}{SEPARATOR}{}",
+            storage.prefix_in_bucket.as_deref().unwrap_or_default(),
             segment_1,
             segment_2,
             SEPARATOR = S3_FILE_SEPARATOR,
         ));
 
-        let actual_key = dummy_storage(&repo_harness.conf.workdir)
+        let actual_key = storage
             .storage_path(local_path)
             .expect("Matching path should map to S3 path normally");
         assert_eq!(
@@ -308,18 +349,30 @@ mod tests {
         let timeline_dir = repo_harness.timeline_path(&TIMELINE_ID);
         let relative_timeline_path = timeline_dir.strip_prefix(&repo_harness.conf.workdir)?;
 
-        let s3_key = create_s3_key(&relative_timeline_path.join("not a metadata"));
+        let s3_key = create_s3_key(
+            &relative_timeline_path.join("not a metadata"),
+            storage.prefix_in_bucket.as_deref(),
+        );
         assert_eq!(
-            s3_key.download_destination(&repo_harness.conf.workdir),
+            s3_key.download_destination(
+                &repo_harness.conf.workdir,
+                storage.prefix_in_bucket.as_deref()
+            ),
             storage
                 .local_path(&s3_key)
                 .expect("For a valid input, valid S3 info should be parsed"),
             "Should be able to parse metadata out of the correctly named remote delta file"
         );
 
-        let s3_key = create_s3_key(&relative_timeline_path.join(METADATA_FILE_NAME));
+        let s3_key = create_s3_key(
+            &relative_timeline_path.join(METADATA_FILE_NAME),
+            storage.prefix_in_bucket.as_deref(),
+        );
         assert_eq!(
-            s3_key.download_destination(&repo_harness.conf.workdir),
+            s3_key.download_destination(
+                &repo_harness.conf.workdir,
+                storage.prefix_in_bucket.as_deref()
+            ),
             storage
                 .local_path(&s3_key)
                 .expect("For a valid input, valid S3 info should be parsed"),
@@ -356,18 +409,18 @@ mod tests {
                 Credentials::anonymous().unwrap(),
             )
             .unwrap(),
+            prefix_in_bucket: Some("dummy_prefix/".to_string()),
         }
     }
 
-    fn create_s3_key(relative_file_path: &Path) -> S3ObjectKey {
-        S3ObjectKey(
-            relative_file_path
-                .iter()
-                .fold(String::new(), |mut path_string, segment| {
-                    path_string.push(S3_FILE_SEPARATOR);
-                    path_string.push_str(segment.to_str().unwrap());
-                    path_string
-                }),
-        )
+    fn create_s3_key(relative_file_path: &Path, prefix: Option<&str>) -> S3ObjectKey {
+        S3ObjectKey(relative_file_path.iter().fold(
+            prefix.unwrap_or_default().to_string(),
+            |mut path_string, segment| {
+                path_string.push(S3_FILE_SEPARATOR);
+                path_string.push_str(segment.to_str().unwrap());
+                path_string
+            },
+        ))
     }
 }
