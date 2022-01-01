@@ -147,6 +147,10 @@ bucket_name = 'some-sample-bucket'
 # Name of the region where the bucket is located at
 bucket_region = 'eu-north-1'
 
+# A "subfolder" in the bucket, to use the same bucket separately by multiple pageservers at once.
+# Optional, pageserver uses entire bucket if the prefix is not specified.
+prefix_in_bucket = '/some/prefix/'
+
 # Access key to connect to the bucket ("login" part of the credentials)
 access_key_id = 'SOMEKEYAAAAASADSAH*#'
 

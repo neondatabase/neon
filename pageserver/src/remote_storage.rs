@@ -5,7 +5,7 @@
 //! There are a few components the storage machinery consists of:
 //! * [`RemoteStorage`] trait a CRUD-like generic abstraction to use for adapting external storages with a few implementations:
 //!     * [`local_fs`] allows to use local file system as an external storage
-//!     * [`rust_s3`] uses AWS S3 bucket entirely as an external storage
+//!     * [`rust_s3`] uses AWS S3 bucket as an external storage
 //!
 //! * synchronization logic at [`storage_sync`] module that keeps pageserver state (both runtime one and the workdir files) and storage state in sync.
 //! Synchronization internals are split into submodules
