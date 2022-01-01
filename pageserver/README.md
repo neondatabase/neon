@@ -129,13 +129,13 @@ There are the following implementations present:
 * local filesystem — to use in tests mainly
 * AWS S3           - to use in production
 
-Implementation details are covered in the [backup readme](./src/remote_storage/README.md) and corresponding Rust file docs.
+Implementation details are covered in the [backup readme](./src/remote_storage/README.md) and corresponding Rust file docs, parameters documentation can be found at [settings docs](../docs/settings.md).
 
 The backup service is disabled by default and can be enabled to interact with a single remote storage.
 
 CLI examples:
 * Local FS: `${PAGESERVER_BIN} -c "remote_storage={local_path='/some/local/path/'}"`
-* AWS S3  : `${PAGESERVER_BIN} -c "remote_storage={bucket_name='some-sample-bucket',bucket_region='eu-north-1',access_key_id='SOMEKEYAAAAASADSAH*#',secret_access_key='SOMEsEcReTsd292v'}"`
+* AWS S3  : `${PAGESERVER_BIN} -c "remote_storage={bucket_name='some-sample-bucket',bucket_region='eu-north-1', prefix_in_bucket='/test_prefix/',access_key_id='SOMEKEYAAAAASADSAH*#',secret_access_key='SOMEsEcReTsd292v'}"`
 
 For Amazon AWS S3, a key id and secret access key could be located in `~/.aws/credentials` if awscli was ever configured to work with the desired bucket, on the AWS Settings page for a certain user. Also note, that the bucket names does not contain any protocols when used on AWS.
 For local S3 installations, refer to the their documentation for name format and credentials.
@@ -154,6 +154,7 @@ or
 [remote_storage]
 bucket_name = 'some-sample-bucket'
 bucket_region = 'eu-north-1'
+prefix_in_bucket = '/test_prefix/'
 access_key_id = 'SOMEKEYAAAAASADSAH*#'
 secret_access_key = 'SOMEsEcReTsd292v'
 ```
