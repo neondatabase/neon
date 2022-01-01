@@ -107,7 +107,7 @@ fn main() -> Result<()> {
         .takes_value(true)
         .number_of_values(1)
         .multiple(true)
-        .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'pageserver-config-override' CLI parameter docs for more")
+        .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
         .required(false);
 
     let matches = App::new("Zenith CLI")
