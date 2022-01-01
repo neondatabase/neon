@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union
 from typing_extensions import Literal
 import pytest
 
@@ -342,10 +342,12 @@ class ZenithEnvBuilder:
     def __init__(self,
                  repo_dir: Path,
                  port_distributor: PortDistributor,
+                 pageserver_remote_storage: Optional[RemoteStorage] = None,
                  num_safekeepers: int = 0,
                  pageserver_auth_enabled: bool = False):
         self.repo_dir = repo_dir
         self.port_distributor = port_distributor
+        self.pageserver_remote_storage = pageserver_remote_storage
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.env: Optional[ZenithEnv] = None
@@ -434,7 +436,9 @@ auth_type = '{pageserver_auth_type}'
         """
 
         # Create a corresponding ZenithPageserver object
-        self.pageserver = ZenithPageserver(self, port=pageserver_port)
+        self.pageserver = ZenithPageserver(self,
+                                           port=pageserver_port,
+                                           remote_storage=config.pageserver_remote_storage)
 
         # Create config and a Safekeeper object for each safekeeper
         for i in range(1, config.num_safekeepers + 1):
@@ -465,6 +469,8 @@ sync = false # Disable fsyncs to make the tests go faster
             tmp.flush()
 
             cmd = ['init', f'--config={tmp.name}']
+            _append_pageserver_param_overrides(cmd, config.pageserver_remote_storage)
+
             self.zenith_cli(cmd)
 
         # Start up the page server and all the safekeepers
@@ -677,17 +683,38 @@ class PageserverPort:
     http: int
 
 
+@dataclass
+class LocalFsStorage:
+    root: Path
+
+
+@dataclass
+class S3Storage:
+    bucket: str
+    region: str
+    access_key: str
+    secret_key: str
+
+
+RemoteStorage = Union[LocalFsStorage, S3Storage]
+
+
 class ZenithPageserver(PgProtocol):
     """
     An object representing a running pageserver.
 
     Initializes the repository via `zenith init`.
     """
-    def __init__(self, env: ZenithEnv, port: PageserverPort, enable_auth=False):
+    def __init__(self,
+                 env: ZenithEnv,
+                 port: PageserverPort,
+                 remote_storage: Optional[RemoteStorage] = None,
+                 enable_auth=False):
         super().__init__(host='localhost', port=port.pg)
         self.env = env
         self.running = False
         self.service_port = port  # do not shadow PgProtocol.port which is just int
+        self.remote_storage = remote_storage
 
     def start(self) -> 'ZenithPageserver':
         """
@@ -696,7 +723,10 @@ class ZenithPageserver(PgProtocol):
         """
         assert self.running == False
 
-        self.env.zenith_cli(['pageserver', 'start'])
+        start_args = ['pageserver', 'start']
+        _append_pageserver_param_overrides(start_args, self.remote_storage)
+
+        self.env.zenith_cli(start_args)
         self.running = True
         return self
 
@@ -727,6 +757,28 @@ class ZenithPageserver(PgProtocol):
             port=self.service_port.http,
             auth_token=auth_token,
         )
+
+
+def _append_pageserver_param_overrides(params_to_update: List[str],
+                                       pageserver_remote_storage: Optional[RemoteStorage]):
+    if pageserver_remote_storage is not None:
+        if isinstance(pageserver_remote_storage, LocalFsStorage):
+            pageserver_storage_override = f"local_path='{pageserver_remote_storage.root}'"
+        elif isinstance(pageserver_remote_storage, S3Storage):
+            pageserver_storage_override = f"bucket_name='{pageserver_remote_storage.bucket}',\
+                bucket_region='{pageserver_remote_storage.region}',access_key_id='{pageserver_remote_storage.access_key}',\
+                secret_access_key='{pageserver_remote_storage.secret_key}'"
+
+        else:
+            raise Exception(f'Unknown storage configuration {pageserver_remote_storage}')
+        params_to_update.append(
+            f'--pageserver-config-override=remote_storage={{{pageserver_storage_override}}}')
+
+    env_overrides = os.getenv('ZENITH_PAGESERVER_OVERRIDES')
+    if env_overrides is not None:
+        params_to_update += [
+            f'--pageserver-config-override={o.strip()}' for o in env_overrides.split(';')
+        ]
 
 
 class PgBin:
