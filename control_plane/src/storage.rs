@@ -19,7 +19,7 @@ use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::ZTenantId;
 
 use crate::local_env::LocalEnv;
-use crate::read_pidfile;
+use crate::{fill_rust_env_vars, read_pidfile};
 use pageserver::branches::BranchInfo;
 use pageserver::tenant_mgr::TenantInfo;
 use zenith_utils::connstring::connection_address;
@@ -142,10 +142,7 @@ impl PageServerNode {
             args.extend(["--create-tenant", tenantid])
         }
 
-        let status = cmd
-            .args(args)
-            .env_clear()
-            .env("RUST_BACKTRACE", "1")
+        let status = fill_rust_env_vars(cmd.args(args))
             .status()
             .expect("pageserver init failed");
 
@@ -181,10 +178,7 @@ impl PageServerNode {
             args.extend(["-c", config_override]);
         }
 
-        cmd.args(&args)
-            .arg("--daemonize")
-            .env_clear()
-            .env("RUST_BACKTRACE", "1");
+        fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
 
         let var = "LLVM_PROFILE_FILE";
         if let Some(val) = std::env::var_os(var) {
