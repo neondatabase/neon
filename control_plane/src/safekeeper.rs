@@ -17,8 +17,8 @@ use thiserror::Error;
 use zenith_utils::http::error::HttpErrorBody;
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
-use crate::read_pidfile;
 use crate::storage::PageServerNode;
+use crate::{fill_rust_env_vars, read_pidfile};
 use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
@@ -118,13 +118,13 @@ impl SafekeeperNode {
         let listen_http = format!("localhost:{}", self.conf.http_port);
 
         let mut cmd = Command::new(self.env.safekeeper_bin()?);
-        cmd.args(&["-D", self.datadir_path().to_str().unwrap()])
-            .args(&["--listen-pg", &listen_pg])
-            .args(&["--listen-http", &listen_http])
-            .args(&["--recall", "1 second"])
-            .arg("--daemonize")
-            .env_clear()
-            .env("RUST_BACKTRACE", "1");
+        fill_rust_env_vars(
+            cmd.args(&["-D", self.datadir_path().to_str().unwrap()])
+                .args(&["--listen-pg", &listen_pg])
+                .args(&["--listen-http", &listen_http])
+                .args(&["--recall", "1 second"])
+                .arg("--daemonize"),
+        );
         if !self.conf.sync {
             cmd.arg("--no-sync");
         }

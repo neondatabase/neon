@@ -344,8 +344,10 @@ class ZenithEnvBuilder:
                  port_distributor: PortDistributor,
                  pageserver_remote_storage: Optional[RemoteStorage] = None,
                  num_safekeepers: int = 0,
-                 pageserver_auth_enabled: bool = False):
+                 pageserver_auth_enabled: bool = False,
+                 rust_log_override: Optional[str] = None):
         self.repo_dir = repo_dir
+        self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.pageserver_remote_storage = pageserver_remote_storage
         self.num_safekeepers = num_safekeepers
@@ -406,6 +408,7 @@ class ZenithEnv:
     """
     def __init__(self, config: ZenithEnvBuilder):
         self.repo_dir = config.repo_dir
+        self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
 
         self.postgres = PostgresFactory(self)
@@ -514,6 +517,9 @@ sync = false # Disable fsyncs to make the tests go faster
         env_vars = os.environ.copy()
         env_vars['ZENITH_REPO_DIR'] = str(self.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
+
+        if self.rust_log_override is not None:
+            env_vars['RUST_LOG'] = self.rust_log_override
 
         # Pass coverage settings
         var = 'LLVM_PROFILE_FILE'

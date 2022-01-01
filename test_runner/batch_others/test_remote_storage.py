@@ -27,6 +27,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder):
     with tempfile.TemporaryDirectory() as tmp_root_dir:
+        zenith_env_builder.rust_log_override = 'debug'
         zenith_env_builder.pageserver_remote_storage = LocalFsStorage(Path(tmp_root_dir))
         zenith_env_builder.num_safekeepers = 1
 
