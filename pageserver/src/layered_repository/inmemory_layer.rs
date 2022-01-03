@@ -154,11 +154,14 @@ impl Layer for InMemoryLayer {
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
+        seg: SegmentTag,
         blknum: u32,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
+        assert_eq!(self.seg, seg); // TODO
+
         let mut need_image = true;
 
         assert!(self.seg.blknum_in_seg(blknum));
@@ -202,7 +205,7 @@ impl Layer for InMemoryLayer {
             if need_image
                 && reconstruct_data.records.is_empty()
                 && self.seg.rel.is_blocky()
-                && blknum - self.seg.segno * RELISH_SEG_SIZE >= self.get_seg_size(lsn)?
+                && blknum - self.seg.segno * RELISH_SEG_SIZE >= self.get_seg_size(seg, lsn)?
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -224,7 +227,9 @@ impl Layer for InMemoryLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, seg: SegmentTag, lsn: Lsn) -> Result<u32> {
+        assert_eq!(self.seg, seg);
+
         assert!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
@@ -236,7 +241,9 @@ impl Layer for InMemoryLayer {
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
+    fn get_seg_exists(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
+        assert_eq!(self.seg, seg);
+
         let inner = self.inner.read().unwrap();
 
         // If the segment created after requested LSN,
@@ -521,7 +528,7 @@ impl InMemoryLayer {
         // Copy the segment size at the start LSN from the predecessor layer.
         let mut segsizes = VecMap::default();
         if seg.rel.is_blocky() {
-            let size = src.get_seg_size(start_lsn)?;
+            let size = src.get_seg_size(seg, start_lsn)?;
             segsizes.append(start_lsn, size).unwrap();
         }
 

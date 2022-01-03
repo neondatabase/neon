@@ -150,6 +150,7 @@ impl Layer for ImageLayer {
     /// Look up given page in the file
     fn get_page_reconstruct_data(
         &self,
+        seg: SegmentTag,
         blknum: u32,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
@@ -166,11 +167,11 @@ impl Layer for ImageLayer {
 
         let base_blknum = blknum % RELISH_SEG_SIZE;
 
-        let blob_range = inner.get_seg_blob_range(self.seg)?;
+        let blob_range = inner.get_seg_blob_range(seg)?;
 
         let chapter = inner.book.as_ref().unwrap().chapter_reader(BLOB_CHAPTER)?;
 
-        let buf = if self.seg.rel.is_blocky() {
+        let buf = if seg.rel.is_blocky() {
             // Check if the request is beyond EOF
             if base_blknum >= get_num_blocks(&blob_range) {
                 return Ok(PageReconstructResult::Missing(lsn));
@@ -196,20 +197,26 @@ impl Layer for ImageLayer {
     }
 
     /// Get size of the segment
-    fn get_seg_size(&self, _lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, seg: SegmentTag, _lsn: Lsn) -> Result<u32> {
         if !self.seg.rel.is_blocky() {
             bail!("get_seg_size called for non-blocky segment");
         }
 
         let inner = self.load()?;
 
-        let blob_range = inner.get_seg_blob_range(self.seg)?;
+        let blob_range = inner.get_seg_blob_range(seg)?;
         Ok(get_num_blocks(&blob_range))
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, _lsn: Lsn) -> Result<bool> {
-        Ok(true)
+    fn get_seg_exists(&self, seg: SegmentTag, _lsn: Lsn) -> Result<bool> {
+        let inner = self.load()?;
+
+        Ok(inner
+            .meta
+            .as_slice()
+            .binary_search_by_key(&&seg, |(seg, _meta)| seg)
+            .is_ok())
     }
 
     fn unload(&self) -> Result<()> {
@@ -355,13 +362,14 @@ impl ImageLayer {
         src: &dyn Layer,
         lsn: Lsn,
     ) -> Result<ImageLayer> {
+        // TODO needs to become an image of all segments in the layer
         let seg = src.get_seg_tag();
         let timelineid = timeline.timelineid;
 
         let startblk;
         let size;
         if seg.rel.is_blocky() {
-            size = src.get_seg_size(lsn)?;
+            size = src.get_seg_size(seg, lsn)?;
             startblk = seg.segno * RELISH_SEG_SIZE;
         } else {
             size = 1;

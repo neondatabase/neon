@@ -830,7 +830,7 @@ impl Timeline for LayeredTimeline {
 
             let segsize;
             if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-                segsize = layer.get_seg_size(lsn)?;
+                segsize = layer.get_seg_size(seg, lsn)?;
                 trace!("get_seg_size: {} at {} -> {}", seg, lsn, segsize);
             } else {
                 if segno == 0 {
@@ -854,7 +854,7 @@ impl Timeline for LayeredTimeline {
 
         let result;
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            result = layer.get_seg_exists(lsn)?;
+            result = layer.get_seg_exists(seg, lsn)?;
         } else {
             result = false;
         }
@@ -1867,7 +1867,7 @@ impl LayeredTimeline {
         let mut curr_lsn = lsn;
         loop {
             let result = layer_ref
-                .get_page_reconstruct_data(blknum, curr_lsn, cached_lsn_opt, &mut data)
+                .get_page_reconstruct_data(seg, blknum, curr_lsn, cached_lsn_opt, &mut data)
                 .with_context(|| {
                     format!(
                         "Failed to get reconstruct data {} {:?} {} {} {:?}",

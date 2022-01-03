@@ -169,7 +169,7 @@ impl LayerMap {
                         if (request_rel.spcnode == 0 || reltag.spcnode == request_rel.spcnode)
                             && (request_rel.dbnode == 0 || reltag.dbnode == request_rel.dbnode)
                         {
-                            if let Some(exists) = segentry.exists_at_lsn(lsn)? {
+                            if let Some(exists) = segentry.exists_at_lsn(*seg, lsn)? {
                                 rels.insert(seg.rel, exists);
                             }
                         }
@@ -177,7 +177,7 @@ impl LayerMap {
                 }
                 _ => {
                     if tag == None {
-                        if let Some(exists) = segentry.exists_at_lsn(lsn)? {
+                        if let Some(exists) = segentry.exists_at_lsn(*seg, lsn)? {
                             rels.insert(seg.rel, exists);
                         }
                     }
@@ -207,7 +207,7 @@ impl LayerMap {
     /// to avoid incorrectly making it visible.
     pub fn layer_exists_at_lsn(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
         Ok(if let Some(segentry) = self.segs.get(&seg) {
-            segentry.exists_at_lsn(lsn)?.unwrap_or(false)
+            segentry.exists_at_lsn(seg, lsn)?.unwrap_or(false)
         } else {
             false
         })
@@ -292,9 +292,9 @@ struct SegEntry {
 impl SegEntry {
     /// Does the segment exist at given LSN?
     /// Return None if object is not found in this SegEntry.
-    fn exists_at_lsn(&self, lsn: Lsn) -> Result<Option<bool>> {
+    fn exists_at_lsn(&self, seg: SegmentTag, lsn: Lsn) -> Result<Option<bool>> {
         if let Some(layer) = self.get(lsn) {
-            Ok(Some(layer.get_seg_exists(lsn)?))
+            Ok(Some(layer.get_seg_exists(seg, lsn)?))
         } else {
             Ok(None)
         }

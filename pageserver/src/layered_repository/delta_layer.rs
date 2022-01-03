@@ -193,6 +193,7 @@ impl Layer for DeltaLayer {
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
+        seg: SegmentTag,
         blknum: u32,
         lsn: Lsn,
         cached_img_lsn: Option<Lsn>,
@@ -200,7 +201,7 @@ impl Layer for DeltaLayer {
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.seg.blknum_in_seg(blknum));
+        assert!(seg.blknum_in_seg(blknum));
 
         match &cached_img_lsn {
             Some(cached_lsn) if &self.end_lsn <= cached_lsn => {
@@ -219,8 +220,8 @@ impl Layer for DeltaLayer {
                 .chapter_reader(PAGE_VERSIONS_CHAPTER)?;
 
             // Scan the metadata BTreeMap backwards, starting from the given entry.
-            let minkey = (self.seg, blknum, Lsn(0));
-            let maxkey = (self.seg, blknum, lsn);
+            let minkey = (seg, blknum, Lsn(0));
+            let maxkey = (seg, blknum, lsn);
             let iter = inner
                 .page_version_metas
                 .slice_range((Included(&minkey), Included(&maxkey)))
@@ -258,8 +259,8 @@ impl Layer for DeltaLayer {
             // If we didn't find any records for this, check if the request is beyond EOF
             if need_image
                 && reconstruct_data.records.is_empty()
-                && self.seg.rel.is_blocky()
-                && blknum - self.seg.segno * RELISH_SEG_SIZE >= inner.get_seg_size(self.seg, lsn)?
+                && seg.rel.is_blocky()
+                && blknum - seg.segno * RELISH_SEG_SIZE >= inner.get_seg_size(seg, lsn)?
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -277,7 +278,7 @@ impl Layer for DeltaLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<u32> {
+    fn get_seg_size(&self, seg: SegmentTag, lsn: Lsn) -> Result<u32> {
         assert!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
@@ -286,11 +287,13 @@ impl Layer for DeltaLayer {
 
         // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
-        inner.get_seg_size(self.seg, lsn)
+        inner.get_seg_size(seg, lsn)
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
+    fn get_seg_exists(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
+        assert_eq!(self.seg, seg, "range get_seg_exists not supported"); // TODO
+
         // Is the requested LSN after the rel was dropped?
         if self.dropped && lsn >= self.end_lsn {
             return Ok(false);
