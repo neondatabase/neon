@@ -1,10 +1,11 @@
 use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, ensure};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::{io, thread};
@@ -34,6 +35,11 @@ lazy_static! {
     static ref CANCEL_MAP: Mutex<HashMap<CancelKeyData, CancelClosure>> = Mutex::new(HashMap::new());
 }
 
+thread_local! {
+    // Used to clean up the CANCEL_MAP. Might not be necessary if we use tokio thread pool in main loop.
+    static THREAD_CANCEL_KEY_DATA: Cell<Option<CancelKeyData>> = Cell::new(None);
+}
+
 ///
 /// Main proxy listener loop.
 ///
@@ -48,12 +54,22 @@ pub fn thread_main(
         println!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
 
+        // TODO Use a threadpool instead. Maybe use tokio's threadpool by
+        //      spawning a future into its runtime. Tokio's JoinError should
+        //      allow us to handle cleanup properly even if the future panics.
         thread::Builder::new()
             .name("Proxy thread".into())
             .spawn(move || {
                 if let Err(err) = proxy_conn_main(state, socket) {
                     println!("error: {}", err);
                 }
+
+                // Clean up CANCEL_MAP.
+                THREAD_CANCEL_KEY_DATA.with(|cell| {
+                    if let Some(cancel_key_data) = cell.get() {
+                        CANCEL_MAP.lock().remove(&cancel_key_data);
+                    };
+                });
             })?;
     }
 }
@@ -296,6 +312,10 @@ async fn connect_to_db(
         cancel_token: client.cancel_token(),
     };
     CANCEL_MAP.lock().insert(cancel_key_data, cancel_closure);
+    THREAD_CANCEL_KEY_DATA.with(|cell| {
+        let prev_value = cell.replace(Some(cancel_key_data));
+        assert!(prev_value.is_none(), "THREAD_CANCEL_KEY_DATA was already set");
+    });
 
     let version = conn.parameter("server_version").unwrap();
     Ok((version.into(), socket, cancel_key_data))
