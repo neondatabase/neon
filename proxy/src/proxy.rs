@@ -1,6 +1,6 @@
 use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
-use anyhow::{anyhow, bail, ensure};
+use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use rand::prelude::StdRng;
@@ -314,7 +314,10 @@ async fn connect_to_db(
     CANCEL_MAP.lock().insert(cancel_key_data, cancel_closure);
     THREAD_CANCEL_KEY_DATA.with(|cell| {
         let prev_value = cell.replace(Some(cancel_key_data));
-        assert!(prev_value.is_none(), "THREAD_CANCEL_KEY_DATA was already set");
+        assert!(
+            prev_value.is_none(),
+            "THREAD_CANCEL_KEY_DATA was already set"
+        );
     });
 
     let version = conn.parameter("server_version").unwrap();
