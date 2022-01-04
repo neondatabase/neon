@@ -1,7 +1,9 @@
 use crate::relish::*;
+use crate::walrecord::MultiXactMember;
 use crate::CheckpointConfig;
 use anyhow::Result;
 use bytes::Bytes;
+use postgres_ffi::{MultiXactId, MultiXactOffset, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::{AddAssign, Deref};
@@ -263,7 +265,7 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
         lsn: Lsn,
         tag: RelishTag,
         blknum: BlockNumber,
-        rec: WALRecord,
+        rec: ZenithWalRecord,
     ) -> Result<()>;
 
     /// Like put_wal_record, but with ready-made image of the page.
@@ -288,14 +290,42 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
     fn advance_last_record_lsn(&self, lsn: Lsn);
 }
 
+/// Each update to a page is represented by a ZenithWalRecord. It can be a wrapper
+/// around a PostgreSQL WAL record, or a custom zenith-specific "record".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WALRecord {
-    pub will_init: bool,
-    pub rec: Bytes,
-    // Remember the offset of main_data in rec,
-    // so that we don't have to parse the record again.
-    // If record has no main_data, this offset equals rec.len().
-    pub main_data_offset: u32,
+pub enum ZenithWalRecord {
+    /// Native PostgreSQL WAL record
+    Postgres { will_init: bool, rec: Bytes },
+
+    /// Set bits in heap visibility map. (heap blkno, flag bits to clear)
+    ClearVisibilityMapFlags { heap_blkno: u32, flags: u8 },
+    /// Mark transaction IDs as committed on a CLOG page
+    ClogSetCommitted { xids: Vec<TransactionId> },
+    /// Mark transaction IDs as aborted on a CLOG page
+    ClogSetAborted { xids: Vec<TransactionId> },
+    /// Extend multixact offsets SLRU
+    MultixactOffsetCreate {
+        mid: MultiXactId,
+        moff: MultiXactOffset,
+    },
+    /// Extend multixact members SLRU.
+    MultixactMembersCreate {
+        moff: MultiXactOffset,
+        members: Vec<MultiXactMember>,
+    },
+}
+
+impl ZenithWalRecord {
+    /// Does replaying this WAL record initialize the page from scratch, or does
+    /// it need to be applied over the previous image of the page?
+    pub fn will_init(&self) -> bool {
+        match self {
+            ZenithWalRecord::Postgres { will_init, rec: _ } => *will_init,
+
+            // None of the special zenith record types currently initialize the page
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,7 +408,7 @@ pub mod repo_harness {
             blknum: BlockNumber,
             lsn: Lsn,
             base_img: Option<Bytes>,
-            records: Vec<(Lsn, WALRecord)>,
+            records: Vec<(Lsn, ZenithWalRecord)>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
                 "redo for {} blk {} to get to {}, with {} and {} records",

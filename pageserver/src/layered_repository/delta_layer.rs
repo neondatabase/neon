@@ -257,7 +257,7 @@ impl Layer for DeltaLayer {
                         break;
                     }
                     PageVersion::Wal(rec) => {
-                        let will_init = rec.will_init;
+                        let will_init = rec.will_init();
                         reconstruct_data.records.push((*pv_lsn, rec));
                         if will_init {
                             // This WAL record initializes the page, so no need to go further back
@@ -373,12 +373,12 @@ impl Layer for DeltaLayer {
                     write!(&mut desc, " img {} bytes", img.len())?;
                 }
                 PageVersion::Wal(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec.rec);
+                    let wal_desc = walrecord::describe_wal_record(&rec);
                     write!(
                         &mut desc,
                         " rec {} bytes will_init: {} {}",
-                        rec.rec.len(),
-                        rec.will_init,
+                        blob_range.size,
+                        rec.will_init(),
                         wal_desc
                     )?;
                 }

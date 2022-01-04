@@ -3,7 +3,7 @@
 //!
 
 use crate::relish::RelishTag;
-use crate::repository::{BlockNumber, WALRecord};
+use crate::repository::{BlockNumber, ZenithWalRecord};
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use bytes::Bytes;
@@ -67,7 +67,7 @@ impl SegmentTag {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PageVersion {
     Page(Bytes),
-    Wal(WALRecord),
+    Wal(ZenithWalRecord),
 }
 
 ///
@@ -78,7 +78,7 @@ pub enum PageVersion {
 /// 'records' contains the records to apply over the base image.
 ///
 pub struct PageReconstructData {
-    pub records: Vec<(Lsn, WALRecord)>,
+    pub records: Vec<(Lsn, ZenithWalRecord)>,
     pub page_img: Option<Bytes>,
 }
 

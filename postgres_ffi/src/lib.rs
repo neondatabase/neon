@@ -1,6 +1,8 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+// bindgen creates some unsafe code with no doc comments.
+#![allow(clippy::missing_safety_doc)]
 // suppress warnings on rust 1.53 due to bindgen unit tests.
 // https://github.com/rust-lang/rust-bindgen/issues/1651
 #![allow(deref_nullptr)]

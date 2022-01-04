@@ -38,7 +38,7 @@ use crate::relish::*;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use crate::repository::{
     BlockNumber, GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState,
-    TimelineWriter, WALRecord,
+    TimelineWriter, ZenithWalRecord,
 };
 use crate::tenant_mgr;
 use crate::walreceiver;
@@ -1986,7 +1986,7 @@ impl LayeredTimeline {
                     assert!(data.page_img.is_none());
                     if let Some((first_rec_lsn, first_rec)) = data.records.first() {
                         assert!(&cached_lsn < first_rec_lsn);
-                        assert!(!first_rec.will_init);
+                        assert!(!first_rec.will_init());
                     }
                     data.page_img = Some(cached_img);
                     break;
@@ -2033,7 +2033,7 @@ impl LayeredTimeline {
             //
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
-            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init {
+            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init() {
                 // FIXME: this ought to be an error?
                 warn!(
                     "Base image for page {}/{} at {} not found, but got {} WAL records",
@@ -2130,8 +2130,8 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         &self,
         lsn: Lsn,
         rel: RelishTag,
-        rel_blknum: BlockNumber,
-        rec: WALRecord,
+        rel_blknum: u32,
+        rec: ZenithWalRecord,
     ) -> Result<()> {
         if !rel.is_blocky() && rel_blknum != 0 {
             bail!(
