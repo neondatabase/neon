@@ -7,7 +7,10 @@ use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
 use postgres_ffi::XLogRecord;
 use postgres_ffi::{BlockNumber, OffsetNumber};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
+use serde::{Deserialize, Serialize};
 use tracing::*;
+
+use crate::repository::ZenithWalRecord;
 
 /// DecodedBkpBlock represents per-page data contained in a WAL record.
 #[derive(Default)]
@@ -351,7 +354,7 @@ impl XlClogTruncate {
 }
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultiXactMember {
     pub xid: TransactionId,
     pub status: MultiXactStatus,
@@ -676,97 +679,6 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         assert_eq!(buf.remaining(), main_data_len as usize);
     }
 
-    // 5. Handle a few special record types that modify blocks without registering
-    // them with the standard mechanism.
-    if xlogrec.xl_rmid == pg_constants::RM_HEAP_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK;
-        let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
-        if info == pg_constants::XLOG_HEAP_INSERT {
-            let xlrec = XlHeapInsert::decode(&mut buf);
-            assert_eq!(0, buf.remaining());
-            if (xlrec.flags
-                & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
-                    | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
-                != 0
-            {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
-            }
-        } else if info == pg_constants::XLOG_HEAP_DELETE {
-            let xlrec = XlHeapDelete::decode(&mut buf);
-            assert_eq!(0, buf.remaining());
-            if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
-            }
-        } else if info == pg_constants::XLOG_HEAP_UPDATE
-            || info == pg_constants::XLOG_HEAP_HOT_UPDATE
-        {
-            let xlrec = XlHeapUpdate::decode(&mut buf);
-            // the size of tuple data is inferred from the size of the record.
-            // we can't validate the remaining number of bytes without parsing
-            // the tuple data.
-            if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
-            }
-            if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0
-                && blocks.len() > 1
-            {
-                let mut blk = DecodedBkpBlock::new();
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blocks[1].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
-                blk.rnode_spcnode = blocks[1].rnode_spcnode;
-                blk.rnode_dbnode = blocks[1].rnode_dbnode;
-                blk.rnode_relnode = blocks[1].rnode_relnode;
-                blocks.push(blk);
-            }
-        }
-    } else if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID {
-        let info = xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK;
-        if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
-            let xlrec = XlHeapMultiInsert::decode(&mut buf);
-
-            let offset_array_len = if xlogrec.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
-                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
-                0
-            } else {
-                std::mem::size_of::<u16>() * xlrec.ntuples as usize
-            };
-            assert_eq!(offset_array_len, buf.remaining());
-
-            if (xlrec.flags
-                & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
-                    | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
-                != 0
-            {
-                let mut blk = DecodedBkpBlock::new();
-                let blkno = blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32;
-                blk.forknum = pg_constants::VISIBILITYMAP_FORKNUM;
-                blk.blkno = blkno;
-                blk.rnode_spcnode = blocks[0].rnode_spcnode;
-                blk.rnode_dbnode = blocks[0].rnode_dbnode;
-                blk.rnode_relnode = blocks[0].rnode_relnode;
-                blocks.push(blk);
-            }
-        }
-    }
-
     DecodedWALRecord {
         xl_xid: xlogrec.xl_xid,
         xl_info: xlogrec.xl_info,
@@ -781,7 +693,20 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
 /// Build a human-readable string to describe a WAL record
 ///
 /// For debugging purposes
-pub fn describe_wal_record(record: &Bytes) -> String {
+pub fn describe_wal_record(rec: &ZenithWalRecord) -> String {
+    match rec {
+        ZenithWalRecord::Postgres { will_init, rec } => {
+            format!(
+                "will_init: {}, {}",
+                will_init,
+                describe_postgres_wal_record(rec)
+            )
+        }
+        _ => format!("{:?}", rec),
+    }
+}
+
+fn describe_postgres_wal_record(record: &Bytes) -> String {
     // TODO: It would be nice to use the PostgreSQL rmgrdesc infrastructure for this.
     // Maybe use the postgres wal redo process, the same used for replaying WAL records?
     // Or could we compile the rmgrdesc routines into the dump_layer_file() binary directly,

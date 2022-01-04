@@ -9,5 +9,6 @@
 #include "access/xlog_internal.h"
 
 #include "storage/block.h"
+#include "storage/bufpage.h"
 #include "storage/off.h"
 #include "access/multixact.h"

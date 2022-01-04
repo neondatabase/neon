@@ -15,7 +15,7 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
-use crate::repository::WALRecord;
+use crate::repository::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
@@ -187,7 +187,7 @@ impl Layer for InMemoryLayer {
                     }
                     PageVersion::Wal(rec) => {
                         reconstruct_data.records.push((*entry_lsn, rec.clone()));
-                        if rec.will_init {
+                        if rec.will_init() {
                             // This WAL record initializes the page, so no need to go further back
                             need_image = false;
                             break;
@@ -369,7 +369,12 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, lsn: Lsn, blknum: SegmentBlk, rec: WALRecord) -> Result<u32> {
+    pub fn put_wal_record(
+        &self,
+        lsn: Lsn,
+        blknum: SegmentBlk,
+        rec: ZenithWalRecord,
+    ) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Wal(rec))
     }
 
