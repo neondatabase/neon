@@ -15,7 +15,7 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
-use crate::repository::WALRecord;
+use crate::repository::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
@@ -187,7 +187,7 @@ impl Layer for InMemoryLayer {
                     }
                     PageVersion::Wal(rec) => {
                         reconstruct_data.records.push((*entry_lsn, rec.clone()));
-                        if rec.will_init {
+                        if rec.will_init() {
                             // This WAL record initializes the page, so no need to go further back
                             need_image = false;
                             break;
@@ -369,7 +369,12 @@ impl InMemoryLayer {
     // Write operations
 
     /// Remember new page version, as a WAL record over previous version
-    pub fn put_wal_record(&self, lsn: Lsn, blknum: SegmentBlk, rec: WALRecord) -> Result<u32> {
+    pub fn put_wal_record(
+        &self,
+        lsn: Lsn,
+        blknum: SegmentBlk,
+        rec: ZenithWalRecord,
+    ) -> Result<u32> {
         self.put_page_version(blknum, lsn, PageVersion::Wal(rec))
     }
 
@@ -575,12 +580,16 @@ impl InMemoryLayer {
     /// Write the this frozen in-memory layer to disk.
     ///
     /// Returns new layers that replace this one.
-    /// If not dropped, returns a new image layer containing the page versions
+    /// If not dropped and reconstruct_pages is true, returns a new image layer containing the page versions
     /// at the `end_lsn`. Can also return a DeltaLayer that includes all the
     /// WAL records between start and end LSN. (The delta layer is not needed
     /// when a new relish is created with a single LSN, so that the start and
     /// end LSN are the same.)
-    pub fn write_to_disk(&self, timeline: &LayeredTimeline) -> Result<LayersOnDisk> {
+    pub fn write_to_disk(
+        &self,
+        timeline: &LayeredTimeline,
+        reconstruct_pages: bool,
+    ) -> Result<LayersOnDisk> {
         trace!(
             "write_to_disk {} get_end_lsn is {}",
             self.filename().display(),
@@ -606,7 +615,7 @@ impl InMemoryLayer {
         // Figure out if we should create a delta layer, image layer, or both.
         let image_lsn: Option<Lsn>;
         let delta_end_lsn: Option<Lsn>;
-        if self.is_dropped() {
+        if self.is_dropped() || !reconstruct_pages {
             // The segment was dropped. Create just a delta layer containing all the
             // changes up to and including the drop.
             delta_end_lsn = Some(end_lsn_exclusive);

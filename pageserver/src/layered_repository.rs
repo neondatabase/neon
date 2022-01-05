@@ -38,7 +38,7 @@ use crate::relish::*;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use crate::repository::{
     BlockNumber, GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState,
-    TimelineWriter, WALRecord,
+    TimelineWriter, ZenithWalRecord,
 };
 use crate::tenant_mgr;
 use crate::walreceiver;
@@ -65,6 +65,7 @@ mod interval_tree;
 mod layer_map;
 pub mod metadata;
 mod page_versions;
+mod par_fsync;
 mod storage_layer;
 
 use delta_layer::DeltaLayer;
@@ -360,7 +361,8 @@ fn shutdown_timeline(
                 .store(false, atomic::Ordering::Relaxed);
             walreceiver::stop_wal_receiver(timeline_id);
             trace!("repo shutdown. checkpoint timeline {}", timeline_id);
-            timeline.checkpoint(CheckpointConfig::Forced)?;
+            // Do not reconstruct pages to reduce shutdown time
+            timeline.checkpoint(CheckpointConfig::Flush)?;
             //TODO Wait for walredo process to shutdown too
         }
         LayeredTimelineEntry::Remote { .. } => warn!(
@@ -975,12 +977,15 @@ impl Timeline for LayeredTimeline {
     /// metrics collection.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
         match cconf {
+            CheckpointConfig::Flush => STORAGE_TIME
+                .with_label_values(&["flush checkpoint"])
+                .observe_closure_duration(|| self.checkpoint_internal(0, false)),
             CheckpointConfig::Forced => STORAGE_TIME
                 .with_label_values(&["forced checkpoint"])
-                .observe_closure_duration(|| self.checkpoint_internal(0)),
+                .observe_closure_duration(|| self.checkpoint_internal(0, true)),
             CheckpointConfig::Distance(distance) => STORAGE_TIME
                 .with_label_values(&["checkpoint"])
-                .observe_closure_duration(|| self.checkpoint_internal(distance)),
+                .observe_closure_duration(|| self.checkpoint_internal(distance, true)),
         }
     }
 
@@ -1429,7 +1434,7 @@ impl LayeredTimeline {
     /// Flush to disk all data that was written with the put_* functions
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    fn checkpoint_internal(&self, checkpoint_distance: u64) -> Result<()> {
+    fn checkpoint_internal(&self, checkpoint_distance: u64, reconstruct_pages: bool) -> Result<()> {
         let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
@@ -1455,7 +1460,7 @@ impl LayeredTimeline {
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
 
-        let mut layer_uploads = Vec::new();
+        let mut layer_paths = Vec::new();
         while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
         {
@@ -1486,8 +1491,8 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let mut this_layer_uploads = self.evict_layer(oldest_layer_id)?;
-            layer_uploads.append(&mut this_layer_uploads);
+            let mut this_layer_paths = self.evict_layer(oldest_layer_id, reconstruct_pages)?;
+            layer_paths.append(&mut this_layer_paths);
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
@@ -1503,12 +1508,16 @@ impl LayeredTimeline {
         drop(layers);
         drop(write_guard);
 
-        if !layer_uploads.is_empty() {
+        if !layer_paths.is_empty() {
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
-            let timeline_dir =
-                File::open(self.conf.timeline_path(&self.timelineid, &self.tenantid))?;
-            timeline_dir.sync_all()?;
+            layer_paths.push(self.conf.timeline_path(&self.timelineid, &self.tenantid));
+
+            // Fsync all the layer files and directory using multiple threads to
+            // minimize latency.
+            par_fsync::par_fsync(&layer_paths)?;
+
+            layer_paths.pop().unwrap();
         }
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
@@ -1554,7 +1563,7 @@ impl LayeredTimeline {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
                     self.timelineid,
-                    layer_uploads,
+                    layer_paths,
                     metadata,
                 );
             }
@@ -1566,7 +1575,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn evict_layer(&self, layer_id: LayerId) -> Result<Vec<PathBuf>> {
+    fn evict_layer(&self, layer_id: LayerId, reconstruct_pages: bool) -> Result<Vec<PathBuf>> {
         // Mark the layer as no longer accepting writes and record the end_lsn.
         // This happens in-place, no new layers are created now.
         // We call `get_last_record_lsn` again, which may be different from the
@@ -1575,7 +1584,7 @@ impl LayeredTimeline {
         let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
-        let mut layer_uploads = Vec::new();
+        let mut layer_paths = Vec::new();
 
         let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
         if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
@@ -1591,7 +1600,7 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let new_historics = oldest_layer.write_to_disk(self)?;
+            let new_historics = oldest_layer.write_to_disk(self, reconstruct_pages)?;
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();
@@ -1601,18 +1610,18 @@ impl LayeredTimeline {
 
             // Add the historics to the LayerMap
             for delta_layer in new_historics.delta_layers {
-                layer_uploads.push(delta_layer.path());
+                layer_paths.push(delta_layer.path());
                 layers.insert_historic(Arc::new(delta_layer));
             }
             for image_layer in new_historics.image_layers {
-                layer_uploads.push(image_layer.path());
+                layer_paths.push(image_layer.path());
                 layers.insert_historic(Arc::new(image_layer));
             }
         }
         drop(layers);
         drop(write_guard);
 
-        Ok(layer_uploads)
+        Ok(layer_paths)
     }
 
     ///
@@ -1977,7 +1986,7 @@ impl LayeredTimeline {
                     assert!(data.page_img.is_none());
                     if let Some((first_rec_lsn, first_rec)) = data.records.first() {
                         assert!(&cached_lsn < first_rec_lsn);
-                        assert!(!first_rec.will_init);
+                        assert!(!first_rec.will_init());
                     }
                     data.page_img = Some(cached_img);
                     break;
@@ -2024,7 +2033,7 @@ impl LayeredTimeline {
             //
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
-            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init {
+            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init() {
                 // FIXME: this ought to be an error?
                 warn!(
                     "Base image for page {}/{} at {} not found, but got {} WAL records",
@@ -2121,8 +2130,8 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         &self,
         lsn: Lsn,
         rel: RelishTag,
-        rel_blknum: BlockNumber,
-        rec: WALRecord,
+        rel_blknum: u32,
+        rec: ZenithWalRecord,
     ) -> Result<()> {
         if !rel.is_blocky() && rel_blknum != 0 {
             bail!(

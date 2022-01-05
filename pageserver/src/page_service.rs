@@ -40,6 +40,7 @@ use crate::relish::*;
 use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::walreceiver;
+use crate::CheckpointConfig;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
@@ -758,6 +759,25 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("checkpoint ") {
+            // Run checkpoint immediately on given timeline.
+
+            // checkpoint <tenant_id> <timeline_id>
+            let re = Regex::new(r"^checkpoint ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)?").unwrap();
+
+            let caps = re
+                .captures(query_string)
+                .ok_or_else(|| anyhow!("invalid checkpoint command: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+
+            let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
+                .context("Failed to fetch local timeline for checkpoint request")?;
+
+            timeline.checkpoint(CheckpointConfig::Forced)?;
+            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }

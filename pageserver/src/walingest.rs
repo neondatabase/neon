@@ -34,11 +34,9 @@ use crate::repository::*;
 use crate::walrecord::*;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::TransactionId;
 use postgres_ffi::{pg_constants, CheckPoint};
 use zenith_utils::lsn::Lsn;
-
-const MAX_MBR_BLKNO: u32 =
-    pg_constants::MAX_MULTIXACT_ID / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
@@ -74,66 +72,23 @@ impl WalIngest {
         recdata: Bytes,
         lsn: Lsn,
     ) -> Result<()> {
-        let decoded = decode_wal_record(recdata.clone());
+        let mut decoded = decode_wal_record(recdata);
+        let mut buf = decoded.record.clone();
+        buf.advance(decoded.main_data_offset);
 
         assert!(!self.checkpoint_modified);
         if self.checkpoint.update_next_xid(decoded.xl_xid) {
             self.checkpoint_modified = true;
         }
 
-        // Iterate through all the blocks that the record modifies, and
-        // "put" a separate copy of the record for each block.
-        for blk in decoded.blocks.iter() {
-            let tag = RelishTag::Relation(RelTag {
-                spcnode: blk.rnode_spcnode,
-                dbnode: blk.rnode_dbnode,
-                relnode: blk.rnode_relnode,
-                forknum: blk.forknum as u8,
-            });
-
-            //
-            // Instead of storing full-page-image WAL record,
-            // it is better to store extracted image: we can skip wal-redo
-            // in this case. Also some FPI records may contain multiple (up to 32) pages,
-            // so them have to be copied multiple times.
-            //
-            if blk.apply_image
-                && blk.has_image
-                && decoded.xl_rmid == pg_constants::RM_XLOG_ID
-                && (decoded.xl_info == pg_constants::XLOG_FPI
-                    || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
-            // compression of WAL is not yet supported: fall back to storing the original WAL record
-                && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
-            {
-                // Extract page image from FPI record
-                let img_len = blk.bimg_len as usize;
-                let img_offs = blk.bimg_offset as usize;
-                let mut image = BytesMut::with_capacity(pg_constants::BLCKSZ as usize);
-                image.extend_from_slice(&recdata[img_offs..img_offs + img_len]);
-
-                if blk.hole_length != 0 {
-                    let tail = image.split_off(blk.hole_offset as usize);
-                    image.resize(image.len() + blk.hole_length as usize, 0u8);
-                    image.unsplit(tail);
-                }
-                image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
-                image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
-                assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
-                timeline.put_page_image(tag, blk.blkno, lsn, image.freeze())?;
-            } else {
-                let rec = WALRecord {
-                    will_init: blk.will_init || blk.apply_image,
-                    rec: recdata.clone(),
-                    main_data_offset: decoded.main_data_offset as u32,
-                };
-                timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
-            }
+        // Heap AM records need some special handling, because they modify VM pages
+        // without registering them with the standard mechanism.
+        if decoded.xl_rmid == pg_constants::RM_HEAP_ID
+            || decoded.xl_rmid == pg_constants::RM_HEAP2_ID
+        {
+            self.ingest_heapam_record(&mut buf, timeline, lsn, &mut decoded)?;
         }
-
-        let mut buf = decoded.record.clone();
-        buf.advance(decoded.main_data_offset);
-
-        // Handle a few special record types
+        // Handle other special record types
         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_SMGR_TRUNCATE
@@ -202,13 +157,23 @@ impl WalIngest {
             if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_ABORT {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-                self.ingest_xact_record(timeline, lsn, &parsed_xact, &decoded)?;
+                self.ingest_xact_record(
+                    timeline,
+                    lsn,
+                    &parsed_xact,
+                    info == pg_constants::XLOG_XACT_COMMIT,
+                )?;
             } else if info == pg_constants::XLOG_XACT_COMMIT_PREPARED
                 || info == pg_constants::XLOG_XACT_ABORT_PREPARED
             {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-                self.ingest_xact_record(timeline, lsn, &parsed_xact, &decoded)?;
+                self.ingest_xact_record(
+                    timeline,
+                    lsn,
+                    &parsed_xact,
+                    info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
+                )?;
                 // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
                 trace!(
                     "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
@@ -223,9 +188,6 @@ impl WalIngest {
                     lsn,
                 )?;
             } else if info == pg_constants::XLOG_XACT_PREPARE {
-                let mut buf = decoded.record.clone();
-                buf.advance(decoded.main_data_offset);
-
                 timeline.put_page_image(
                     RelishTag::TwoPhase {
                         xid: decoded.xl_xid,
@@ -266,7 +228,7 @@ impl WalIngest {
                 )?;
             } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                 let xlrec = XlMultiXactCreate::decode(&mut buf);
-                self.ingest_multixact_create_record(timeline, lsn, &xlrec, &decoded)?;
+                self.ingest_multixact_create_record(timeline, lsn, &xlrec)?;
             } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
                 let xlrec = XlMultiXactTruncate::decode(&mut buf);
                 self.ingest_multixact_truncate_record(timeline, lsn, &xlrec)?;
@@ -286,8 +248,6 @@ impl WalIngest {
                 || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
             {
                 let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
-                let mut buf = decoded.record.clone();
-                buf.advance(decoded.main_data_offset);
                 buf.copy_to_slice(&mut checkpoint_bytes);
                 let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes).unwrap();
                 trace!(
@@ -307,6 +267,12 @@ impl WalIngest {
             }
         }
 
+        // Iterate through all the blocks that the record modifies, and
+        // "put" a separate copy of the record for each block.
+        for blk in decoded.blocks.iter() {
+            self.ingest_decoded_block(timeline, lsn, &decoded, blk)?;
+        }
+
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
             let new_checkpoint_bytes = self.checkpoint.encode();
@@ -318,6 +284,195 @@ impl WalIngest {
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
         timeline.advance_last_record_lsn(lsn);
+
+        Ok(())
+    }
+
+    fn ingest_decoded_block(
+        &mut self,
+        timeline: &dyn TimelineWriter,
+        lsn: Lsn,
+        decoded: &DecodedWALRecord,
+        blk: &DecodedBkpBlock,
+    ) -> Result<()> {
+        let tag = RelishTag::Relation(RelTag {
+            spcnode: blk.rnode_spcnode,
+            dbnode: blk.rnode_dbnode,
+            relnode: blk.rnode_relnode,
+            forknum: blk.forknum as u8,
+        });
+
+        //
+        // Instead of storing full-page-image WAL record,
+        // it is better to store extracted image: we can skip wal-redo
+        // in this case. Also some FPI records may contain multiple (up to 32) pages,
+        // so them have to be copied multiple times.
+        //
+        if blk.apply_image
+            && blk.has_image
+            && decoded.xl_rmid == pg_constants::RM_XLOG_ID
+            && (decoded.xl_info == pg_constants::XLOG_FPI
+                || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
+        // compression of WAL is not yet supported: fall back to storing the original WAL record
+            && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
+        {
+            // Extract page image from FPI record
+            let img_len = blk.bimg_len as usize;
+            let img_offs = blk.bimg_offset as usize;
+            let mut image = BytesMut::with_capacity(pg_constants::BLCKSZ as usize);
+            image.extend_from_slice(&decoded.record[img_offs..img_offs + img_len]);
+
+            if blk.hole_length != 0 {
+                let tail = image.split_off(blk.hole_offset as usize);
+                image.resize(image.len() + blk.hole_length as usize, 0u8);
+                image.unsplit(tail);
+            }
+            image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
+            image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+            assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
+            timeline.put_page_image(tag, blk.blkno, lsn, image.freeze())?;
+        } else {
+            let rec = ZenithWalRecord::Postgres {
+                will_init: blk.will_init || blk.apply_image,
+                rec: decoded.record.clone(),
+            };
+            timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
+        }
+        Ok(())
+    }
+
+    fn ingest_heapam_record(
+        &mut self,
+        buf: &mut Bytes,
+        timeline: &dyn TimelineWriter,
+        lsn: Lsn,
+        decoded: &mut DecodedWALRecord,
+    ) -> Result<()> {
+        // Handle VM bit updates that are implicitly part of heap records.
+        if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+            let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+            if info == pg_constants::XLOG_HEAP_INSERT {
+                let xlrec = XlHeapInsert::decode(buf);
+                assert_eq!(0, buf.remaining());
+                if (xlrec.flags
+                    & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
+                        | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
+                    != 0
+                {
+                    timeline.put_wal_record(
+                        lsn,
+                        RelishTag::Relation(RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: decoded.blocks[0].rnode_spcnode,
+                            dbnode: decoded.blocks[0].rnode_dbnode,
+                            relnode: decoded.blocks[0].rnode_relnode,
+                        }),
+                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        ZenithWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno: decoded.blocks[0].blkno,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+            } else if info == pg_constants::XLOG_HEAP_DELETE {
+                let xlrec = XlHeapDelete::decode(buf);
+                assert_eq!(0, buf.remaining());
+                if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                    timeline.put_wal_record(
+                        lsn,
+                        RelishTag::Relation(RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: decoded.blocks[0].rnode_spcnode,
+                            dbnode: decoded.blocks[0].rnode_dbnode,
+                            relnode: decoded.blocks[0].rnode_relnode,
+                        }),
+                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        ZenithWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno: decoded.blocks[0].blkno,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+            } else if info == pg_constants::XLOG_HEAP_UPDATE
+                || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+            {
+                let xlrec = XlHeapUpdate::decode(buf);
+                // the size of tuple data is inferred from the size of the record.
+                // we can't validate the remaining number of bytes without parsing
+                // the tuple data.
+                if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                    timeline.put_wal_record(
+                        lsn,
+                        RelishTag::Relation(RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: decoded.blocks[0].rnode_spcnode,
+                            dbnode: decoded.blocks[0].rnode_dbnode,
+                            relnode: decoded.blocks[0].rnode_relnode,
+                        }),
+                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        ZenithWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno: decoded.blocks[0].blkno,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+                if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0
+                    && decoded.blocks.len() > 1
+                {
+                    timeline.put_wal_record(
+                        lsn,
+                        RelishTag::Relation(RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: decoded.blocks[1].rnode_spcnode,
+                            dbnode: decoded.blocks[1].rnode_dbnode,
+                            relnode: decoded.blocks[1].rnode_relnode,
+                        }),
+                        decoded.blocks[1].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        ZenithWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno: decoded.blocks[1].blkno,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+            }
+        } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+            let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+            if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                let xlrec = XlHeapMultiInsert::decode(buf);
+
+                let offset_array_len = if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                    // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                    0
+                } else {
+                    std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                };
+                assert_eq!(offset_array_len, buf.remaining());
+
+                // FIXME: why also ALL_FROZEN_SET?
+                if (xlrec.flags
+                    & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
+                        | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
+                    != 0
+                {
+                    timeline.put_wal_record(
+                        lsn,
+                        RelishTag::Relation(RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: decoded.blocks[0].rnode_spcnode,
+                            dbnode: decoded.blocks[0].rnode_dbnode,
+                            relnode: decoded.blocks[0].rnode_relnode,
+                        }),
+                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        ZenithWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno: decoded.blocks[0].blkno,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+            }
+        }
+
+        // FIXME: What about XLOG_HEAP_LOCK and XLOG_HEAP2_LOCK_UPDATED?
 
         Ok(())
     }
@@ -476,34 +631,20 @@ impl WalIngest {
         timeline: &dyn TimelineWriter,
         lsn: Lsn,
         parsed: &XlXactParsedRecord,
-        decoded: &DecodedWALRecord,
+        is_commit: bool,
     ) -> Result<()> {
-        // Record update of CLOG page
+        // Record update of CLOG pages
         let mut pageno = parsed.xid / pg_constants::CLOG_XACTS_PER_PAGE;
-
-        let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-        let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-        let rec = WALRecord {
-            will_init: false,
-            rec: decoded.record.clone(),
-            main_data_offset: decoded.main_data_offset as u32,
-        };
-        timeline.put_wal_record(
-            lsn,
-            RelishTag::Slru {
-                slru: SlruKind::Clog,
-                segno,
-            },
-            rpageno,
-            rec.clone(),
-        )?;
+        let mut segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+        let mut rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+        let mut page_xids: Vec<TransactionId> = vec![parsed.xid];
 
         for subxact in &parsed.subxacts {
             let subxact_pageno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
             if subxact_pageno != pageno {
-                pageno = subxact_pageno;
-                let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                // This subxact goes to different page. Write the record
+                // for all the XIDs on the previous page, and continue
+                // accumulating XIDs on this new page.
                 timeline.put_wal_record(
                     lsn,
                     RelishTag::Slru {
@@ -511,10 +652,33 @@ impl WalIngest {
                         segno,
                     },
                     rpageno,
-                    rec.clone(),
+                    if is_commit {
+                        ZenithWalRecord::ClogSetCommitted { xids: page_xids }
+                    } else {
+                        ZenithWalRecord::ClogSetAborted { xids: page_xids }
+                    },
                 )?;
+                page_xids = Vec::new();
             }
+            pageno = subxact_pageno;
+            segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+            rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+            page_xids.push(*subxact);
         }
+        timeline.put_wal_record(
+            lsn,
+            RelishTag::Slru {
+                slru: SlruKind::Clog,
+                segno,
+            },
+            rpageno,
+            if is_commit {
+                ZenithWalRecord::ClogSetCommitted { xids: page_xids }
+            } else {
+                ZenithWalRecord::ClogSetAborted { xids: page_xids }
+            },
+        )?;
+
         for xnode in &parsed.xnodes {
             for forknum in pg_constants::MAIN_FORKNUM..=pg_constants::VISIBILITYMAP_FORKNUM {
                 let rel = RelTag {
@@ -596,16 +760,12 @@ impl WalIngest {
         timeline: &dyn TimelineWriter,
         lsn: Lsn,
         xlrec: &XlMultiXactCreate,
-        decoded: &DecodedWALRecord,
     ) -> Result<()> {
-        let rec = WALRecord {
-            will_init: false,
-            rec: decoded.record.clone(),
-            main_data_offset: decoded.main_data_offset as u32,
-        };
+        // Create WAL record for updating the multixact-offsets page
         let pageno = xlrec.mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+
         timeline.put_wal_record(
             lsn,
             RelishTag::Slru {
@@ -613,40 +773,51 @@ impl WalIngest {
                 segno,
             },
             rpageno,
-            rec.clone(),
+            ZenithWalRecord::MultixactOffsetCreate {
+                mid: xlrec.mid,
+                moff: xlrec.moff,
+            },
         )?;
 
-        let first_mbr_pageno = xlrec.moff / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-        let last_mbr_pageno =
-            (xlrec.moff + xlrec.nmembers - 1) / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-        // The members SLRU can, in contrast to the offsets one, be filled to almost
-        // the full range at once. So we need to handle wraparound.
-        let mut pageno = first_mbr_pageno;
+        // Create WAL records for the update of each affected multixact-members page
+        let mut members = xlrec.members.iter();
+        let mut offset = xlrec.moff;
         loop {
-            // Update members page
-            let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-            let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+            let pageno = offset / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+
+            // How many members fit on this page?
+            let page_remain = pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32
+                - offset % pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+
+            let mut this_page_members: Vec<MultiXactMember> = Vec::new();
+            for _ in 0..page_remain {
+                if let Some(m) = members.next() {
+                    this_page_members.push(m.clone());
+                } else {
+                    break;
+                }
+            }
+            if this_page_members.is_empty() {
+                // all done
+                break;
+            }
+            let n_this_page = this_page_members.len();
+
             timeline.put_wal_record(
                 lsn,
                 RelishTag::Slru {
                     slru: SlruKind::MultiXactMembers,
-                    segno,
+                    segno: pageno / pg_constants::SLRU_PAGES_PER_SEGMENT,
                 },
-                rpageno,
-                rec.clone(),
+                pageno % pg_constants::SLRU_PAGES_PER_SEGMENT,
+                ZenithWalRecord::MultixactMembersCreate {
+                    moff: offset,
+                    members: this_page_members,
+                },
             )?;
 
-            if pageno == last_mbr_pageno {
-                // last block inclusive
-                break;
-            }
-
-            // handle wraparound
-            if pageno == MAX_MBR_BLKNO {
-                pageno = 0;
-            } else {
-                pageno += 1;
-            }
+            // Note: The multixact members can wrap around, even within one WAL record.
+            offset = offset.wrapping_add(n_this_page as u32);
         }
         if xlrec.mid >= self.checkpoint.nextMulti {
             self.checkpoint.nextMulti = xlrec.mid + 1;

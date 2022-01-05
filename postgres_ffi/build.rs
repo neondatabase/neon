@@ -75,6 +75,7 @@ fn main() {
         .allowlist_var("XLOG_PAGE_MAGIC")
         .allowlist_var("PG_CONTROL_FILE_SIZE")
         .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
+        .allowlist_type("PageHeaderData")
         .allowlist_type("DBState")
         // Because structs are used for serialization, tell bindgen to emit
         // explicit padding fields.

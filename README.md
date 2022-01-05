@@ -4,9 +4,9 @@ Zenith is a serverless open source alternative to AWS Aurora Postgres. It separa
 
 ## Architecture overview
 
-A Zenith installation consists of Compute nodes and Storage engine.
+A Zenith installation consists of compute nodes and Zenith storage engine.
 
-Compute nodes are stateless PostgreSQL nodes, backed by zenith storage.
+Compute nodes are stateless PostgreSQL nodes, backed by Zenith storage engine.
 
 Zenith storage engine consists of two major components:
 - Pageserver. Scalable storage backend for compute nodes.
