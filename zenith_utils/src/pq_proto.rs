@@ -48,7 +48,7 @@ pub enum FeStartupPacket {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct CancelKeyData {
     pub backend_pid: i32,
     pub cancel_key: i32,
