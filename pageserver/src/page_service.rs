@@ -184,6 +184,7 @@ impl PagestreamBeMessage {
 /// Listens for connections, and launches a new handler thread for each.
 ///
 pub fn thread_main(
+    mut shutdown_hook: tokio::sync::watch::Receiver<()>,
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
@@ -195,7 +196,23 @@ pub fn thread_main(
         .build()?;
 
     while !tenant_mgr::shutdown_requested() {
-        let (socket, peer_addr) = runtime.block_on(listener.accept())?;
+        let (socket, peer_addr) = match runtime
+            .block_on(async {
+                tokio::select! {
+                        connection = listener.accept() => Some(connection),
+                        _ = shutdown_hook.changed() => None,
+                }
+            })
+            .transpose()
+            .context("Failed to accept incoming connection")?
+        {
+            Some(connection) => connection,
+            None => {
+                info!("shutdown requested, exiting");
+                return Ok(());
+            }
+        };
+
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
         let local_auth = auth.clone();

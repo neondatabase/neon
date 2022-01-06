@@ -199,7 +199,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     let (async_shutdown_tx, async_shutdown_rx) = tokio::sync::watch::channel(());
     let mut threads = Vec::new();
 
-    let sync_startup = remote_storage::start_local_timeline_sync(conf, async_shutdown_rx)
+    let sync_startup = remote_storage::start_local_timeline_sync(conf, async_shutdown_rx.clone())
         .context("Failed to set up local files sync with external storage")?;
 
     if let Some(handle) = sync_startup.sync_loop_handle {
@@ -238,7 +238,13 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         thread::Builder::new()
             .name("Page Service thread".into())
             .spawn(move || {
-                page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
+                page_service::thread_main(
+                    async_shutdown_rx,
+                    conf,
+                    auth,
+                    pageserver_listener,
+                    conf.auth_type,
+                )
             })?,
     );
 
