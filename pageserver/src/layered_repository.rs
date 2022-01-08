@@ -622,6 +622,7 @@ impl LayeredRepository {
             };
 
             if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
+                drop(timelines);
                 let ancestor_timeline =
                     match ancestor_timeline.local_or_schedule_download(self.tenantid) {
                         Some(timeline) => timeline,
@@ -645,6 +646,7 @@ impl LayeredRepository {
                 else {
                     all_branchpoints.insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
                 }
+                timelines = self.timelines.lock().unwrap();
             }
         }
 
