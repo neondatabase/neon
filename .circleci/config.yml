@@ -443,25 +443,27 @@ jobs:
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
+      - run:
+          name: Login to docker hub
+          command: echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+      - run: 
+          name: Setup buildx
+          command: docker run -it --rm --privileged tonistiigi/binfmt --install all
       # Build zenithdb/compute-tools:latest image and push it to Docker hub
       # TODO: this should probably also use versioned tag, not just :latest.
       # XXX: but should it? We build and use it only locally now.
       - run:
           name: Build and push compute-tools Docker image
-          command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
-            docker build -t zenithdb/compute-tools:latest ./compute_tools/
-            docker push zenithdb/compute-tools:latest
+          command: docker buildx build --platform linux/amd64,linux/arm64 --push -t zenithdb/compute-tools:latest compute_tools
       - run:
           name: Init postgres submodule
           command: git submodule update --init --depth 1
       - run:
           name: Build and push compute-node Docker image
           command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build -t zenithdb/compute-node:latest vendor/postgres && docker push zenithdb/compute-node:latest
-            docker tag zenithdb/compute-node:latest zenithdb/compute-node:${DOCKER_TAG} && docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker buildx build --platform linux/amd64,linux/arm64 --push -t zenithdb/compute-node:latest vendor/postgres
+            docker buildx build --platform linux/amd64,linux/arm64 --push -t zenithdb/compute-node:${DOCKER_TAG} vendor/postgres
 
   deploy-staging:
     docker:
@@ -688,10 +690,11 @@ workflows:
             branches:
               only:
                 - main
-          requires:
-            - pg_regress-tests-release
-            - other-tests-release
-            - compute-tools-test
+                - docker-multi-platform
+#          requires:
+#            - pg_regress-tests-release
+#            - other-tests-release
+#            - compute-tools-test
       - deploy-staging:
           # Context gives an ability to login
           context: Docker Hub
