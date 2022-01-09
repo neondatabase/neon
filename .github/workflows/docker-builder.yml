@@ -1,0 +1,44 @@
+## Build docker image zenithdb/build:buster for linux/adm64 and linux/arm64 platforms
+
+name: docker-builder
+
+on:
+  push:
+    branches:
+      - 'docker-multi-platform'
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    # buil daily at 5:30am
+    - cron:  '30 5 * * *'
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v2
+        with:
+          submodules: false
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      -
+        name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      -
+        name: Build and push zenithdb/build:buster
+        uses: docker/build-push-action@v2
+        with:
+          push:       true
+          file:       Dockerfile.build
+          platforms:  linux/amd64,linux/arm64
+          cache-from: type=registry,ref=zenithdb/build:buster
+          tags:       zenithdb/build:buster
+
