@@ -127,7 +127,7 @@ pub struct LayeredRepository {
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
-
+    gc_cs: Mutex<i32>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
     /// Makes every timeline to backup their files to remote storage.
     upload_relishes: bool,
@@ -186,6 +186,8 @@ impl Repository for LayeredRepository {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
+        let _ = self.gc_cs.lock().unwrap();
+
         let mut timelines = self.timelines.lock().unwrap();
         let src_timeline = match self.get_or_init_timeline(src, &mut timelines)? {
             LayeredTimelineEntry::Local(timeline) => timeline,
@@ -489,6 +491,7 @@ impl LayeredRepository {
             tenantid,
             conf,
             timelines: Mutex::new(HashMap::new()),
+            gc_cs: Mutex::new(0),
             walredo_mgr,
             upload_relishes,
         }
@@ -575,7 +578,8 @@ impl LayeredRepository {
         let now = Instant::now();
 
         // grab mutex to prevent new timelines from being created here.
-        // TODO: We will hold it for a long time
+        let _ = self.gc_cs.lock().unwrap();
+
         let mut timelines = self.timelines.lock().unwrap();
 
         // Scan all timelines. For each timeline, remember the timeline ID and
