@@ -127,6 +127,12 @@ pub struct LayeredRepository {
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
+    // This mutex prevents creation of new timelines during GC.
+    // Adding yet another mutex (in addition to `timelines`) is needed because holding
+    // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
+    // may block for a long time `get_timeline`, `get_timelines_state`,... and other operations
+    // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
+    // timeout...
     gc_cs: Mutex<i32>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
     /// Makes every timeline to backup their files to remote storage.
@@ -186,7 +192,7 @@ impl Repository for LayeredRepository {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
-        let _ = self.gc_cs.lock().unwrap();
+        let _gc_cs = self.gc_cs.lock().unwrap();
 
         let mut timelines = self.timelines.lock().unwrap();
         let src_timeline = match self.get_or_init_timeline(src, &mut timelines)? {
@@ -578,7 +584,7 @@ impl LayeredRepository {
         let now = Instant::now();
 
         // grab mutex to prevent new timelines from being created here.
-        let _ = self.gc_cs.lock().unwrap();
+        let _gc_cs = self.gc_cs.lock().unwrap();
 
         let mut timelines = self.timelines.lock().unwrap();
 
