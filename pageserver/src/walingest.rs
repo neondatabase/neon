@@ -354,11 +354,7 @@ impl WalIngest {
             if info == pg_constants::XLOG_HEAP_INSERT {
                 let xlrec = XlHeapInsert::decode(buf);
                 assert_eq!(0, buf.remaining());
-                if (xlrec.flags
-                    & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
-                        | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
-                    != 0
-                {
+                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                     timeline.put_wal_record(
                         lsn,
                         RelishTag::Relation(RelTag {
@@ -369,6 +365,22 @@ impl WalIngest {
                         }),
                         decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
                         ZenithWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno: decoded.blocks[0].blkno,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+                if (xlrec.flags | pg_constants::XLH_INSERT_ALL_FROZEN_SET) != 0 {
+                    timeline.put_wal_record(
+                        lsn,
+                        RelishTag::Relation(RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: decoded.blocks[0].rnode_spcnode,
+                            dbnode: decoded.blocks[0].rnode_dbnode,
+                            relnode: decoded.blocks[0].rnode_relnode,
+                        }),
+                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        ZenithWalRecord::SetVisibilityMapFlags {
                             heap_blkno: decoded.blocks[0].blkno,
                             flags: pg_constants::VISIBILITYMAP_VALID_BITS,
                         },
@@ -448,12 +460,7 @@ impl WalIngest {
                 };
                 assert_eq!(offset_array_len, buf.remaining());
 
-                // FIXME: why also ALL_FROZEN_SET?
-                if (xlrec.flags
-                    & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
-                        | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
-                    != 0
-                {
+                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                     timeline.put_wal_record(
                         lsn,
                         RelishTag::Relation(RelTag {
@@ -464,6 +471,22 @@ impl WalIngest {
                         }),
                         decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
                         ZenithWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno: decoded.blocks[0].blkno,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_FROZEN_SET) != 0 {
+                    timeline.put_wal_record(
+                        lsn,
+                        RelishTag::Relation(RelTag {
+                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                            spcnode: decoded.blocks[0].rnode_spcnode,
+                            dbnode: decoded.blocks[0].rnode_dbnode,
+                            relnode: decoded.blocks[0].rnode_relnode,
+                        }),
+                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        ZenithWalRecord::SetVisibilityMapFlags {
                             heap_blkno: decoded.blocks[0].blkno,
                             flags: pg_constants::VISIBILITYMAP_VALID_BITS,
                         },

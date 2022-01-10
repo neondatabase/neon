@@ -383,6 +383,26 @@ impl PostgresRedoManager {
                 let mask: u8 = flags << map_offset;
                 map[map_byte as usize] &= !mask;
             }
+            ZenithWalRecord::SetVisibilityMapFlags { heap_blkno, flags } => {
+                // Calculate the VM block and offset that corresponds to the heap block.
+                let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(*heap_blkno);
+                let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(*heap_blkno);
+                let map_offset = pg_constants::HEAPBLK_TO_OFFSET(*heap_blkno);
+
+                // Check that we're modifying the correct VM block.
+                assert!(
+                    check_forknum(&rel, pg_constants::VISIBILITYMAP_FORKNUM),
+                    "SetVisibilityMapFlags record on unexpected rel {:?}",
+                    rel
+                );
+                assert!(map_block == blknum);
+
+                // equivalent to PageGetContents(page)
+                let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+
+                let mask: u8 = flags << map_offset;
+                map[map_byte as usize] |= mask;
+            }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
             ZenithWalRecord::ClogSetCommitted { xids } => {
