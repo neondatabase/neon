@@ -370,7 +370,7 @@ impl WalIngest {
                         },
                     )?;
                 }
-                if (xlrec.flags | pg_constants::XLH_INSERT_ALL_FROZEN_SET) != 0 {
+                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_FROZEN_SET) != 0 {
                     timeline.put_wal_record(
                         lsn,
                         RelishTag::Relation(RelTag {
