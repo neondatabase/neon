@@ -283,12 +283,14 @@ impl ReplicationConn {
             if spg.appname == Some("wal_proposer_recovery".to_string()) {
                 None
             } else {
-                let pageserver_connstr = pageserver_connstr.clone().expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
-                let tenant_id = spg.ztenantid.unwrap();
-                let timeline_id = spg.timeline.get().zttid.timeline_id;
+                let pageserver_connstr = pageserver_connstr.expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
+                let zttid = spg.timeline.get().zttid;
                 let tx_clone = spg.tx.clone();
-                let subscription_key =
-                    SubscriptionStateKey::new(tenant_id, timeline_id, pageserver_connstr.clone());
+                let subscription_key = SubscriptionStateKey::new(
+                    zttid.tenant_id,
+                    zttid.timeline_id,
+                    pageserver_connstr.clone(),
+                );
                 spg.tx
                     .send(CallmeEvent::Pause(subscription_key))
                     .unwrap_or_else(|e| {
@@ -298,8 +300,8 @@ impl ReplicationConn {
                 // create a guard to subscribe callback again, when this connection will exit
                 Some(ReplicationStreamGuard {
                     tx: tx_clone,
-                    tenant_id,
-                    timeline_id,
+                    tenant_id: zttid.tenant_id,
+                    timeline_id: zttid.timeline_id,
                     pageserver_connstr,
                 })
             }
@@ -324,21 +326,10 @@ impl ReplicationConn {
                 if let Some(lsn) = lsn {
                     end_pos = lsn;
                 } else {
-                    // Is it time to end streaming to this replica?
-                    if spg.timeline.get().check_stop_streaming(replica_id) {
-                        // this expect should never fail because in wal_proposer_recovery mode stop_pos is set
-                        // and this code is not reachable
-                        let pageserver_connstr = pageserver_connstr
-                            .expect("there should be a pageserver connection string");
-                        let tenant_id = spg.ztenantid.unwrap();
-                        let timeline_id = spg.timeline.get().zttid.timeline_id;
-                        let subscription_key =
-                            SubscriptionStateKey::new(tenant_id, timeline_id, pageserver_connstr);
-                        spg.tx
-                            .send(CallmeEvent::Unsubscribe(subscription_key))
-                            .unwrap_or_else(|e| {
-                                error!("failed to send Pause request to callmemaybe thread {}", e);
-                            });
+                    // TODO: also check once in a while whether we are walsender
+                    // to right pageserver.
+                    if spg.timeline.get().check_deactivate(replica_id, &spg.tx)? {
+                        // Shut down, timeline is suspended.
                         // TODO create proper error type for this
                         bail!("end streaming to {:?}", spg.appname);
                     }
