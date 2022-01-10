@@ -288,15 +288,14 @@ impl ReplicationConn {
                 if let Some(lsn) = lsn {
                     end_pos = lsn;
                 } else {
-                    // Is is time to end streaming to this replica?
-                    if spg.timeline.get().check_stop_streaming(replica_id) {
-                        let timelineid = spg.timeline.get().timelineid;
-                        let tenant_id = spg.ztenantid.unwrap();
-                        spg.tx
-                            .send(CallmeEvent::Unsubscribe(tenant_id, timelineid))
-                            .unwrap_or_else(|e| {
-                                error!("failed to send Pause request to callmemaybe thread {}", e);
-                            });
+                    // TODO: also check once in a while whether we are walsender
+                    // to right pageserver.
+                    if spg.timeline.get().check_deactivate(
+                        replica_id,
+                        spg.ztenantid.unwrap(),
+                        &spg.tx,
+                    )? {
+                        // Shut down, timeline is suspended.
                         // TODO create proper error type for this
                         bail!("end streaming to {:?}", spg.appname);
                     }
