@@ -117,6 +117,7 @@ impl ProxyConnection {
                 None => return Ok(None),
             };
 
+            // HACK I will revert this before PR
             // Both scenarios here should end up producing database credentials
             if true || username.ends_with("@zenith") {
                 self.handle_existing_user(&username, &dbname).map(Some)
@@ -231,6 +232,7 @@ impl ProxyConnection {
             .split_last()
             .ok_or_else(|| anyhow!("unexpected password message"))?;
 
+        // HACK I will revert this before PR
         // let cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
         // let db_info = cplane.authenticate_proxy_request(
         //     user,
