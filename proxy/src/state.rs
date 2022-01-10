@@ -10,6 +10,10 @@ pub struct ProxyConfig {
     /// main entrypoint for users to connect to
     pub proxy_address: SocketAddr,
 
+    /// internally used for status and prometheus metrics
+    pub http_address: SocketAddr,
+
+    // TODO it's not http? it's postgres protocol over tcp.
     /// http management endpoint. Upon user account creation control plane
     /// will notify us here, so that we can 'unfreeze' user session.
     pub mgmt_address: SocketAddr,
