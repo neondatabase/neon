@@ -1436,6 +1436,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "zenith_metrics",
  "zenith_utils",
 ]
 

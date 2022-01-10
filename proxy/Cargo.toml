@@ -25,3 +25,4 @@ rustls = "0.19.1"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 zenith_utils = { path = "../zenith_utils" }
+zenith_metrics = { path = "../zenith_metrics" }
