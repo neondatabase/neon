@@ -5,6 +5,7 @@
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use bytes::BytesMut;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 
 use crate::timeline::Timeline;
@@ -18,10 +19,8 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::TimelineTools;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage};
-use zenith_utils::zid::ZTenantId;
 
 use crate::callmemaybe::CallmeEvent;
-use crate::callmemaybe::SubscriptionStateKey;
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -82,50 +81,23 @@ impl<'pg> ReceiveWalConn<'pg> {
         let mut msg = self
             .read_msg()
             .context("failed to receive proposer greeting")?;
-        let tenant_id: ZTenantId;
         match msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
                     "start handshake with wal proposer {} sysid {} timeline {}",
                     self.peer_addr, greeting.system_id, greeting.tli,
                 );
-                tenant_id = greeting.tenant_id;
             }
             _ => bail!("unexpected message {:?} instead of greeting", msg),
         }
 
-        // Incoming WAL stream resumed, so reset information about the timeline pause.
-        spg.timeline.get().continue_streaming();
-
-        // if requested, ask pageserver to fetch wal from us
-        // as long as this wal_stream is alive, callmemaybe thread
-        // will send requests to pageserver
-        let _guard = match self.pageserver_connstr {
-            Some(ref pageserver_connstr) => {
-                // Need to establish replication channel with page server.
-                // Add far as replication in postgres is initiated by receiver
-                // we should use callmemaybe mechanism.
-                let timeline_id = spg.timeline.get().zttid.timeline_id;
-                let subscription_key = SubscriptionStateKey::new(
-                    tenant_id,
-                    timeline_id,
-                    pageserver_connstr.to_owned(),
-                );
-                spg.tx
-                    .send(CallmeEvent::Subscribe(subscription_key))
-                    .unwrap_or_else(|e| {
-                        error!(
-                            "failed to send Subscribe request to callmemaybe thread {}",
-                            e
-                        );
-                    });
-
-                // create a guard to unsubscribe callback, when this wal_stream will exit
-                Some(SendWalHandlerGuard {
-                    timeline: Arc::clone(spg.timeline.get()),
-                })
-            }
-            None => None,
+        // Register the connection and defer unregister.
+        spg.timeline
+            .get()
+            .on_compute_connect(self.pageserver_connstr.as_ref(), &spg.tx)?;
+        let _guard = ComputeConnectionGuard {
+            timeline: Arc::clone(spg.timeline.get()),
+            callmemaybe_tx: spg.tx.clone(),
         };
 
         loop {
@@ -142,12 +114,15 @@ impl<'pg> ReceiveWalConn<'pg> {
     }
 }
 
-struct SendWalHandlerGuard {
+struct ComputeConnectionGuard {
     timeline: Arc<Timeline>,
+    callmemaybe_tx: UnboundedSender<CallmeEvent>,
 }
 
-impl Drop for SendWalHandlerGuard {
+impl Drop for ComputeConnectionGuard {
     fn drop(&mut self) {
-        self.timeline.stop_streaming();
+        self.timeline
+            .on_compute_disconnect(&self.callmemaybe_tx)
+            .unwrap();
     }
 }
