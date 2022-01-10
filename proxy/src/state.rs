@@ -13,9 +13,9 @@ pub struct ProxyConfig {
     /// internally used for status and prometheus metrics
     pub http_address: SocketAddr,
 
-    // TODO it's not http? it's postgres protocol over tcp.
-    /// http management endpoint. Upon user account creation control plane
+    /// management endpoint. Upon user account creation control plane
     /// will notify us here, so that we can 'unfreeze' user session.
+    /// TODO It uses postgres protocol over TCP but should be migrated to http.
     pub mgmt_address: SocketAddr,
 
     /// send unauthenticated users to this URI
