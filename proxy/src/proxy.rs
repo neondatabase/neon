@@ -117,9 +117,8 @@ impl ProxyConnection {
                 None => return Ok(None),
             };
 
-            // HACK I will revert this before PR
             // Both scenarios here should end up producing database credentials
-            if true || username.ends_with("@zenith") {
+            if username.ends_with("@zenith") {
                 self.handle_existing_user(&username, &dbname).map(Some)
             } else {
                 self.handle_new_user().map(Some)
@@ -232,22 +231,14 @@ impl ProxyConnection {
             .split_last()
             .ok_or_else(|| anyhow!("unexpected password message"))?;
 
-        // HACK I will revert this before PR
-        // let cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
-        // let db_info = cplane.authenticate_proxy_request(
-        //     user,
-        //     db,
-        //     md5_response,
-        //     &md5_salt,
-        //     &self.psql_session_id,
-        // )?;
-        let db_info = DatabaseInfo {
-            host: "localhost".into(),
-            port: 5432,
-            dbname: "postgres".into(),
-            user: "postgres".into(),
-            password: Some("postgres".into()),
-        };
+        let cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
+        let db_info = cplane.authenticate_proxy_request(
+            user,
+            db,
+            md5_response,
+            &md5_salt,
+            &self.psql_session_id,
+        )?;
 
         self.pgb
             .write_message_noflush(&Be::AuthenticationOk)?

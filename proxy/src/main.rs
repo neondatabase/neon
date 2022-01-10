@@ -9,15 +9,15 @@ use anyhow::bail;
 use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
 use std::thread;
-use zenith_utils::{tcp_listener, GIT_VERSION};
 use zenith_utils::http::endpoint;
+use zenith_utils::{tcp_listener, GIT_VERSION};
 
 mod cplane_api;
+mod http;
 mod mgmt;
 mod proxy;
 mod state;
 mod waiters;
-mod http;
 
 fn main() -> anyhow::Result<()> {
     zenith_metrics::set_common_metrics_prefix("proxy");
