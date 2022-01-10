@@ -133,7 +133,7 @@ pub struct LayeredRepository {
     // may block for a long time `get_timeline`, `get_timelines_state`,... and other operations
     // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
     // timeout...
-    gc_cs: Mutex<i32>,
+    gc_cs: Mutex<()>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
     /// Makes every timeline to backup their files to remote storage.
     upload_relishes: bool,
@@ -497,7 +497,7 @@ impl LayeredRepository {
             tenantid,
             conf,
             timelines: Mutex::new(HashMap::new()),
-            gc_cs: Mutex::new(0),
+            gc_cs: Mutex::new(()),
             walredo_mgr,
             upload_relishes,
         }
