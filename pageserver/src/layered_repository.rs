@@ -127,7 +127,13 @@ pub struct LayeredRepository {
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
-
+    // This mutex prevents creation of new timelines during GC.
+    // Adding yet another mutex (in addition to `timelines`) is needed because holding
+    // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
+    // may block for a long time `get_timeline`, `get_timelines_state`,... and other operations
+    // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
+    // timeout...
+    gc_cs: Mutex<()>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
     /// Makes every timeline to backup their files to remote storage.
     upload_relishes: bool,
@@ -186,6 +192,8 @@ impl Repository for LayeredRepository {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
+        let _gc_cs = self.gc_cs.lock().unwrap();
+
         let mut timelines = self.timelines.lock().unwrap();
         let src_timeline = match self.get_or_init_timeline(src, &mut timelines)? {
             LayeredTimelineEntry::Local(timeline) => timeline,
@@ -489,6 +497,7 @@ impl LayeredRepository {
             tenantid,
             conf,
             timelines: Mutex::new(HashMap::new()),
+            gc_cs: Mutex::new(()),
             walredo_mgr,
             upload_relishes,
         }
@@ -575,7 +584,8 @@ impl LayeredRepository {
         let now = Instant::now();
 
         // grab mutex to prevent new timelines from being created here.
-        // TODO: We will hold it for a long time
+        let _gc_cs = self.gc_cs.lock().unwrap();
+
         let mut timelines = self.timelines.lock().unwrap();
 
         // Scan all timelines. For each timeline, remember the timeline ID and
@@ -612,6 +622,7 @@ impl LayeredRepository {
             };
 
             if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
+                drop(timelines);
                 let ancestor_timeline =
                     match ancestor_timeline.local_or_schedule_download(self.tenantid) {
                         Some(timeline) => timeline,
@@ -635,6 +646,7 @@ impl LayeredRepository {
                 else {
                     all_branchpoints.insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
                 }
+                timelines = self.timelines.lock().unwrap();
             }
         }
 
