@@ -102,10 +102,6 @@ impl PageServerNode {
         config_overrides: &[&str],
     ) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        let var = "LLVM_PROFILE_FILE";
-        if let Some(val) = std::env::var_os(var) {
-            cmd.env(var, val);
-        }
 
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let base_data_dir_param = self.env.base_data_dir.display().to_string();
@@ -179,11 +175,6 @@ impl PageServerNode {
         }
 
         fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
-
-        let var = "LLVM_PROFILE_FILE";
-        if let Some(val) = std::env::var_os(var) {
-            cmd.env(var, val);
-        }
 
         if !cmd.status()?.success() {
             bail!(
