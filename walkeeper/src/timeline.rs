@@ -9,7 +9,7 @@ use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tracing::*;
@@ -136,13 +136,14 @@ impl SharedState {
     /// If create=false and file doesn't exist, bails out.
     fn create_restore(
         conf: &SafeKeeperConf,
-        timelineid: ZTimelineId,
+        timeline_id: ZTimelineId,
         create: CreateControlFile,
     ) -> Result<Self> {
-        let (file_storage, state) = FileStorage::load_from_control_file(conf, timelineid, create)
+        let state = FileStorage::load_control_file_conf(conf, timeline_id, create)
             .with_context(|| "failed to load from control file")?;
+        let file_storage = FileStorage::new(timeline_id, conf);
         let flush_lsn = if state.server.wal_seg_size != 0 {
-            let wal_dir = conf.timeline_dir(&timelineid);
+            let wal_dir = conf.timeline_dir(&timeline_id);
             find_end_of_wal(
                 &wal_dir,
                 state.server.wal_seg_size as usize,
@@ -381,7 +382,7 @@ impl GlobalTimelines {
 }
 
 #[derive(Debug)]
-struct FileStorage {
+pub struct FileStorage {
     // save timeline dir to avoid reconstructing it every time
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
@@ -389,6 +390,17 @@ struct FileStorage {
 }
 
 impl FileStorage {
+    fn new(timeline_id: ZTimelineId, conf: &SafeKeeperConf) -> FileStorage {
+        let timeline_dir = conf.timeline_dir(&timeline_id);
+        let timelineid_str = format!("{}", timeline_id);
+        FileStorage {
+            timeline_dir,
+            conf: conf.clone(),
+            persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
+                .with_label_values(&[&timelineid_str]),
+        }
+    }
+
     // Check the magic/version in the on-disk data and deserialize it, if possible.
     fn deser_sk_state(buf: &mut &[u8]) -> Result<SafeKeeperState> {
         // Read the version independent part
@@ -409,20 +421,24 @@ impl FileStorage {
         upgrade_control_file(buf, version)
     }
 
-    /// Fetch and lock control file (prevent running more than one instance of safekeeper)
-    /// If create=false and file doesn't exist, bails out.
-    fn load_from_control_file(
+    fn load_control_file_conf(
         conf: &SafeKeeperConf,
-        timelineid: ZTimelineId,
+        timeline_id: ZTimelineId,
         create: CreateControlFile,
-    ) -> Result<(FileStorage, SafeKeeperState)> {
-        let timeline_dir = conf.timeline_dir(&timelineid);
+    ) -> Result<SafeKeeperState> {
+        let path = conf.timeline_dir(&timeline_id).join(CONTROL_FILE_NAME);
+        Self::load_control_file(path, create)
+    }
 
-        let control_file_path = timeline_dir.join(CONTROL_FILE_NAME);
-
+    /// Read in the control file.
+    /// If create=false and file doesn't exist, bails out.
+    pub fn load_control_file<P: AsRef<Path>>(
+        control_file_path: P,
+        create: CreateControlFile,
+    ) -> Result<SafeKeeperState> {
         info!(
             "loading control file {}, create={:?}",
-            control_file_path.display(),
+            control_file_path.as_ref().display(),
             create,
         );
 
@@ -434,7 +450,7 @@ impl FileStorage {
             .with_context(|| {
                 format!(
                     "failed to open control file at {}",
-                    control_file_path.display(),
+                    control_file_path.as_ref().display(),
                 )
             })?;
 
@@ -465,21 +481,15 @@ impl FileStorage {
             );
 
             FileStorage::deser_sk_state(&mut &buf[..buf.len() - CHECKSUM_SIZE]).with_context(
-                || format!("while reading control file {}", control_file_path.display(),),
+                || {
+                    format!(
+                        "while reading control file {}",
+                        control_file_path.as_ref().display(),
+                    )
+                },
             )?
         };
-
-        let timelineid_str = format!("{}", timelineid);
-
-        Ok((
-            FileStorage {
-                timeline_dir,
-                conf: conf.clone(),
-                persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
-                    .with_label_values(&[&timelineid_str]),
-            },
-            state,
-        ))
+        Ok(state)
     }
 }
 
@@ -549,7 +559,7 @@ impl Storage for FileStorage {
         let mut start_pos = startpos;
         const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
         let wal_seg_size = server.wal_seg_size as usize;
-        let ztli = server.ztli;
+        let ztli = server.timeline_id;
 
         /* Extract WAL location for this block */
         let mut xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
@@ -637,7 +647,7 @@ impl Storage for FileStorage {
         let partial;
         const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
         let wal_seg_size = server.wal_seg_size as usize;
-        let ztli = server.ztli;
+        let ztli = server.timeline_id;
 
         /* Extract WAL location for this block */
         let mut xlogoff = end_pos.segment_offset(wal_seg_size) as usize;
@@ -737,7 +747,10 @@ mod test {
     ) -> Result<(FileStorage, SafeKeeperState)> {
         fs::create_dir_all(&conf.timeline_dir(&timeline_id))
             .expect("failed to create timeline dir");
-        FileStorage::load_from_control_file(conf, timeline_id, create)
+        Ok((
+            FileStorage::new(timeline_id, conf),
+            FileStorage::load_control_file_conf(conf, timeline_id, create)?,
+        ))
     }
 
     #[test]
