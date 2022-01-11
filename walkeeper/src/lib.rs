@@ -62,7 +62,7 @@ impl Default for SafeKeeperConf {
             daemonize: false,
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
-            listen_http_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
+            listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             ttl: None,
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
         }
