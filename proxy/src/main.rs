@@ -17,7 +17,8 @@ mod proxy;
 mod state;
 mod waiters;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("Zenith proxy/router")
         .version(GIT_VERSION)
         .arg(
@@ -97,20 +98,10 @@ fn main() -> anyhow::Result<()> {
     println!("Starting mgmt on {}", state.conf.mgmt_address);
     let mgmt_listener = tcp_listener::bind(state.conf.mgmt_address)?;
 
-    let threads = [
-        // Spawn a thread to listen for connections. It will spawn further threads
-        // for each connection.
-        thread::Builder::new()
-            .name("Listener thread".into())
-            .spawn(move || proxy::thread_main(state, pageserver_listener))?,
-        thread::Builder::new()
-            .name("Mgmt thread".into())
-            .spawn(move || mgmt::thread_main(state, mgmt_listener))?,
-    ];
-
-    for t in threads {
-        t.join().unwrap()?;
-    }
+    tokio::try_join!(
+        proxy::thread_main(state, pageserver_listener),
+        mgmt::thread_main(state, mgmt_listener),
+    )?;
 
     Ok(())
 }

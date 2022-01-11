@@ -16,7 +16,7 @@ use crate::{cplane_api::DatabaseInfo, ProxyState};
 ///
 /// Listens for connections, and launches a new handler thread for each.
 ///
-pub fn thread_main(state: &'static ProxyState, listener: TcpListener) -> anyhow::Result<()> {
+pub async fn thread_main(state: &'static ProxyState, listener: TcpListener) -> anyhow::Result<()> {
     loop {
         let (socket, peer_addr) = listener.accept()?;
         println!("accepted connection from {}", peer_addr);
