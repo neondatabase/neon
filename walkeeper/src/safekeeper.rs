@@ -30,7 +30,7 @@ use zenith_utils::pq_proto::SystemId;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 2;
+pub const SK_FORMAT_VERSION: u32 = 3;
 const SK_PROTOCOL_VERSION: u32 = 1;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 
@@ -133,9 +133,11 @@ pub struct ServerInfo {
     /// Postgres server version
     pub pg_version: u32,
     pub system_id: SystemId,
+    #[serde(with = "hex")]
     pub tenant_id: ZTenantId,
     /// Zenith timelineid
-    pub ztli: ZTimelineId,
+    #[serde(with = "hex")]
+    pub timeline_id: ZTimelineId,
     pub wal_seg_size: u32,
 }
 
@@ -149,6 +151,7 @@ pub struct SafeKeeperState {
     pub server: ServerInfo,
     /// Unique id of the last *elected* proposer we dealed with. Not needed
     /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
     pub commit_lsn: Lsn,
@@ -171,7 +174,7 @@ impl SafeKeeperState {
                 pg_version: UNKNOWN_SERVER_VERSION, /* Postgres server version */
                 system_id: 0,                       /* Postgres system identifier */
                 tenant_id: ZTenantId::from([0u8; 16]),
-                ztli: ZTimelineId::from([0u8; 16]),
+                timeline_id: ZTimelineId::from([0u8; 16]),
                 wal_seg_size: 0,
             },
             proposer_uuid: [0; 16],
@@ -560,13 +563,13 @@ where
         // set basic info about server, if not yet
         self.s.server.system_id = msg.system_id;
         self.s.server.tenant_id = msg.tenant_id;
-        self.s.server.ztli = msg.ztli;
+        self.s.server.timeline_id = msg.ztli;
         self.s.server.wal_seg_size = msg.wal_seg_size;
         self.storage
             .persist(&self.s)
             .with_context(|| "failed to persist shared state")?;
 
-        self.metrics = SafeKeeperMetrics::new(self.s.server.ztli);
+        self.metrics = SafeKeeperMetrics::new(self.s.server.timeline_id);
 
         info!(
             "processed greeting from proposer {:?}, sending term {:?}",
