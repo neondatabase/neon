@@ -5,7 +5,7 @@ import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.utils import print_gc_result
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.zenith_fixtures import ZenithEnvBuilder
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -13,10 +13,18 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Create a couple of branches off the main branch, at a historical point in time.
 #
-def test_branch_behind(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
+
+    # Use safekeeper in this test to avoid a subtle race condition.
+    # Without safekeeper, walreceiver reconnection can stuck
+    # because of IO deadlock.
+    #
+    # See https://github.com/zenithdb/zenith/issues/1068
+    zenith_env_builder.num_safekeepers = 1
+    env = zenith_env_builder.init()
+
     # Branch at the point where only 100 rows were inserted
-    env.zenith_cli(["branch", "test_branch_behind", "empty"])
+    env.zenith_cli(["branch", "test_branch_behind", "main"])
 
     pgmain = env.postgres.create_start('test_branch_behind')
     log.info("postgres is running on 'test_branch_behind' branch")
