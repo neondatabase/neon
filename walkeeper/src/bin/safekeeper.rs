@@ -10,6 +10,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
+use walkeeper::timeline::{CreateControlFile, FileStorage};
 use zenith_utils::http::endpoint;
 use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
@@ -86,7 +87,20 @@ fn main() -> Result<()> {
                 .takes_value(false)
                 .help("Do not wait for changes to be written safely to disk"),
         )
+        .arg(
+            Arg::with_name("dump-control-file")
+                .long("dump-control-file")
+                .takes_value(true)
+                .help("Dump control file at path specifed by this argument and exit"),
+        )
         .get_matches();
+
+    if let Some(addr) = arg_matches.value_of("dump-control-file") {
+        let state = FileStorage::load_control_file(Path::new(addr), CreateControlFile::False)?;
+        let json = serde_json::to_string(&state)?;
+        print!("{}", json);
+        return Ok(());
+    }
 
     let mut conf: SafeKeeperConf = Default::default();
 
