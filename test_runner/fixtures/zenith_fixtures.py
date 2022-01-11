@@ -360,6 +360,11 @@ class ZenithEnvBuilder:
         self.env = ZenithEnv(self)
         return self.env
 
+    def enable_local_fs_remote_storage(self):
+        assert self.pageserver_remote_storage is None, "remote storage is enabled already"
+        self.pageserver_remote_storage = LocalFsStorage(
+            Path(self.repo_dir / 'local_fs_remote_storage'))
+
     def __enter__(self):
         return self
 
@@ -472,7 +477,7 @@ sync = false # Disable fsyncs to make the tests go faster
             tmp.flush()
 
             cmd = ['init', f'--config={tmp.name}']
-            _append_pageserver_param_overrides(cmd, config.pageserver_remote_storage)
+            append_pageserver_param_overrides(cmd, config.pageserver_remote_storage)
 
             self.zenith_cli(cmd)
 
@@ -744,7 +749,7 @@ class ZenithPageserver(PgProtocol):
         assert self.running == False
 
         start_args = ['pageserver', 'start']
-        _append_pageserver_param_overrides(start_args, self.remote_storage)
+        append_pageserver_param_overrides(start_args, self.remote_storage)
 
         self.env.zenith_cli(start_args)
         self.running = True
@@ -779,8 +784,8 @@ class ZenithPageserver(PgProtocol):
         )
 
 
-def _append_pageserver_param_overrides(params_to_update: List[str],
-                                       pageserver_remote_storage: Optional[RemoteStorage]):
+def append_pageserver_param_overrides(params_to_update: List[str],
+                                      pageserver_remote_storage: Optional[RemoteStorage]):
     if pageserver_remote_storage is not None:
         if isinstance(pageserver_remote_storage, LocalFsStorage):
             pageserver_storage_override = f"local_path='{pageserver_remote_storage.root}'"

@@ -129,11 +129,6 @@ impl SafekeeperNode {
             cmd.arg("--no-sync");
         }
 
-        let var = "LLVM_PROFILE_FILE";
-        if let Some(val) = std::env::var_os(var) {
-            cmd.env(var, val);
-        }
-
         if !cmd.status()?.success() {
             bail!(
                 "Safekeeper failed to start. See '{}' for details.",

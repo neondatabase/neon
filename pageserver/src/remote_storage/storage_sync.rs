@@ -426,7 +426,7 @@ fn storage_sync_loop<
     max_sync_errors: NonZeroU32,
 ) -> anyhow::Result<()> {
     let remote_assets = Arc::new((storage, RwLock::new(index)));
-    while !crate::tenant_mgr::shutdown_requested() {
+    loop {
         let loop_step = runtime.block_on(async {
             tokio::select! {
                 new_timeline_states = loop_step(
@@ -447,11 +447,13 @@ fn storage_sync_loop<
                 set_timeline_states(conf, new_timeline_states);
                 debug!("Sync loop step completed");
             }
-            LoopStep::Shutdown => {}
+            LoopStep::Shutdown => {
+                debug!("Shutdown requested, stopping");
+                break;
+            }
         }
     }
 
-    debug!("Shutdown requested, stopping");
     Ok(())
 }
 
