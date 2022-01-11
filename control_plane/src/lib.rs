@@ -36,6 +36,11 @@ pub fn read_pidfile(pidfile: &Path) -> Result<i32> {
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
     let cmd = cmd.env_clear().env("RUST_BACKTRACE", "1");
 
+    let var = "LLVM_PROFILE_FILE";
+    if let Some(val) = std::env::var_os(var) {
+        cmd.env(var, val);
+    }
+
     const RUST_LOG_KEY: &str = "RUST_LOG";
     if let Ok(rust_log_value) = std::env::var(RUST_LOG_KEY) {
         cmd.env(RUST_LOG_KEY, rust_log_value)
