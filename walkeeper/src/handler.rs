@@ -16,7 +16,7 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
 use crate::timeline::CreateControlFile;
@@ -116,8 +116,11 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
                         | SafekeeperPostgresCommand::JSONCtrl { .. } => CreateControlFile::True,
                         _ => CreateControlFile::False,
                     };
-                    self.timeline
-                        .set(&self.conf, tenantid, timelineid, create_control_file)?;
+                    self.timeline.set(
+                        &self.conf,
+                        ZTenantTimelineId::new(tenantid, timelineid),
+                        create_control_file,
+                    )?;
                 }
             }
         }
