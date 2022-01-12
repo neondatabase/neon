@@ -149,9 +149,11 @@ impl Repository for LayeredRepository {
                 LayeredTimelineEntry::Remote {
                     id,
                     disk_consistent_lsn,
+                    awaits_download,
                 } => RepositoryTimeline::Remote {
                     id,
                     disk_consistent_lsn,
+                    awaits_download,
                 },
             },
         )
@@ -317,12 +319,20 @@ impl Repository for LayeredRepository {
                 None
             }
             TimelineSyncState::Evicted(_) => timelines_accessor.remove(&timeline_id),
-            TimelineSyncState::AwaitsDownload(disk_consistent_lsn)
-            | TimelineSyncState::CloudOnly(disk_consistent_lsn) => timelines_accessor.insert(
+            TimelineSyncState::AwaitsDownload(disk_consistent_lsn) => timelines_accessor.insert(
                 timeline_id,
                 LayeredTimelineEntry::Remote {
                     id: timeline_id,
                     disk_consistent_lsn,
+                    awaits_download: true,
+                },
+            ),
+            TimelineSyncState::CloudOnly(disk_consistent_lsn) => timelines_accessor.insert(
+                timeline_id,
+                LayeredTimelineEntry::Remote {
+                    id: timeline_id,
+                    disk_consistent_lsn,
+                    awaits_download: false,
                 },
             ),
         };
@@ -388,6 +398,7 @@ enum LayeredTimelineEntry {
         id: ZTimelineId,
         /// metadata contents of the latest successfully uploaded checkpoint
         disk_consistent_lsn: Lsn,
+        awaits_download: bool,
     },
 }
 
@@ -404,13 +415,19 @@ impl LayeredTimelineEntry {
         match self {
             Self::Local(local) => Some(local.as_ref()),
             Self::Remote {
-                id: timeline_id, ..
+                id: timeline_id,
+                awaits_download,
+                ..
             } => {
-                debug!(
-                    "Accessed a remote timeline {} for tenant {}, scheduling a timeline download",
-                    timeline_id, tenant_id
-                );
-                schedule_timeline_download(tenant_id, *timeline_id);
+                if *awaits_download {
+                    debug!("timeline {} already scheduled for download", timeline_id,);
+                } else {
+                    debug!(
+                        "Accessed a remote timeline {} for tenant {}, scheduling a timeline download",
+                        timeline_id, tenant_id
+                    );
+                    schedule_timeline_download(tenant_id, *timeline_id);
+                }
                 None
             }
         }

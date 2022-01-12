@@ -78,6 +78,7 @@ pub enum RepositoryTimeline {
         id: ZTimelineId,
         /// metadata contents of the latest successfully uploaded checkpoint
         disk_consistent_lsn: Lsn,
+        awaits_download: bool,
     },
 }
 
