@@ -32,12 +32,13 @@
 //! only a single tenant or timeline.
 //!
 
+use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -152,12 +153,9 @@ where
 
     let thread_rc = Arc::new(thread);
 
-    let mut jh_guard = thread_rc.join_handle.lock().unwrap();
+    let mut jh_guard = thread_rc.join_handle.lock();
 
-    THREADS
-        .lock()
-        .unwrap()
-        .insert(thread_id, Arc::clone(&thread_rc));
+    THREADS.lock().insert(thread_id, Arc::clone(&thread_rc));
 
     let thread_rc2 = Arc::clone(&thread_rc);
     let join_handle = match thread::Builder::new()
@@ -167,7 +165,7 @@ where
         Ok(handle) => handle,
         Err(err) => {
             // Could not spawn the thread. Remove the entry
-            THREADS.lock().unwrap().remove(&thread_id);
+            THREADS.lock().remove(&thread_id);
             return Err(err);
         }
     };
@@ -201,7 +199,7 @@ fn thread_wrapper<F, E>(
     let result = panic::catch_unwind(AssertUnwindSafe(f));
 
     // Remove our entry from the global hashmap.
-    THREADS.lock().unwrap().remove(&thread_id);
+    THREADS.lock().remove(&thread_id);
 
     // If the thread payload panic'd, exit with the panic.
     if let Err(err) = result {
@@ -230,7 +228,7 @@ pub fn shutdown_threads(
 ) {
     let mut victim_threads = Vec::new();
 
-    let threads = THREADS.lock().unwrap();
+    let threads = THREADS.lock();
     for thread in threads.values() {
         if (kind.is_none() || Some(thread.kind) == kind)
             && (tenant_id.is_none() || thread.tenant_id == tenant_id)
@@ -246,7 +244,7 @@ pub fn shutdown_threads(
 
     for thread in victim_threads {
         info!("waiting for {} to shut down", thread.name);
-        if let Some(join_handle) = thread.join_handle.lock().unwrap().take() {
+        if let Some(join_handle) = thread.join_handle.lock().take() {
             let _ = join_handle.join();
         } else {
             // The thread had not even fully started yet. Or it was shut down

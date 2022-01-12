@@ -32,12 +32,12 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use log::*;
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter, ChapterWriter};
 
@@ -269,7 +269,7 @@ impl ImageLayer {
     ///
     fn load(&self) -> Result<MutexGuard<ImageLayerInner>> {
         // quick exit if already loaded
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
 
         if inner.book.is_some() {
             return Ok(inner);

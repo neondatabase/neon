@@ -52,13 +52,13 @@ use serde::{Deserialize, Serialize};
 use zenith_utils::vec_map::VecMap;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
+use parking_lot::{Mutex, MutexGuard};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 use bookfile::{Book, BookWriter, BoundedReader, ChapterWriter};
 
@@ -317,7 +317,7 @@ impl Layer for DeltaLayer {
     /// it will need to be loaded back.
     ///
     fn unload(&self) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.page_version_metas = VecMap::default();
         inner.seg_sizes = VecMap::default();
         inner.loaded = false;
@@ -411,7 +411,7 @@ impl DeltaLayer {
     ///
     fn load(&self) -> Result<MutexGuard<DeltaLayerInner>> {
         // quick exit if already loaded
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
 
         if inner.loaded {
             return Ok(inner);
