@@ -843,13 +843,17 @@ impl ZenithFeedback {
     pub fn serialize(&self, buf: &mut BytesMut) -> Result<()> {
         buf.put_u8(ZENITH_FEEDBACK_FIELDS_NUMBER); // # of keys
         write_cstr(&Bytes::from("current_instance_size"), buf)?;
+        buf.put_i32(64);
         buf.put_u64(self.current_instance_size);
 
         write_cstr(&Bytes::from("ps_writelsn"), buf)?;
+        buf.put_i32(64);
         buf.put_u64(self.ps_writelsn);
         write_cstr(&Bytes::from("ps_flushlsn"), buf)?;
+        buf.put_i32(64);
         buf.put_u64(self.ps_flushlsn);
         write_cstr(&Bytes::from("ps_applylsn"), buf)?;
+        buf.put_i32(64);
         buf.put_u64(self.ps_applylsn);
 
         let timestamp = match self.ps_replytime.duration_since(*PG_EPOCH) {
@@ -858,6 +862,7 @@ impl ZenithFeedback {
         };
 
         write_cstr(&Bytes::from("ps_replytime"), buf)?;
+        buf.put_i32(64);
         buf.put_i64(timestamp);
         Ok(())
     }
@@ -872,18 +877,28 @@ impl ZenithFeedback {
             let key = cstr_to_str(&key_cstr).unwrap();
             match key {
                 "current_instance_size" => {
+                    let len = buf.get_i32();
+                    assert_eq!(len, 64);
                     zf.current_instance_size = buf.get_u64();
                 }
                 "ps_writelsn" => {
+                    let len = buf.get_i32();
+                    assert_eq!(len, 64);
                     zf.ps_writelsn = buf.get_u64();
                 }
                 "ps_flushlsn" => {
+                    let len = buf.get_i32();
+                    assert_eq!(len, 64);
                     zf.ps_flushlsn = buf.get_u64();
                 }
                 "ps_applylsn" => {
+                    let len = buf.get_i32();
+                    assert_eq!(len, 64);
                     zf.ps_applylsn = buf.get_u64();
                 }
                 "ps_replytime" => {
+                    let len = buf.get_i32();
+                    assert_eq!(len, 64);
                     let raw_time = buf.get_i64();
                     if raw_time > 0 {
                         zf.ps_replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
@@ -892,7 +907,12 @@ impl ZenithFeedback {
                     }
                 }
                 _ => {
-                    info!("ZenithFeedback parse. unknown key {}", key)
+                    let len = buf.get_i32();
+                    info!(
+                        "ZenithFeedback parse. unknown key {} of len {}. Skip it.",
+                        key, len
+                    );
+                    buf.advance(len as usize);
                 }
             }
         }
