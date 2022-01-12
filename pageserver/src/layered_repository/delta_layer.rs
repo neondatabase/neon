@@ -247,7 +247,19 @@ impl Layer for DeltaLayer {
                     _ => {}
                 }
 
-                let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
+                let labels = [
+                    "read",
+                    &self.tenantid.to_string(),
+                    &self.timelineid.to_string(),
+                ];
+                let blob = STORAGE_IO_TIME
+                    .with_label_values(&labels)
+                    .observe_closure_duration(|| read_blob(&page_version_reader, blob_range))?;
+                STORAGE_IO_SIZE
+                    .with_label_values(&labels)
+                    .add(blob.len() as i64);
+
+                let pv = PageVersion::des(&blob)?;
 
                 match pv {
                     PageVersion::Page(img) => {
