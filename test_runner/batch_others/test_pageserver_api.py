@@ -100,7 +100,7 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: str):
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) > 0
     for timeline_id_str in timelines:
-        timeline_details = client.timeline_details(tenant_id.hex, timeline_id_str)
+        timeline_details = client.timeline_detail(tenant_id, UUID(timeline_id_str))
         assert timeline_details['type'] == 'Local'
         assert timeline_details['tenant_id'] == tenant_id.hex
         assert timeline_details['timeline_id'] == timeline_id_str

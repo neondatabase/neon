@@ -725,6 +725,16 @@ class ZenithPageserverHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def timeline_attach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/attach", )
+        res.raise_for_status()
+
+    def timeline_detach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/detach", )
+        res.raise_for_status()
+
     def branch_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
         res.raise_for_status()
@@ -777,8 +787,9 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def timeline_details(self, tenant_id: str, timeline_id: str) -> Dict[Any, Any]:
-        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
+    def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+        res = self.get(
+            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}")
         res.raise_for_status()
         res_json = res.json()
         assert isinstance(res_json, dict)

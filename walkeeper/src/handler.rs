@@ -30,6 +30,7 @@ pub struct SafekeeperPostgresHandler {
     pub ztenantid: Option<ZTenantId>,
     pub ztimelineid: Option<ZTimelineId>,
     pub timeline: Option<Arc<Timeline>>,
+    pageserver_connstr: Option<String>,
     //sender to communicate with callmemaybe thread
     pub tx: UnboundedSender<CallmeEvent>,
 }
@@ -88,6 +89,8 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
                 self.appname = Some(app_name.clone());
             }
 
+            self.pageserver_connstr = params.get("pageserver_connstr").cloned();
+
             Ok(())
         } else {
             bail!("Walkeeper received unexpected initial message: {:?}", sm);
@@ -127,7 +130,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             }
             SafekeeperPostgresCommand::StartReplication { start_lsn } => {
                 ReplicationConn::new(pgb)
-                    .run(self, pgb, start_lsn)
+                    .run(self, pgb, start_lsn, self.pageserver_connstr.clone())
                     .context("failed to run ReplicationConn")?;
             }
             SafekeeperPostgresCommand::IdentifySystem => {
@@ -149,6 +152,7 @@ impl SafekeeperPostgresHandler {
             ztenantid: None,
             ztimelineid: None,
             timeline: None,
+            pageserver_connstr: None,
             tx,
         }
     }

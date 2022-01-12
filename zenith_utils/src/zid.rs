@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 // Zenith ID is a 128-bit random ID.
 // Used to represent various identifiers. Provides handy utility methods and impls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 struct ZId([u8; 16]);
 
 impl ZId {
@@ -59,6 +59,12 @@ impl From<[u8; 16]> for ZId {
 }
 
 impl fmt::Display for ZId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
+
+impl fmt::Debug for ZId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(self.0))
     }
@@ -118,6 +124,12 @@ macro_rules! zid_newtype {
                 self.0.fmt(f)
             }
         }
+
+        impl fmt::Debug for $t {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
     };
 }
 
@@ -143,14 +155,14 @@ macro_rules! zid_newtype {
 /// is separate from PostgreSQL timelines, and doesn't have those
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ZTimelineId(ZId);
 
 zid_newtype!(ZTimelineId);
 
 // Zenith Tenant Id represents identifiar of a particular tenant.
 // Is used for distinguishing requests and data belonging to different users.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ZTenantId(ZId);
 
 zid_newtype!(ZTenantId);

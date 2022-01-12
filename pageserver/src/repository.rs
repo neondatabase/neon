@@ -19,6 +19,8 @@ pub type BlockNumber = u32;
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
+    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
+
     /// Updates timeline based on the new sync state, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
     fn set_timeline_state(
@@ -242,7 +244,7 @@ pub trait Timeline: Send + Sync {
     fn get_current_logical_size(&self) -> usize;
 
     /// Does the same as get_current_logical_size but counted on demand.
-    /// Used in tests to ensure thet incremental and non incremental variants match.
+    /// Used in tests to ensure that incremental and non incremental variants match.
     fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize>;
 
     /// An escape hatch to allow "casting" a generic Timeline to LayeredTimeline.

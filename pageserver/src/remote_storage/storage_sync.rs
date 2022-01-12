@@ -333,6 +333,10 @@ pub fn schedule_timeline_checkpoint_upload(
 ///
 /// Ensure that the loop is started otherwise the task is never processed.
 pub fn schedule_timeline_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
+    debug!(
+        "Scheduling timeline download for tenant {}, timeline {}",
+        tenant_id, timeline_id
+    );
     sync_queue::push(SyncTask::new(
         TimelineSyncId(tenant_id, timeline_id),
         0,
