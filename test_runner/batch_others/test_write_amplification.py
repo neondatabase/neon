@@ -17,10 +17,10 @@ def test_write_amplification(zenith_simple_env: ZenithEnv):
     env.zenith_cli(["branch", "test_write_amplification", "empty"])
     pg = env.postgres.create_start('test_write_amplification')
     n_iterations = 3
-#    n_iterations = 100
+    #    n_iterations = 100
     seg_size = 10 * 1024 * 1024
-#    n_segments = 10 * 1024 # 100Gb
-    n_segments = 100 # 1Gb
+    #    n_segments = 10 * 1024 # 100Gb
+    n_segments = 100  # 1Gb
     payload_size = 100
     header_size = 28
     tuple_size = header_size + payload_size
@@ -38,10 +38,15 @@ def test_write_amplification(zenith_simple_env: ZenithEnv):
                     timeline = cur.fetchone()[0]
 
                     # Create a test table
-                    cur.execute("CREATE TABLE Big(pk integer primary key, count integer default 0, payload text default repeat(' ', 100))")
+                    cur.execute(
+                        "CREATE TABLE Big(pk integer primary key, count integer default 0, payload text default repeat(' ', 100))"
+                    )
                     # populate ~100Gb in Big
-                    cur.execute(f"INSERT INTO Big (pk) values (generate_series(1,{big_table_size}))");
-                    cur.execute(f"CREATE TABLE Small(pk integer, payload text default repeat(' ', {payload_size}))")
+                    cur.execute(
+                        f"INSERT INTO Big (pk) values (generate_series(1,{big_table_size}))")
+                    cur.execute(
+                        f"CREATE TABLE Small(pk integer, payload text default repeat(' ', {payload_size}))"
+                    )
                     for i in range(n_iterations):
                         print(f"Iteration {i}")
                         # update random keys
@@ -50,7 +55,9 @@ def test_write_amplification(zenith_simple_env: ZenithEnv):
                             cur.execute(f"update Big set count=count+1 where pk={key}")
 
                         # bulk insert small table to trigger checkpoint distance
-                        cur.execute(f"insert into Small (pk) values (generate_series(1, {small_table_size}))")
+                        cur.execute(
+                            f"insert into Small (pk) values (generate_series(1, {small_table_size}))"
+                        )
                         # And truncate it to avoid database size explosion
                         cur.execute("truncate Small")
                         # Run GC to force checkpoint and save image layers
@@ -59,4 +66,6 @@ def test_write_amplification(zenith_simple_env: ZenithEnv):
                         print_gc_result(row)
     # Wait forever to be able to inspect statistic
     print('Test completed')
+
+
 #    time.sleep(100000)
