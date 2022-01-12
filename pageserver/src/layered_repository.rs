@@ -554,8 +554,8 @@ impl LayeredRepository {
 
         let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
 
-        let tenantid_str = self.tenantid.to_string();
-        let timelineid_str = self.timelineid.to_string();
+        let tenantid_str = tenantid.to_string();
+        let timelineid_str = timelineid.to_string();
         let rc = STORAGE_IO_TIME
             .with_label_values(&["write", &tenantid_str, &timelineid_str])
             .observe_closure_duration(|| file.write(&metadata_bytes))?;
