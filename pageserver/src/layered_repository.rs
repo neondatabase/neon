@@ -622,7 +622,6 @@ impl LayeredRepository {
             };
 
             if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
-                drop(timelines);
                 let ancestor_timeline =
                     match ancestor_timeline.local_or_schedule_download(self.tenantid) {
                         Some(timeline) => timeline,
@@ -646,7 +645,6 @@ impl LayeredRepository {
                 else {
                     all_branchpoints.insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
                 }
-                timelines = self.timelines.lock().unwrap();
             }
         }
 
@@ -675,6 +673,7 @@ impl LayeredRepository {
             }
 
             if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
+                drop(timelines);
                 let branchpoints: Vec<Lsn> = all_branchpoints
                     .range((
                         Included((timelineid, Lsn(0))),
@@ -694,6 +693,7 @@ impl LayeredRepository {
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
 
                 totals += result;
+                timelines = self.timelines.lock().unwrap();
             }
         }
 
