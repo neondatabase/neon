@@ -41,8 +41,8 @@ use crate::config::PageServerConf;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
-    RELISH_SEG_SIZE,
 };
+use crate::layered_repository::{RELISH_SEG_SIZE, STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
@@ -425,10 +425,20 @@ impl DeltaLayer {
             inner.book = Some(Book::new(file)?);
         }
         let book = inner.book.as_ref().unwrap();
+        let labels = [
+            "read",
+            &self.tenantid.to_string(),
+            &self.timelineid.to_string(),
+        ];
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
-                let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+                let chapter = STORAGE_IO_TIME
+                    .with_label_values(&labels)
+                    .observe_closure_duration(|| book.read_chapter(SUMMARY_CHAPTER))?;
+                STORAGE_IO_SIZE
+                    .with_label_values(&labels)
+                    .add(chapter.len() as i64);
                 let actual_summary = Summary::des(&chapter)?;
 
                 let expected_summary = Summary::from(self);
@@ -451,10 +461,20 @@ impl DeltaLayer {
             }
         }
 
-        let chapter = book.read_chapter(PAGE_VERSION_METAS_CHAPTER)?;
+        let chapter = STORAGE_IO_TIME
+            .with_label_values(&labels)
+            .observe_closure_duration(|| book.read_chapter(PAGE_VERSION_METAS_CHAPTER))?;
+        STORAGE_IO_SIZE
+            .with_label_values(&labels)
+            .add(chapter.len() as i64);
         let page_version_metas = VecMap::des(&chapter)?;
 
-        let chapter = book.read_chapter(SEG_SIZES_CHAPTER)?;
+        let chapter = STORAGE_IO_TIME
+            .with_label_values(&labels)
+            .observe_closure_duration(|| book.read_chapter(SEG_SIZES_CHAPTER))?;
+        STORAGE_IO_SIZE
+            .with_label_values(&labels)
+            .add(chapter.len() as i64);
         let seg_sizes = VecMap::des(&chapter)?;
 
         debug!("loaded from {}", &path.display());
@@ -499,6 +519,14 @@ impl DeltaLayer {
     {
         let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
         let summary = Summary::des(&chapter)?;
+        let labels = [
+            "read",
+            &summary.tenantid.to_string(),
+            &summary.timelineid.to_string(),
+        ];
+        STORAGE_IO_SIZE
+            .with_label_values(&labels)
+            .add(chapter.len() as i64);
 
         Ok(DeltaLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
@@ -631,7 +659,17 @@ impl DeltaLayerWriter {
             .unwrap();
 
         // write the page version
-        self.page_version_writer.write_all(buf)?;
+        let labels = [
+            "write",
+            &self.tenantid.to_string(),
+            &self.timelineid.to_string(),
+        ];
+        STORAGE_IO_TIME
+            .with_label_values(&labels)
+            .observe_closure_duration(|| self.page_version_writer.write_all(buf))?;
+        STORAGE_IO_SIZE
+            .with_label_values(&labels)
+            .add(buf.len() as i64);
         self.pv_offset += buf.len() as u64;
 
         Ok(())
@@ -644,13 +682,26 @@ impl DeltaLayerWriter {
     ///
     pub fn finish(self, seg_sizes: VecMap<Lsn, SegmentBlk>) -> Result<DeltaLayer> {
         // Close the page-versions chapter
+        let tenantid_str = self.tenantid.to_string();
+        let timelineid_str = self.timelineid.to_string();
+        let write_labels = ["write", &tenantid_str, &timelineid_str];
+        let close_labels = ["close", &tenantid_str, &timelineid_str];
+
         let book = self.page_version_writer.close()?;
 
         // Write out page versions metadata
         let mut chapter = book.new_chapter(PAGE_VERSION_METAS_CHAPTER);
         let buf = VecMap::ser(&self.page_version_metas)?;
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
+        STORAGE_IO_TIME
+            .with_label_values(&write_labels)
+            .observe_closure_duration(|| chapter.write_all(&buf))?;
+        STORAGE_IO_SIZE
+            .with_label_values(&write_labels)
+            .add(buf.len() as i64);
+
+        let book = STORAGE_IO_TIME
+            .with_label_values(&close_labels)
+            .observe_closure_duration(|| chapter.close())?;
 
         if self.seg.rel.is_blocky() {
             assert!(!seg_sizes.is_empty());
@@ -659,8 +710,15 @@ impl DeltaLayerWriter {
         // and seg_sizes to separate chapter
         let mut chapter = book.new_chapter(SEG_SIZES_CHAPTER);
         let buf = VecMap::ser(&seg_sizes)?;
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
+        STORAGE_IO_TIME
+            .with_label_values(&write_labels)
+            .observe_closure_duration(|| chapter.write_all(&buf))?;
+        STORAGE_IO_SIZE
+            .with_label_values(&write_labels)
+            .add(buf.len() as i64);
+        let book = STORAGE_IO_TIME
+            .with_label_values(&close_labels)
+            .observe_closure_duration(|| chapter.close())?;
 
         let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
         let summary = Summary {
@@ -673,11 +731,21 @@ impl DeltaLayerWriter {
 
             dropped: self.dropped,
         };
-        Summary::ser_into(&summary, &mut chapter)?;
-        let book = chapter.close()?;
+        STORAGE_IO_TIME
+            .with_label_values(&write_labels)
+            .observe_closure_duration(|| Summary::ser_into(&summary, &mut chapter))?;
+        STORAGE_IO_SIZE
+            .with_label_values(&write_labels)
+            .add(summary.ser()?.len() as i64);
+
+        let book = STORAGE_IO_TIME
+            .with_label_values(&close_labels)
+            .observe_closure_duration(|| chapter.close())?;
 
         // This flushes the underlying 'buf_writer'.
-        book.close()?;
+        STORAGE_IO_TIME
+            .with_label_values(&close_labels)
+            .observe_closure_duration(|| book.close())?;
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't

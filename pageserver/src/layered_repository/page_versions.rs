@@ -39,6 +39,10 @@ impl PageVersions {
         }
     }
 
+    pub fn len(&mut self) -> Result<u64> {
+        Ok(self.file.stream_position()?)
+    }
+
     pub fn append_or_update_last(
         &mut self,
         blknum: u32,
@@ -101,10 +105,10 @@ impl PageVersions {
     ///
     /// Read a page version.
     ///
-    pub fn read_pv(&self, off: u64) -> Result<PageVersion> {
+    pub fn read_pv(&self, off: u64) -> Result<(PageVersion, usize)> {
         let mut buf = Vec::new();
         self.read_pv_bytes(off, &mut buf)?;
-        Ok(PageVersion::des(&buf)?)
+        Ok((PageVersion::des(&buf)?, buf.len()))
     }
 
     ///

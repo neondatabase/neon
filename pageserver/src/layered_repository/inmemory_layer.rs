@@ -11,10 +11,10 @@ use crate::layered_repository::filename::DeltaFileName;
 use crate::layered_repository::image_layer::{ImageLayer, ImageLayerWriter};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
-    RELISH_SEG_SIZE,
 };
 use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
+use crate::layered_repository::{RELISH_SEG_SIZE, STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use crate::repository::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
@@ -178,7 +178,15 @@ impl Layer for InMemoryLayer {
                     _ => {}
                 }
 
-                let pv = inner.page_versions.read_pv(*pos)?;
+                let labels = [
+                    "read",
+                    &self.tenantid.to_string(),
+                    &self.timelineid.to_string(),
+                ];
+                let (pv, size) = STORAGE_IO_TIME
+                    .with_label_values(&labels)
+                    .observe_closure_duration(|| inner.page_versions.read_pv(*pos))?;
+                STORAGE_IO_SIZE.with_label_values(&labels).add(size as i64);
                 match pv {
                     PageVersion::Page(img) => {
                         reconstruct_data.page_img = Some(img);
@@ -297,8 +305,16 @@ impl Layer for InMemoryLayer {
             println!("seg_sizes {}: {}", k, v);
         }
 
+        let labels = [
+            "read",
+            &self.tenantid.to_string(),
+            &self.timelineid.to_string(),
+        ];
         for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
-            let pv = inner.page_versions.read_pv(pos)?;
+            let (pv, size) = STORAGE_IO_TIME
+                .with_label_values(&labels)
+                .observe_closure_duration(|| inner.page_versions.read_pv(pos))?;
+            STORAGE_IO_SIZE.with_label_values(&labels).add(size as i64);
             let pv_description = match pv {
                 PageVersion::Page(_img) => "page",
                 PageVersion::Wal(_rec) => "wal",
@@ -440,11 +456,25 @@ impl InMemoryLayer {
                         gapblknum,
                         blknum
                     );
-                    let old = inner
-                        .page_versions
-                        .append_or_update_last(gapblknum, lsn, zeropv)?;
-                    // We already had an entry for this LSN. That's odd..
+                    let before = inner.page_versions.len()?;
+                    let labels = [
+                        "write",
+                        &self.tenantid.to_string(),
+                        &self.timelineid.to_string(),
+                    ];
+                    let old = STORAGE_IO_TIME
+                        .with_label_values(&labels)
+                        .observe_closure_duration(|| {
+                            inner
+                                .page_versions
+                                .append_or_update_last(gapblknum, lsn, zeropv)
+                        })?;
+                    let after = inner.page_versions.len()?;
+                    STORAGE_IO_SIZE
+                        .with_label_values(&labels)
+                        .add((after - before) as i64);
 
+                    // We already had an entry for this LSN. That's odd..
                     if old.is_some() {
                         warn!(
                             "Page version of seg {} blk {} at {} already exists",
@@ -656,8 +686,18 @@ impl InMemoryLayer {
             let page_versions_iter = inner
                 .page_versions
                 .ordered_page_version_iter(Some(delta_end_lsn));
+            let labels = [
+                "read",
+                &self.tenantid.to_string(),
+                &self.timelineid.to_string(),
+            ];
             for (blknum, lsn, pos) in page_versions_iter {
-                let len = inner.page_versions.read_pv_bytes(pos, &mut buf)?;
+                let len = STORAGE_IO_TIME
+                    .with_label_values(&labels)
+                    .observe_closure_duration(|| {
+                        inner.page_versions.read_pv_bytes(pos, &mut buf)
+                    })?;
+                STORAGE_IO_SIZE.with_label_values(&labels).add(len as i64);
                 delta_layer_writer.put_page_version(blknum, lsn, &buf[..len])?;
             }
 

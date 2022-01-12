@@ -26,7 +26,7 @@ use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, PageReconstructData, PageReconstructResult, SegmentBlk, SegmentTag,
 };
-use crate::layered_repository::RELISH_SEG_SIZE;
+use crate::layered_repository::{RELISH_SEG_SIZE, STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use crate::virtual_file::VirtualFile;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -150,6 +150,11 @@ impl Layer for ImageLayer {
     ) -> Result<PageReconstructResult> {
         assert!((0..RELISH_SEG_SIZE).contains(&blknum));
         assert!(lsn >= self.lsn);
+        let labels = [
+            "read",
+            &self.tenantid.to_string(),
+            &self.timelineid.to_string(),
+        ];
 
         match cached_img_lsn {
             Some(cached_lsn) if self.lsn <= cached_lsn => return Ok(PageReconstructResult::Cached),
@@ -173,18 +178,29 @@ impl Layer for ImageLayer {
                     .as_ref()
                     .unwrap()
                     .chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
-                chapter.read_exact_at(&mut buf, offset)?;
-
+                STORAGE_IO_TIME
+                    .with_label_values(&labels)
+                    .observe_closure_duration(|| chapter.read_exact_at(&mut buf, offset))?;
+                STORAGE_IO_SIZE
+                    .with_label_values(&labels)
+                    .add(BLOCK_SIZE as i64);
                 buf
             }
             ImageType::NonBlocky => {
                 ensure!(blknum == 0);
-                inner
-                    .book
-                    .as_ref()
-                    .unwrap()
-                    .read_chapter(NONBLOCKY_IMAGE_CHAPTER)?
-                    .into_vec()
+                let chapter = STORAGE_IO_TIME
+                    .with_label_values(&labels)
+                    .observe_closure_duration(|| {
+                        inner
+                            .book
+                            .as_ref()
+                            .unwrap()
+                            .read_chapter(NONBLOCKY_IMAGE_CHAPTER)
+                    })?;
+                STORAGE_IO_SIZE
+                    .with_label_values(&labels)
+                    .add(chapter.len() as i64);
+                chapter.into_vec()
             }
         };
 
@@ -287,7 +303,17 @@ impl ImageLayer {
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
-                let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+                let labels = [
+                    "read",
+                    &self.tenantid.to_string(),
+                    &self.timelineid.to_string(),
+                ];
+                let chapter = STORAGE_IO_TIME
+                    .with_label_values(&labels)
+                    .observe_closure_duration(|| book.read_chapter(SUMMARY_CHAPTER))?;
+                STORAGE_IO_SIZE
+                    .with_label_values(&labels)
+                    .add(chapter.len() as i64);
                 let actual_summary = Summary::des(&chapter)?;
 
                 let expected_summary = Summary::from(self);
@@ -360,6 +386,14 @@ impl ImageLayer {
     {
         let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
         let summary = Summary::des(&chapter)?;
+        let labels = [
+            "read",
+            &summary.tenantid.to_string(),
+            &summary.timelineid.to_string(),
+        ];
+        STORAGE_IO_SIZE
+            .with_label_values(&labels)
+            .add(chapter.len() as i64);
 
         Ok(ImageLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
@@ -472,7 +506,18 @@ impl ImageLayerWriter {
         if self.seg.rel.is_blocky() {
             assert_eq!(block_bytes.len(), BLOCK_SIZE);
         }
-        self.page_image_writer.write_all(block_bytes)?;
+        let labels = [
+            "write",
+            &self.tenantid.to_string(),
+            &self.timelineid.to_string(),
+        ];
+        STORAGE_IO_TIME
+            .with_label_values(&labels)
+            .observe_closure_duration(|| self.page_image_writer.write_all(block_bytes))?;
+        STORAGE_IO_SIZE
+            .with_label_values(&labels)
+            .add(block_bytes.len() as i64);
+
         self.num_blocks_written += 1;
         Ok(())
     }
@@ -482,6 +527,11 @@ impl ImageLayerWriter {
         assert!(self.num_blocks_written == self.num_blocks);
 
         // Close the page-images chapter
+        let labels = [
+            "close",
+            &self.tenantid.to_string(),
+            &self.timelineid.to_string(),
+        ];
         let book = self.page_image_writer.close()?;
 
         // Write out the summary chapter
@@ -500,10 +550,14 @@ impl ImageLayerWriter {
             lsn: self.lsn,
         };
         Summary::ser_into(&summary, &mut chapter)?;
-        let book = chapter.close()?;
+        let book = STORAGE_IO_TIME
+            .with_label_values(&labels)
+            .observe_closure_duration(|| chapter.close())?;
 
         // This flushes the underlying 'buf_writer'.
-        book.close()?;
+        STORAGE_IO_TIME
+            .with_label_values(&labels)
+            .observe_closure_duration(|| book.close())?;
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't

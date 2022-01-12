@@ -117,6 +117,35 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+// Metrics collected on disk IO operations
+const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
+    0.000001, // 1 usec
+    0.00001,  // 10 usec
+    0.0001,   // 100 usec
+    0.001,    // 1 msec
+    0.01,     // 10 msec
+    0.1,      // 100 msec
+    1.0,      // 1 sec
+];
+
+lazy_static! {
+    static ref STORAGE_IO_TIME: HistogramVec = register_histogram_vec!(
+        "pageserver_io_time",
+        "Time spent in IO operations",
+        &["operation", "tenant_id", "timeline_id"],
+        STORAGE_IO_TIME_BUCKETS.into()
+    )
+    .expect("failed to define a metric");
+}
+lazy_static! {
+    static ref STORAGE_IO_SIZE: IntGaugeVec = register_int_gauge_vec!(
+        "pageserver_io_size",
+        "Amount of bytes",
+        &["operation", "tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
 /// Parts of the `.zenith/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
@@ -342,7 +371,11 @@ impl Repository for LayeredRepository {
     /// [`TimelineSyncState::Evicted`] and other non-local and non-remote states are not stored in the layered repo at all,
     /// hence their statuses cannot be returned by the repo.
     fn get_timeline_state(&self, timeline_id: ZTimelineId) -> Option<TimelineSyncState> {
+        let now = Instant::now();
         let timelines_accessor = self.timelines.lock().unwrap();
+        if now.elapsed() > Duration::from_secs(10) {
+            info!("get_timeline_state wait lock {:?}", now.elapsed());
+        }
         let timeline_entry = timelines_accessor.get(&timeline_id)?;
         Some(
             if timeline_entry
@@ -1527,7 +1560,14 @@ impl LayeredTimeline {
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
-            par_fsync::par_fsync(&layer_paths)?;
+            let labels = [
+                "fsync",
+                &self.tenantid.to_string(),
+                &self.timelineid.to_string(),
+            ];
+            STORAGE_IO_TIME
+                .with_label_values(&labels)
+                .observe_closure_duration(|| par_fsync::par_fsync(&layer_paths))?;
 
             layer_paths.pop().unwrap();
         }
