@@ -843,17 +843,17 @@ impl ZenithFeedback {
     pub fn serialize(&self, buf: &mut BytesMut) -> Result<()> {
         buf.put_u8(ZENITH_FEEDBACK_FIELDS_NUMBER); // # of keys
         write_cstr(&Bytes::from("current_instance_size"), buf)?;
-        buf.put_i32(64);
+        buf.put_i32(8);
         buf.put_u64(self.current_instance_size);
 
         write_cstr(&Bytes::from("ps_writelsn"), buf)?;
-        buf.put_i32(64);
+        buf.put_i32(8);
         buf.put_u64(self.ps_writelsn);
         write_cstr(&Bytes::from("ps_flushlsn"), buf)?;
-        buf.put_i32(64);
+        buf.put_i32(8);
         buf.put_u64(self.ps_flushlsn);
         write_cstr(&Bytes::from("ps_applylsn"), buf)?;
-        buf.put_i32(64);
+        buf.put_i32(8);
         buf.put_u64(self.ps_applylsn);
 
         let timestamp = match self.ps_replytime.duration_since(*PG_EPOCH) {
@@ -862,7 +862,7 @@ impl ZenithFeedback {
         };
 
         write_cstr(&Bytes::from("ps_replytime"), buf)?;
-        buf.put_i32(64);
+        buf.put_i32(8);
         buf.put_i64(timestamp);
         Ok(())
     }
@@ -878,27 +878,27 @@ impl ZenithFeedback {
             match key {
                 "current_instance_size" => {
                     let len = buf.get_i32();
-                    assert_eq!(len, 64);
+                    assert_eq!(len, 8);
                     zf.current_instance_size = buf.get_u64();
                 }
                 "ps_writelsn" => {
                     let len = buf.get_i32();
-                    assert_eq!(len, 64);
+                    assert_eq!(len, 8);
                     zf.ps_writelsn = buf.get_u64();
                 }
                 "ps_flushlsn" => {
                     let len = buf.get_i32();
-                    assert_eq!(len, 64);
+                    assert_eq!(len, 8);
                     zf.ps_flushlsn = buf.get_u64();
                 }
                 "ps_applylsn" => {
                     let len = buf.get_i32();
-                    assert_eq!(len, 64);
+                    assert_eq!(len, 8);
                     zf.ps_applylsn = buf.get_u64();
                 }
                 "ps_replytime" => {
                     let len = buf.get_i32();
-                    assert_eq!(len, 64);
+                    assert_eq!(len, 8);
                     let raw_time = buf.get_i64();
                     if raw_time > 0 {
                         zf.ps_replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
@@ -912,11 +912,57 @@ impl ZenithFeedback {
                         "ZenithFeedback parse. unknown key {} of len {}. Skip it.",
                         key, len
                     );
+                    println!("{}", key);
                     buf.advance(len as usize);
                 }
             }
         }
         info!("ZenithFeedback parsed is {:?}", zf);
         zf
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zenithfeedback_serialization() {
+        let mut zf = ZenithFeedback::empty();
+        // Fill zf wih some values
+        zf.current_instance_size = 12345678;
+        // Set rounded time to be able to compare it with deserialized value,
+        // because it is rounded up to microseconds during serialization.
+        zf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        let mut data = BytesMut::new();
+        zf.serialize(&mut data).unwrap();
+
+        let zf_parsed = ZenithFeedback::parse(data.freeze());
+        assert_eq!(zf, zf_parsed);
+    }
+
+    #[test]
+    fn test_zenithfeedback_unknown_key() {
+        let mut zf = ZenithFeedback::empty();
+        // Fill zf wih some values
+        zf.current_instance_size = 12345678;
+        // Set rounded time to be able to compare it with deserialized value,
+        // because it is rounded up to microseconds during serialization.
+        zf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        let mut data = BytesMut::new();
+        zf.serialize(&mut data).unwrap();
+
+        // Add an extra field to the buffer and adjust number of keys
+        if let Some(first) = data.first_mut() {
+            *first = ZENITH_FEEDBACK_FIELDS_NUMBER + 1;
+        }
+
+        write_cstr(&Bytes::from("new_field_one"), &mut data).unwrap();
+        data.put_i32(8);
+        data.put_u64(42);
+
+        // Parse serialized data and check that new field is not parsed
+        let zf_parsed = ZenithFeedback::parse(data.freeze());
+        assert_eq!(zf, zf_parsed);
     }
 }
