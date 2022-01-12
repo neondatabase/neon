@@ -18,10 +18,9 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::TimelineTools;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::ZTenantId;
 
 use crate::callmemaybe::CallmeEvent;
-use tokio::sync::mpsc::UnboundedSender;
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -106,13 +105,11 @@ impl<'pg> ReceiveWalConn<'pg> {
                 // Add far as replication in postgres is initiated by receiver
                 // we should use callmemaybe mechanism.
                 let timelineid = spg.timeline.get().timelineid;
-                let tx_clone = spg.tx.clone();
-                let pageserver_connstr = pageserver_connstr.to_owned();
                 spg.tx
                     .send(CallmeEvent::Subscribe(
                         tenant_id,
                         timelineid,
-                        pageserver_connstr,
+                        pageserver_connstr.to_owned(),
                     ))
                     .unwrap_or_else(|e| {
                         error!(
@@ -123,9 +120,6 @@ impl<'pg> ReceiveWalConn<'pg> {
 
                 // create a guard to unsubscribe callback, when this wal_stream will exit
                 Some(SendWalHandlerGuard {
-                    _tx: tx_clone,
-                    _tenant_id: tenant_id,
-                    _timelineid: timelineid,
                     timeline: Arc::clone(spg.timeline.get()),
                 })
             }
@@ -147,22 +141,11 @@ impl<'pg> ReceiveWalConn<'pg> {
 }
 
 struct SendWalHandlerGuard {
-    _tx: UnboundedSender<CallmeEvent>,
-    _tenant_id: ZTenantId,
-    _timelineid: ZTimelineId,
     timeline: Arc<Timeline>,
 }
 
 impl Drop for SendWalHandlerGuard {
     fn drop(&mut self) {
         self.timeline.stop_streaming();
-        // self.tx
-        //     .send(CallmeEvent::Unsubscribe(self.tenant_id, self.timelineid))
-        //     .unwrap_or_else(|e| {
-        //         error!(
-        //             "failed to send Unsubscribe request to callmemaybe thread {}",
-        //             e
-        //         );
-        //     });
     }
 }

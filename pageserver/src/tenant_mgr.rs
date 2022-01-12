@@ -73,6 +73,7 @@ pub fn set_timeline_states(
     let mut m = access_tenants();
     for (tenant_id, timeline_states) in timeline_states {
         let tenant = m.entry(tenant_id).or_insert_with(|| {
+            // TODO (rodionov) reuse one of the initialisation routines
             // Set up a WAL redo manager, for applying WAL records.
             let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 

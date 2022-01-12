@@ -25,6 +25,7 @@ use zenith_utils::zid::{opt_display_serde, ZTimelineId};
 use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
+use crate::repository::RepositoryTimeline;
 use crate::repository::TimelineSyncState;
 use crate::{branches, config::PageServerConf, tenant_mgr, ZTenantId};
 
@@ -247,6 +248,58 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     Ok(json_response(StatusCode::OK, response_data)?)
 }
 
+async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+
+    tokio::task::spawn_blocking(move || {
+        let _enter =
+            info_span!("timeline_attach_handler", tenant = %tenant_id, timeline = %timeline_id)
+                .entered();
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        match repo.get_timeline(timeline_id)? {
+            RepositoryTimeline::Local(_) => {
+                anyhow::bail!("Timeline with id {} is already local", timeline_id)
+            }
+            RepositoryTimeline::Remote {
+                id: _,
+                disk_consistent_lsn: _,
+            } => {
+                // FIXME (rodionov) get timeline already schedules timeline for download, and duplicate tasks can cause errors
+                //  first should be fixed in https://github.com/zenithdb/zenith/issues/997
+                // TODO (rodionov) change timeline state to awaits download (incapsulate it somewhere in the repo)
+                // TODO (rodionov) can we safely request replication on the timeline before sync is completed? (can be implemented on top of the #997)
+                Ok(())
+            }
+        }
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
+    Ok(json_response(StatusCode::ACCEPTED, ())?)
+}
+
+async fn timeline_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+
+    tokio::task::spawn_blocking(move || {
+        let _enter =
+            info_span!("timeline_detach_handler", tenant = %tenant_id, timeline = %timeline_id)
+                .entered();
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        repo.detach_timeline(timeline_id)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
+    Ok(json_response(StatusCode::OK, ())?)
+}
+
 async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     // check for management permission
     check_permission(&request, None)?;
@@ -267,13 +320,13 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
-    let response_data = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id).entered();
         tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
     })
     .await
     .map_err(ApiError::from_err)??;
-    Ok(json_response(StatusCode::CREATED, response_data)?)
+    Ok(json_response(StatusCode::CREATED, ())?)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -307,6 +360,14 @@ pub fn make_router(
         .get(
             "/v1/timeline/:tenant_id/:timeline_id",
             timeline_detail_handler,
+        )
+        .post(
+            "/v1/timeline/:tenant_id/:timeline_id/attach",
+            timeline_attach_handler,
+        )
+        .post(
+            "/v1/timeline/:tenant_id/:timeline_id/detach",
+            timeline_detach_handler,
         )
         .get("/v1/branch/:tenant_id", branch_list_handler)
         .get("/v1/branch/:tenant_id/:branch_name", branch_detail_handler)

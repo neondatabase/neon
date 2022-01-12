@@ -73,7 +73,7 @@ impl RemoteStorage for LocalFs {
     }
 
     async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
-        Ok(get_all_files(&self.root).await?.into_iter().collect())
+        get_all_files(&self.root).await
     }
 
     async fn upload(

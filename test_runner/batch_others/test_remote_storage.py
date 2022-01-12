@@ -4,6 +4,7 @@
 import time, shutil, os
 from contextlib import closing
 from pathlib import Path
+from uuid import UUID
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 import pytest
@@ -77,7 +78,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     client = env.pageserver.http_client()
     attempts = 0
     while True:
-        timeline_details = client.timeline_details(tenant_id, timeline_id)
+        timeline_details = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
         assert timeline_details['timeline_id'] == timeline_id
         assert timeline_details['tenant_id'] == tenant_id
         if timeline_details['type'] == 'Local':
