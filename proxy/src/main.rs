@@ -20,7 +20,7 @@ mod state;
 mod waiters;
 
 fn main() -> anyhow::Result<()> {
-    zenith_metrics::set_common_metrics_prefix("proxy");
+    zenith_metrics::set_common_metrics_prefix("zenith_proxy");
     let arg_matches = App::new("Zenith proxy/router")
         .version(GIT_VERSION)
         .arg(
