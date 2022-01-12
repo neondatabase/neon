@@ -105,7 +105,7 @@ impl<'pg> ReceiveWalConn<'pg> {
                 // Need to establish replication channel with page server.
                 // Add far as replication in postgres is initiated by receiver
                 // we should use callmemaybe mechanism.
-                let timeline_id = spg.timeline.get().timeline_id;
+                let timeline_id = spg.timeline.get().zttid.timeline_id;
                 let subscription_key = SubscriptionStateKey::new(
                     tenant_id,
                     timeline_id,

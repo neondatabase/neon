@@ -6,6 +6,7 @@ use serde::Serializer;
 use std::fmt::Display;
 use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZTenantTimelineId;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
@@ -65,16 +66,13 @@ struct TimelineStatus {
 
 /// Report info about timeline.
 async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    let zttid = ZTenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
 
-    let tli = GlobalTimelines::get(
-        get_conf(&request),
-        tenant_id,
-        timeline_id,
-        CreateControlFile::False,
-    )
-    .map_err(ApiError::from_err)?;
+    let tli = GlobalTimelines::get(get_conf(&request), zttid, CreateControlFile::False)
+        .map_err(ApiError::from_err)?;
     let sk_state = tli.get_info();
     let flush_lsn = tli.get_end_of_wal();
 
@@ -85,8 +83,8 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     };
 
     let status = TimelineStatus {
-        tenant_id,
-        timeline_id,
+        tenant_id: zttid.tenant_id,
+        timeline_id: zttid.timeline_id,
         acceptor_state: acc_state,
         commit_lsn: sk_state.commit_lsn,
         truncate_lsn: sk_state.truncate_lsn,

@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use zenith_utils::zid::ZTimelineId;
+use zenith_utils::zid::ZTenantTimelineId;
 
 pub mod callmemaybe;
 pub mod handler;
@@ -47,8 +47,10 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn timeline_dir(&self, timelineid: &ZTimelineId) -> PathBuf {
-        self.workdir.join(timelineid.to_string())
+    pub fn timeline_dir(&self, zttid: &ZTenantTimelineId) -> PathBuf {
+        self.workdir
+            .join(zttid.tenant_id.to_string())
+            .join(zttid.timeline_id.to_string())
     }
 }
 

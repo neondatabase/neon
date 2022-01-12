@@ -4,7 +4,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use lazy_static::lazy_static;
-use postgres_ffi::xlog_utils::{find_end_of_wal, PG_TLI};
+use postgres_ffi::xlog_utils::{find_end_of_wal, XLogSegNo, PG_TLI};
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -16,7 +16,7 @@ use tracing::*;
 use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
 use zenith_utils::bin_ser::LeSer;
 use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::ZTenantTimelineId;
 
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
@@ -164,14 +164,14 @@ impl SharedState {
     /// If create=false and file doesn't exist, bails out.
     fn create_restore(
         conf: &SafeKeeperConf,
-        timeline_id: ZTimelineId,
+        zttid: &ZTenantTimelineId,
         create: CreateControlFile,
     ) -> Result<Self> {
-        let state = FileStorage::load_control_file_conf(conf, timeline_id, create)
+        let state = FileStorage::load_control_file_conf(conf, zttid, create)
             .context("failed to load from control file")?;
-        let file_storage = FileStorage::new(timeline_id, conf);
+        let file_storage = FileStorage::new(zttid, conf);
         let flush_lsn = if state.server.wal_seg_size != 0 {
-            let wal_dir = conf.timeline_dir(&timeline_id);
+            let wal_dir = conf.timeline_dir(zttid);
             find_end_of_wal(
                 &wal_dir,
                 state.server.wal_seg_size as usize,
@@ -194,16 +194,16 @@ impl SharedState {
 
 /// Database instance (tenant)
 pub struct Timeline {
-    pub timeline_id: ZTimelineId,
+    pub zttid: ZTenantTimelineId,
     mutex: Mutex<SharedState>,
     /// conditional variable used to notify wal senders
     cond: Condvar,
 }
 
 impl Timeline {
-    fn new(timelineid: ZTimelineId, shared_state: SharedState) -> Timeline {
+    fn new(zttid: ZTenantTimelineId, shared_state: SharedState) -> Timeline {
         Timeline {
-            timeline_id: timelineid,
+            zttid,
             mutex: Mutex::new(shared_state),
             cond: Condvar::new(),
         }
@@ -349,8 +349,7 @@ pub trait TimelineTools {
     fn set(
         &mut self,
         conf: &SafeKeeperConf,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        zttid: ZTenantTimelineId,
         create: CreateControlFile,
     ) -> Result<()>;
 
@@ -361,14 +360,13 @@ impl TimelineTools for Option<Arc<Timeline>> {
     fn set(
         &mut self,
         conf: &SafeKeeperConf,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        zttid: ZTenantTimelineId,
         create: CreateControlFile,
     ) -> Result<()> {
         // We will only set the timeline once. If it were to ever change,
         // anyone who cloned the Arc would be out of date.
         assert!(self.is_none());
-        *self = Some(GlobalTimelines::get(conf, tenant_id, timeline_id, create)?);
+        *self = Some(GlobalTimelines::get(conf, zttid, create)?);
         Ok(())
     }
 
@@ -378,7 +376,7 @@ impl TimelineTools for Option<Arc<Timeline>> {
 }
 
 lazy_static! {
-    pub static ref TIMELINES: Mutex<HashMap<(ZTenantId, ZTimelineId), Arc<Timeline>>> =
+    pub static ref TIMELINES: Mutex<HashMap<ZTenantTimelineId, Arc<Timeline>>> =
         Mutex::new(HashMap::new());
 }
 
@@ -390,26 +388,29 @@ impl GlobalTimelines {
     /// If control file doesn't exist and create=false, bails out.
     pub fn get(
         conf: &SafeKeeperConf,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        zttid: ZTenantTimelineId,
         create: CreateControlFile,
     ) -> Result<Arc<Timeline>> {
         let mut timelines = TIMELINES.lock().unwrap();
 
-        match timelines.get(&(tenant_id, timeline_id)) {
+        match timelines.get(&zttid) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
-                info!(
-                    "creating timeline dir {}, create is {:?}",
-                    timeline_id, create
-                );
-                fs::create_dir_all(timeline_id.to_string())?;
+                if let CreateControlFile::True = create {
+                    let dir = conf.timeline_dir(&zttid);
+                    info!(
+                        "creating timeline dir {}, create is {:?}",
+                        dir.display(),
+                        create
+                    );
+                    fs::create_dir_all(dir)?;
+                }
 
-                let shared_state = SharedState::create_restore(conf, timeline_id, create)
+                let shared_state = SharedState::create_restore(conf, &zttid, create)
                     .context("failed to restore shared state")?;
 
-                let new_tli = Arc::new(Timeline::new(timeline_id, shared_state));
-                timelines.insert((tenant_id, timeline_id), Arc::clone(&new_tli));
+                let new_tli = Arc::new(Timeline::new(zttid, shared_state));
+                timelines.insert(zttid, Arc::clone(&new_tli));
                 Ok(new_tli)
             }
         }
@@ -425,9 +426,9 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
-    fn new(timeline_id: ZTimelineId, conf: &SafeKeeperConf) -> FileStorage {
-        let timeline_dir = conf.timeline_dir(&timeline_id);
-        let timelineid_str = format!("{}", timeline_id);
+    fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> FileStorage {
+        let timeline_dir = conf.timeline_dir(zttid);
+        let timelineid_str = format!("{}", zttid);
         FileStorage {
             timeline_dir,
             conf: conf.clone(),
@@ -456,12 +457,13 @@ impl FileStorage {
         upgrade_control_file(buf, version)
     }
 
+    // Load control file for given zttid at path specified by conf.
     fn load_control_file_conf(
         conf: &SafeKeeperConf,
-        timeline_id: ZTimelineId,
+        zttid: &ZTenantTimelineId,
         create: CreateControlFile,
     ) -> Result<SafeKeeperState> {
-        let path = conf.timeline_dir(&timeline_id).join(CONTROL_FILE_NAME);
+        let path = conf.timeline_dir(zttid).join(CONTROL_FILE_NAME);
         Self::load_control_file(path, create)
     }
 
@@ -525,6 +527,14 @@ impl FileStorage {
             )?
         };
         Ok(state)
+    }
+
+    /// Helper returning full path to WAL segment file and its .partial brother.
+    fn wal_file_paths(&self, segno: XLogSegNo, wal_seg_size: usize) -> (PathBuf, PathBuf) {
+        let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
+        let wal_file_path = self.timeline_dir.join(wal_file_name.clone());
+        let wal_file_partial_path = self.timeline_dir.join(wal_file_name + ".partial");
+        (wal_file_path, wal_file_partial_path)
     }
 }
 
@@ -594,7 +604,6 @@ impl Storage for FileStorage {
         let mut start_pos = startpos;
         const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
         let wal_seg_size = server.wal_seg_size as usize;
-        let ztli = server.timeline_id;
 
         /* Extract WAL location for this block */
         let mut xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
@@ -614,14 +623,7 @@ impl Storage for FileStorage {
 
             /* Open file */
             let segno = start_pos.segment_number(wal_seg_size);
-            // note: we basically don't support changing pg timeline
-            let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-            let wal_file_path = self.conf.timeline_dir(&ztli).join(wal_file_name.clone());
-            let wal_file_partial_path = self
-                .conf
-                .timeline_dir(&ztli)
-                .join(wal_file_name.clone() + ".partial");
-
+            let (wal_file_path, wal_file_partial_path) = self.wal_file_paths(segno, wal_seg_size);
             {
                 let mut wal_file: File;
                 /* Try to open already completed segment */
@@ -682,25 +684,13 @@ impl Storage for FileStorage {
         let partial;
         const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
         let wal_seg_size = server.wal_seg_size as usize;
-        let ztli = server.timeline_id;
 
         /* Extract WAL location for this block */
         let mut xlogoff = end_pos.segment_offset(wal_seg_size) as usize;
 
         /* Open file */
         let mut segno = end_pos.segment_number(wal_seg_size);
-        // note: we basically don't support changing pg timeline
-        let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-        let wal_file_path = self
-            .conf
-            .workdir
-            .join(ztli.to_string())
-            .join(wal_file_name.clone());
-        let wal_file_partial_path = self
-            .conf
-            .workdir
-            .join(ztli.to_string())
-            .join(wal_file_name + ".partial");
+        let (wal_file_path, wal_file_partial_path) = self.wal_file_paths(segno, wal_seg_size);
         {
             let mut wal_file: File;
             /* Try to open already completed segment */
@@ -731,17 +721,7 @@ impl Storage for FileStorage {
         // Remove all subsequent segments
         loop {
             segno += 1;
-            let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-            let wal_file_path = self
-                .conf
-                .workdir
-                .join(ztli.to_string())
-                .join(wal_file_name.clone());
-            let wal_file_partial_path = self
-                .conf
-                .workdir
-                .join(ztli.to_string())
-                .join(wal_file_name.clone() + ".partial");
+            let (wal_file_path, wal_file_partial_path) = self.wal_file_paths(segno, wal_seg_size);
             // TODO: better use fs::try_exists which is currenty avaialble only in nightly build
             if wal_file_path.exists() {
                 fs::remove_file(&wal_file_path)?;
@@ -761,11 +741,11 @@ mod test {
     use crate::{
         safekeeper::{SafeKeeperState, Storage},
         timeline::{CreateControlFile, CONTROL_FILE_NAME},
-        SafeKeeperConf,
+        SafeKeeperConf, ZTenantTimelineId,
     };
     use anyhow::Result;
     use std::fs;
-    use zenith_utils::{lsn::Lsn, zid::ZTimelineId};
+    use zenith_utils::lsn::Lsn;
 
     fn stub_conf() -> SafeKeeperConf {
         let workdir = tempfile::tempdir().unwrap().into_path();
@@ -777,31 +757,30 @@ mod test {
 
     fn load_from_control_file(
         conf: &SafeKeeperConf,
-        timeline_id: ZTimelineId,
+        zttid: &ZTenantTimelineId,
         create: CreateControlFile,
     ) -> Result<(FileStorage, SafeKeeperState)> {
-        fs::create_dir_all(&conf.timeline_dir(&timeline_id))
-            .expect("failed to create timeline dir");
+        fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
         Ok((
-            FileStorage::new(timeline_id, conf),
-            FileStorage::load_control_file_conf(conf, timeline_id, create)?,
+            FileStorage::new(zttid, conf),
+            FileStorage::load_control_file_conf(conf, zttid, create)?,
         ))
     }
 
     #[test]
     fn test_read_write_safekeeper_state() {
         let conf = stub_conf();
-        let timeline_id = ZTimelineId::generate();
+        let zttid = ZTenantTimelineId::generate();
         {
             let (mut storage, mut state) =
-                load_from_control_file(&conf, timeline_id, CreateControlFile::True)
+                load_from_control_file(&conf, &zttid, CreateControlFile::True)
                     .expect("failed to read state");
             // change something
             state.wal_start_lsn = Lsn(42);
             storage.persist(&state).expect("failed to persist state");
         }
 
-        let (_, state) = load_from_control_file(&conf, timeline_id, CreateControlFile::False)
+        let (_, state) = load_from_control_file(&conf, &zttid, CreateControlFile::False)
             .expect("failed to read state");
         assert_eq!(state.wal_start_lsn, Lsn(42));
     }
@@ -809,21 +788,21 @@ mod test {
     #[test]
     fn test_safekeeper_state_checksum_mismatch() {
         let conf = stub_conf();
-        let timeline_id = ZTimelineId::generate();
+        let zttid = ZTenantTimelineId::generate();
         {
             let (mut storage, mut state) =
-                load_from_control_file(&conf, timeline_id, CreateControlFile::True)
+                load_from_control_file(&conf, &zttid, CreateControlFile::True)
                     .expect("failed to read state");
             // change something
             state.wal_start_lsn = Lsn(42);
             storage.persist(&state).expect("failed to persist state");
         }
-        let control_path = conf.timeline_dir(&timeline_id).join(CONTROL_FILE_NAME);
+        let control_path = conf.timeline_dir(&zttid).join(CONTROL_FILE_NAME);
         let mut data = fs::read(&control_path).unwrap();
         data[0] += 1; // change the first byte of the file to fail checksum validation
         fs::write(&control_path, &data).expect("failed to write control file");
 
-        match load_from_control_file(&conf, timeline_id, CreateControlFile::False) {
+        match load_from_control_file(&conf, &zttid, CreateControlFile::False) {
             Err(err) => assert!(err
                 .to_string()
                 .contains("safekeeper control file checksum mismatch")),
