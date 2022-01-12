@@ -554,10 +554,20 @@ impl LayeredRepository {
 
         let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
 
-        if file.write(&metadata_bytes)? != metadata_bytes.len() {
+        let tenantid_str = self.tenantid.to_string();
+        let timelineid_str = self.timelineid.to_string();
+        let rc = STORAGE_IO_TIME
+            .with_label_values(&["write", &tenantid_str, &timelineid_str])
+            .observe_closure_duration(|| file.write(&metadata_bytes))?;
+        if rc != metadata_bytes.len() {
             bail!("Could not write all the metadata bytes in a single call");
         }
-        file.sync_all()?;
+        STORAGE_IO_SIZE
+            .with_label_values(&["write", &tenantid_str, &timelineid_str])
+            .add(rc as i64);
+        STORAGE_IO_TIME
+            .with_label_values(&["fsync", &tenantid_str, &timelineid_str])
+            .observe_closure_duration(|| file.sync_all())?;
 
         // fsync the parent directory to ensure the directory entry is durable
         if first_save {
@@ -566,7 +576,9 @@ impl LayeredRepository {
                     .parent()
                     .expect("Metadata should always have a parent dir"),
             )?;
-            timeline_dir.sync_all()?;
+            STORAGE_IO_TIME
+                .with_label_values(&["fsync", &tenantid_str, &timelineid_str])
+                .observe_closure_duration(|| timeline_dir.sync_all())?;
         }
 
         Ok(())

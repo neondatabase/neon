@@ -415,7 +415,21 @@ impl InMemoryLayer {
 
         inner.assert_writeable();
 
-        let old = inner.page_versions.append_or_update_last(blknum, lsn, pv)?;
+        let before = inner.page_versions.len()?;
+        let labels = [
+            "write",
+            &self.tenantid.to_string(),
+            &self.timelineid.to_string(),
+        ];
+        let old = STORAGE_IO_TIME
+            .with_label_values(&labels)
+            .observe_closure_duration(|| {
+                inner.page_versions.append_or_update_last(blknum, lsn, pv)
+            })?;
+        let after = inner.page_versions.len()?;
+        STORAGE_IO_SIZE
+            .with_label_values(&labels)
+            .add((after - before) as i64);
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
