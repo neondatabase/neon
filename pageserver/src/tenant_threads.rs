@@ -6,8 +6,8 @@ use crate::tenant_mgr::TenantState;
 use crate::CheckpointConfig;
 use anyhow::Result;
 use lazy_static::lazy_static;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::*;
@@ -39,7 +39,7 @@ lazy_static! {
 // It's possible that the threads are running already,
 // if so, just don't spawn new ones.
 pub fn start_tenant_threads(conf: &'static PageServerConf, tenantid: ZTenantId) {
-    let mut handles = TENANT_HANDLES.lock().unwrap();
+    let mut handles = TENANT_HANDLES.lock();
     let h = handles
         .entry(tenantid)
         .or_insert_with(|| TenantHandleEntry {
@@ -67,7 +67,7 @@ pub fn start_tenant_threads(conf: &'static PageServerConf, tenantid: ZTenantId) 
 }
 
 pub fn wait_for_tenant_threads_to_stop(tenantid: ZTenantId) {
-    let mut handles = TENANT_HANDLES.lock().unwrap();
+    let mut handles = TENANT_HANDLES.lock();
     if let Some(h) = handles.get_mut(&tenantid) {
         h.checkpointer_handle.take().map(JoinHandle::join);
         trace!("checkpointer for tenant {} has stopped", tenantid);

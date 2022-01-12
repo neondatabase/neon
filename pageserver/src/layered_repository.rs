@@ -15,6 +15,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
+use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::pg_constants::BLCKSZ;
 use tracing::*;
 
@@ -28,7 +29,7 @@ use std::io::Write;
 use std::ops::{Bound::Included, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool, AtomicUsize};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
@@ -142,7 +143,7 @@ pub struct LayeredRepository {
 /// Public interface
 impl Repository for LayeredRepository {
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline> {
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
         Ok(
             match self.get_or_init_timeline(timelineid, &mut timelines)? {
                 LayeredTimelineEntry::Local(local) => RepositoryTimeline::Local(local),
@@ -162,7 +163,7 @@ impl Repository for LayeredRepository {
         timelineid: ZTimelineId,
         initdb_lsn: Lsn,
     ) -> Result<Arc<dyn Timeline>> {
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
 
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
@@ -192,9 +193,9 @@ impl Repository for LayeredRepository {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
-        let _gc_cs = self.gc_cs.lock().unwrap();
+        let _gc_cs = self.gc_cs.lock();
 
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
         let src_timeline = match self.get_or_init_timeline(src, &mut timelines)? {
             LayeredTimelineEntry::Local(timeline) => timeline,
             LayeredTimelineEntry::Remote { .. } => {
@@ -263,7 +264,7 @@ impl Repository for LayeredRepository {
         // while holding the lock. Then drop the lock and actually perform the
         // checkpoints.  We don't want to block everything else while the
         // checkpoint runs.
-        let timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock();
         let timelines_to_checkpoint = timelines
             .iter()
             .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
@@ -289,7 +290,7 @@ impl Repository for LayeredRepository {
     fn shutdown(&self) -> Result<()> {
         trace!("LayeredRepository shutdown for tenant {}", self.tenantid);
 
-        let timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock();
         for (timelineid, timeline) in timelines.iter() {
             shutdown_timeline(self.tenantid, *timelineid, timeline)?;
         }
@@ -306,7 +307,7 @@ impl Repository for LayeredRepository {
         timeline_id: ZTimelineId,
         new_state: TimelineSyncState,
     ) -> Result<()> {
-        let mut timelines_accessor = self.timelines.lock().unwrap();
+        let mut timelines_accessor = self.timelines.lock();
 
         let timeline_to_shutdown = match new_state {
             TimelineSyncState::Ready(_) => {
@@ -342,7 +343,7 @@ impl Repository for LayeredRepository {
     /// [`TimelineSyncState::Evicted`] and other non-local and non-remote states are not stored in the layered repo at all,
     /// hence their statuses cannot be returned by the repo.
     fn get_timeline_state(&self, timeline_id: ZTimelineId) -> Option<TimelineSyncState> {
-        let timelines_accessor = self.timelines.lock().unwrap();
+        let timelines_accessor = self.timelines.lock();
         let timeline_entry = timelines_accessor.get(&timeline_id)?;
         Some(
             if timeline_entry
@@ -584,9 +585,9 @@ impl LayeredRepository {
         let now = Instant::now();
 
         // grab mutex to prevent new timelines from being created here.
-        let _gc_cs = self.gc_cs.lock().unwrap();
+        let _gc_cs = self.gc_cs.lock();
 
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
@@ -693,7 +694,7 @@ impl LayeredRepository {
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
 
                 totals += result;
-                timelines = self.timelines.lock().unwrap();
+                timelines = self.timelines.lock();
             }
         }
 
@@ -935,7 +936,7 @@ impl Timeline for LayeredTimeline {
         // We will filter dropped relishes below.
         //
         loop {
-            let rels = timeline.layers.lock().unwrap().list_relishes(tag, lsn)?;
+            let rels = timeline.layers.lock().list_relishes(tag, lsn)?;
 
             for (&new_relish, &new_relish_exists) in rels.iter() {
                 match all_relishes_map.entry(new_relish) {
@@ -1081,7 +1082,7 @@ impl Timeline for LayeredTimeline {
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
         Box::new(LayeredTimelineWriter {
             tl: self,
-            _write_guard: self.write_lock.lock().unwrap(),
+            _write_guard: self.write_lock.lock(),
         })
     }
 
@@ -1141,7 +1142,7 @@ impl LayeredTimeline {
     /// Returns all timeline-related files that were found and loaded.
     ///
     fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.lock();
         let mut num_layers = 0;
 
         // Scan timeline directory and create ImageFileName and DeltaFilename
@@ -1239,7 +1240,7 @@ impl LayeredTimeline {
         seg: SegmentTag,
         lsn: Lsn,
     ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
-        let self_layers = self.layers.lock().unwrap();
+        let self_layers = self.layers.lock();
         self.get_layer_for_read_locked(seg, lsn, &self_layers)
     }
 
@@ -1286,7 +1287,7 @@ impl LayeredTimeline {
         loop {
             let layers_owned: MutexGuard<LayerMap>;
             let layers = if self as *const LayeredTimeline != timeline as *const LayeredTimeline {
-                layers_owned = timeline.layers.lock().unwrap();
+                layers_owned = timeline.layers.lock();
                 &layers_owned
             } else {
                 self_layers
@@ -1342,7 +1343,7 @@ impl LayeredTimeline {
     /// Get a handle to the latest layer for appending.
     ///
     fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.lock();
 
         assert!(lsn.is_aligned());
 
@@ -1447,8 +1448,8 @@ impl LayeredTimeline {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
     fn checkpoint_internal(&self, checkpoint_distance: u64, reconstruct_pages: bool) -> Result<()> {
-        let mut write_guard = self.write_lock.lock().unwrap();
-        let mut layers = self.layers.lock().unwrap();
+        let mut write_guard = self.write_lock.lock();
+        let mut layers = self.layers.lock();
 
         // Bump the generation number in the layer map, so that we can distinguish
         // entries inserted after the checkpoint started
@@ -1506,8 +1507,8 @@ impl LayeredTimeline {
             let mut this_layer_paths = self.evict_layer(oldest_layer_id, reconstruct_pages)?;
             layer_paths.append(&mut this_layer_paths);
 
-            write_guard = self.write_lock.lock().unwrap();
-            layers = self.layers.lock().unwrap();
+            write_guard = self.write_lock.lock();
+            layers = self.layers.lock();
         }
 
         // Call unload() on all frozen layers, to release memory.
@@ -1593,8 +1594,8 @@ impl LayeredTimeline {
         // We call `get_last_record_lsn` again, which may be different from the
         // original load, as we may have released the write lock since then.
 
-        let mut write_guard = self.write_lock.lock().unwrap();
-        let mut layers = self.layers.lock().unwrap();
+        let mut write_guard = self.write_lock.lock();
+        let mut layers = self.layers.lock();
 
         let mut layer_paths = Vec::new();
 
@@ -1614,8 +1615,8 @@ impl LayeredTimeline {
 
             let new_historics = oldest_layer.write_to_disk(self, reconstruct_pages)?;
 
-            write_guard = self.write_lock.lock().unwrap();
-            layers = self.layers.lock().unwrap();
+            write_guard = self.write_lock.lock();
+            layers = self.layers.lock();
 
             // Finally, replace the frozen in-memory layer with the new on-disk layers
             layers.remove_historic(oldest_layer);
@@ -1682,7 +1683,7 @@ impl LayeredTimeline {
         // 3. newer on-disk layer exists (only for non-dropped segments);
         // 4. this layer doesn't serve as a tombstone for some older layer;
         //
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.lock();
         'outer: for l in layers.iter_historic_layers() {
             // This layer is in the process of being flushed to disk.
             // It will be swapped out of the layer map, replaced with

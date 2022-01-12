@@ -10,11 +10,12 @@ use crate::walredo::PostgresRedoManager;
 use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
 use log::*;
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 lazy_static! {
@@ -53,7 +54,7 @@ impl fmt::Display for TenantState {
 }
 
 fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
-    TENANTS.lock().unwrap()
+    TENANTS.lock()
 }
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);

@@ -23,6 +23,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
 use nix::poll::*;
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
@@ -32,7 +33,6 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use zenith_metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
@@ -266,7 +266,7 @@ impl PostgresRedoManager {
 
         let apply_result: Result<Bytes, Error>;
 
-        let mut process_guard = self.process.lock().unwrap();
+        let mut process_guard = self.process.lock();
         let lock_time = Instant::now();
 
         // launch the WAL redo process on first use
