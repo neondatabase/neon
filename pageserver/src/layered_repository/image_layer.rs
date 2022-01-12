@@ -523,15 +523,15 @@ impl ImageLayerWriter {
     }
 
     pub fn finish(self) -> Result<ImageLayer> {
+        let tenantid_str = self.tenantid.to_string();
+        let timelineid_str = self.timelineid.to_string();
+        let write_labels = ["write", &tenantid_str, &timelineid_str];
+        let close_labels = ["close", &tenantid_str, &timelineid_str];
+
         // Check that the `put_page_image' was called for every block.
         assert!(self.num_blocks_written == self.num_blocks);
 
         // Close the page-images chapter
-        let labels = [
-            "close",
-            &self.tenantid.to_string(),
-            &self.timelineid.to_string(),
-        ];
         let book = self.page_image_writer.close()?;
 
         // Write out the summary chapter
@@ -549,14 +549,16 @@ impl ImageLayerWriter {
             seg: self.seg,
             lsn: self.lsn,
         };
-        Summary::ser_into(&summary, &mut chapter)?;
+        STORAGE_IO_TIME
+            .with_label_values(&write_labels)
+            .observe_closure_duration(|| Summary::ser_into(&summary, &mut chapter))?;
         let book = STORAGE_IO_TIME
-            .with_label_values(&labels)
+            .with_label_values(&close_labels)
             .observe_closure_duration(|| chapter.close())?;
 
         // This flushes the underlying 'buf_writer'.
         STORAGE_IO_TIME
-            .with_label_values(&labels)
+            .with_label_values(&close_labels)
             .observe_closure_duration(|| book.close())?;
 
         // Note: Because we open the file in write-only mode, we cannot
