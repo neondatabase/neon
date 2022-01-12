@@ -1535,9 +1535,7 @@ impl LayeredTimeline {
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
         let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
-        if disk_consistent_lsn != old_disk_consistent_lsn {
-            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
-
+        if disk_consistent_lsn > old_disk_consistent_lsn {
             // We can only save a valid 'prev_record_lsn' value on disk if we
             // flushed *all* in-memory changes to disk. We only track
             // 'prev_record_lsn' in memory for the latest processed record, so we
