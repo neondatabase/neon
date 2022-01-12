@@ -10,12 +10,12 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{RwLock, RwLockWriteGuard};
 
 use once_cell::sync::OnceCell;
 
@@ -126,7 +126,7 @@ impl OpenFiles {
             // I/O operation.
             if retries < num_slots * 2 {
                 if !slot.recently_used.swap(false, Ordering::Release) {
-                    if let Ok(guard) = slot.inner.try_write() {
+                    if let Some(guard) = slot.inner.try_write() {
                         slot_guard = guard;
                         index = next;
                         break;
@@ -134,7 +134,7 @@ impl OpenFiles {
                 }
                 retries += 1;
             } else {
-                slot_guard = slot.inner.write().unwrap();
+                slot_guard = slot.inner.write();
                 index = next;
                 break;
             }
@@ -232,12 +232,12 @@ impl VirtualFile {
             // We only need to hold the handle lock while we read the current handle. If
             // another thread closes the file and recycles the slot for a different file,
             // we will notice that the handle we read is no longer valid and retry.
-            let mut handle = *self.handle.read().unwrap();
+            let mut handle = *self.handle.read();
             loop {
                 // Check if the slot contains our File
                 {
                     let slot = &open_files.slots[handle.index];
-                    let slot_guard = slot.inner.read().unwrap();
+                    let slot_guard = slot.inner.read();
                     if slot_guard.tag == handle.tag {
                         if let Some(file) = &slot_guard.file {
                             // Found a cached file descriptor.
@@ -250,7 +250,7 @@ impl VirtualFile {
                 // The slot didn't contain our File. We will have to open it ourselves,
                 // but before that, grab a write lock on handle in the VirtualFile, so
                 // that no other thread will try to concurrently open the same file.
-                let handle_guard = self.handle.write().unwrap();
+                let handle_guard = self.handle.write();
 
                 // If another thread changed the handle while we were not holding the lock,
                 // then the handle might now be valid again. Loop back to retry.
@@ -291,12 +291,12 @@ impl VirtualFile {
 impl Drop for VirtualFile {
     /// If a VirtualFile is dropped, close the underlying file if it was open.
     fn drop(&mut self) {
-        let handle = self.handle.get_mut().unwrap();
+        let handle = self.handle.get_mut();
 
         // We could check with a read-lock first, to avoid waiting on an
         // unrelated I/O.
         let slot = &get_open_files().slots[handle.index];
-        let mut slot_guard = slot.inner.write().unwrap();
+        let mut slot_guard = slot.inner.write();
         if slot_guard.tag == handle.tag {
             slot.recently_used.store(false, Ordering::Relaxed);
             slot_guard.file.take();

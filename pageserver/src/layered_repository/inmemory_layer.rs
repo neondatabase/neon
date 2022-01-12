@@ -20,8 +20,9 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
+use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::vec_map::VecMap;
 
@@ -98,7 +99,7 @@ impl Layer for InMemoryLayer {
     // This function is used only for debugging, so we don't need to be very precise.
     // Construct a filename as if it was a delta layer.
     fn filename(&self) -> PathBuf {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         let end_lsn;
         if let Some(drop_lsn) = inner.end_lsn {
@@ -135,7 +136,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn get_end_lsn(&self) -> Lsn {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         if let Some(end_lsn) = inner.end_lsn {
             end_lsn
@@ -145,7 +146,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn is_dropped(&self) -> bool {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner.dropped
     }
 
@@ -162,7 +163,7 @@ impl Layer for InMemoryLayer {
         assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read();
 
             // Scan the page versions backwards, starting from `lsn`.
             let iter = inner
@@ -229,13 +230,13 @@ impl Layer for InMemoryLayer {
             "get_seg_size() called on a non-blocky rel"
         );
 
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         Ok(inner.get_seg_size(lsn))
     }
 
     /// Does this segment exist at given LSN?
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         // If the segment created after requested LSN,
         // it doesn't exist in the layer. But we shouldn't
@@ -280,7 +281,7 @@ impl Layer for InMemoryLayer {
 
     /// debugging function to print out the contents of the layer
     fn dump(&self) -> Result<()> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         let end_str = inner
             .end_lsn
@@ -395,7 +396,7 @@ impl InMemoryLayer {
             self.timelineid,
             lsn
         );
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
 
         inner.assert_writeable();
 
@@ -468,7 +469,7 @@ impl InMemoryLayer {
             "put_truncation() called on a non-blocky rel"
         );
 
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         inner.assert_writeable();
 
         // check that this we truncate to a smaller size than segment was before the truncation
@@ -488,7 +489,7 @@ impl InMemoryLayer {
 
     /// Remember that the segment was dropped at given LSN
     pub fn drop_segment(&self, lsn: Lsn) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
 
         assert!(inner.end_lsn.is_none());
         assert!(!inner.dropped);
@@ -550,7 +551,7 @@ impl InMemoryLayer {
     }
 
     pub fn is_writeable(&self) -> bool {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner.end_lsn.is_none()
     }
 
@@ -558,7 +559,7 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is inclusive
     pub fn freeze(&self, end_lsn: Lsn) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
 
         if inner.end_lsn.is_some() {
             assert!(inner.dropped);
@@ -605,7 +606,7 @@ impl InMemoryLayer {
         // lock, it will see that it's not writeable anymore and retry, but it
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         // Since `end_lsn` is exclusive, subtract 1 to calculate the last LSN
         // that is included.

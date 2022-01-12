@@ -36,13 +36,11 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
     collections::{hash_map::Entry, HashMap},
     convert::TryInto,
-    sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard,
-    },
+    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
 
 use once_cell::sync::OnceCell;
@@ -374,7 +372,7 @@ impl PageCache {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
 
-            let mut inner = slot.inner.write().unwrap();
+            let mut inner = slot.inner.write();
             if let Some(key) = &inner.key {
                 match key {
                     CacheKey::EphemeralPage { file_id, blkno: _ } if *file_id == drop_file_id => {
@@ -413,7 +411,7 @@ impl PageCache {
             // that it's still what we expected (because we released the mapping
             // lock already, another thread could have evicted the page)
             let slot = &self.slots[slot_idx];
-            let inner = slot.inner.read().unwrap();
+            let inner = slot.inner.read();
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageReadGuard(inner));
@@ -502,7 +500,7 @@ impl PageCache {
             // that it's still what we expected (because we don't released the mapping
             // lock already, another thread could have evicted the page)
             let slot = &self.slots[slot_idx];
-            let inner = slot.inner.write().unwrap();
+            let inner = slot.inner.write();
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageWriteGuard { inner, valid: true });
@@ -570,7 +568,7 @@ impl PageCache {
     fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = self.materialized_page_map.read();
                 let versions = map.get(hash_key)?;
 
                 let version_idx = match versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -583,7 +581,7 @@ impl PageCache {
                 Some(version.slot_idx)
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
+                let map = self.ephemeral_page_map.read();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -596,7 +594,7 @@ impl PageCache {
     fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
         match key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = self.materialized_page_map.read();
                 let versions = map.get(hash_key)?;
 
                 if let Ok(version_idx) = versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -606,7 +604,7 @@ impl PageCache {
                 }
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
+                let map = self.ephemeral_page_map.read();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -621,7 +619,7 @@ impl PageCache {
                 hash_key: old_hash_key,
                 lsn: old_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
+                let mut map = self.materialized_page_map.write();
                 if let Entry::Occupied(mut old_entry) = map.entry(old_hash_key.clone()) {
                     let versions = old_entry.get_mut();
 
@@ -636,7 +634,7 @@ impl PageCache {
                 }
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
+                let mut map = self.ephemeral_page_map.write();
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
@@ -654,7 +652,7 @@ impl PageCache {
                 hash_key: new_key,
                 lsn: new_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
+                let mut map = self.materialized_page_map.write();
                 let versions = map.entry(new_key.clone()).or_default();
                 match versions.binary_search_by_key(new_lsn, |v| v.lsn) {
                     Ok(version_idx) => Some(versions[version_idx].slot_idx),
@@ -671,7 +669,7 @@ impl PageCache {
                 }
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
+                let mut map = self.ephemeral_page_map.write();
                 match map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
@@ -699,7 +697,7 @@ impl PageCache {
             let slot = &self.slots[slot_idx];
 
             if slot.dec_usage_count() == 0 || iters >= iter_limit {
-                let mut inner = slot.inner.write().unwrap();
+                let mut inner = slot.inner.write();
 
                 if let Some(old_key) = &inner.key {
                     if inner.dirty {

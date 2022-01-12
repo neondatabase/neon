@@ -11,11 +11,12 @@
 //!
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use super::inmemory_layer::InMemoryLayer;
 
 use lazy_static::lazy_static;
+use parking_lot::RwLock;
 
 const MAX_USAGE_COUNT: u8 = 5;
 

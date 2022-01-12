@@ -1599,7 +1599,7 @@ impl LayeredTimeline {
 
         let mut layer_paths = Vec::new();
 
-        let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
+        let global_layer_map = GLOBAL_LAYER_MAP.read();
         if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
             drop(global_layer_map);
             oldest_layer.freeze(self.get_last_record_lsn());

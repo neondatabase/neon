@@ -72,7 +72,7 @@ impl LayerMap {
 
         segentry
             .open_layer_id
-            .and_then(|layer_id| GLOBAL_LAYER_MAP.read().unwrap().get(&layer_id))
+            .and_then(|layer_id| GLOBAL_LAYER_MAP.read().get(&layer_id))
     }
 
     ///
@@ -108,7 +108,7 @@ impl LayerMap {
         // the top of the heap.
 
         let layer_opt = {
-            let mut global_map = GLOBAL_LAYER_MAP.write().unwrap();
+            let mut global_map = GLOBAL_LAYER_MAP.write();
             let layer_opt = global_map.get(&layer_id);
             global_map.remove(&layer_id);
             // TODO it's bad that a ref can still exist after being evicted from cache
@@ -215,7 +215,7 @@ impl LayerMap {
 
     /// Return the oldest in-memory layer, along with its generation number.
     pub fn peek_oldest_open(&mut self) -> Option<(LayerId, Arc<InMemoryLayer>, u64)> {
-        let global_map = GLOBAL_LAYER_MAP.read().unwrap();
+        let global_map = GLOBAL_LAYER_MAP.read();
 
         while let Some(oldest_entry) = self.open_layers.peek() {
             if let Some(layer) = global_map.get(&oldest_entry.layer_id) {
@@ -248,7 +248,7 @@ impl LayerMap {
         println!("Begin dump LayerMap");
         for (seg, segentry) in self.segs.iter() {
             if let Some(open) = &segentry.open_layer_id {
-                if let Some(layer) = GLOBAL_LAYER_MAP.read().unwrap().get(open) {
+                if let Some(layer) = GLOBAL_LAYER_MAP.read().get(open) {
                     layer.dump()?;
                 } else {
                     println!("layer not found in global map");
@@ -302,7 +302,7 @@ impl SegEntry {
 
     pub fn get(&self, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         if let Some(open_layer_id) = &self.open_layer_id {
-            let open_layer = GLOBAL_LAYER_MAP.read().unwrap().get(open_layer_id)?;
+            let open_layer = GLOBAL_LAYER_MAP.read().get(open_layer_id)?;
             if open_layer.get_start_lsn() <= lsn {
                 return Some(open_layer);
             }
@@ -325,12 +325,11 @@ impl SegEntry {
     // but only if it is not writeable anymore.
     pub fn update_open(&mut self, layer: Arc<InMemoryLayer>) -> LayerId {
         if let Some(prev_open_layer_id) = &self.open_layer_id {
-            if let Some(prev_open_layer) = GLOBAL_LAYER_MAP.read().unwrap().get(prev_open_layer_id)
-            {
+            if let Some(prev_open_layer) = GLOBAL_LAYER_MAP.read().get(prev_open_layer_id) {
                 assert!(!prev_open_layer.is_writeable());
             }
         }
-        let open_layer_id = GLOBAL_LAYER_MAP.write().unwrap().insert(layer);
+        let open_layer_id = GLOBAL_LAYER_MAP.write().insert(layer);
         self.open_layer_id = Some(open_layer_id);
         open_layer_id
     }

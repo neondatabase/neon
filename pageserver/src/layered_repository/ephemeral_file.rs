@@ -7,13 +7,14 @@ use crate::page_cache::PAGE_SZ;
 use crate::page_cache::{ReadBufResult, WriteBufResult};
 use crate::virtual_file::VirtualFile;
 use lazy_static::lazy_static;
+use parking_lot::RwLock;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
 use std::ops::DerefMut;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use zenith_utils::zid::ZTenantId;
 use zenith_utils::zid::ZTimelineId;
 
@@ -50,7 +51,7 @@ impl EphemeralFile {
         tenantid: ZTenantId,
         timelineid: ZTimelineId,
     ) -> Result<EphemeralFile, std::io::Error> {
-        let mut l = EPHEMERAL_FILES.write().unwrap();
+        let mut l = EPHEMERAL_FILES.write();
         let file_id = l.next_file_id;
         l.next_file_id += 1;
 
@@ -216,7 +217,7 @@ impl Drop for EphemeralFile {
         cache.drop_buffers_for_ephemeral(self.file_id);
 
         // remove entry from the hash map
-        EPHEMERAL_FILES.write().unwrap().files.remove(&self.file_id);
+        EPHEMERAL_FILES.write().files.remove(&self.file_id);
 
         // unlink file
         // FIXME: print error
@@ -225,7 +226,7 @@ impl Drop for EphemeralFile {
 }
 
 pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), std::io::Error> {
-    if let Some(file) = EPHEMERAL_FILES.read().unwrap().files.get(&file_id) {
+    if let Some(file) = EPHEMERAL_FILES.read().files.get(&file_id) {
         file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64)?;
         Ok(())
     } else {
