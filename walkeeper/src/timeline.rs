@@ -121,7 +121,7 @@ impl SharedState {
     }
 
     /// Assign new replica ID. We choose first empty cell in the replicas vector
-    /// or extend the vector if there are not free items.
+    /// or extend the vector if there are no free slots.
     pub fn add_replica(&mut self, state: ReplicaState) -> usize {
         if let Some(pos) = self.replicas.iter().position(|r| r.is_none()) {
             self.replicas[pos] = Some(state);
@@ -298,9 +298,15 @@ impl Timeline {
         shared_state.add_replica(state)
     }
 
-    pub fn update_replica_state(&self, id: usize, state: Option<ReplicaState>) {
+    pub fn update_replica_state(&self, id: usize, state: ReplicaState) {
         let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.replicas[id] = state;
+        shared_state.replicas[id] = Some(state);
+    }
+
+    pub fn remove_replica(&self, id: usize) {
+        let mut shared_state = self.mutex.lock().unwrap();
+        assert!(shared_state.replicas[id].is_some());
+        shared_state.replicas[id] = None;
     }
 
     pub fn get_end_of_wal(&self) -> Lsn {

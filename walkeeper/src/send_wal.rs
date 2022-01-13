@@ -79,7 +79,7 @@ struct ReplicationConnGuard {
 
 impl Drop for ReplicationConnGuard {
     fn drop(&mut self) {
-        self.timeline.update_replica_state(self.replica, None);
+        self.timeline.remove_replica(self.replica);
     }
 }
 
@@ -120,14 +120,12 @@ impl ReplicationConn {
     /// This is spawned into the background by `handle_start_replication`.
     fn background_thread(
         mut stream_in: ReadStream,
-        timeline: Arc<Timeline>,
-        replica_id: usize,
+        replica_guard: Arc<ReplicationConnGuard>,
     ) -> Result<()> {
+        let replica_id = replica_guard.replica;
+        let timeline = &replica_guard.timeline;
+
         let mut state = ReplicaState::new();
-        let _guard = ReplicationConnGuard {
-            replica: replica_id,
-            timeline: timeline.clone(),
-        };
         // Wait for replica's feedback.
         while let Some(msg) = FeMessage::read(&mut stream_in)? {
             match &msg {
@@ -140,7 +138,7 @@ impl ReplicationConn {
                             // Note: deserializing is on m[1..] because we skip the tag byte.
                             state.hs_feedback = HotStandbyFeedback::des(&m[1..])
                                 .context("failed to deserialize HotStandbyFeedback")?;
-                            timeline.update_replica_state(replica_id, Some(state));
+                            timeline.update_replica_state(replica_id, state);
                         }
                         Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
                             let reply = StandbyReply::des(&m[1..])
@@ -148,7 +146,7 @@ impl ReplicationConn {
                             state.last_received_lsn = reply.write_lsn;
                             state.disk_consistent_lsn = reply.flush_lsn;
                             state.remote_consistent_lsn = reply.apply_lsn;
-                            timeline.update_replica_state(replica_id, Some(state));
+                            timeline.update_replica_state(replica_id, state);
                         }
                         _ => warn!("unexpected message {:?}", msg),
                     }
@@ -207,16 +205,23 @@ impl ReplicationConn {
         // This replica_id is used below to check if it's time to stop replication.
         let replica_id = bg_timeline.add_replica(state);
 
+        // Use a guard object to remove our entry from the timeline, when the background
+        // thread and us have both finished using it.
+        let replica_guard = Arc::new(ReplicationConnGuard {
+            replica: replica_id,
+            timeline: bg_timeline,
+        });
+        let bg_replica_guard = Arc::clone(&replica_guard);
+
         // TODO: here we got two threads, one for writing WAL and one for receiving
         // feedback. If one of them fails, we should shutdown the other one too.
         let _ = thread::Builder::new()
             .name("HotStandbyFeedback thread".into())
             .spawn(move || {
-                if let Err(err) = Self::background_thread(bg_stream_in, bg_timeline, replica_id) {
+                if let Err(err) = Self::background_thread(bg_stream_in, bg_replica_guard) {
                     error!("Replication background thread failed: {}", err);
                 }
-            })
-            .unwrap();
+            })?;
 
         let mut wal_seg_size: usize;
         loop {
