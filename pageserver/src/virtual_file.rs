@@ -137,11 +137,7 @@ impl OpenFiles {
     ///
     /// On return, we hold a lock on the slot, and its 'tag' has been updated
     /// recently_used has been set. It's all ready for reuse.
-    fn find_victim_slot(
-        &self,
-        tenantid: &str,
-        timelineid: &str,
-    ) -> (SlotHandle, RwLockWriteGuard<SlotInner>) {
+    fn find_victim_slot(&self) -> (SlotHandle, RwLockWriteGuard<SlotInner>) {
         //
         // Run the clock algorithm to find a slot to replace.
         //
@@ -185,7 +181,7 @@ impl OpenFiles {
         //
         if let Some(old_file) = slot_guard.file.take() {
             STORAGE_IO_TIME
-                .with_label_values(&["close", tenantid, timelineid])
+                .with_label_values(&["close", "-", "-"])
                 .observe_closure_duration(|| drop(old_file));
         }
 
@@ -236,7 +232,7 @@ impl VirtualFile {
             tenantid = "*".to_string();
             timelineid = "*".to_string();
         }
-        let (handle, mut slot_guard) = get_open_files().find_victim_slot(&tenantid, &timelineid);
+        let (handle, mut slot_guard) = get_open_files().find_victim_slot();
         let file = STORAGE_IO_TIME
             .with_label_values(&["open", &tenantid, &timelineid])
             .observe_closure_duration(|| open_options.open(path))?;
@@ -320,8 +316,7 @@ impl VirtualFile {
 
         // We need to open the file ourselves. The handle in the VirtualFile is
         // now locked in write-mode. Find a free slot to put it in.
-        let (handle, mut slot_guard) =
-            open_files.find_victim_slot(&self.tenantid, &self.timelineid);
+        let (handle, mut slot_guard) = open_files.find_victim_slot();
 
         // Open the physical file
         let file = STORAGE_IO_TIME

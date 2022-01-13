@@ -41,12 +41,12 @@ use crate::repository::{
     TimelineWriter, ZenithWalRecord,
 };
 use crate::tenant_mgr;
+use crate::virtual_file::VirtualFile;
 use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
-use crate::virtual_file::VirtualFile;
 
 use zenith_metrics::{
     register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
