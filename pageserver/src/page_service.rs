@@ -17,7 +17,7 @@ use regex::Regex;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::{io, net::TcpStream};
 use tracing::*;
@@ -189,31 +189,25 @@ pub fn thread_main(
     listener: TcpListener,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
-    let mut join_handles = Vec::new();
-
+    let barrier = Arc::new(RwLock::new(()));
     while !tenant_mgr::shutdown_requested() {
         let (socket, peer_addr) = listener.accept()?;
         debug!("accepted connection from {}", peer_addr);
         socket.set_nodelay(true).unwrap();
         let local_auth = auth.clone();
-
-        let handle = thread::Builder::new()
+        let barrier = barrier.clone();
+        thread::Builder::new()
             .name("serving Page Service thread".into())
             .spawn(move || {
+                let _running = barrier.read().unwrap();
                 if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
                     error!(%err, "page server thread exited with error");
                 }
             })
-            .unwrap();
-
-        join_handles.push(handle);
+            .ok();
     }
-
     debug!("page_service loop terminated. wait for connections to cancel");
-    for handle in join_handles.into_iter() {
-        handle.join().unwrap();
-    }
-
+    let _stopall = barrier.write().unwrap();
     Ok(())
 }
 
