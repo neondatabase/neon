@@ -9,12 +9,11 @@ from batch_others.test_wal_acceptor import SafekeeperEnv
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
-def test_walproposer_pgbench(
-    test_output_dir: str,
-    port_distributor: PortDistributor,
-    pg_bin: PgBin,
-    zenbenchmark: ZenithBenchmarker
-):
+
+def test_walproposer_pgbench(test_output_dir: str,
+                             port_distributor: PortDistributor,
+                             pg_bin: PgBin,
+                             zenbenchmark: ZenithBenchmarker):
     scale = 50
     conns_count = 32
     pgbench_time = 30
@@ -42,12 +41,7 @@ def test_walproposer_pgbench(
             "PGDATABASE": "postgres"
         }
 
-        cmd = [
-            "pgbench",
-            "-i",
-            "-s",
-            str(scale)
-        ]
+        cmd = ["pgbench", "-i", "-s", str(scale)]
         basepath = pg_bin.run_capture(cmd, pgbench_env)
         pgbench_init = basepath + '.stderr'
 
@@ -59,9 +53,9 @@ def test_walproposer_pgbench(
         init_seconds = float(stats_str.split()[2])
 
         zenbenchmark.record("pgbench_init",
-                    init_seconds,
-                    unit="s",
-                    report=MetricReport.LOWER_IS_BETTER)
+                            init_seconds,
+                            unit="s",
+                            report=MetricReport.LOWER_IS_BETTER)
 
         cmd = [
             "pgbench",
@@ -84,12 +78,12 @@ def test_walproposer_pgbench(
         pgbench_tps = float(stats_str.split()[2])
 
         zenbenchmark.record("tps_pgbench",
-                    pgbench_tps,
-                    unit="",
-                    report=MetricReport.HIGHER_IS_BETTER)
+                            pgbench_tps,
+                            unit="",
+                            report=MetricReport.HIGHER_IS_BETTER)
 
         pg_log = env.postgres.log_path()
-    
+
     sizes_log = str(repo_dir.joinpath("sizes.log"))
 
     cmd = [
@@ -103,16 +97,17 @@ def test_walproposer_pgbench(
     log.info(f"avg_sizes in blocks of {block} messages = {avg_sizes}")
 
     zenbenchmark.record("walmessage_size_begin",
-                    avg_sizes[0],
-                    unit="b",
-                    report=MetricReport.HIGHER_IS_BETTER)
+                        avg_sizes[0],
+                        unit="b",
+                        report=MetricReport.HIGHER_IS_BETTER)
 
     zenbenchmark.record("walmessage_size_end",
-                    avg_sizes[-1],
-                    unit="b",
-                    report=MetricReport.HIGHER_IS_BETTER)
+                        avg_sizes[-1],
+                        unit="b",
+                        report=MetricReport.HIGHER_IS_BETTER)
 
-def calc_avg_sizes(filename, avg_size_block) -> "list[int]":
+
+def calc_avg_sizes(filename, avg_size_block) -> "list[float]":
     sizes = []
     pos = []
 
