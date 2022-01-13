@@ -771,6 +771,11 @@ pub struct LayeredTimeline {
     /// to avoid deadlock.
     write_lock: Mutex<()>,
 
+    // Prevent concurrent checkpoints.
+    // Checkpoints are normally performed by one thread. But GC with enforce checkpoint can explciitly requested
+    // by used. Also checkpoint is invoked on shutdown.
+    checkpoint_cs: Mutex<()>,
+
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     latest_gc_cutoff_lsn: AtomicLsn,
 
@@ -1130,6 +1135,7 @@ impl LayeredTimeline {
             upload_relishes: AtomicBool::new(upload_relishes),
 
             write_lock: Mutex::new(()),
+            checkpoint_cs: Mutex::new(()),
 
             latest_gc_cutoff_lsn: AtomicLsn::from(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
@@ -1447,6 +1453,9 @@ impl LayeredTimeline {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
     fn checkpoint_internal(&self, checkpoint_distance: u64, reconstruct_pages: bool) -> Result<()> {
+        // Prevent concurrent checkpoints
+        let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
+
         let mut write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
