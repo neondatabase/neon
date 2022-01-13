@@ -772,8 +772,9 @@ pub struct LayeredTimeline {
     write_lock: Mutex<()>,
 
     // Prevent concurrent checkpoints.
-    // Checkpoints are normally performed by one thread. But GC with enforce checkpoint can explciitly requested
-    // by used. Also checkpoint is invoked on shutdown.
+    // Checkpoints are normally performed by one thread. But checkpoint can also be manually requested by admin
+    // (that's used in tests), and shutdown also forces a checkpoint. These forced checkpoints run in a different thread
+    // and could be triggered at the same time as a normal checkpoint.
     checkpoint_cs: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
