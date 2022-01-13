@@ -46,6 +46,7 @@ use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
+use crate::virtual_file::VirtualFile;
 
 use zenith_metrics::{
     register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
@@ -514,10 +515,10 @@ impl LayeredRepository {
         let _enter = info_span!("saving metadata").entered();
         let path = metadata_path(conf, timelineid, tenantid);
         // use OpenOptions to ensure file presence is consistent with first_save
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(first_save)
-            .open(&path)?;
+        let mut file = VirtualFile::open_with_options(
+            &path,
+            OpenOptions::new().write(true).create_new(first_save),
+        )?;
 
         let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
 
