@@ -342,6 +342,10 @@ class ProposerPostgres(PgProtocol):
         """ Path to postgresql.conf """
         return os.path.join(self.pgdata_dir, 'postgresql.conf')
 
+    def log_path(self) -> str:
+        """ Path to pg.log """
+        return os.path.join(self.pg_data_dir_path(), "pg.log")
+
     def create_dir_config(self, wal_acceptors: str):
         """ Create dir and config for running --sync-safekeepers """
 
@@ -387,8 +391,7 @@ class ProposerPostgres(PgProtocol):
     def start(self):
         """ Start postgres with pg_ctl """
 
-        log_path = os.path.join(self.pg_data_dir_path(), "pg.log")
-        args = ["pg_ctl", "-D", self.pg_data_dir_path(), "-l", log_path, "-w", "start"]
+        args = ["pg_ctl", "-D", self.pg_data_dir_path(), "-l", self.log_path(), "-w", "start"]
         self.pg_bin.run(args)
 
     def stop(self):
