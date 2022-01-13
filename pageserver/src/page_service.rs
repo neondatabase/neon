@@ -594,7 +594,7 @@ impl postgres_backend::Handler for PageServerHandler {
             tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
                 .context("Failed to fetch local timeline for callmemaybe requests")?;
 
-            walreceiver::launch_wal_receiver(self.conf, timelineid, &connstr, tenantid.to_owned());
+            walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr);
 
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("branch_create ") {

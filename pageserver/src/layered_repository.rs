@@ -368,7 +368,7 @@ fn shutdown_timeline(
             timeline
                 .upload_relishes
                 .store(false, atomic::Ordering::Relaxed);
-            walreceiver::stop_wal_receiver(timeline_id);
+            walreceiver::stop_wal_receiver(tenant_id, timeline_id);
             trace!("repo shutdown. checkpoint timeline {}", timeline_id);
             // Do not reconstruct pages to reduce shutdown time
             timeline.checkpoint(CheckpointConfig::Flush)?;
