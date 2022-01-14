@@ -5,88 +5,14 @@ use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use crate::CheckpointConfig;
 use anyhow::Result;
-use lazy_static::lazy_static;
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::*;
-use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 use zenith_utils::zid::ZTenantId;
-
-struct TenantHandleEntry {
-    checkpointer_handle: Option<JoinHandle<()>>,
-    gc_handle: Option<JoinHandle<()>>,
-}
-
-// Preserve handles to wait for thread completion
-// at shutdown
-lazy_static! {
-    static ref TENANT_HANDLES: Mutex<HashMap<ZTenantId, TenantHandleEntry>> =
-        Mutex::new(HashMap::new());
-}
-
-lazy_static! {
-    static ref TENANT_THREADS_COUNT: IntGaugeVec = register_int_gauge_vec!(
-        "tenant_threads_count",
-        "Number of live tenant threads",
-        &["tenant_thread_type"]
-    )
-    .expect("failed to define a metric");
-}
-
-// Launch checkpointer and GC for the tenant.
-// It's possible that the threads are running already,
-// if so, just don't spawn new ones.
-pub fn start_tenant_threads(conf: &'static PageServerConf, tenantid: ZTenantId) {
-    let mut handles = TENANT_HANDLES.lock().unwrap();
-    let h = handles
-        .entry(tenantid)
-        .or_insert_with(|| TenantHandleEntry {
-            checkpointer_handle: None,
-            gc_handle: None,
-        });
-
-    if h.checkpointer_handle.is_none() {
-        h.checkpointer_handle = std::thread::Builder::new()
-            .name("Checkpointer thread".into())
-            .spawn(move || {
-                checkpoint_loop(tenantid, conf).expect("Checkpointer thread died");
-            })
-            .ok();
-    }
-
-    if h.gc_handle.is_none() {
-        h.gc_handle = std::thread::Builder::new()
-            .name("GC thread".into())
-            .spawn(move || {
-                gc_loop(tenantid, conf).expect("GC thread died");
-            })
-            .ok();
-    }
-}
-
-pub fn wait_for_tenant_threads_to_stop(tenantid: ZTenantId) {
-    let mut handles = TENANT_HANDLES.lock().unwrap();
-    if let Some(h) = handles.get_mut(&tenantid) {
-        h.checkpointer_handle.take().map(JoinHandle::join);
-        trace!("checkpointer for tenant {} has stopped", tenantid);
-        h.gc_handle.take().map(JoinHandle::join);
-        trace!("gc for tenant {} has stopped", tenantid);
-    }
-    handles.remove(&tenantid);
-}
 
 ///
 /// Checkpointer thread's main loop
 ///
-fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
-    let gauge = TENANT_THREADS_COUNT.with_label_values(&["checkpointer"]);
-    gauge.inc();
-    scopeguard::defer! {
-        gauge.dec();
-    }
-
+pub fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
@@ -112,13 +38,7 @@ fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result
 ///
 /// GC thread's main loop
 ///
-fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
-    let gauge = TENANT_THREADS_COUNT.with_label_values(&["gc"]);
-    gauge.inc();
-    scopeguard::defer! {
-        gauge.dec();
-    }
-
+pub fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;

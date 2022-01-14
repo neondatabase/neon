@@ -197,7 +197,12 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
             .spawn(|| {
                 // TODO authentication
                 let router = http::make_router(conf_);
-                endpoint::serve_thread_main(router, http_listener).unwrap();
+                endpoint::serve_thread_main(
+                    router,
+                    http_listener,
+                    std::future::pending(), // never shut down
+                )
+                .unwrap();
             })?,
     );
 

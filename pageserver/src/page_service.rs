@@ -14,12 +14,11 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::io;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread;
-use std::{io, net::TcpStream};
 use tracing::*;
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
@@ -39,6 +38,8 @@ use crate::config::PageServerConf;
 use crate::relish::*;
 use crate::repository::Timeline;
 use crate::tenant_mgr;
+use crate::thread_mgr;
+use crate::thread_mgr::ThreadKind;
 use crate::walreceiver;
 use crate::CheckpointConfig;
 
@@ -189,36 +190,61 @@ pub fn thread_main(
     listener: TcpListener,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
-    let mut join_handles = Vec::new();
+    listener.set_nonblocking(true)?;
+    let basic_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
 
-    while !tenant_mgr::shutdown_requested() {
-        let (socket, peer_addr) = listener.accept()?;
-        debug!("accepted connection from {}", peer_addr);
-        let local_auth = auth.clone();
+    let tokio_listener = {
+        let _guard = basic_rt.enter();
+        tokio::net::TcpListener::from_std(listener)
+    }?;
 
-        match thread::Builder::new()
-            .name("serving Page Service thread".into())
-            .spawn(move || {
-                if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
-                    error!("page server thread exited with error: {:?}", err);
+    // Wait for a new connection to arrive, or for server shutdown.
+    while let Some(res) = basic_rt.block_on(async {
+        let shutdown_watcher = thread_mgr::shutdown_watcher();
+        tokio::select! {
+            biased;
+
+            _ = shutdown_watcher => {
+                // We were requested to shut down.
+                None
+            }
+
+            res = tokio_listener.accept() => {
+                Some(res)
+            }
+        }
+    }) {
+        match res {
+            Ok((socket, peer_addr)) => {
+                // Connection established. Spawn a new thread to handle it.
+                debug!("accepted connection from {}", peer_addr);
+                let local_auth = auth.clone();
+
+                // PageRequestHandler threads are not associated with any particular
+                // timeline in the thread manager. In practice most connections will
+                // only deal with a particular timeline, but we don't know which one
+                // yet.
+                if let Err(err) = thread_mgr::spawn(
+                    ThreadKind::PageRequestHandler,
+                    None,
+                    None,
+                    "serving Page Service thread",
+                    move || page_service_conn_main(conf, local_auth, socket, auth_type),
+                ) {
+                    // Thread creation failed. Log the error and continue.
+                    error!("could not spawn page service thread: {:?}", err);
                 }
-            }) {
-            Ok(handle) => {
-                // FIXME: There is no mechanism to remove the handle from this list
-                // when a thread exits
-                join_handles.push(handle);
             }
             Err(err) => {
-                // Thread creation failed. Log the error and continue.
-                error!(%err, "could not spawn page service thread");
+                // accept() failed. Log the error, and loop back to retry on next connection.
+                error!("accept() failed: {:?}", err);
             }
         }
     }
 
-    debug!("page_service loop terminated. wait for connections to cancel");
-    for handle in join_handles.into_iter() {
-        handle.join().unwrap();
-    }
+    debug!("page_service loop terminated");
 
     Ok(())
 }
@@ -226,10 +252,10 @@ pub fn thread_main(
 fn page_service_conn_main(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
-    socket: TcpStream,
+    socket: tokio::net::TcpStream,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
-    // Immediatsely increment the gauge, then create a job to decrement it on thread exit.
+    // Immediately increment the gauge, then create a job to decrement it on thread exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
     let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
@@ -237,6 +263,15 @@ fn page_service_conn_main(
     scopeguard::defer! {
         gauge.dec();
     }
+
+    // We use Tokio to accept the connection, but the rest of the code works with a
+    // regular socket. Convert.
+    let socket = socket
+        .into_std()
+        .context("could not convert tokio::net:TcpStream to std::net::TcpStream")?;
+    socket
+        .set_nonblocking(false)
+        .context("could not put socket to blocking mode")?;
 
     socket
         .set_nodelay(true)
@@ -296,7 +331,7 @@ impl PageServerHandler {
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
-        while !tenant_mgr::shutdown_requested() {
+        while !thread_mgr::is_shutdown_requested() {
             match pgb.read_message() {
                 Ok(message) => {
                     if let Some(message) = message {

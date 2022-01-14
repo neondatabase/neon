@@ -89,11 +89,10 @@ use std::{
     collections::HashMap,
     ffi, fs,
     path::{Path, PathBuf},
-    thread,
 };
 
 use anyhow::{bail, Context};
-use tokio::{io, sync};
+use tokio::io;
 use tracing::{error, info};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -125,8 +124,6 @@ pub struct SyncStartupData {
     /// To reuse the local file scan logic, the timeline states are returned even if no sync loop get started during init:
     /// in this case, no remote files exist and all local timelines with correct metadata files are considered ready.
     pub initial_timeline_states: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>>,
-    /// A handle to the sync loop, if it was started from the configuration provided.
-    pub sync_loop_handle: Option<thread::JoinHandle<anyhow::Result<()>>>,
 }
 
 /// Based on the config, initiates the remote storage connection and starts a separate thread
@@ -135,7 +132,6 @@ pub struct SyncStartupData {
 /// Along with that, scans tenant files local and remote (if the sync gets enabled) to check the initial timeline states.
 pub fn start_local_timeline_sync(
     config: &'static PageServerConf,
-    shutdown_hook: sync::watch::Receiver<()>,
 ) -> anyhow::Result<SyncStartupData> {
     let local_timeline_files = local_tenant_timeline_files(config)
         .context("Failed to collect local tenant timeline files")?;
@@ -143,7 +139,6 @@ pub fn start_local_timeline_sync(
     match &config.remote_storage_config {
         Some(storage_config) => match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => storage_sync::spawn_storage_sync_thread(
-                shutdown_hook,
                 config,
                 local_timeline_files,
                 LocalFs::new(root.clone(), &config.workdir)?,
@@ -151,7 +146,6 @@ pub fn start_local_timeline_sync(
                 storage_config.max_sync_errors,
             ),
             RemoteStorageKind::AwsS3(s3_config) => storage_sync::spawn_storage_sync_thread(
-                shutdown_hook,
                 config,
                 local_timeline_files,
                 S3::new(s3_config, &config.workdir)?,
@@ -179,7 +173,6 @@ pub fn start_local_timeline_sync(
             }
             Ok(SyncStartupData {
                 initial_timeline_states,
-                sync_loop_handle: None,
             })
         }
     }

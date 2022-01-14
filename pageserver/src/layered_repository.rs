@@ -40,9 +40,8 @@ use crate::repository::{
     BlockNumber, GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState,
     TimelineWriter, ZenithWalRecord,
 };
-use crate::tenant_mgr;
+use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
-use crate::walreceiver;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
@@ -286,19 +285,7 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    // Wait for all threads to complete and persist repository data before pageserver shutdown.
-    fn shutdown(&self) -> Result<()> {
-        trace!("LayeredRepository shutdown for tenant {}", self.tenantid);
-
-        let timelines = self.timelines.lock().unwrap();
-        for (timelineid, timeline) in timelines.iter() {
-            shutdown_timeline(self.tenantid, *timelineid, timeline)?;
-        }
-
-        Ok(())
-    }
-
-    // TODO this method currentlly does not do anything to prevent (or react to) state updates between a sync task schedule and a sync task end (that causes this update).
+    // TODO this method currently does not do anything to prevent (or react to) state updates between a sync task schedule and a sync task end (that causes this update).
     // Sync task is enqueued and can error and be rescheduled, so some significant time may pass between the events.
     //
     /// Reacts on the timeline sync state change, changing pageserver's memory state for this timeline (unload or load of the timeline files).
@@ -309,7 +296,7 @@ impl Repository for LayeredRepository {
     ) -> Result<()> {
         let mut timelines_accessor = self.timelines.lock().unwrap();
 
-        let timeline_to_shutdown = match new_state {
+        match new_state {
             TimelineSyncState::Ready(_) => {
                 let reloaded_timeline =
                     self.init_local_timeline(timeline_id, &mut timelines_accessor)?;
@@ -328,10 +315,6 @@ impl Repository for LayeredRepository {
             ),
         };
         drop(timelines_accessor);
-
-        if let Some(timeline) = timeline_to_shutdown {
-            shutdown_timeline(self.tenantid, timeline_id, &timeline)?;
-        }
 
         Ok(())
     }
@@ -356,30 +339,6 @@ impl Repository for LayeredRepository {
             },
         )
     }
-}
-
-fn shutdown_timeline(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-    timeline: &LayeredTimelineEntry,
-) -> Result<(), anyhow::Error> {
-    match timeline {
-        LayeredTimelineEntry::Local(timeline) => {
-            timeline
-                .upload_relishes
-                .store(false, atomic::Ordering::Relaxed);
-            walreceiver::stop_wal_receiver(tenant_id, timeline_id);
-            trace!("repo shutdown. checkpoint timeline {}", timeline_id);
-            // Do not reconstruct pages to reduce shutdown time
-            timeline.checkpoint(CheckpointConfig::Flush)?;
-            //TODO Wait for walredo process to shutdown too
-        }
-        LayeredTimelineEntry::Remote { .. } => warn!(
-            "Skipping shutdown of a remote timeline {} for tenant {}",
-            timeline_id, tenant_id
-        ),
-    }
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -652,8 +611,10 @@ impl LayeredRepository {
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
         for timelineid in timelineids {
-            if tenant_mgr::shutdown_requested() {
-                return Ok(totals);
+            if thread_mgr::is_shutdown_requested() {
+                // We were requested to shut down. Stop and return with the progress we
+                // made.
+                break;
             }
 
             // We have already loaded all timelines above

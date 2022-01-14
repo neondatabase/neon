@@ -1,6 +1,6 @@
 //! Main entry point for the Page Server executable.
 
-use std::{env, path::Path, str::FromStr, thread};
+use std::{env, path::Path, str::FromStr};
 use tracing::*;
 use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
 
@@ -12,7 +12,9 @@ use daemonize::Daemonize;
 use pageserver::{
     branches,
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, remote_storage, tenant_mgr, virtual_file, LOG_FILE_NAME,
+    http, page_cache, page_service, remote_storage, tenant_mgr, thread_mgr,
+    thread_mgr::ThreadKind,
+    virtual_file, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
@@ -169,7 +171,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     );
     let pageserver_listener = tcp_listener::bind(conf.listen_pg_addr.clone())?;
 
-    // XXX: Don't spawn any threads before daemonizing!
+    // NB: Don't spawn any threads before daemonizing!
     if daemonize {
         info!("daemonizing...");
 
@@ -195,15 +197,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     }
 
     let signals = signals::install_shutdown_handlers()?;
-    let (async_shutdown_tx, async_shutdown_rx) = tokio::sync::watch::channel(());
-    let mut threads = Vec::new();
-
-    let sync_startup = remote_storage::start_local_timeline_sync(conf, async_shutdown_rx)
+    let sync_startup = remote_storage::start_local_timeline_sync(conf)
         .context("Failed to set up local files sync with external storage")?;
-
-    if let Some(handle) = sync_startup.sync_loop_handle {
-        threads.push(handle);
-    }
 
     // Initialize tenant manager.
     tenant_mgr::set_timeline_states(conf, sync_startup.initial_timeline_states);
@@ -221,25 +216,27 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
 
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
-    let cloned = auth.clone();
-    threads.push(
-        thread::Builder::new()
-            .name("http_endpoint_thread".into())
-            .spawn(move || {
-                let router = http::make_router(conf, cloned);
-                endpoint::serve_thread_main(router, http_listener)
-            })?,
-    );
+    let auth_cloned = auth.clone();
+    thread_mgr::spawn(
+        ThreadKind::HttpEndpointListener,
+        None,
+        None,
+        "http_endpoint_thread",
+        move || {
+            let router = http::make_router(conf, auth_cloned);
+            endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
+        },
+    )?;
 
-    // Spawn a thread to listen for connections. It will spawn further threads
+    // Spawn a thread to listen for libpq connections. It will spawn further threads
     // for each connection.
-    threads.push(
-        thread::Builder::new()
-            .name("Page Service thread".into())
-            .spawn(move || {
-                page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type)
-            })?,
-    );
+    thread_mgr::spawn(
+        ThreadKind::LibpqEndpointListener,
+        None,
+        None,
+        "libpq endpoint thread",
+        move || page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type),
+    )?;
 
     signals.handle(|signal| match signal {
         Signal::Quit => {
@@ -255,21 +252,38 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-
-            async_shutdown_tx.send(())?;
-            postgres_backend::set_pgbackend_shutdown_requested();
-            tenant_mgr::shutdown_all_tenants()?;
-            endpoint::shutdown();
-
-            for handle in std::mem::take(&mut threads) {
-                handle
-                    .join()
-                    .expect("thread panicked")
-                    .expect("thread exited with an error");
-            }
-
-            info!("Shut down successfully completed");
-            std::process::exit(0);
+            shutdown_pageserver();
+            unreachable!()
         }
     })
+}
+
+fn shutdown_pageserver() {
+    // Shut down the libpq endpoint thread. This prevents new connections from
+    // being accepted.
+    thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
+
+    // Shut down any page service threads.
+    postgres_backend::set_pgbackend_shutdown_requested();
+    thread_mgr::shutdown_threads(Some(ThreadKind::PageRequestHandler), None, None);
+
+    // Shut down all the tenants. This flushes everything to disk and kills
+    // the checkpoint and GC threads.
+    tenant_mgr::shutdown_all_tenants();
+
+    // Stop syncing with remote storage.
+    //
+    // FIXME: Does this wait for the sync thread to finish syncing what's queued up?
+    // Should it?
+    thread_mgr::shutdown_threads(Some(ThreadKind::StorageSync), None, None);
+
+    // Shut down the HTTP endpoint last, so that you can still check the server's
+    // status while it's shutting down.
+    thread_mgr::shutdown_threads(Some(ThreadKind::HttpEndpointListener), None, None);
+
+    // There should be nothing left, but let's be sure
+    thread_mgr::shutdown_threads(None, None, None);
+
+    info!("Shut down successfully completed");
+    std::process::exit(0);
 }

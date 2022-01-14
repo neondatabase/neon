@@ -5,15 +5,16 @@ use crate::branches;
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::repository::{Repository, Timeline, TimelineSyncState};
-use crate::tenant_threads;
+use crate::thread_mgr;
+use crate::thread_mgr::ThreadKind;
 use crate::walredo::PostgresRedoManager;
+use crate::CheckpointConfig;
 use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -23,7 +24,7 @@ lazy_static! {
 
 struct Tenant {
     state: TenantState,
-    repo: Option<Arc<dyn Repository>>,
+    repo: Arc<dyn Repository>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -56,8 +57,6 @@ fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
     TENANTS.lock().unwrap()
 }
 
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-
 /// Updates tenants' repositories, changing their timelines state in memory.
 pub fn set_timeline_states(
     conf: &'static PageServerConf,
@@ -73,28 +72,7 @@ pub fn set_timeline_states(
 
     let mut m = access_tenants();
     for (tenant_id, timeline_states) in timeline_states {
-        let tenant = m.entry(tenant_id).or_insert_with(|| Tenant {
-            state: TenantState::Idle,
-            repo: None,
-        });
-        if let Err(e) = put_timelines_into_tenant(conf, tenant, tenant_id, timeline_states) {
-            error!(
-                "Failed to update timeline states for tenant {}: {:?}",
-                tenant_id, e
-            );
-        }
-    }
-}
-
-fn put_timelines_into_tenant(
-    conf: &'static PageServerConf,
-    tenant: &mut Tenant,
-    tenant_id: ZTenantId,
-    timeline_states: HashMap<ZTimelineId, TimelineSyncState>,
-) -> anyhow::Result<()> {
-    let repo = match tenant.repo.as_ref() {
-        Some(repo) => Arc::clone(repo),
-        None => {
+        let tenant = m.entry(tenant_id).or_insert_with(|| {
             // Set up a WAL redo manager, for applying WAL records.
             let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
@@ -105,13 +83,43 @@ fn put_timelines_into_tenant(
                 tenant_id,
                 conf.remote_storage_config.is_some(),
             ));
-            tenant.repo = Some(Arc::clone(&repo));
-            repo
+            Tenant {
+                state: TenantState::Idle,
+                repo,
+            }
+        });
+        if let Err(e) = put_timelines_into_tenant(tenant, tenant_id, timeline_states) {
+            error!(
+                "Failed to update timeline states for tenant {}: {:?}",
+                tenant_id, e
+            );
         }
-    };
+    }
+}
 
+fn put_timelines_into_tenant(
+    tenant: &mut Tenant,
+    tenant_id: ZTenantId,
+    timeline_states: HashMap<ZTimelineId, TimelineSyncState>,
+) -> anyhow::Result<()> {
     for (timeline_id, timeline_state) in timeline_states {
-        repo.set_timeline_state(timeline_id, timeline_state)
+        // If the timeline is being put into any other state than Ready,
+        // stop any threads operating on it.
+        //
+        // FIXME: This is racy. A page service thread could just get
+        // handle on the Timeline, before we call set_timeline_state()
+        if !matches!(timeline_state, TimelineSyncState::Ready(_)) {
+            thread_mgr::shutdown_threads(None, Some(tenant_id), Some(timeline_id));
+
+            // Should we run a final checkpoint to flush all the data to
+            // disk? Doesn't seem necessary; all of the states other than
+            // Ready imply that the data on local disk is corrupt or incomplete,
+            // and we don't want to flush that to disk.
+        }
+
+        tenant
+            .repo
+            .set_timeline_state(timeline_id, timeline_state)
             .with_context(|| {
                 format!(
                     "Failed to update timeline {} state to {:?}",
@@ -123,29 +131,49 @@ fn put_timelines_into_tenant(
     Ok(())
 }
 
-// Check this flag in the thread loops to know when to exit
-pub fn shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
-}
-
-pub fn shutdown_all_tenants() -> Result<()> {
-    SHUTDOWN_REQUESTED.swap(true, Ordering::Relaxed);
-
-    let tenantids = list_tenantids()?;
-
-    for tenantid in &tenantids {
-        set_tenant_state(*tenantid, TenantState::Stopping)?;
+///
+/// Shut down all tenants. This runs as part of pageserver shutdown.
+///
+pub fn shutdown_all_tenants() {
+    let mut m = access_tenants();
+    let mut tenantids = Vec::new();
+    for (tenantid, tenant) in m.iter_mut() {
+        tenant.state = TenantState::Stopping;
+        tenantids.push(*tenantid)
     }
+    drop(m);
 
+    thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::Checkpointer), None, None);
+
+    // Ok, no background threads running anymore. Flush any remaining data in
+    // memory to disk.
+    //
+    // We assume that any incoming connections that might request pages from
+    // the repository have already been terminated by the caller, so there
+    // should be no more activity in any of the repositories.
+    //
+    // On error, log it but continue with the shutdown for other tenants.
     for tenantid in tenantids {
-        // Wait for checkpointer and GC to finish their job
-        tenant_threads::wait_for_tenant_threads_to_stop(tenantid);
-
-        let repo = get_repository_for_tenant(tenantid)?;
         debug!("shutdown tenant {}", tenantid);
-        repo.shutdown()?;
+        match get_repository_for_tenant(tenantid) {
+            Ok(repo) => {
+                if let Err(err) = repo.checkpoint_iteration(CheckpointConfig::Flush) {
+                    error!(
+                        "Could not checkpoint tenant {} during shutdown: {:?}",
+                        tenantid, err
+                    );
+                }
+            }
+            Err(err) => {
+                error!(
+                    "Could not get repository for tenant {} during shutdown: {:?}",
+                    tenantid, err
+                );
+            }
+        }
     }
-    Ok(())
 }
 
 pub fn create_repository_for_tenant(
@@ -153,7 +181,7 @@ pub fn create_repository_for_tenant(
     tenantid: ZTenantId,
 ) -> Result<()> {
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-    let repo = Some(branches::create_repo(conf, tenantid, wal_redo_manager)?);
+    let repo = branches::create_repo(conf, tenantid, wal_redo_manager)?;
 
     match access_tenants().entry(tenantid) {
         hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenantid),
@@ -172,22 +200,51 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
     Some(access_tenants().get(&tenantid)?.state)
 }
 
-pub fn set_tenant_state(tenantid: ZTenantId, newstate: TenantState) -> Result<TenantState> {
+///
+/// Change the state of a tenant to Active and launch its checkpointer and GC
+/// threads. If the tenant was already in Active state or Stopping, does nothing.
+///
+pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
     let mut m = access_tenants();
-    let tenant = m.get_mut(&tenantid);
+    let tenant = m
+        .get_mut(&tenantid)
+        .ok_or_else(|| anyhow!("Tenant not found for id {}", tenantid))?;
 
-    match tenant {
-        Some(tenant) => {
-            if newstate == TenantState::Idle && tenant.state != TenantState::Active {
-                // Only Active tenant can become Idle
-                return Ok(tenant.state);
-            }
-            info!("set_tenant_state: {} -> {}", tenant.state, newstate);
-            tenant.state = newstate;
-            Ok(tenant.state)
+    info!("activating tenant {}", tenantid);
+
+    match tenant.state {
+        // If the tenant is already active, nothing to do.
+        TenantState::Active => {}
+
+        // If it's Idle, launch the checkpointer and GC threads
+        TenantState::Idle => {
+            thread_mgr::spawn(
+                ThreadKind::Checkpointer,
+                Some(tenantid),
+                None,
+                "Checkpointer thread",
+                move || crate::tenant_threads::checkpoint_loop(tenantid, conf),
+            )?;
+
+            // FIXME: if we fail to launch the GC thread, but already launched the
+            // checkpointer, we're in a strange state.
+
+            thread_mgr::spawn(
+                ThreadKind::GarbageCollector,
+                Some(tenantid),
+                None,
+                "GC thread",
+                move || crate::tenant_threads::gc_loop(tenantid, conf),
+            )?;
+
+            tenant.state = TenantState::Active;
         }
-        None => bail!("Tenant not found for id {}", tenantid),
+
+        TenantState::Stopping => {
+            // don't re-activate it if it's being stopped
+        }
     }
+    Ok(())
 }
 
 pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
@@ -196,10 +253,7 @@ pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Reposito
         .get(&tenantid)
         .ok_or_else(|| anyhow!("Tenant not found for tenant {}", tenantid))?;
 
-    match &tenant.repo {
-        Some(repo) => Ok(Arc::clone(repo)),
-        None => bail!("Repository for tenant {} is not yet valid", tenantid),
-    }
+    Ok(Arc::clone(&tenant.repo))
 }
 
 pub fn get_timeline_for_tenant(
@@ -210,16 +264,6 @@ pub fn get_timeline_for_tenant(
         .get_timeline(timelineid)?
         .local_timeline()
         .ok_or_else(|| anyhow!("cannot fetch timeline {}", timelineid))
-}
-
-fn list_tenantids() -> Result<Vec<ZTenantId>> {
-    access_tenants()
-        .iter()
-        .map(|v| {
-            let (tenantid, _) = v;
-            Ok(*tenantid)
-        })
-        .collect()
 }
 
 #[derive(Serialize, Deserialize, Clone)]

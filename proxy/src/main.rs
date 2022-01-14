@@ -117,7 +117,11 @@ fn main() -> anyhow::Result<()> {
             .name("Http thread".into())
             .spawn(move || {
                 let router = http::make_router();
-                endpoint::serve_thread_main(router, http_listener)
+                endpoint::serve_thread_main(
+                    router,
+                    http_listener,
+                    std::future::pending(), // never shut down
+                )
             })?,
         // Spawn a thread to listen for connections. It will spawn further threads
         // for each connection.

@@ -11,6 +11,7 @@ pub mod remote_storage;
 pub mod repository;
 pub mod tenant_mgr;
 pub mod tenant_threads;
+pub mod thread_mgr;
 pub mod virtual_file;
 pub mod walingest;
 pub mod walreceiver;

@@ -80,7 +80,6 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
-    thread,
 };
 
 use anyhow::{bail, Context};
@@ -91,7 +90,6 @@ use tokio::{
     runtime::Runtime,
     sync::{
         mpsc::{self, UnboundedReceiver},
-        watch::Receiver,
         RwLock,
     },
     time::{Duration, Instant},
@@ -111,7 +109,7 @@ use super::{RemoteStorage, SyncStartupData, TimelineSyncId};
 use crate::{
     config::PageServerConf, layered_repository::metadata::TimelineMetadata,
     remote_storage::storage_sync::compression::read_archive_header, repository::TimelineSyncState,
-    tenant_mgr::set_timeline_states,
+    tenant_mgr::set_timeline_states, thread_mgr, thread_mgr::ThreadKind,
 };
 
 use zenith_metrics::{register_histogram_vec, register_int_gauge, HistogramVec, IntGauge};
@@ -351,7 +349,6 @@ pub(super) fn spawn_storage_sync_thread<
     P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    shutdown_hook: Receiver<()>,
     conf: &'static PageServerConf,
     local_timeline_files: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>,
     storage: S,
@@ -385,12 +382,14 @@ pub(super) fn spawn_storage_sync_thread<
 
     let initial_timeline_states = schedule_first_sync_tasks(&remote_index, local_timeline_files);
 
-    let handle = thread::Builder::new()
-        .name("Remote storage sync thread".to_string())
-        .spawn(move || {
+    thread_mgr::spawn(
+        ThreadKind::StorageSync,
+        None,
+        None,
+        "Remote storage sync thread",
+        move || {
             storage_sync_loop(
                 runtime,
-                shutdown_hook,
                 conf,
                 receiver,
                 remote_index,
@@ -398,11 +397,11 @@ pub(super) fn spawn_storage_sync_thread<
                 max_concurrent_sync,
                 max_sync_errors,
             )
-        })
-        .context("Failed to spawn remote storage sync thread")?;
+        },
+    )
+    .context("Failed to spawn remote storage sync thread")?;
     Ok(SyncStartupData {
         initial_timeline_states,
-        sync_loop_handle: Some(handle),
     })
 }
 
@@ -417,7 +416,6 @@ fn storage_sync_loop<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     runtime: Runtime,
-    mut shutdown_hook: Receiver<()>,
     conf: &'static PageServerConf,
     mut receiver: UnboundedReceiver<SyncTask>,
     index: RemoteTimelineIndex,
@@ -437,7 +435,7 @@ fn storage_sync_loop<
                     max_sync_errors,
                 )
                 .instrument(debug_span!("storage_sync_loop_step")) => LoopStep::NewStates(new_timeline_states),
-                _ = shutdown_hook.changed() => LoopStep::Shutdown,
+                _ = thread_mgr::shutdown_watcher() => LoopStep::Shutdown,
             }
         });
 

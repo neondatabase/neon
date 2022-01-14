@@ -8,21 +8,14 @@ use lazy_static::lazy_static;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
-use std::net::TcpListener;
 use tracing::info;
 use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use zenith_metrics::{Encoder, TextEncoder};
 
-use std::sync::Mutex;
-use tokio::sync::oneshot::Sender;
+use std::future::Future;
+use std::net::TcpListener;
 
 use super::error::ApiError;
-
-lazy_static! {
-    /// Channel used to send shutdown signal - wrapped in an Option to allow
-    /// it to be taken by value (since oneshot channels consume themselves on send)
-    static ref SHUTDOWN_SENDER: Mutex<Option<Sender<()>>> = Mutex::new(None);
-}
 
 lazy_static! {
     static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
@@ -153,17 +146,20 @@ pub fn check_permission(req: &Request<Body>, tenantid: Option<ZTenantId>) -> Res
     }
 }
 
-/// Initiate graceful shutdown of the http endpoint
-pub fn shutdown() {
-    if let Some(tx) = SHUTDOWN_SENDER.lock().unwrap().take() {
-        let _ = tx.send(());
-    }
-}
-
-pub fn serve_thread_main(
+///
+/// Start listening for HTTP requests on given socket.
+///
+/// 'shutdown_future' can be used to stop. If the Future becomes
+/// ready, we stop listening for new requests, and the function returns.
+///
+pub fn serve_thread_main<S>(
     router_builder: RouterBuilder<hyper::Body, ApiError>,
     listener: TcpListener,
-) -> anyhow::Result<()> {
+    shutdown_future: S,
+) -> anyhow::Result<()>
+where
+    S: Future<Output = ()> + Send + Sync,
+{
     info!("Starting a http endpoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
@@ -176,14 +172,9 @@ pub fn serve_thread_main(
 
     let _guard = runtime.enter();
 
-    let (send, recv) = tokio::sync::oneshot::channel::<()>();
-    *SHUTDOWN_SENDER.lock().unwrap() = Some(send);
-
     let server = Server::from_tcp(listener)?
         .serve(service)
-        .with_graceful_shutdown(async {
-            recv.await.ok();
-        });
+        .with_graceful_shutdown(shutdown_future);
 
     runtime.block_on(server)?;
 

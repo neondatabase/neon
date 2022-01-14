@@ -19,8 +19,6 @@ pub type BlockNumber = u32;
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
-    fn shutdown(&self) -> Result<()>;
-
     /// Updates timeline based on the new sync state, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
     fn set_timeline_state(

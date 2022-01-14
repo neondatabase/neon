@@ -7,8 +7,8 @@
 
 use crate::config::PageServerConf;
 use crate::tenant_mgr;
-use crate::tenant_mgr::TenantState;
-use crate::tenant_threads;
+use crate::thread_mgr;
+use crate::thread_mgr::ThreadKind;
 use crate::walingest::WalIngest;
 use anyhow::{bail, Context, Error, Result};
 use lazy_static::lazy_static;
@@ -19,12 +19,9 @@ use postgres_types::PgLsn;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::thread;
-use std::thread::JoinHandle;
 use std::thread_local;
 use std::time::SystemTime;
 use tokio::pin;
-use tokio::sync::oneshot;
 use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
@@ -38,9 +35,6 @@ use zenith_utils::zid::ZTimelineId;
 //
 struct WalReceiverEntry {
     wal_producer_connstr: String,
-    wal_receiver_handle: Option<JoinHandle<()>>,
-    wal_receiver_interrupt_sender: Option<oneshot::Sender<()>>,
-    tenantid: ZTenantId,
 }
 
 lazy_static! {
@@ -55,50 +49,9 @@ thread_local! {
     pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
 }
 
-// Wait for walreceiver to stop
-// Now it stops when pageserver shutdown is requested.
-// In future we can make this more granular and send shutdown signals
-// per tenant/timeline to cancel inactive walreceivers.
-// TODO deal with blocking pg connections
-pub fn stop_wal_receiver(tenantid: ZTenantId, timelineid: ZTimelineId) {
-    let mut receivers = WAL_RECEIVERS.lock();
-
-    if let Some(r) = receivers.get_mut(&(tenantid, timelineid)) {
-        match r.wal_receiver_interrupt_sender.take() {
-            Some(s) => {
-                if s.send(()).is_err() {
-                    warn!("wal receiver interrupt signal already sent");
-                }
-            }
-            None => {
-                warn!("wal_receiver_interrupt_sender is missing, wal recever shouldn't be running")
-            }
-        }
-
-        info!("waiting for wal receiver to stop");
-        let handle = r.wal_receiver_handle.take();
-        // do not hold the lock while joining the handle (deadlock is possible otherwise)
-        drop(receivers);
-        // there is no timeout or try_join option available so in case of a bug this can hang forever
-        handle.map(JoinHandle::join);
-    }
-}
-
 fn drop_wal_receiver(tenantid: ZTenantId, timelineid: ZTimelineId) {
     let mut receivers = WAL_RECEIVERS.lock();
     receivers.remove(&(tenantid, timelineid));
-
-    // Check if it was the last walreceiver of the tenant.
-    // TODO now we store one WalReceiverEntry per timeline,
-    // so this iterator looks a bit strange.
-    for (_timelineid, entry) in receivers.iter() {
-        if entry.tenantid == tenantid {
-            return;
-        }
-    }
-
-    // When last walreceiver of the tenant is gone, change state to Idle
-    tenant_mgr::set_tenant_state(tenantid, TenantState::Idle).unwrap();
 }
 
 // Launch a new WAL receiver, or tell one that's running about change in connection string
@@ -115,26 +68,24 @@ pub fn launch_wal_receiver(
             receiver.wal_producer_connstr = wal_producer_connstr.into();
         }
         None => {
-            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-
-            let wal_receiver_handle = thread::Builder::new()
-                .name("WAL receiver thread".into())
-                .spawn(move || {
+            thread_mgr::spawn(
+                ThreadKind::WalReceiver,
+                Some(tenantid),
+                Some(timelineid),
+                "WAL receiver thread",
+                move || {
                     IS_WAL_RECEIVER.with(|c| c.set(true));
-                    thread_main(conf, tenantid, timelineid, rx);
-                })?;
+                    thread_main(conf, tenantid, timelineid)
+                },
+            )?;
 
             let receiver = WalReceiverEntry {
                 wal_producer_connstr: wal_producer_connstr.into(),
-                wal_receiver_handle: Some(wal_receiver_handle),
-                wal_receiver_interrupt_sender: Some(tx),
-                tenantid,
             };
             receivers.insert((tenantid, timelineid), receiver);
 
             // Update tenant state and start tenant threads, if they are not running yet.
-            tenant_mgr::set_tenant_state(tenantid, TenantState::Active)?;
-            tenant_threads::start_tenant_threads(conf, tenantid);
+            tenant_mgr::activate_tenant(conf, tenantid)?;
         }
     };
     Ok(())
@@ -158,8 +109,7 @@ fn thread_main(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
-    interrupt_receiver: oneshot::Receiver<()>,
-) {
+) -> Result<()> {
     let _enter = info_span!("WAL receiver", timeline = %timelineid, tenant = %tenantid).entered();
     info!("WAL receiver thread started");
 
@@ -168,13 +118,7 @@ fn thread_main(
 
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it.
-    let res = walreceiver_main(
-        conf,
-        tenantid,
-        timelineid,
-        &wal_producer_connstr,
-        interrupt_receiver,
-    );
+    let res = walreceiver_main(conf, tenantid, timelineid, &wal_producer_connstr);
 
     // TODO cleanup info messages
     if let Err(e) = res {
@@ -189,6 +133,7 @@ fn thread_main(
     // Drop it from list of active WAL_RECEIVERS
     // so that next callmemaybe request launched a new thread
     drop_wal_receiver(tenantid, timelineid);
+    Ok(())
 }
 
 fn walreceiver_main(
@@ -196,7 +141,6 @@ fn walreceiver_main(
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
-    mut interrupt_receiver: oneshot::Receiver<()>,
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
@@ -273,12 +217,15 @@ fn walreceiver_main(
     let mut walingest = WalIngest::new(&*timeline, startpoint)?;
 
     while let Some(replication_message) = runtime.block_on(async {
+        let shutdown_watcher = thread_mgr::shutdown_watcher();
         tokio::select! {
-            replication_message = physical_stream.next() => replication_message,
-            _ = &mut interrupt_receiver => {
+            // check for shutdown first
+            biased;
+            _ = shutdown_watcher => {
                 info!("walreceiver interrupted");
                 None
             }
+            replication_message = physical_stream.next() => replication_message,
         }
     }) {
         let replication_message = replication_message?;
