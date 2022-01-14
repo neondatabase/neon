@@ -13,7 +13,6 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 class BankClient(object):
-
     def __init__(self, conn: asyncpg.Connection, n_accounts, init_amount):
         self.conn: asyncpg.Connection = conn
         self.n_accounts = n_accounts
@@ -66,7 +65,6 @@ async def bank_transfer(conn: asyncpg.Connection, from_uid, to_uid, amount):
 
 
 class WorkerStats(object):
-
     def __init__(self, n_workers):
         self.counters = [0] * n_workers
         self.running = True

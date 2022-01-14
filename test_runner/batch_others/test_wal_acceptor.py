@@ -121,7 +121,6 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
 
     # Populate data for 2/3 branches
     class MetricsChecker(threading.Thread):
-
         def __init__(self) -> None:
             super().__init__(daemon=True)
             self.should_stop = threading.Event()
@@ -319,7 +318,6 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 
 class ProposerPostgres(PgProtocol):
     """Object for running postgres without ZenithEnv"""
-
     def __init__(self,
                  pgdata_dir: str,
                  pg_bin,
@@ -488,7 +486,6 @@ def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
 
 
 class SafekeeperEnv:
-
     def __init__(self,
                  repo_dir: Path,
                  port_distributor: PortDistributor,

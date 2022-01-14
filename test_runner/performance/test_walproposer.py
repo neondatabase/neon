@@ -192,10 +192,10 @@ def run_pgbench(pg_bin: PgBin,
                 repo_dir: str,
                 log_path: str,
                 pgbench_env: dict,
-                scale=10,
+                scale=200,
                 conns_count=32,
-                pgbench_time=6,
-                block=1000):
+                pgbench_time=60,
+                block=5000):
     cmd = ["pgbench", "-i", "-s", str(scale)]
     basepath = pg_bin.run_capture(cmd, pgbench_env)
     pgbench_init = basepath + '.stderr'
