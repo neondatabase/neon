@@ -1611,8 +1611,15 @@ impl LayeredTimeline {
 
         let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
         if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
+            let last_lsn = self.get_last_record_lsn();
+            let n_delta_layers = if reconstruct_pages {
+                layers.count_delta_layers(oldest_layer.get_seg_tag(), last_lsn)
+            } else {
+                0
+            };
+
             drop(global_layer_map);
-            oldest_layer.freeze(self.get_last_record_lsn());
+            oldest_layer.freeze(last_lsn);
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
@@ -1623,7 +1630,8 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let new_historics = oldest_layer.write_to_disk(self, reconstruct_pages)?;
+            let new_historics =
+                oldest_layer.write_to_disk(self, reconstruct_pages, n_delta_layers)?;
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();

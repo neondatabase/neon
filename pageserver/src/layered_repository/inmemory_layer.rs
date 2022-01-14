@@ -20,12 +20,15 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
+use postgres_ffi::pg_constants::BLCKSZ;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::vec_map::VecMap;
 
 use super::page_versions::PageVersions;
+
+const MAX_DELTA_LAYERS: usize = 10;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -589,6 +592,7 @@ impl InMemoryLayer {
         &self,
         timeline: &LayeredTimeline,
         reconstruct_pages: bool,
+        n_delta_layers: usize,
     ) -> Result<LayersOnDisk> {
         trace!(
             "write_to_disk {} get_end_lsn is {}",
@@ -615,7 +619,13 @@ impl InMemoryLayer {
         // Figure out if we should create a delta layer, image layer, or both.
         let image_lsn: Option<Lsn>;
         let delta_end_lsn: Option<Lsn>;
-        if self.is_dropped() || !reconstruct_pages {
+        if self.is_dropped()
+            || !reconstruct_pages
+            || (self.seg.rel.is_blocky()
+                && self.get_seg_size(end_lsn_inclusive)? as u64 * BLCKSZ as u64
+                    > inner.page_versions.size() * 2
+                && n_delta_layers < MAX_DELTA_LAYERS)
+        {
             // The segment was dropped. Create just a delta layer containing all the
             // changes up to and including the drop.
             delta_end_lsn = Some(end_lsn_exclusive);

@@ -111,6 +111,14 @@ where
         }
     }
 
+    /// Iterate over all items with start bound <= 'key'
+    pub fn iter_older(&self, key: I::Key) -> IntervalIter<I> {
+        IntervalIter {
+            point_iter: self.points.range(..key),
+            elem_iter: None,
+        }
+    }
+
     /// Iterate over all items
     pub fn iter(&self) -> IntervalIter<I> {
         IntervalIter {
@@ -220,6 +228,35 @@ where
             }
             // No more elements at this point. Move to next point.
             if let Some((point_key, point)) = self.point_iter.next() {
+                self.elem_iter = Some((*point_key, point.elements.iter()));
+                continue;
+            } else {
+                // No more points, all done
+                return None;
+            }
+        }
+    }
+}
+
+impl<'a, I> DoubleEndedIterator for IntervalIter<'a, I>
+where
+    I: IntervalItem + ?Sized,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        // Iterate over all elements in all the points in 'point_iter'. To avoid
+        // returning the same element twice, we only return each element at its
+        // starting point.
+        loop {
+            // Return next remaining element from the current point
+            if let Some((point_key, elem_iter)) = &mut self.elem_iter {
+                for elem in elem_iter {
+                    if elem.start_key() == *point_key {
+                        return Some(Arc::clone(elem));
+                    }
+                }
+            }
+            // No more elements at this point. Move to next point.
+            if let Some((point_key, point)) = self.point_iter.next_back() {
                 self.elem_iter = Some((*point_key, point.elements.iter()));
                 continue;
             } else {

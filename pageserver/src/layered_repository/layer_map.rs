@@ -199,6 +199,14 @@ impl LayerMap {
         }
     }
 
+    pub fn count_delta_layers(&self, seg: SegmentTag, lsn: Lsn) -> usize {
+        if let Some(segentry) = self.segs.get(&seg) {
+            segentry.count_delta_layers(lsn)
+        } else {
+            0
+        }
+    }
+
     /// Is there any layer for given segment that is alive at the lsn?
     ///
     /// This is a public wrapper for SegEntry fucntion,
@@ -318,6 +326,18 @@ impl SegEntry {
         self.historic
             .iter_newer(lsn)
             .any(|layer| !layer.is_incremental())
+    }
+
+    pub fn count_delta_layers(&self, lsn: Lsn) -> usize {
+        let mut count: usize = 0;
+        let mut iter = self.historic.iter_older(lsn);
+        while let Some(layer) = iter.next_back() {
+            if !layer.is_incremental() {
+                break;
+            }
+            count += 1;
+        }
+        count
     }
 
     // Set new open layer for a SegEntry.

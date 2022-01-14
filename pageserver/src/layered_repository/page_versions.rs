@@ -39,6 +39,10 @@ impl PageVersions {
         }
     }
 
+    pub fn size(&self) -> u64 {
+        self.file.pos
+    }
+
     pub fn append_or_update_last(
         &mut self,
         blknum: u32,
