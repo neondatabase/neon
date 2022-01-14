@@ -9,15 +9,18 @@ use anyhow::bail;
 use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
 use std::thread;
+use zenith_utils::http::endpoint;
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
 mod cplane_api;
+mod http;
 mod mgmt;
 mod proxy;
 mod state;
 mod waiters;
 
 fn main() -> anyhow::Result<()> {
+    zenith_metrics::set_common_metrics_prefix("zenith_proxy");
     let arg_matches = App::new("Zenith proxy/router")
         .version(GIT_VERSION)
         .arg(
@@ -35,6 +38,14 @@ fn main() -> anyhow::Result<()> {
                 .takes_value(true)
                 .help("listen for management callback connection on ip:port")
                 .default_value("127.0.0.1:7000"),
+        )
+        .arg(
+            Arg::with_name("http")
+                .short("h")
+                .long("http")
+                .takes_value(true)
+                .help("listen for incoming http connections (metrics, etc) on ip:port")
+                .default_value("127.0.0.1:7001"),
         )
         .arg(
             Arg::with_name("uri")
@@ -82,6 +93,7 @@ fn main() -> anyhow::Result<()> {
     let config = ProxyConfig {
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
+        http_address: arg_matches.value_of("http").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
         auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         ssl_config,
@@ -91,6 +103,9 @@ fn main() -> anyhow::Result<()> {
     println!("Version: {}", GIT_VERSION);
 
     // Check that we can bind to address before further initialization
+    println!("Starting http on {}", state.conf.http_address);
+    let http_listener = tcp_listener::bind(state.conf.http_address)?;
+
     println!("Starting proxy on {}", state.conf.proxy_address);
     let pageserver_listener = tcp_listener::bind(state.conf.proxy_address)?;
 
@@ -98,6 +113,12 @@ fn main() -> anyhow::Result<()> {
     let mgmt_listener = tcp_listener::bind(state.conf.mgmt_address)?;
 
     let threads = [
+        thread::Builder::new()
+            .name("Http thread".into())
+            .spawn(move || {
+                let router = http::make_router();
+                endpoint::serve_thread_main(router, http_listener)
+            })?,
         // Spawn a thread to listen for connections. It will spawn further threads
         // for each connection.
         thread::Builder::new()
