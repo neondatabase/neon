@@ -194,19 +194,25 @@ pub fn thread_main(
     while !tenant_mgr::shutdown_requested() {
         let (socket, peer_addr) = listener.accept()?;
         debug!("accepted connection from {}", peer_addr);
-        socket.set_nodelay(true).unwrap();
         let local_auth = auth.clone();
 
-        let handle = thread::Builder::new()
+        match thread::Builder::new()
             .name("serving Page Service thread".into())
             .spawn(move || {
                 if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
                     error!("page server thread exited with error: {:?}", err);
                 }
-            })
-            .unwrap();
-
-        join_handles.push(handle);
+            }) {
+            Ok(handle) => {
+                // FIXME: There is no mechanism to remove the handle from this list
+                // when a thread exits
+                join_handles.push(handle);
+            }
+            Err(err) => {
+                // Thread creation failed. Log the error and continue.
+                error!(%err, "could not spawn page service thread");
+            }
+        }
     }
 
     debug!("page_service loop terminated. wait for connections to cancel");
@@ -231,6 +237,10 @@ fn page_service_conn_main(
     scopeguard::defer! {
         gauge.dec();
     }
+
+    socket
+        .set_nodelay(true)
+        .context("could not set TCP_NODELAY")?;
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
     let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
