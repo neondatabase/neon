@@ -1,0 +1,14 @@
+# First transient image to build compute_tools binaries
+# NB: keep in sync with rust image version in .circle/config.yml
+FROM rust:1.56.1-slim-buster AS rust-build
+
+WORKDIR /zenith
+
+COPY . .
+
+RUN cargo build -p compute_tools --release
+
+# Final image that only has one binary
+FROM debian:buster-slim
+
+COPY --from=rust-build /zenith/target/release/zenith_ctl /usr/local/bin/zenith_ctl

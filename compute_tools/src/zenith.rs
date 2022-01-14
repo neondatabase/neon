@@ -87,17 +87,19 @@ pub fn sync_safekeepers(pgdata: &str, pgbin: &str) -> Result<String> {
         .args(&["--sync-safekeepers"])
         .env("PGDATA", &pgdata) // we cannot use -D in this mode
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .expect("postgres --sync-safekeepers failed to start");
 
+    // `postgres --sync-safekeepers` will print all log output to stderr and
+    // final LSN to stdout. So we pipe only stdout, while stderr will be automatically
+    // redirected to the caller output.
     let sync_output = sync_handle
         .wait_with_output()
         .expect("postgres --sync-safekeepers failed");
     if !sync_output.status.success() {
         anyhow::bail!(
-            "postgres --sync-safekeepers failed: '{}'",
-            String::from_utf8_lossy(&sync_output.stderr)
+            "postgres --sync-safekeepers exited with non-zero status: {}",
+            sync_output.status,
         );
     }
 
