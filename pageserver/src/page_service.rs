@@ -201,7 +201,7 @@ pub fn thread_main(
             .name("serving Page Service thread".into())
             .spawn(move || {
                 if let Err(err) = page_service_conn_main(conf, local_auth, socket, auth_type) {
-                    error!(%err, "page server thread exited with error");
+                    error!("page server thread exited with error: {:?}", err);
                 }
             })
             .unwrap();
@@ -320,7 +320,7 @@ impl PageServerHandler {
                         let response = response.unwrap_or_else(|e| {
                             // print the all details to the log with {:#}, but for the client the
                             // error message is enough
-                            error!("error reading relation or page version: {:#}", e);
+                            error!("error reading relation or page version: {:?}", e);
                             PagestreamBeMessage::Error(PagestreamErrorResponse {
                                 message: e.to_string(),
                             })

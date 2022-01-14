@@ -43,7 +43,7 @@ pub(super) async fn upload_timeline_checkpoint<
     debug!("Uploading checkpoint for sync id {}", sync_id);
     if let Err(e) = upload_missing_branches(config, remote_assets.as_ref(), sync_id.0).await {
         error!(
-            "Failed to upload missing branches for sync id {}: {:#}",
+            "Failed to upload missing branches for sync id {}: {:?}",
             sync_id, e
         );
         sync_queue::push(SyncTask::new(
@@ -69,7 +69,7 @@ pub(super) async fn upload_timeline_checkpoint<
             match update_index_description(remote_assets.as_ref(), &timeline_dir, sync_id).await {
                 Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
                 Err(e) => {
-                    error!("Failed to download full timeline index: {:#}", e);
+                    error!("Failed to download full timeline index: {:?}", e);
                     sync_queue::push(SyncTask::new(
                         sync_id,
                         retries,
@@ -132,7 +132,7 @@ pub(super) async fn upload_timeline_checkpoint<
         }
         Err(e) => {
             error!(
-                "Failed to upload checkpoint: {:#}, requeueing the upload",
+                "Failed to upload checkpoint: {:?}, requeueing the upload",
                 e
             );
             sync_queue::push(SyncTask::new(
@@ -253,7 +253,7 @@ async fn upload_missing_branches<
                 .await
                 .add_branch_file(tenant_id, local_only_branch.clone()),
             Err(e) => {
-                error!("Failed to upload branch file: {:#}", e);
+                error!("Failed to upload branch file: {:?}", e);
                 branch_uploads_failed = true;
             }
         }

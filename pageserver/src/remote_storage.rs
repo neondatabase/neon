@@ -208,7 +208,7 @@ fn local_tenant_timeline_files(
                 }
             }
             Err(e) => error!(
-                "Failed to list tenants dir entry {:?} in directory {}, reason: {:#}",
+                "Failed to list tenants dir entry {:?} in directory {}, reason: {:?}",
                 tenants_dir_entry,
                 tenants_dir.display(),
                 e
@@ -249,14 +249,14 @@ fn collect_timelines_for_tenant(
                         );
                     }
                     Err(e) => error!(
-                        "Failed to process timeline dir contents at '{}', reason: {:#}",
+                        "Failed to process timeline dir contents at '{}', reason: {:?}",
                         timeline_path.display(),
                         e
                     ),
                 }
             }
             Err(e) => error!(
-                "Failed to list timelines for entry tenant {}, reason: {:#}",
+                "Failed to list timelines for entry tenant {}, reason: {:?}",
                 tenant_id, e
             ),
         }

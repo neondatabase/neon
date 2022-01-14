@@ -79,7 +79,7 @@ pub fn set_timeline_states(
         });
         if let Err(e) = put_timelines_into_tenant(conf, tenant, tenant_id, timeline_states) {
             error!(
-                "Failed to update timeline states for tenant {}: {:#}",
+                "Failed to update timeline states for tenant {}: {:?}",
                 tenant_id, e
             );
         }

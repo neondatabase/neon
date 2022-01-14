@@ -24,7 +24,7 @@ postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbf
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 tokio-stream = "0.1.8"
 routerify = "2"
-anyhow = "1.0"
+anyhow = { version = "1.0", features = ["backtrace"] }
 crc32c = "0.6.0"
 thiserror = "1.0"
 hex = { version = "0.4.3", features = ["serde"] }

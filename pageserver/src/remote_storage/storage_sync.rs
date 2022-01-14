@@ -375,7 +375,7 @@ pub(super) fn spawn_storage_sync_thread<
             Ok(local_path) => Some(local_path),
             Err(e) => {
                 error!(
-                    "Failed to find local path for remote path {:?}: {:#}",
+                    "Failed to find local path for remote path {:?}: {:?}",
                     remote_path, e
                 );
                 None
@@ -507,7 +507,7 @@ async fn loop_step<
                 Ok(extra_step) => extra_step,
                 Err(e) => {
                     error!(
-                        "Failed to process storage sync task for tenant {}, timeline {}: {:#}",
+                        "Failed to process storage sync task for tenant {}, timeline {}: {:?}",
                         sync_id.0, sync_id.1, e
                     );
                     None

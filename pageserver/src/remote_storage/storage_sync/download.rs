@@ -80,7 +80,7 @@ pub(super) async fn download_timeline<
                 {
                     Ok(remote_timeline) => Cow::Owned(remote_timeline),
                     Err(e) => {
-                        error!("Failed to download full timeline index: {:#}", e);
+                        error!("Failed to download full timeline index: {:?}", e);
                         return match remote_disk_consistent_lsn {
                             Some(disk_consistent_lsn) => {
                                 sync_queue::push(SyncTask::new(
@@ -112,7 +112,7 @@ pub(super) async fn download_timeline<
 
     if let Err(e) = download_missing_branches(conf, remote_assets.as_ref(), sync_id.0).await {
         error!(
-            "Failed to download missing branches for sync id {}: {:#}",
+            "Failed to download missing branches for sync id {}: {:?}",
             sync_id, e
         );
         sync_queue::push(SyncTask::new(
@@ -150,7 +150,7 @@ pub(super) async fn download_timeline<
             Err(e) => {
                 let archives_left = archives_total - archives_downloaded;
                 error!(
-                    "Failed to download archive {:?} (archives downloaded: {}; archives left: {}) for tenant {} timeline {}, requeueing the download: {:#}",
+                    "Failed to download archive {:?} (archives downloaded: {}; archives left: {}) for tenant {} timeline {}, requeueing the download: {:?}",
                     archive_id, archives_downloaded, archives_left, tenant_id, timeline_id, e
                 );
                 sync_queue::push(SyncTask::new(
@@ -307,7 +307,7 @@ async fn download_missing_branches<
         while let Some(download_result) = remote_only_branches_downloads.next().await {
             if let Err(e) = download_result {
                 branch_downloads_failed = true;
-                error!("Failed to download a branch file: {:#}", e);
+                error!("Failed to download a branch file: {:?}", e);
             }
         }
         ensure!(
