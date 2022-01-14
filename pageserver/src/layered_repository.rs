@@ -204,7 +204,7 @@ impl Repository for LayeredRepository {
         };
 
         src_timeline
-            .check_lsn_is_in_scope(start_lsn)
+            .check_lsn_is_in_pitr_interval(start_lsn)
             .context("invalid branch start lsn")?;
 
         let RecordLsn {
@@ -833,14 +833,6 @@ impl Timeline for LayeredTimeline {
             );
         }
         debug_assert!(lsn <= self.get_last_record_lsn());
-        let latest_gc_cutoff_lsn = self.latest_gc_cutoff_lsn.load();
-        // error instead of assert to simplify testing
-        ensure!(
-            lsn >= latest_gc_cutoff_lsn,
-            "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-            lsn, latest_gc_cutoff_lsn
-        );
-
         let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
@@ -1011,7 +1003,7 @@ impl Timeline for LayeredTimeline {
     ///
     /// Validate lsn against initdb_lsn and latest_gc_cutoff_lsn.
     ///
-    fn check_lsn_is_in_scope(&self, lsn: Lsn) -> Result<()> {
+    fn check_lsn_is_in_pitr_interval(&self, lsn: Lsn) -> Result<()> {
         let initdb_lsn = self.initdb_lsn;
         ensure!(
             lsn >= initdb_lsn,

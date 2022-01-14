@@ -235,7 +235,10 @@ pub trait Timeline: Send + Sync {
 
     ///
     /// Check that it is valid to request operations with that lsn.
-    fn check_lsn_is_in_scope(&self, lsn: Lsn) -> Result<()>;
+    /// PITR is point in time recovery. So this function is intended
+    /// to check e.g. is it ok to create a branch at a certain point in time.
+    ///
+    fn check_lsn_is_in_pitr_interval(&self, lsn: Lsn) -> Result<()>;
 
     /// Retrieve current logical size of the timeline
     ///
@@ -991,26 +994,6 @@ mod tests {
             }
         }
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_prohibit_get_page_at_lsn_for_garbage_collected_pages() -> Result<()> {
-        let repo =
-            RepoHarness::create("test_prohibit_get_page_at_lsn_for_garbage_collected_pages")?
-                .load();
-
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-        make_some_layers(&tline, Lsn(0x20))?;
-
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-
-        match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
-            Ok(_) => panic!("request for page should have failed"),
-            Err(err) => assert!(err
-                .to_string()
-                .contains("tried to request a page version that was garbage collected")),
-        }
         Ok(())
     }
 

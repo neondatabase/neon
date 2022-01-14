@@ -461,7 +461,7 @@ impl PageServerHandler {
             .context("Cannot handle basebackup request for a remote timeline")?;
         if let Some(lsn) = lsn {
             timeline
-                .check_lsn_is_in_scope(lsn)
+                .check_lsn_is_in_pitr_interval(lsn)
                 .context("invalid basebackup lsn")?;
         }
 
