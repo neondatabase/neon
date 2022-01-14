@@ -6,9 +6,6 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[workspace]
-# TODO: make it a part of global zenith worksapce
-
 [dependencies]
 libc = "0.2"
 anyhow = "1.0"
@@ -17,12 +14,9 @@ clap = "2.33"
 env_logger = "0.8"
 hyper = { version = "0.14", features = ["full"] }
 log = { version = "0.4", features = ["std", "serde"] }
-postgres = "0.19"
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = "1"
 tar = "0.4"
-tokio = { version = "1", features = ["full"] }
-
-[profile.release]
-debug = true
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
