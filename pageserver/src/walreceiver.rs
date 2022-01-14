@@ -107,7 +107,7 @@ pub fn launch_wal_receiver(
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
-) {
+) -> Result<()> {
     let mut receivers = WAL_RECEIVERS.lock();
 
     match receivers.get_mut(&(tenantid, timelineid)) {
@@ -122,8 +122,7 @@ pub fn launch_wal_receiver(
                 .spawn(move || {
                     IS_WAL_RECEIVER.with(|c| c.set(true));
                     thread_main(conf, tenantid, timelineid, rx);
-                })
-                .unwrap();
+                })?;
 
             let receiver = WalReceiverEntry {
                 wal_producer_connstr: wal_producer_connstr.into(),
@@ -134,10 +133,11 @@ pub fn launch_wal_receiver(
             receivers.insert((tenantid, timelineid), receiver);
 
             // Update tenant state and start tenant threads, if they are not running yet.
-            tenant_mgr::set_tenant_state(tenantid, TenantState::Active).unwrap();
+            tenant_mgr::set_tenant_state(tenantid, TenantState::Active)?;
             tenant_threads::start_tenant_threads(conf, tenantid);
         }
     };
+    Ok(())
 }
 
 // Look up current WAL producer connection string in the hash table
