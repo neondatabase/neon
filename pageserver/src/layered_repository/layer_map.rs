@@ -328,6 +328,8 @@ impl SegEntry {
             .any(|layer| !layer.is_incremental())
     }
 
+    // Count number of delta layers preceeding specified `lsn`.
+    // Perform backward iteration from exclusive upper bound until image layer is reached.
     pub fn count_delta_layers(&self, lsn: Lsn) -> usize {
         let mut count: usize = 0;
         let mut iter = self.historic.iter_older(lsn);

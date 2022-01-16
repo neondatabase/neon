@@ -249,7 +249,7 @@ where
         loop {
             // Return next remaining element from the current point
             if let Some((point_key, elem_iter)) = &mut self.elem_iter {
-                for elem in elem_iter {
+                while let Some(elem) = elem_iter.next_back() {
                     if elem.start_key() == *point_key {
                         return Some(Arc::clone(elem));
                     }

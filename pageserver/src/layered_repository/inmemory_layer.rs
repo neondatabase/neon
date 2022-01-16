@@ -28,6 +28,8 @@ use zenith_utils::vec_map::VecMap;
 
 use super::page_versions::PageVersions;
 
+// The garbage collector needs image layers in order to delete files.
+// If this number is too large it can result in too many small files on disk.
 const MAX_DELTA_LAYERS: usize = 10;
 
 pub struct InMemoryLayer {
@@ -626,7 +628,7 @@ impl InMemoryLayer {
                     > inner.page_versions.size() * 2
                 && n_delta_layers < MAX_DELTA_LAYERS)
         {
-            // The segment was dropped. Create just a delta layer containing all the
+            // Create just a delta layer containing all the
             // changes up to and including the drop.
             delta_end_lsn = Some(end_lsn_exclusive);
             image_lsn = None;

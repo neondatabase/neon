@@ -1612,6 +1612,7 @@ impl LayeredTimeline {
         let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
         if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
             let last_lsn = self.get_last_record_lsn();
+            // Count number of layers only if we nned this information: when creation of image layer was not prohibited
             let n_delta_layers = if reconstruct_pages {
                 layers.count_delta_layers(oldest_layer.get_seg_tag(), last_lsn)
             } else {
