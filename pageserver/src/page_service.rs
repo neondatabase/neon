@@ -484,6 +484,13 @@ impl PageServerHandler {
         let tag = RelishTag::Relation(req.rel);
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
 
+        // Add a 1s delay to some requests. The delayed causes the requests to
+        // hit the race condition from github issue #1047 more easily.
+        use rand::Rng;
+        if rand::thread_rng().gen::<u8>() < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
+
         let page = timeline.get_page_at_lsn(tag, req.blkno, lsn)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
