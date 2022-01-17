@@ -1005,12 +1005,11 @@ mod tests {
         make_some_layers(&tline, Lsn(0x20))?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-
         match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
             Ok(_) => panic!("request for page should have failed"),
             Err(err) => assert!(err
                 .to_string()
-                .contains("tried to request a page version that was garbage collected")),
+                .contains("not found at")),
         }
         Ok(())
     }
