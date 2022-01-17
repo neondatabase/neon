@@ -26,7 +26,7 @@ use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody};
 use zenith_utils::sock_split::ReadStream;
 
-use crate::callmemaybe::CallmeEvent;
+use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -90,7 +90,7 @@ impl Drop for ReplicationConnGuard {
 struct ReplicationStreamGuard {
     tx: UnboundedSender<CallmeEvent>,
     tenant_id: ZTenantId,
-    timelineid: ZTimelineId,
+    timeline_id: ZTimelineId,
     pageserver_connstr: String,
 }
 
@@ -110,11 +110,7 @@ impl Drop for ReplicationStreamGuard {
         );
 
         self.tx
-            .send(CallmeEvent::Resume(
-                self.tenant_id,
-                self.timelineid,
-                self.pageserver_connstr.to_owned(),
-            ))
+            .send(CallmeEvent::Resume(subscription_key))
             .unwrap_or_else(|e| {
                 error!("failed to send Resume request to callmemaybe thread {}", e);
             });
@@ -271,15 +267,13 @@ impl ReplicationConn {
                 None
             } else {
                 let pageserver_connstr = pageserver_connstr.clone().expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
-                let timelineid = spg.timeline.get().timelineid;
+                let timeline_id = spg.timeline.get().timeline_id;
                 let tenant_id = spg.ztenantid.unwrap();
                 let tx_clone = spg.tx.clone();
+                let subscription_key =
+                    SubscriptionStateKey::new(tenant_id, timeline_id, pageserver_connstr.clone());
                 spg.tx
-                    .send(CallmeEvent::Pause(
-                        tenant_id,
-                        timelineid,
-                        pageserver_connstr.clone(),
-                    ))
+                    .send(CallmeEvent::Pause(subscription_key))
                     .unwrap_or_else(|e| {
                         error!("failed to send Pause request to callmemaybe thread {}", e);
                     });
@@ -288,7 +282,7 @@ impl ReplicationConn {
                 Some(ReplicationStreamGuard {
                     tx: tx_clone,
                     tenant_id,
-                    timelineid,
+                    timeline_id,
                     pageserver_connstr,
                 })
             }
@@ -318,15 +312,13 @@ impl ReplicationConn {
                         // this expect should never fail because in wal_proposer_recovery mode stop_pos is set
                         // and this code is not reachable
                         let pageserver_connstr = pageserver_connstr
-                            .expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
+                            .expect("there should be a pageserver connection string");
                         let timelineid = spg.timeline.get().timeline_id;
                         let tenant_id = spg.ztenantid.unwrap();
+                        let subscription_key =
+                            SubscriptionStateKey::new(tenant_id, timelineid, pageserver_connstr);
                         spg.tx
-                            .send(CallmeEvent::Unsubscribe(
-                                tenant_id,
-                                timelineid,
-                                pageserver_connstr,
-                            ))
+                            .send(CallmeEvent::Unsubscribe(subscription_key))
                             .unwrap_or_else(|e| {
                                 error!("failed to send Pause request to callmemaybe thread {}", e);
                             });
@@ -352,7 +344,7 @@ impl ReplicationConn {
                     // Open a new file.
                     let segno = start_pos.segment_number(wal_seg_size);
                     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-                    let timeline_id = spg.timeline.get().timelineid;
+                    let timeline_id = spg.timeline.get().timeline_id;
                     let wal_file_path = spg.conf.timeline_dir(&timeline_id).join(wal_file_name);
                     Self::open_wal_file(&wal_file_path)?
                 }

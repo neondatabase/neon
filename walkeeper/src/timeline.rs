@@ -166,7 +166,7 @@ impl SharedState {
 
 /// Database instance (tenant)
 pub struct Timeline {
-    pub timelineid: ZTimelineId,
+    pub timeline_id: ZTimelineId,
     mutex: Mutex<SharedState>,
     /// conditional variable used to notify wal senders
     cond: Condvar,
@@ -175,7 +175,7 @@ pub struct Timeline {
 impl Timeline {
     fn new(timelineid: ZTimelineId, shared_state: SharedState) -> Timeline {
         Timeline {
-            timelineid,
+            timeline_id: timelineid,
             mutex: Mutex::new(shared_state),
             cond: Condvar::new(),
         }
