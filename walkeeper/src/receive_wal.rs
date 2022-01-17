@@ -21,6 +21,7 @@ use zenith_utils::pq_proto::{BeMessage, FeMessage};
 use zenith_utils::zid::ZTenantId;
 
 use crate::callmemaybe::CallmeEvent;
+use crate::callmemaybe::SubscriptionStateKey;
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -104,13 +105,14 @@ impl<'pg> ReceiveWalConn<'pg> {
                 // Need to establish replication channel with page server.
                 // Add far as replication in postgres is initiated by receiver
                 // we should use callmemaybe mechanism.
-                let timelineid = spg.timeline.get().timelineid;
+                let timeline_id = spg.timeline.get().timeline_id;
+                let subscription_key = SubscriptionStateKey::new(
+                    tenant_id,
+                    timeline_id,
+                    pageserver_connstr.to_owned(),
+                );
                 spg.tx
-                    .send(CallmeEvent::Subscribe(
-                        tenant_id,
-                        timelineid,
-                        pageserver_connstr.to_owned(),
-                    ))
+                    .send(CallmeEvent::Subscribe(subscription_key))
                     .unwrap_or_else(|e| {
                         error!(
                             "failed to send Subscribe request to callmemaybe thread {}",
