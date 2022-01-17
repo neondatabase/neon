@@ -482,7 +482,14 @@ impl PageServerHandler {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
             .entered();
         let tag = RelishTag::Relation(req.rel);
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
+        // error instead of assert to simplify testing
+        ensure!(
+            lsn >= *latest_gc_cutoff_lsn,
+            "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
+            lsn, *latest_gc_cutoff_lsn
+        );
 
         // Add a 1s delay to some requests. The delayed causes the requests to
         // hit the race condition from github issue #1047 more easily.

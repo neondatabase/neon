@@ -28,7 +28,7 @@ use std::io::Write;
 use std::ops::{Bound::Included, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool, AtomicUsize};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
@@ -231,7 +231,7 @@ impl Repository for LayeredRepository {
             dst_prev,
             Some(src),
             start_lsn,
-            src_timeline.latest_gc_cutoff_lsn.load(),
+            *src_timeline.latest_gc_cutoff_lsn.read().unwrap(),
             src_timeline.initdb_lsn,
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
@@ -739,7 +739,7 @@ pub struct LayeredTimeline {
     checkpoint_cs: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
-    latest_gc_cutoff_lsn: AtomicLsn,
+    latest_gc_cutoff_lsn: RwLock<Lsn>,
 
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
@@ -783,6 +783,10 @@ impl Timeline for LayeredTimeline {
         Ok(())
     }
 
+    fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn> {
+        self.latest_gc_cutoff_lsn.read().unwrap()
+    }
+
     /// Look up given page version.
     fn get_page_at_lsn(&self, rel: RelishTag, rel_blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
         if !rel.is_blocky() && rel_blknum != 0 {
@@ -793,14 +797,6 @@ impl Timeline for LayeredTimeline {
             );
         }
         debug_assert!(lsn <= self.get_last_record_lsn());
-        let latest_gc_cutoff_lsn = self.latest_gc_cutoff_lsn.load();
-        // error instead of assert to simplify testing
-        ensure!(
-            lsn >= latest_gc_cutoff_lsn,
-            "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-            lsn, latest_gc_cutoff_lsn
-        );
-
         let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
@@ -980,7 +976,7 @@ impl Timeline for LayeredTimeline {
             initdb_lsn,
         );
 
-        let latest_gc_cutoff_lsn = self.latest_gc_cutoff_lsn.load();
+        let latest_gc_cutoff_lsn = *self.latest_gc_cutoff_lsn.read().unwrap();
         ensure!(
             lsn >= latest_gc_cutoff_lsn,
             "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
@@ -1099,7 +1095,7 @@ impl LayeredTimeline {
             write_lock: Mutex::new(()),
             checkpoint_cs: Mutex::new(()),
 
-            latest_gc_cutoff_lsn: AtomicLsn::from(metadata.latest_gc_cutoff_lsn()),
+            latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
         }
     }
@@ -1531,7 +1527,7 @@ impl LayeredTimeline {
                 ondisk_prev_record_lsn,
                 ancestor_timelineid,
                 self.ancestor_lsn,
-                self.latest_gc_cutoff_lsn.load(),
+                *self.latest_gc_cutoff_lsn.read().unwrap(),
                 self.initdb_lsn,
             );
 
@@ -1633,12 +1629,13 @@ impl LayeredTimeline {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
+        let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
 
         let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
 
         // We need to ensure that no one branches at a point before latest_gc_cutoff_lsn.
         // See branch_timeline() for details.
-        self.latest_gc_cutoff_lsn.store(cutoff);
+        *self.latest_gc_cutoff_lsn.write().unwrap() = cutoff;
 
         info!("GC starting");
 

@@ -7,7 +7,7 @@ use postgres_ffi::{MultiXactId, MultiXactOffset, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::{AddAssign, Deref};
-use std::sync::Arc;
+use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
 use zenith_utils::lsn::{Lsn, RecordLsn};
 use zenith_utils::zid::ZTimelineId;
@@ -181,6 +181,9 @@ pub trait Timeline: Send + Sync {
     /// those functions with an LSN that has been processed yet is an error.
     ///
     fn wait_lsn(&self, lsn: Lsn) -> Result<()>;
+
+    /// Lock and get timeline's GC cuttof
+    fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn>;
 
     /// Look up given page version.
     fn get_page_at_lsn(&self, tag: RelishTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes>;
