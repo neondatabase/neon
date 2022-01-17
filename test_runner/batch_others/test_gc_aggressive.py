@@ -15,7 +15,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # UPDATEs on it, using {num_connections} separate connections.
 num_connections = 10
 num_rows = 100000
-updates_to_perform = 100000
+updates_to_perform = 10000
 
 updates_performed = 0
 
