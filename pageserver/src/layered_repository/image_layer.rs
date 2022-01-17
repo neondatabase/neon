@@ -201,6 +201,11 @@ impl Layer for ImageLayer {
         }
     }
 
+    // Get physical size of the layer
+    fn get_physical_size(&self) -> Result<u64> {
+        Ok(self.get_seg_size(Lsn(0))? as u64 * BLOCK_SIZE as u64)
+    }
+
     /// Does this segment exist at given LSN?
     fn get_seg_exists(&self, _lsn: Lsn) -> Result<bool> {
         Ok(true)

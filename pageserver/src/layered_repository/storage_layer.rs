@@ -154,11 +154,14 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult>;
 
-    /// Return size of the segment at given LSN. (Only for blocky relations.)
+    /// Return logical size of the segment at given LSN. (Only for blocky relations.)
     fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk>;
 
     /// Does the segment exist at given LSN? Or was it dropped before it.
     fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
+
+    // Get physical size of the layer
+    fn get_physical_size(&self) -> Result<u64>;
 
     /// Does this layer only contain some data for the segment (incremental),
     /// or does it contain a version of every page? This is important to know

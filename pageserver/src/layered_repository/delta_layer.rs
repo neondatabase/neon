@@ -161,6 +161,14 @@ pub struct DeltaLayerInner {
 }
 
 impl DeltaLayerInner {
+    fn get_physical_size(&self) -> Result<u64> {
+        Ok(if let Some(book) = &self.book {
+            book.chapter_reader(PAGE_VERSIONS_CHAPTER)?.len()
+        } else {
+            0
+        })
+    }
+
     fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
         // Scan the VecMap backwards, starting from the given entry.
         let slice = self
@@ -287,6 +295,12 @@ impl Layer for DeltaLayer {
         } else {
             Ok(PageReconstructResult::Complete)
         }
+    }
+
+    // Get physical size of the layer
+    fn get_physical_size(&self) -> Result<u64> {
+        // TODO: is it actually necessary to load layer to get it's size?
+        self.load()?.get_physical_size()
     }
 
     /// Get size of the relation at given LSN

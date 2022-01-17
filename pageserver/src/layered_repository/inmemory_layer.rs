@@ -20,17 +20,12 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
-use postgres_ffi::pg_constants::BLCKSZ;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::vec_map::VecMap;
 
 use super::page_versions::PageVersions;
-
-// The garbage collector needs image layers in order to delete files.
-// If this number is too large it can result in too many small files on disk.
-const MAX_DELTA_LAYERS: usize = 10;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -83,6 +78,10 @@ pub struct InMemoryLayerInner {
 impl InMemoryLayerInner {
     fn assert_writeable(&self) {
         assert!(self.end_lsn.is_none());
+    }
+
+    fn get_physical_size(&self) -> u64 {
+        self.page_versions.size()
     }
 
     fn get_seg_size(&self, lsn: Lsn) -> SegmentBlk {
@@ -226,7 +225,12 @@ impl Layer for InMemoryLayer {
         }
     }
 
-    /// Get size of the relation at given LSN
+    // Get physical size of the layer
+    fn get_physical_size(&self) -> Result<u64> {
+        Ok(self.inner.read().unwrap().get_physical_size() as u64)
+    }
+
+    /// Get logical size of the relation at given LSN
     fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
         assert!(lsn >= self.start_lsn);
         ensure!(
@@ -594,7 +598,6 @@ impl InMemoryLayer {
         &self,
         timeline: &LayeredTimeline,
         reconstruct_pages: bool,
-        n_delta_layers: usize,
     ) -> Result<LayersOnDisk> {
         trace!(
             "write_to_disk {} get_end_lsn is {}",
@@ -621,13 +624,7 @@ impl InMemoryLayer {
         // Figure out if we should create a delta layer, image layer, or both.
         let image_lsn: Option<Lsn>;
         let delta_end_lsn: Option<Lsn>;
-        if self.is_dropped()
-            || !reconstruct_pages
-            || (self.seg.rel.is_blocky()
-                && self.get_seg_size(end_lsn_inclusive)? as u64 * BLCKSZ as u64
-                    > inner.page_versions.size() * 2
-                && n_delta_layers < MAX_DELTA_LAYERS)
-        {
+        if self.is_dropped() || !reconstruct_pages {
             // Create just a delta layer containing all the
             // changes up to and including the drop.
             delta_end_lsn = Some(end_lsn_exclusive);

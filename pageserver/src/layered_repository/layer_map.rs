@@ -199,11 +199,11 @@ impl LayerMap {
         }
     }
 
-    pub fn count_delta_layers(&self, seg: SegmentTag, lsn: Lsn) -> usize {
+    pub fn count_delta_layers(&self, seg: SegmentTag, lsn: Lsn) -> Result<(usize, u64)> {
         if let Some(segentry) = self.segs.get(&seg) {
             segentry.count_delta_layers(lsn)
         } else {
-            0
+            Ok((0, 0))
         }
     }
 
@@ -330,16 +330,18 @@ impl SegEntry {
 
     // Count number of delta layers preceeding specified `lsn`.
     // Perform backward iteration from exclusive upper bound until image layer is reached.
-    pub fn count_delta_layers(&self, lsn: Lsn) -> usize {
+    pub fn count_delta_layers(&self, lsn: Lsn) -> Result<(usize, u64)> {
         let mut count: usize = 0;
+        let mut total_size: u64 = 0;
         let mut iter = self.historic.iter_older(lsn);
         while let Some(layer) = iter.next_back() {
             if !layer.is_incremental() {
                 break;
             }
             count += 1;
+            total_size += layer.get_physical_size()?;
         }
-        count
+        Ok((count, total_size))
     }
 
     // Set new open layer for a SegEntry.

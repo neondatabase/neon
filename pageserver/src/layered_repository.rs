@@ -1598,7 +1598,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn evict_layer(&self, layer_id: LayerId, reconstruct_pages: bool) -> Result<Vec<PathBuf>> {
+    fn evict_layer(&self, layer_id: LayerId, mut reconstruct_pages: bool) -> Result<Vec<PathBuf>> {
         // Mark the layer as no longer accepting writes and record the end_lsn.
         // This happens in-place, no new layers are created now.
         // We call `get_last_record_lsn` again, which may be different from the
@@ -1612,12 +1612,20 @@ impl LayeredTimeline {
         let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
         if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
             let last_lsn = self.get_last_record_lsn();
-            // Count number of layers only if we nned this information: when creation of image layer was not prohibited
-            let n_delta_layers = if reconstruct_pages {
-                layers.count_delta_layers(oldest_layer.get_seg_tag(), last_lsn)
-            } else {
-                0
-            };
+            // Avoid creation of image layers if there are not so much deltas
+            if reconstruct_pages && oldest_layer.get_seg_tag().rel.is_blocky() {
+                let (n_delta_layers, total_delta_size) =
+                    layers.count_delta_layers(oldest_layer.get_seg_tag(), last_lsn)?;
+                let logical_segment_size =
+                    oldest_layer.get_seg_size(last_lsn)? as u64 * BLCKSZ as u64;
+                let physical_deltas_size = total_delta_size + oldest_layer.get_physical_size()?;
+                if logical_segment_size * self.conf.image_layer_generation_threshold as u64
+                    > physical_deltas_size * 100
+                    && n_delta_layers < self.conf.max_delta_layers
+                {
+                    reconstruct_pages = false;
+                }
+            }
 
             drop(global_layer_map);
             oldest_layer.freeze(last_lsn);
@@ -1631,8 +1639,7 @@ impl LayeredTimeline {
             drop(layers);
             drop(write_guard);
 
-            let new_historics =
-                oldest_layer.write_to_disk(self, reconstruct_pages, n_delta_layers)?;
+            let new_historics = oldest_layer.write_to_disk(self, reconstruct_pages)?;
 
             write_guard = self.write_lock.lock().unwrap();
             layers = self.layers.lock().unwrap();

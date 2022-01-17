@@ -43,6 +43,9 @@ pub mod defaults {
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
 
+    pub const DEFAULT_MAX_DELTA_LAYERS: usize = 10;
+    pub const DEFAULT_IMAGE_LAYER_GENERATION_THRESHOLD: usize = 50;
+
     ///
     /// Default built-in configuration file.
     ///
@@ -89,6 +92,21 @@ pub struct PageServerConf {
 
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
+
+    //
+    // Minimal total size of delta layeres which triggers generation of image layer by checkpointer.
+    // It is specified as percent of maximal sigment size (RELISH_SEG_SIZE).
+    // I.e. it means that checkpoint will create image layer in addition to delta layer only when total size
+    // of delta layers since last image layer exceeds specified percent of segment size.
+    //
+    pub image_layer_generation_threshold: usize,
+
+    //
+    // Maximal number of delta layers which can be stored before image layere should be generated.
+    // The garbage collector needs image layers in order to delete files.
+    // If this number is too large it can result in too many small files on disk.
+    //
+    pub max_delta_layers: usize,
 
     // Repository directory, relative to current working directory.
     // Normally, the page server changes the current working directory
@@ -228,6 +246,9 @@ impl PageServerConf {
             page_cache_size: DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: DEFAULT_MAX_FILE_DESCRIPTORS,
 
+            max_delta_layers: DEFAULT_MAX_DELTA_LAYERS,
+            image_layer_generation_threshold: DEFAULT_IMAGE_LAYER_GENERATION_THRESHOLD,
+
             pg_distrib_dir: PathBuf::new(),
             auth_validation_public_key_path: None,
             auth_type: AuthType::Trust,
@@ -249,6 +270,10 @@ impl PageServerConf {
                 "page_cache_size" => conf.page_cache_size = parse_toml_u64(key, item)? as usize,
                 "max_file_descriptors" => {
                     conf.max_file_descriptors = parse_toml_u64(key, item)? as usize
+                }
+                "max_delta_layers" => conf.max_delta_layers = parse_toml_u64(key, item)? as usize,
+                "image_layer_generation_threshold" => {
+                    conf.image_layer_generation_threshold = parse_toml_u64(key, item)? as usize
                 }
                 "pg_distrib_dir" => {
                     conf.pg_distrib_dir = PathBuf::from(parse_toml_string(key, item)?)
@@ -379,6 +404,8 @@ impl PageServerConf {
             gc_period: Duration::from_secs(10),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
+            max_delta_layers: defaults::DEFAULT_MAX_DELTA_LAYERS,
+            image_layer_generation_threshold: defaults::DEFAULT_IMAGE_LAYER_GENERATION_THRESHOLD,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             superuser: "zenith_admin".to_string(),
@@ -450,6 +477,9 @@ gc_horizon = 222
 page_cache_size = 444
 max_file_descriptors = 333
 
+max_delta_layers = 10
+image_layer_generation_threshold = 50
+
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zzzz'
 
@@ -480,6 +510,9 @@ initial_superuser_name = 'zzzz'
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
                 page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
+                max_delta_layers: defaults::DEFAULT_MAX_DELTA_LAYERS,
+                image_layer_generation_threshold:
+                    defaults::DEFAULT_IMAGE_LAYER_GENERATION_THRESHOLD,
                 workdir,
                 pg_distrib_dir,
                 auth_type: AuthType::Trust,
@@ -521,6 +554,8 @@ initial_superuser_name = 'zzzz'
                 superuser: "zzzz".to_string(),
                 page_cache_size: 444,
                 max_file_descriptors: 333,
+                max_delta_layers: 10,
+                image_layer_generation_threshold: 50,
                 workdir,
                 pg_distrib_dir,
                 auth_type: AuthType::Trust,
