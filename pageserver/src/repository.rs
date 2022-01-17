@@ -1005,11 +1005,11 @@ mod tests {
         make_some_layers(&tline, Lsn(0x20))?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
+        assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
         match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
             Ok(_) => panic!("request for page should have failed"),
-            Err(err) => assert!(err
-                .to_string()
-                .contains("not found at")),
+            Err(err) => assert!(err.to_string().contains("not found at")),
         }
         Ok(())
     }
