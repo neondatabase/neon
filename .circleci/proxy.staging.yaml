@@ -11,3 +11,10 @@ exposedService:
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
     external-dns.alpha.kubernetes.io/hostname: start.stage.zenith.tech
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    selector:
+      prometheus: zenith
