@@ -34,7 +34,6 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use libc::{prctl, PR_SET_PDEATHSIG, SIGINT};
 use log::info;
 use postgres::{Client, NoTls};
 
@@ -155,20 +154,6 @@ fn run_compute(state: &Arc<RwLock<ComputeState>>) -> Result<ExitStatus> {
 }
 
 fn main() -> Result<()> {
-    // During configuration we are starting Postgres as a child process. If we
-    // fail we do not want to leave it running. PR_SET_PDEATHSIG sets the signal
-    // that will be sent to the child process when the parent dies. NB: this is
-    // cleared for the child of a fork(). SIGINT means fast shutdown for Postgres.
-    // This does not matter much for Docker, where `zenith_ctl` is an entrypoint,
-    // so the whole container will exit if it exits. But could be useful when
-    // `zenith_ctl` is used in e.g. systemd.
-    // XXX: this appears to just don't work. When `main` exits, the child process
-    // `postgres` is re-assigned to a new parent (`/lib/systemd/systemd --user`
-    // in my case).
-    unsafe {
-        prctl(PR_SET_PDEATHSIG, SIGINT);
-    }
-
     // TODO: re-use `zenith_utils::logging` later
     init_logger(DEFAULT_LOG_LEVEL)?;
 
