@@ -195,7 +195,9 @@ impl ProxyConnection {
                     if received_something {
                         bail!("connection is lost");
                     } else {
-                        return Ok(None); // Probably load balancer health check
+                        // Probably load balancer health check
+                        // TODO check peer_addr to make sure.
+                        return Ok(None);
                     }
                 }
                 bad => bail!("unexpected message type: {:?}", bad),
