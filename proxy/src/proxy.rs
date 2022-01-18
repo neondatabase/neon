@@ -168,7 +168,7 @@ impl ProxyConnection {
         loop {
             let msg = match self.pgb.read_message()? {
                 Some(Fe::StartupPacket(msg)) => msg,
-                None => bail!("connection is lost"),
+                None => return Ok(None), // Probably load balancer health check
                 bad => bail!("unexpected message type: {:?}", bad),
             };
             println!("got message: {:?}", msg);
