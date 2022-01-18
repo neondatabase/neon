@@ -717,8 +717,9 @@ class LocalFsStorage:
 class S3Storage:
     bucket: str
     region: str
-    access_key: str
-    secret_key: str
+    access_key: Optional[str]
+    secret_key: Optional[str]
+    endpoint: Optional[str]
 
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]
@@ -791,8 +792,13 @@ def append_pageserver_param_overrides(params_to_update: List[str],
             pageserver_storage_override = f"local_path='{pageserver_remote_storage.root}'"
         elif isinstance(pageserver_remote_storage, S3Storage):
             pageserver_storage_override = f"bucket_name='{pageserver_remote_storage.bucket}',\
-                bucket_region='{pageserver_remote_storage.region}',access_key_id='{pageserver_remote_storage.access_key}',\
-                secret_access_key='{pageserver_remote_storage.secret_key}'"
+                bucket_region='{pageserver_remote_storage.region}'"
+            if pageserver_remote_storage.access_key is not None:
+                pageserver_storage_override += f",access_key_id='{pageserver_remote_storage.access_key}'"
+            if pageserver_remote_storage.secret_key is not None:
+                pageserver_storage_override +=  f",secret_access_key='{pageserver_remote_storage.secret_key}'"
+            if pageserver_remote_storage.endpoint is not None:
+                pageserver_storage_override +=  f",endpoint='{pageserver_remote_storage.endpoint}'"
 
         else:
             raise Exception(f'Unknown storage configuration {pageserver_remote_storage}')
