@@ -58,10 +58,16 @@ pub struct S3 {
 impl S3 {
     /// Creates the storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config, pageserver_workdir: &'static Path) -> anyhow::Result<Self> {
-        let region = aws_config
-            .bucket_region
-            .parse::<Region>()
-            .context("Failed to parse the s3 region from config")?;
+        let region = match aws_config.endpoint.clone() {
+            Some(endpoint) => Region::Custom {
+                endpoint,
+                region: aws_config.bucket_region.clone(),
+            },
+            None => aws_config
+                .bucket_region
+                .parse::<Region>()
+                .context("Failed to parse the s3 region from config")?,
+        };
         let credentials = Credentials::new(
             aws_config.access_key_id.as_deref(),
             aws_config.secret_access_key.as_deref(),

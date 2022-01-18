@@ -144,6 +144,13 @@ pub struct S3Config {
     pub access_key_id: Option<String>,
     /// "Password" to use when connecting to bucket.
     pub secret_access_key: Option<String>,
+    /// A base URL to send S3 requests to.
+    /// By default, the endpoint is derived from a region name, assuming it's
+    /// an AWS S3 region name, erroring on wrong region name.
+    /// Endpoint provides a way to support other S3 flavors and their regions.
+    ///
+    /// Example: `http://127.0.0.1:5000`
+    pub endpoint: Option<String>,
 }
 
 impl std::fmt::Debug for S3Config {
@@ -348,6 +355,10 @@ impl PageServerConf {
                 prefix_in_bucket: toml
                     .get("prefix_in_bucket")
                     .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
+                    .transpose()?,
+                endpoint: toml
+                    .get("endpoint")
+                    .map(|endpoint| parse_toml_string("endpoint", endpoint))
                     .transpose()?,
             }),
             (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
@@ -597,6 +608,7 @@ pg_distrib_dir='{}'
         let prefix_in_bucket = "test_prefix".to_string();
         let access_key_id = "SOMEKEYAAAAASADSAH*#".to_string();
         let secret_access_key = "SOMEsEcReTsd292v".to_string();
+        let endpoint = "http://localhost:5000".to_string();
         let max_concurrent_sync = NonZeroUsize::new(111).unwrap();
         let max_sync_errors = NonZeroU32::new(222).unwrap();
 
@@ -609,12 +621,13 @@ bucket_name = '{}'
 bucket_region = '{}'
 prefix_in_bucket = '{}'
 access_key_id = '{}'
-secret_access_key = '{}'"#,
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key
+secret_access_key = '{}'
+endpoint = '{}'"#,
+                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key, endpoint
             ),
             format!(
-                "remote_storage={{max_concurrent_sync={}, max_sync_errors={}, bucket_name='{}', bucket_region='{}', prefix_in_bucket='{}', access_key_id='{}', secret_access_key='{}'}}",
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key
+                "remote_storage={{max_concurrent_sync={}, max_sync_errors={}, bucket_name='{}', bucket_region='{}', prefix_in_bucket='{}', access_key_id='{}', secret_access_key='{}', endpoint='{}'}}",
+                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key, endpoint
             ),
         ];
 
@@ -648,7 +661,8 @@ pg_distrib_dir='{}'
                         bucket_region: bucket_region.clone(),
                         access_key_id: Some(access_key_id.clone()),
                         secret_access_key: Some(secret_access_key.clone()),
-                        prefix_in_bucket: Some(prefix_in_bucket.clone())
+                        prefix_in_bucket: Some(prefix_in_bucket.clone()),
+                        endpoint: Some(endpoint.clone())
                     }),
                 },
                 "Remote storage config should correctly parse the S3 config"
