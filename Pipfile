@@ -13,6 +13,8 @@ asyncpg = "*"
 cached-property = "*"
 psycopg2-binary = "*"
 jinja2 = "*"
+boto3 = "*"
+boto3-stubs = "*"
 
 [dev-packages]
 # Behavior may change slightly between versions. These are run continuously,
@@ -22,6 +24,9 @@ mypy = "==0.910"
 # Non-pinned packages follow.
 pipenv = "*"
 flake8 = "*"
+moto = "*"
+flask = "*"
+flask-cors = "*"
 types-requests = "*"
 types-psycopg2 = "*"
 

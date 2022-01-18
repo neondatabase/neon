@@ -1,11 +1,12 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/zenith_zzz/'}" pipenv ......
 
-import tempfile, time, shutil, os
+import time, shutil, os
 from contextlib import closing
 from pathlib import Path
-from fixtures.zenith_fixtures import ZenithEnvBuilder, LocalFsStorage, check_restored_datadir_content
+from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
+import pytest
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -25,10 +26,17 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #   * timeline status is polled until it's downloaded
 #   * queries the specific data, ensuring that it matches the one stored before
 #
-def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder):
+# The tests are done for all types of remote storage pageserver supports.
+@pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
+def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
     zenith_env_builder.rust_log_override = 'debug'
     zenith_env_builder.num_safekeepers = 1
-    zenith_env_builder.enable_local_fs_remote_storage()
+    if storage_type == 'local_fs':
+        zenith_env_builder.enable_local_fs_remote_storage()
+    elif storage_type == 'mock_s3':
+        zenith_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
+    else:
+        raise RuntimeError(f'Unknown storage type: {storage_type}')
 
     data_id = 1
     data_secret = 'very secret secret'

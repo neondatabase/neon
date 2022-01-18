@@ -70,8 +70,3 @@ on the timeline download, missing remote branch files are downlaoded.
 
 A branch is a per-tenant entity, yet a current implementaion requires synchronizing a timeline first to get the branch files locally.
 Currently, there's no other way to know about the remote branch files, neither the file contents is verified and updated.
-
-* no IT tests
-
-Automated S3 testing is lacking currently, due to no convenient way to enable backups during the tests.
-After it's fixed, benchmark runs should also be carried out to find bottlenecks.
