@@ -164,14 +164,22 @@ impl ProxyConnection {
     fn handle_startup(&mut self) -> anyhow::Result<Option<(String, String)>> {
         let have_tls = self.pgb.tls_config.is_some();
         let mut encrypted = false;
+        let mut received_something = false;
 
         loop {
             let msg = match self.pgb.read_message()? {
                 Some(Fe::StartupPacket(msg)) => msg,
-                None => return Ok(None), // Probably load balancer health check
+                None => {
+                    if received_something {
+                        bail!("connection is lost");
+                    } else {
+                        return Ok(None); // Probably load balancer health check
+                    }
+                }
                 bad => bail!("unexpected message type: {:?}", bad),
             };
             println!("got message: {:?}", msg);
+            received_something = true;
 
             match msg {
                 FeStartupPacket::GssEncRequest => {
