@@ -27,12 +27,12 @@
 //! ```
 //!
 use std::fs::File;
+use std::panic;
 use std::path::Path;
 use std::process::{exit, Command, ExitStatus};
 use std::sync::{Arc, RwLock};
-use std::{env, panic};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use libc::{prctl, PR_SET_PDEATHSIG, SIGINT};
 use log::info;
@@ -70,7 +70,7 @@ fn prepare_pgdata(state: &Arc<RwLock<ComputeState>>) -> Result<()> {
         .expect("tenant id should be provided");
 
     info!(
-        "applying spec for cluster #{}, operation #{}",
+        "starting cluster #{}, operation #{}",
         spec.cluster.cluster_id,
         spec.operation_uuid.as_ref().unwrap()
     );
@@ -80,10 +80,23 @@ fn prepare_pgdata(state: &Arc<RwLock<ComputeState>>) -> Result<()> {
     config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec)?;
 
     info!("starting safekeepers syncing");
-    let lsn = sync_safekeepers(&state.pgdata, &state.pgbin)?;
+    let lsn = sync_safekeepers(&state.pgdata, &state.pgbin)
+        .with_context(|| "failed to sync safekeepers")?;
     info!("safekeepers synced at LSN {}", lsn);
 
-    get_basebackup(&state.pgdata, &pageserver_connstr, &tenant, &timeline, &lsn)?;
+    info!(
+        "getting basebackup@{} from pageserver {}",
+        lsn, pageserver_connstr
+    );
+    get_basebackup(&state.pgdata, &pageserver_connstr, &tenant, &timeline, &lsn).with_context(
+        || {
+            format!(
+                "failed to get basebackup@{} from pageserver {}",
+                lsn, pageserver_connstr
+            )
+        },
+    )?;
+
     // Update pg_hba.conf received with basebackup.
     update_pg_hba(pgdata_path)?;
 
@@ -149,6 +162,9 @@ fn main() -> Result<()> {
     // This does not matter much for Docker, where `zenith_ctl` is an entrypoint,
     // so the whole container will exit if it exits. But could be useful when
     // `zenith_ctl` is used in e.g. systemd.
+    // XXX: this appears to just don't work. When `main` exits, the child process
+    // `postgres` is re-assigned to a new parent (`/lib/systemd/systemd --user`
+    // in my case).
     unsafe {
         prctl(PR_SET_PDEATHSIG, SIGINT);
     }
@@ -156,8 +172,10 @@ fn main() -> Result<()> {
     // TODO: re-use `zenith_utils::logging` later
     init_logger(DEFAULT_LOG_LEVEL)?;
 
+    // Env variable is set by `cargo`
+    let version: Option<&str> = option_env!("CARGO_PKG_VERSION");
     let matches = clap::App::new("zenith_ctl")
-        .version("0.1.0")
+        .version(version.unwrap_or("unknown"))
         .arg(
             clap::Arg::with_name("connstr")
                 .short("C")
@@ -212,13 +230,7 @@ fn main() -> Result<()> {
                 let file = File::open(path)?;
                 serde_json::from_reader(file)?
             } else {
-                // Finally, try to fetch it from the env
-                // XXX: not tested well and kept as a backup option for k8s, Docker, etc.
-                // TODO: remove later
-                match env::var("CLUSTER_SPEC") {
-                    Ok(json) => serde_json::from_str(&json)?,
-                    Err(_) => panic!("cluster spec should be provided via --spec, --spec-path or env variable CLUSTER_SPEC")
-                }
+                panic!("cluster spec should be provided via --spec or --spec-path argument");
             }
         }
     };

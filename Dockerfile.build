@@ -2,8 +2,9 @@
 # Image with all the required dependencies to build https://github.com/zenithdb/zenith
 # and Postgres from https://github.com/zenithdb/postgres
 # Also includes some rust development and build tools.
+# NB: keep in sync with rust image version in .circle/config.yml
 #
-FROM rust:slim-buster
+FROM rust:1.56.1-slim-buster
 WORKDIR /zenith
 
 # Install postgres and zenith build dependencies
