@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from cached_property import cached_property
 import asyncpg
 import os
+import boto3
 import pathlib
 import uuid
 import warnings
@@ -330,6 +331,48 @@ class AuthKeys:
         return token
 
 
+class MockS3Server:
+    """
+    Starts a mock S3 server for testing on a port given, errors if the server fails to start or exits prematurely.
+    Relies that `pipenv` and `moto` server are installed, since it's the way the tests are run.
+
+    Also provides a set of methods to derive the connection properties from and the method to kill the underlying server.
+    """
+    def __init__(
+        self,
+        port: int,
+    ):
+        self.port = port
+
+        self.subprocess = subprocess.Popen([f'pipenv run moto_server s3 -p{port}'], shell=True)
+        error = None
+        try:
+            return_code = self.subprocess.poll()
+            if return_code is not None:
+                error = f"expected mock s3 server to run but it exited with code {return_code}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
+        except Exception as e:
+            error = f"expected mock s3 server to start but it failed with exception: {e}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
+        if error is not None:
+            log.error(error)
+            self.subprocess.kill()
+            raise RuntimeError("failed to start s3 mock server")
+
+    def endpoint(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def region(self) -> str:
+        return 'us-east-1'
+
+    def access_key(self) -> str:
+        return 'test'
+
+    def secret_key(self) -> str:
+        return 'test'
+
+    def kill(self):
+        self.subprocess.kill()
+
+
 class ZenithEnvBuilder:
     """
     Builder object to create a Zenith runtime environment
@@ -352,6 +395,7 @@ class ZenithEnvBuilder:
         self.pageserver_remote_storage = pageserver_remote_storage
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
+        self.s3_mock_server: Optional[MockS3Server] = None
         self.env: Optional[ZenithEnv] = None
 
     def init(self) -> ZenithEnv:
@@ -360,10 +404,43 @@ class ZenithEnvBuilder:
         self.env = ZenithEnv(self)
         return self.env
 
-    def enable_local_fs_remote_storage(self):
-        assert self.pageserver_remote_storage is None, "remote storage is enabled already"
+    """
+    Sets up the pageserver to use the local fs at the `test_dir/local_fs_remote_storage` path.
+    Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
+    """
+
+    def enable_local_fs_remote_storage(self, force_enable=True):
+        assert force_enable or self.pageserver_remote_storage is None, "remote storage is enabled already"
         self.pageserver_remote_storage = LocalFsStorage(
             Path(self.repo_dir / 'local_fs_remote_storage'))
+
+    """
+    Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
+    Starts up the mock server, if that does not run yet.
+    Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
+    """
+
+    def enable_s3_mock_remote_storage(self, bucket_name: str, force_enable=True):
+        assert force_enable or self.pageserver_remote_storage is None, "remote storage is enabled already"
+        if not self.s3_mock_server:
+            self.s3_mock_server = MockS3Server(self.port_distributor.get_port())
+
+        mock_endpoint = self.s3_mock_server.endpoint()
+        mock_region = self.s3_mock_server.region()
+        mock_access_key = self.s3_mock_server.access_key()
+        mock_secret_key = self.s3_mock_server.secret_key()
+        boto3.client(
+            's3',
+            endpoint_url=mock_endpoint,
+            region_name=mock_region,
+            aws_access_key_id=mock_access_key,
+            aws_secret_access_key=mock_secret_key,
+        ).create_bucket(Bucket=bucket_name)
+        self.pageserver_remote_storage = S3Storage(bucket=bucket_name,
+                                                   endpoint=mock_endpoint,
+                                                   region=mock_region,
+                                                   access_key=mock_access_key,
+                                                   secret_key=mock_secret_key)
 
     def __enter__(self):
         return self
@@ -377,6 +454,8 @@ class ZenithEnvBuilder:
             for sk in self.env.safekeepers:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
+            if self.s3_mock_server:
+                self.s3_mock_server.kill()
 
 
 class ZenithEnv:
@@ -415,6 +494,7 @@ class ZenithEnv:
         self.repo_dir = config.repo_dir
         self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
+        self.s3_mock_server = config.s3_mock_server
 
         self.postgres = PostgresFactory(self)
 
@@ -600,6 +680,8 @@ def zenith_simple_env(_shared_simple_env: ZenithEnv) -> Iterator[ZenithEnv]:
     yield _shared_simple_env
 
     _shared_simple_env.postgres.stop_all()
+    if _shared_simple_env.s3_mock_server:
+        _shared_simple_env.s3_mock_server.kill()
 
 
 @pytest.fixture(scope='function')
@@ -793,12 +875,13 @@ def append_pageserver_param_overrides(params_to_update: List[str],
         elif isinstance(pageserver_remote_storage, S3Storage):
             pageserver_storage_override = f"bucket_name='{pageserver_remote_storage.bucket}',\
                 bucket_region='{pageserver_remote_storage.region}'"
+
             if pageserver_remote_storage.access_key is not None:
                 pageserver_storage_override += f",access_key_id='{pageserver_remote_storage.access_key}'"
             if pageserver_remote_storage.secret_key is not None:
-                pageserver_storage_override +=  f",secret_access_key='{pageserver_remote_storage.secret_key}'"
+                pageserver_storage_override += f",secret_access_key='{pageserver_remote_storage.secret_key}'"
             if pageserver_remote_storage.endpoint is not None:
-                pageserver_storage_override +=  f",endpoint='{pageserver_remote_storage.endpoint}'"
+                pageserver_storage_override += f",endpoint='{pageserver_remote_storage.endpoint}'"
 
         else:
             raise Exception(f'Unknown storage configuration {pageserver_remote_storage}')

@@ -277,6 +277,10 @@ jobs:
           name: Install deps
           command: pipenv --python 3.7 install
       - run:
+          name: Install dev deps
+          # we need to run moto s3 mock server, we start is as a separate process, so it's in the dev deps
+          command: pipenv --python 3.7 install --dev
+      - run:
           name: Run pytest
           # pytest doesn't output test logs in real time, so CI job may fail with
           # `Too long with no output` error, if a test is running for a long time.
