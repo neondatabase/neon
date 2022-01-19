@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
                 .short("a")
                 .long("auth-endpoint")
                 .takes_value(true)
-                .help("redirect unauthenticated users to given uri")
+                .help("API endpoint for authenticating users")
                 .default_value("http://localhost:3000/authenticate_proxy_request/"),
         )
         .arg(
