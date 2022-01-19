@@ -138,20 +138,27 @@ pub fn start_local_timeline_sync(
 
     match &config.remote_storage_config {
         Some(storage_config) => match &storage_config.storage {
-            RemoteStorageKind::LocalFs(root) => storage_sync::spawn_storage_sync_thread(
-                config,
-                local_timeline_files,
-                LocalFs::new(root.clone(), &config.workdir)?,
-                storage_config.max_concurrent_sync,
-                storage_config.max_sync_errors,
-            ),
-            RemoteStorageKind::AwsS3(s3_config) => storage_sync::spawn_storage_sync_thread(
-                config,
-                local_timeline_files,
-                S3::new(s3_config, &config.workdir)?,
-                storage_config.max_concurrent_sync,
-                storage_config.max_sync_errors,
-            ),
+            RemoteStorageKind::LocalFs(root) => {
+                info!("Using fs root '{}' as a remote storage", root.display());
+                storage_sync::spawn_storage_sync_thread(
+                    config,
+                    local_timeline_files,
+                    LocalFs::new(root.clone(), &config.workdir)?,
+                    storage_config.max_concurrent_sync,
+                    storage_config.max_sync_errors,
+                )
+            },
+            RemoteStorageKind::AwsS3(s3_config) => {
+                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
+                    s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
+                storage_sync::spawn_storage_sync_thread(
+                    config,
+                    local_timeline_files,
+                    S3::new(s3_config, &config.workdir)?,
+                    storage_config.max_concurrent_sync,
+                    storage_config.max_sync_errors,
+                )
+            },
         }
         .context("Failed to spawn the storage sync thread"),
         None => {
