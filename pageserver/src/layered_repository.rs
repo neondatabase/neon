@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
@@ -2171,11 +2171,10 @@ impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
         let oldsize = self
             .tl
             .get_relish_size(rel, self.tl.get_last_record_lsn())?
-            .ok_or_else(|| {
-                anyhow!(
+            .with_context(|| {
+                format!(
                     "attempted to truncate non-existent relish {} at {}",
-                    rel,
-                    lsn
+                    rel, lsn
                 )
             })?;
 
@@ -2298,8 +2297,5 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
         }
     }
 
-    Err(anyhow!(
-        "couldn't find an unused backup number for {:?}",
-        path
-    ))
+    bail!("couldn't find an unused backup number for {:?}", path)
 }

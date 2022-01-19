@@ -4,7 +4,7 @@
 // TODO: move all paths construction to conf impl
 //
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -118,7 +118,7 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     if let Some(tenantid) = create_tenant {
         let tenantid = ZTenantId::from_str(tenantid)?;
         println!("initializing tenantid {}", tenantid);
-        create_repo(conf, tenantid, dummy_redo_mgr).with_context(|| "failed to create repo")?;
+        create_repo(conf, tenantid, dummy_redo_mgr).context("failed to create repo")?;
     }
     crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
@@ -197,7 +197,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
         .stdout(Stdio::null())
         .output()
-        .with_context(|| "failed to execute initdb")?;
+        .context("failed to execute initdb")?;
     if !initdb_output.status.success() {
         anyhow::bail!(
             "initdb failed: '{}'",
@@ -308,7 +308,7 @@ pub(crate) fn create_branch(
     let timeline = repo
         .get_timeline(startpoint.timelineid)?
         .local_timeline()
-        .ok_or_else(|| anyhow!("Cannot branch off the timeline that's not present locally"))?;
+        .context("Cannot branch off the timeline that's not present locally")?;
     if startpoint.lsn == Lsn(0) {
         // Find end of WAL on the old timeline
         let end_of_wal = timeline.get_last_record_lsn();
@@ -383,14 +383,11 @@ fn parse_point_in_time(
     let mut strings = s.split('@');
     let name = strings.next().unwrap();
 
-    let lsn: Option<Lsn>;
-    if let Some(lsnstr) = strings.next() {
-        lsn = Some(
-            Lsn::from_str(lsnstr).with_context(|| "invalid LSN in point-in-time specification")?,
-        );
-    } else {
-        lsn = None
-    }
+    let lsn = strings
+        .next()
+        .map(Lsn::from_str)
+        .transpose()
+        .context("invalid LSN in point-in-time specification")?;
 
     // Check if it's a tag
     if lsn.is_none() {

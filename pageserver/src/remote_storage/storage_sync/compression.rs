@@ -34,7 +34,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{bail, ensure, Context};
 use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -211,16 +211,18 @@ pub async fn read_archive_header<A: io::AsyncRead + Send + Sync + Unpin>(
 pub fn parse_archive_name(archive_path: &Path) -> anyhow::Result<(Lsn, u64)> {
     let archive_name = archive_path
         .file_name()
-        .ok_or_else(|| anyhow!("Archive '{}' has no file name", archive_path.display()))?
+        .with_context(|| format!("Archive '{}' has no file name", archive_path.display()))?
         .to_string_lossy();
     let (lsn_str, header_size_str) =
-        archive_name.rsplit_once(ARCHIVE_EXTENSION).ok_or_else(|| {
-            anyhow!(
-                "Archive '{}' has incorrect extension, expected to contain '{}'",
-                archive_path.display(),
-                ARCHIVE_EXTENSION
-            )
-        })?;
+        archive_name
+            .rsplit_once(ARCHIVE_EXTENSION)
+            .with_context(|| {
+                format!(
+                    "Archive '{}' has incorrect extension, expected to contain '{}'",
+                    archive_path.display(),
+                    ARCHIVE_EXTENSION
+                )
+            })?;
     let disk_consistent_lsn = Lsn::from_hex(lsn_str).with_context(|| {
         format!(
             "Archive '{}' has an invalid disk consistent lsn in its extension",
@@ -374,7 +376,7 @@ async fn write_archive_contents(
     }
     let metadata_bytes_written = io::copy(&mut metadata_bytes.as_slice(), &mut archive_input)
         .await
-        .with_context(|| "Failed to add metadata into the archive")?;
+        .context("Failed to add metadata into the archive")?;
     ensure!(
         header.metadata_file_size == metadata_bytes_written,
         "Metadata file was written to the archive incompletely",

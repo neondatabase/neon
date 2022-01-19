@@ -2,7 +2,7 @@
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use byteorder::{BigEndian, ByteOrder};
 use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -122,7 +122,7 @@ impl FeMessage {
         // The message length includes itself, so it better be at least 4
         let bodylen = len
             .checked_sub(4)
-            .ok_or_else(|| anyhow!("invalid message length: parsing u32"))?;
+            .context("invalid message length: parsing u32")?;
 
         // Read message body
         let mut body_buf: Vec<u8> = vec![0; bodylen as usize];
@@ -144,7 +144,7 @@ impl FeMessage {
             b'c' => Ok(Some(FeMessage::CopyDone)),
             b'f' => Ok(Some(FeMessage::CopyFail)),
             b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
-            tag => Err(anyhow!("unknown message tag: {},'{:?}'", tag, body)),
+            tag => bail!("unknown message tag: {},'{:?}'", tag, body),
         }
     }
 }
@@ -203,9 +203,9 @@ impl FeStartupPacket {
                 let mut params_tokens = params_str.split('\0');
                 let mut params: HashMap<String, String> = HashMap::new();
                 while let Some(name) = params_tokens.next() {
-                    let value = params_tokens.next().ok_or_else(|| {
-                        anyhow!("expected even number of params in StartupMessage")
-                    })?;
+                    let value = params_tokens
+                        .next()
+                        .context("expected even number of params in StartupMessage")?;
                     if name == "options" {
                         // deprecated way of passing params as cmd line args
                         for cmdopt in value.split(' ') {

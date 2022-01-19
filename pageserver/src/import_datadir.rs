@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use tracing::*;
 
@@ -126,7 +126,7 @@ pub fn import_timeline_from_postgres_datadir(
     writer.advance_last_record_lsn(lsn);
 
     // We expect the Postgres server to be shut down cleanly.
-    let pg_control = pg_control.ok_or_else(|| anyhow!("pg_control file not found"))?;
+    let pg_control = pg_control.context("pg_control file not found")?;
     ensure!(
         pg_control.state == DBState_DB_SHUTDOWNED,
         "Postgres cluster was not shut down cleanly"

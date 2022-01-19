@@ -9,7 +9,7 @@ use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::walredo::PostgresRedoManager;
 use crate::CheckpointConfig;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use lazy_static::lazy_static;
 use log::*;
 use serde::{Deserialize, Serialize};
@@ -208,7 +208,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Re
     let mut m = access_tenants();
     let tenant = m
         .get_mut(&tenantid)
-        .ok_or_else(|| anyhow!("Tenant not found for id {}", tenantid))?;
+        .with_context(|| format!("Tenant not found for id {}", tenantid))?;
 
     info!("activating tenant {}", tenantid);
 
@@ -251,7 +251,7 @@ pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Reposito
     let m = access_tenants();
     let tenant = m
         .get(&tenantid)
-        .ok_or_else(|| anyhow!("Tenant not found for tenant {}", tenantid))?;
+        .with_context(|| format!("Tenant not found for tenant {}", tenantid))?;
 
     Ok(Arc::clone(&tenant.repo))
 }
@@ -263,7 +263,7 @@ pub fn get_timeline_for_tenant(
     get_repository_for_tenant(tenantid)?
         .get_timeline(timelineid)?
         .local_timeline()
-        .ok_or_else(|| anyhow!("cannot fetch timeline {}", timelineid))
+        .with_context(|| format!("cannot fetch timeline {}", timelineid))
 }
 
 #[derive(Serialize, Deserialize, Clone)]

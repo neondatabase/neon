@@ -169,7 +169,7 @@ impl DeltaLayerInner {
         if let Some((_entry_lsn, entry)) = slice.last() {
             Ok(*entry)
         } else {
-            Err(anyhow::anyhow!("could not find seg size in delta layer"))
+            bail!("could not find seg size in delta layer")
         }
     }
 }

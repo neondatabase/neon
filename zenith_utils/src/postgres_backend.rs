@@ -5,7 +5,7 @@
 
 use crate::pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -206,7 +206,7 @@ impl PostgresBackend {
     fn get_stream_in(&mut self) -> Result<&mut BidiStream> {
         match &mut self.stream {
             Some(Stream::Bidirectional(stream)) => Ok(stream),
-            _ => Err(anyhow!("reader taken")),
+            _ => bail!("reader taken"),
         }
     }
 
@@ -399,9 +399,7 @@ impl PostgresBackend {
                 match self.auth_type {
                     AuthType::Trust => unreachable!(),
                     AuthType::MD5 => {
-                        let (_, md5_response) = m
-                            .split_last()
-                            .ok_or_else(|| anyhow!("protocol violation"))?;
+                        let (_, md5_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_md5(self, md5_response) {
                             self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
@@ -409,9 +407,7 @@ impl PostgresBackend {
                         }
                     }
                     AuthType::ZenithJWT => {
-                        let (_, jwt_response) = m
-                            .split_last()
-                            .ok_or_else(|| anyhow!("protocol violation"))?;
+                        let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                             self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;

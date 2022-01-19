@@ -4,7 +4,7 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use toml_edit;
 use toml_edit::{Document, Item};
 use zenith_utils::postgres_backend::AuthType;
@@ -306,9 +306,7 @@ impl PageServerConf {
                 })
                 .ok()
                 .and_then(NonZeroUsize::new)
-                .ok_or_else(|| {
-                    anyhow!("'max_concurrent_sync' must be a non-zero positive integer")
-                })?
+                .context("'max_concurrent_sync' must be a non-zero positive integer")?
         } else {
             NonZeroUsize::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC).unwrap()
         };
@@ -321,7 +319,7 @@ impl PageServerConf {
                 })
                 .ok()
                 .and_then(NonZeroU32::new)
-                .ok_or_else(|| anyhow!("'max_sync_errors' must be a non-zero positive integer"))?
+                .context("'max_sync_errors' must be a non-zero positive integer")?
         } else {
             NonZeroU32::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS).unwrap()
         };
@@ -396,7 +394,7 @@ impl PageServerConf {
 fn parse_toml_string(name: &str, item: &Item) -> Result<String> {
     let s = item
         .as_str()
-        .ok_or_else(|| anyhow!("configure option {} is not a string", name))?;
+        .with_context(|| format!("configure option {} is not a string", name))?;
     Ok(s.to_string())
 }
 
@@ -405,7 +403,7 @@ fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
     // for our use, though.
     let i: i64 = item
         .as_integer()
-        .ok_or_else(|| anyhow!("configure option {} is not an integer", name))?;
+        .with_context(|| format!("configure option {} is not an integer", name))?;
     if i < 0 {
         bail!("configure option {} cannot be negative", name);
     }
@@ -415,7 +413,7 @@ fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
 fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
     let s = item
         .as_str()
-        .ok_or_else(|| anyhow!("configure option {} is not a string", name))?;
+        .with_context(|| format!("configure option {} is not a string", name))?;
 
     Ok(humantime::parse_duration(s)?)
 }
@@ -423,7 +421,7 @@ fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
 fn parse_toml_auth_type(name: &str, item: &Item) -> Result<AuthType> {
     let v = item
         .as_str()
-        .ok_or_else(|| anyhow!("configure option {} is not a string", name))?;
+        .with_context(|| format!("configure option {} is not a string", name))?;
     AuthType::from_str(v)
 }
 

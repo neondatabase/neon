@@ -140,7 +140,7 @@ impl SharedState {
         create: CreateControlFile,
     ) -> Result<Self> {
         let state = FileStorage::load_control_file_conf(conf, timeline_id, create)
-            .with_context(|| "failed to load from control file")?;
+            .context("failed to load from control file")?;
         let file_storage = FileStorage::new(timeline_id, conf);
         let flush_lsn = if state.server.wal_seg_size != 0 {
             let wal_dir = conf.timeline_dir(&timeline_id);
@@ -377,7 +377,7 @@ impl GlobalTimelines {
                 fs::create_dir_all(timeline_id.to_string())?;
 
                 let shared_state = SharedState::create_restore(conf, timeline_id, create)
-                    .with_context(|| "failed to restore shared state")?;
+                    .context("failed to restore shared state")?;
 
                 let new_tli = Arc::new(Timeline::new(timeline_id, shared_state));
                 timelines.insert((tenant_id, timeline_id), Arc::clone(&new_tli));
@@ -470,7 +470,7 @@ impl FileStorage {
             let mut buf = Vec::new();
             control_file
                 .read_to_end(&mut buf)
-                .with_context(|| "failed to read control file")?;
+                .context("failed to read control file")?;
 
             let calculated_checksum = crc32c::crc32c(&buf[..buf.len() - CHECKSUM_SIZE]);
 
@@ -554,7 +554,7 @@ impl Storage for FileStorage {
         // fsync the directory (linux specific)
         File::open(&self.timeline_dir)
             .and_then(|f| f.sync_all())
-            .with_context(|| "failed to sync control file directory")?;
+            .context("failed to sync control file directory")?;
         Ok(())
     }
 

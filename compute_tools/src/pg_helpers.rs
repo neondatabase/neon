@@ -5,7 +5,7 @@ use std::process::Command;
 use std::str::FromStr;
 use std::{fs, thread, time};
 
-use anyhow::{anyhow, Result};
+use anyhow::{bail, Result};
 use postgres::{Client, Transaction};
 use serde::Deserialize;
 
@@ -226,7 +226,7 @@ pub fn wait_for_postgres(port: &str, pgdata: &Path) -> Result<()> {
         // but postgres starts listening almost immediately, even if it is not really
         // ready to accept connections).
         if slept >= POSTGRES_WAIT_TIMEOUT {
-            return Err(anyhow!("timed out while waiting for Postgres to start"));
+            bail!("timed out while waiting for Postgres to start");
         }
 
         if pid_path.exists() {

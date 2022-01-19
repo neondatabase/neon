@@ -1,6 +1,6 @@
 use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use rand::prelude::StdRng;
@@ -214,7 +214,7 @@ impl ProxyConnection {
                     let mut get_param = |key| {
                         params
                             .remove(key)
-                            .ok_or_else(|| anyhow!("{} is missing in startup packet", key))
+                            .with_context(|| format!("{} is missing in startup packet", key))
                     };
 
                     return Ok(Some((get_param("user")?, get_param("database")?)));

@@ -6,8 +6,7 @@
 //!  from the call list.
 //!
 use crate::SafeKeeperConf;
-use anyhow::anyhow;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -198,7 +197,7 @@ pub async fn main_loop(conf: SafeKeeperConf, mut rx: UnboundedReceiver<CallmeEve
         tokio::select! {
             request = rx.recv() =>
             {
-                match request.ok_or_else(|| anyhow!("done"))?
+                match request.context("done")?
                 {
                     CallmeEvent::Subscribe(tenantid, timelineid, pageserver_connstr) =>
                     {

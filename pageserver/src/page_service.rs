@@ -10,7 +10,7 @@
 //     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -624,7 +624,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
             let caps = re
                 .captures(query_string)
-                .ok_or_else(|| anyhow!("invalid callmemaybe: '{}'", query_string))?;
+                .with_context(|| format!("invalid callmemaybe: '{}'", query_string))?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
@@ -643,18 +643,18 @@ impl postgres_backend::Handler for PageServerHandler {
 
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("branch_create ") {
-            let err = || anyhow!("invalid branch_create: '{}'", query_string);
+            let err = || format!("invalid branch_create: '{}'", query_string);
 
             // branch_create <tenantid> <branchname> <startpoint>
             // TODO lazy static
             // TODO: escaping, to allow branch names with spaces
             let re = Regex::new(r"^branch_create ([[:xdigit:]]+) (\S+) ([^\r\n\s;]+)[\r\n\s;]*;?$")
                 .unwrap();
-            let caps = re.captures(query_string).ok_or_else(err)?;
+            let caps = re.captures(query_string).with_context(err)?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let branchname = caps.get(2).ok_or_else(err)?.as_str().to_owned();
-            let startpoint_str = caps.get(3).ok_or_else(err)?.as_str().to_owned();
+            let branchname = caps.get(2).with_context(err)?.as_str().to_owned();
+            let startpoint_str = caps.get(3).with_context(err)?.as_str().to_owned();
 
             self.check_permission(Some(tenantid))?;
 
@@ -673,7 +673,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let re = Regex::new(r"^branch_list ([[:xdigit:]]+)$").unwrap();
             let caps = re
                 .captures(query_string)
-                .ok_or_else(|| anyhow!("invalid branch_list: '{}'", query_string))?;
+                .with_context(|| format!("invalid branch_list: '{}'", query_string))?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
 
@@ -693,11 +693,11 @@ impl postgres_backend::Handler for PageServerHandler {
                 .write_message_noflush(&BeMessage::DataRow(&[Some(&tenants_buf)]))?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("tenant_create") {
-            let err = || anyhow!("invalid tenant_create: '{}'", query_string);
+            let err = || format!("invalid tenant_create: '{}'", query_string);
 
             // tenant_create <tenantid>
             let re = Regex::new(r"^tenant_create ([[:xdigit:]]+)$").unwrap();
-            let caps = re.captures(query_string).ok_or_else(err)?;
+            let caps = re.captures(query_string).with_context(err)?;
 
             self.check_permission(None)?;
 
@@ -728,7 +728,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let caps = re
                 .captures(query_string)
-                .ok_or_else(|| anyhow!("invalid do_gc: '{}'", query_string))?;
+                .with_context(|| format!("invalid do_gc: '{}'", query_string))?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
@@ -812,7 +812,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let caps = re
                 .captures(query_string)
-                .ok_or_else(|| anyhow!("invalid checkpoint command: '{}'", query_string))?;
+                .with_context(|| format!("invalid checkpoint command: '{}'", query_string))?;
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;

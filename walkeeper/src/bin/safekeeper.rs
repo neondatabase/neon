@@ -143,7 +143,7 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
-    let lock_file = File::create(&lock_file_path).with_context(|| "failed to open lockfile")?;
+    let lock_file = File::create(&lock_file_path).context("failed to open lockfile")?;
     lock_file.try_lock_exclusive().with_context(|| {
         format!(
             "control file {} is locked by some other process",

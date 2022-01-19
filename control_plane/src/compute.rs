@@ -82,15 +82,11 @@ impl ComputeControlPlane {
         let mut strings = s.split('@');
         let name = strings.next().unwrap();
 
-        let lsn: Option<Lsn>;
-        if let Some(lsnstr) = strings.next() {
-            lsn = Some(
-                Lsn::from_str(lsnstr)
-                    .with_context(|| "invalid LSN in point-in-time specification")?,
-            );
-        } else {
-            lsn = None
-        }
+        let lsn = strings
+            .next()
+            .map(Lsn::from_str)
+            .transpose()
+            .context("invalid LSN in point-in-time specification")?;
 
         // Resolve the timeline ID, given the human-readable branch name
         let timeline_id = self
@@ -253,16 +249,16 @@ impl PostgresNode {
         let mut client = self
             .pageserver
             .page_server_psql_client()
-            .with_context(|| "connecting to page server failed")?;
+            .context("connecting to page server failed")?;
 
         let copyreader = client
             .copy_out(sql.as_str())
-            .with_context(|| "page server 'basebackup' command failed")?;
+            .context("page server 'basebackup' command failed")?;
 
         // Read the archive directly from the `CopyOutReader`
         tar::Archive::new(copyreader)
             .unpack(&self.pgdata())
-            .with_context(|| "extracting base backup failed")?;
+            .context("extracting base backup failed")?;
 
         Ok(())
     }
@@ -443,7 +439,7 @@ impl PostgresNode {
         if let Some(token) = auth_token {
             cmd.env("ZENITH_AUTH_TOKEN", token);
         }
-        let pg_ctl = cmd.status().with_context(|| "pg_ctl failed")?;
+        let pg_ctl = cmd.status().context("pg_ctl failed")?;
 
         if !pg_ctl.success() {
             anyhow::bail!("pg_ctl failed");

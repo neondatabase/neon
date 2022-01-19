@@ -28,7 +28,7 @@ impl DatabaseInfo {
             .to_socket_addrs()
             .with_context(|| format!("cannot resolve {} to SocketAddr", host_port))?
             .next()
-            .ok_or_else(|| anyhow!("cannot resolve at least one SocketAddr"))
+            .context("cannot resolve at least one SocketAddr")
     }
 }
 

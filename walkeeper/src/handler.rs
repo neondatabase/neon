@@ -6,7 +6,7 @@ use crate::receive_wal::ReceiveWalConn;
 use crate::send_wal::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::SafeKeeperConf;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 
 use postgres_ffi::xlog_utils::PG_TLI;
 use regex::Regex;
@@ -56,16 +56,15 @@ fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
         let start_lsn = caps
             .next()
             .map(|cap| cap[1].parse::<Lsn>())
-            .ok_or_else(|| anyhow!("failed to parse start LSN from START_REPLICATION command"))??;
+            .context("failed to parse start LSN from START_REPLICATION command")??;
         Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
     } else if cmd.starts_with("JSON_CTRL") {
-        let cmd = cmd
-            .strip_prefix("JSON_CTRL")
-            .ok_or_else(|| anyhow!("invalid prefix"))?;
-        let parsed_cmd: AppendLogicalMessage = serde_json::from_str(cmd)?;
-        Ok(SafekeeperPostgresCommand::JSONCtrl { cmd: parsed_cmd })
+        let cmd = cmd.strip_prefix("JSON_CTRL").context("invalid prefix")?;
+        Ok(SafekeeperPostgresCommand::JSONCtrl {
+            cmd: serde_json::from_str(cmd)?,
+        })
     } else {
         bail!("unsupported command {}", cmd);
     }
@@ -104,12 +103,8 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             | SafekeeperPostgresCommand::StartReplication { .. }
             | SafekeeperPostgresCommand::IdentifySystem
             | SafekeeperPostgresCommand::JSONCtrl { .. } => {
-                let tenantid = self
-                    .ztenantid
-                    .ok_or_else(|| anyhow!("tenantid is required"))?;
-                let timelineid = self
-                    .ztimelineid
-                    .ok_or_else(|| anyhow!("timelineid is required"))?;
+                let tenantid = self.ztenantid.context("tenantid is required")?;
+                let timelineid = self.ztimelineid.context("timelineid is required")?;
                 if self.timeline.is_none() {
                     // START_WAL_PUSH is the only command that initializes the timeline in production.
                     // There is also JSON_CTRL command, which should initialize the timeline for testing.
@@ -128,12 +123,12 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             SafekeeperPostgresCommand::StartWalPush { pageserver_connstr } => {
                 ReceiveWalConn::new(pgb, pageserver_connstr)
                     .run(self)
-                    .with_context(|| "failed to run ReceiveWalConn")?;
+                    .context("failed to run ReceiveWalConn")?;
             }
             SafekeeperPostgresCommand::StartReplication { start_lsn } => {
                 ReplicationConn::new(pgb)
                     .run(self, pgb, start_lsn)
-                    .with_context(|| "failed to run ReplicationConn")?;
+                    .context("failed to run ReplicationConn")?;
             }
             SafekeeperPostgresCommand::IdentifySystem => {
                 self.handle_identify_system(pgb)?;

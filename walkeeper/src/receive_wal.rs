@@ -137,7 +137,7 @@ impl<'pg> ReceiveWalConn<'pg> {
                 .timeline
                 .get()
                 .process_msg(&msg)
-                .with_context(|| "failed to process ProposerAcceptorMessage")?;
+                .context("failed to process ProposerAcceptorMessage")?;
             if let Some(reply) = reply {
                 self.write_msg(&reply)?;
             }
