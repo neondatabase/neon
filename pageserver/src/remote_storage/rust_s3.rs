@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use s3::{bucket::Bucket, creds::Credentials, region::Region};
 use tokio::io::{self, AsyncWriteExt};
+use tracing::debug;
 
 use crate::{
     config::S3Config,
@@ -58,6 +59,10 @@ pub struct S3 {
 impl S3 {
     /// Creates the storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config, pageserver_workdir: &'static Path) -> anyhow::Result<Self> {
+        debug!(
+            "Creating s3 remote storage around bucket {}",
+            aws_config.bucket_name
+        );
         let region = match aws_config.endpoint.clone() {
             Some(endpoint) => Region::Custom {
                 endpoint,
@@ -68,6 +73,7 @@ impl S3 {
                 .parse::<Region>()
                 .context("Failed to parse the s3 region from config")?,
         };
+
         let credentials = Credentials::new(
             aws_config.access_key_id.as_deref(),
             aws_config.secret_access_key.as_deref(),
