@@ -70,7 +70,8 @@
 //!
 //! When pageserver signals shutdown, current sync task gets finished and the loop exists.
 
-mod compression;
+/// Expose the module for a binary CLI tool that deals with the corresponding blobs.
+pub mod compression;
 mod download;
 pub mod index;
 mod upload;

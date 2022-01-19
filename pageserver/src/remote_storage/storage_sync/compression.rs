@@ -248,7 +248,7 @@ fn archive_name(disk_consistent_lsn: Lsn, header_size: u64) -> String {
     archive_name
 }
 
-async fn uncompress_with_header(
+pub async fn uncompress_with_header(
     files_to_skip: &BTreeSet<PathBuf>,
     destination_dir: &Path,
     header: ArchiveHeader,
