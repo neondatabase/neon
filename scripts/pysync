@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+# This is a helper script for setting up/updating our python environment.
+# It is intended to be a primary endpoint for all the people who want to
+# just setup test environment without going into details of python package management
+
+poetry install --no-root # this installs dev dependencies by default
