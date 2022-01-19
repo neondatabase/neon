@@ -334,7 +334,7 @@ class AuthKeys:
 class MockS3Server:
     """
     Starts a mock S3 server for testing on a port given, errors if the server fails to start or exits prematurely.
-    Relies that `pipenv` and `moto` server are installed, since it's the way the tests are run.
+    Relies that `poetry` and `moto` server are installed, since it's the way the tests are run.
 
     Also provides a set of methods to derive the connection properties from and the method to kill the underlying server.
     """
@@ -344,7 +344,7 @@ class MockS3Server:
     ):
         self.port = port
 
-        self.subprocess = subprocess.Popen([f'pipenv run moto_server s3 -p{port}'], shell=True)
+        self.subprocess = subprocess.Popen([f'poetry run moto_server s3 -p{port}'], shell=True)
         error = None
         try:
             return_code = self.subprocess.poll()

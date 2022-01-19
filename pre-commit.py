@@ -38,7 +38,7 @@ def rustfmt(fix_inplace: bool = False, no_color: bool = False) -> str:
 
 
 def yapf(fix_inplace: bool) -> str:
-    cmd = "pipenv run yapf --recursive"
+    cmd = "poetry run yapf --recursive"
     if fix_inplace:
         cmd += " --in-place"
     else:
@@ -47,7 +47,7 @@ def yapf(fix_inplace: bool) -> str:
 
 
 def mypy() -> str:
-    return "pipenv run mypy"
+    return "poetry run mypy"
 
 
 def get_commit_files() -> List[str]:
@@ -72,7 +72,7 @@ def check(name: str, suffix: str, cmd: str, changed_files: List[str], no_color: 
             print("Please inspect the output below and run make fmt to fix automatically.")
         if suffix == ".py":
             print("If the output is empty, ensure that you've installed Python tooling by\n"
-                  "running 'pipenv install --dev' in the current directory (no root needed)")
+                  "running './scripts/pysync' in the current directory (no root needed)")
         print()
         print(res.stdout.decode())
         exit(1)

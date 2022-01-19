@@ -3,11 +3,11 @@ import logging.config
 """
 This file configures logging to use in python tests.
 Logs are automatically captured and shown in their
-own section after all tests are executed. 
+own section after all tests are executed.
 
 To see logs for all (even successful) tests, run
 pytest with the following command:
-- `pipenv run pytest -n8 -rA`
+- `poetry run pytest -n8 -rA`
 
 Other log config can be set in pytest.ini file.
 You can add `log_cli = true` to it to watch
@@ -34,7 +34,7 @@ LOGGING = {
 
 def getLogger(name='root') -> logging.Logger:
     """Method to get logger for tests.
-    
+
     Should be used to get correctly initialized logger. """
     return logging.getLogger(name)
 

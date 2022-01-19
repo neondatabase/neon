@@ -446,7 +446,7 @@ prerequisites:
 
 self-contained example:
     {app} run make
-    {app} run pipenv run pytest test_runner
+    {app} run poetry run pytest test_runner
     {app} run cargo test
     {app} report --open
     """

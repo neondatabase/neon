@@ -14,7 +14,7 @@ mkdir -p data/$REPORT_TO
 cp $REPORT_FROM/* data/$REPORT_TO
 
 echo "Generating report"
-pipenv run python $SCRIPT_DIR/generate_perf_report_page.py --input-dir data/$REPORT_TO --out reports/$REPORT_TO.html 
+poetry run python $SCRIPT_DIR/generate_perf_report_page.py --input-dir data/$REPORT_TO --out reports/$REPORT_TO.html
 echo "Uploading perf result"
 git add data reports
 git \

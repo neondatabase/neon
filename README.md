@@ -28,12 +28,12 @@ apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libsec
 libssl-dev clang pkg-config libpq-dev
 ```
 
-[Rust] 1.55 or later is also required.
+[Rust] 1.56.1 or later is also required.
 
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
-Python (3.7 or higher), and install python3 packages using `pipenv install` in the project directory.
+Python (3.7 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
 
 2. Build zenith and patched postgres
 ```sh
@@ -128,8 +128,7 @@ INSERT 0 1
 ```sh
 git clone --recursive https://github.com/zenithdb/zenith.git
 make # builds also postgres and installs it to ./tmp_install
-cd test_runner
-pipenv run pytest
+./scripts/pytest
 ```
 
 ## Documentation
