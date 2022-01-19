@@ -360,8 +360,8 @@ fn proxy(
                 // `std::io::copy` is guaranteed to exit if we return an error,
                 // so we can afford to lose `res` in case `flush` fails
                 let res = self.0.write(buf);
-                if res.is_ok() {
-                    NUM_BYTES_PROXIED_COUNTER.inc_by(buf.len() as u64);
+                if let Ok(count) = res {
+                    NUM_BYTES_PROXIED_COUNTER.inc_by(count as u64);
                     self.flush()?;
                 }
                 res
