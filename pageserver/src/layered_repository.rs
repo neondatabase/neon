@@ -201,9 +201,10 @@ impl Repository for LayeredRepository {
                 bail!("Cannot branch off the timeline {} that's not local", src)
             }
         };
+        let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
 
         src_timeline
-            .check_lsn_is_in_scope(start_lsn)
+            .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context("invalid branch start lsn")?;
 
         let RecordLsn {
@@ -967,7 +968,11 @@ impl Timeline for LayeredTimeline {
     ///
     /// Validate lsn against initdb_lsn and latest_gc_cutoff_lsn.
     ///
-    fn check_lsn_is_in_scope(&self, lsn: Lsn) -> Result<()> {
+    fn check_lsn_is_in_scope(
+        &self,
+        lsn: Lsn,
+        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+    ) -> Result<()> {
         let initdb_lsn = self.initdb_lsn;
         ensure!(
             lsn >= initdb_lsn,
@@ -976,12 +981,11 @@ impl Timeline for LayeredTimeline {
             initdb_lsn,
         );
 
-        let latest_gc_cutoff_lsn = *self.latest_gc_cutoff_lsn.read().unwrap();
         ensure!(
-            lsn >= latest_gc_cutoff_lsn,
+            lsn >= **latest_gc_cutoff_lsn,
             "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
             lsn,
-            latest_gc_cutoff_lsn,
+            **latest_gc_cutoff_lsn,
         );
         Ok(())
     }

@@ -236,7 +236,11 @@ pub trait Timeline: Send + Sync {
 
     ///
     /// Check that it is valid to request operations with that lsn.
-    fn check_lsn_is_in_scope(&self, lsn: Lsn) -> Result<()>;
+    fn check_lsn_is_in_scope(
+        &self,
+        lsn: Lsn,
+        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+    ) -> Result<()>;
 
     /// Retrieve current logical size of the timeline
     ///
