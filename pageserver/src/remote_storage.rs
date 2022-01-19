@@ -104,6 +104,8 @@ use crate::{
     repository::TimelineSyncState,
 };
 
+pub use storage_sync::compression;
+
 /// Any timeline has its own id and its own tenant it belongs to,
 /// the sync processes group timelines by both for simplicity.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
