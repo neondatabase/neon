@@ -395,8 +395,14 @@ class ZenithEnvBuilder:
         self.pageserver_remote_storage = pageserver_remote_storage
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
-        self.s3_mock_server: Optional[MockS3Server] = None
         self.env: Optional[ZenithEnv] = None
+
+        self.s3_mock_server: Optional[MockS3Server] = None
+
+        if os.getenv('FORCE_MOCK_S3') is not None:
+            bucket_name = f'{repo_dir.name}_bucket'
+            log.warning(f'Unconditionally initializing mock S3 server for bucket {bucket_name}')
+            self.enable_s3_mock_remote_storage(bucket_name)
 
     def init(self) -> ZenithEnv:
         # Cannot create more than one environment from one builder

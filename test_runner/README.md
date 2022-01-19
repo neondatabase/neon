@@ -48,6 +48,7 @@ Useful environment variables:
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 `ZENITH_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
+`FORCE_MOCK_S3`: inits every test's pageserver with a mock S3 used as a remote storage.
 `--pageserver-config-override=${value}` parameter values when zenith cli is invoked
 `RUST_LOG`: logging configuration to pass into Zenith CLI
 
