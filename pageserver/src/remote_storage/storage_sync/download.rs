@@ -3,7 +3,7 @@
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
-use anyhow::{anyhow, ensure, Context};
+use anyhow::{ensure, Context};
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::{fs, sync::RwLock};
 use tracing::{debug, error, trace, warn};
@@ -189,7 +189,7 @@ async fn try_download_archive<
     debug!("Downloading archive {:?}", archive_id);
     let archive_to_download = remote_timeline
         .archive_data(archive_id)
-        .ok_or_else(|| anyhow!("Archive {:?} not found in remote storage", archive_id))?;
+        .with_context(|| format!("Archive {:?} not found in remote storage", archive_id))?;
     let (archive_header, header_size) = remote_timeline
         .restore_header(archive_id)
         .context("Failed to restore header when downloading an archive")?;

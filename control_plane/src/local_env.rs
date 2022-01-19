@@ -251,7 +251,7 @@ impl LocalEnv {
                 .arg("2048")
                 .stdout(Stdio::null())
                 .output()
-                .with_context(|| "failed to generate auth private key")?;
+                .context("failed to generate auth private key")?;
             if !keygen_output.status.success() {
                 bail!(
                     "openssl failed: '{}'",
@@ -270,7 +270,7 @@ impl LocalEnv {
                 .args(&["-out", public_key_path.to_str().unwrap()])
                 .stdout(Stdio::null())
                 .output()
-                .with_context(|| "failed to generate auth private key")?;
+                .context("failed to generate auth private key")?;
             if !keygen_output.status.success() {
                 bail!(
                     "openssl failed: '{}'",

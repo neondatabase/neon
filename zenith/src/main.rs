@@ -1,5 +1,4 @@
-use anyhow::{anyhow, bail};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env;
@@ -271,7 +270,7 @@ fn print_branches_tree(branches: Vec<BranchInfo>) -> Result<()> {
         if let Some(tid) = &branch.ancestor_id {
             branches_hash
                 .get_mut(tid)
-                .with_context(|| "missing branch info in the HashMap")?
+                .context("missing branch info in the HashMap")?
                 .children
                 .push(branch.timeline_id.to_string());
         }
@@ -310,7 +309,7 @@ fn print_branch(
             .info
             .ancestor_lsn
             .as_ref()
-            .with_context(|| "missing branch info in the HashMap")?;
+            .context("missing branch info in the HashMap")?;
         let mut br_sym = "┣━";
 
         // Draw each nesting padding with proper style
@@ -356,7 +355,7 @@ fn print_branch(
             &is_last_new,
             branches
                 .get(child)
-                .with_context(|| "missing branch info in the HashMap")?,
+                .context("missing branch info in the HashMap")?,
             branches,
         )?;
     }
@@ -402,10 +401,10 @@ fn handle_init(init_match: &ArgMatches) -> Result<()> {
         default_conf()
     };
 
-    let mut env = LocalEnv::create_config(&toml_file)
-        .with_context(|| "Failed to create zenith configuration")?;
+    let mut env =
+        LocalEnv::create_config(&toml_file).context("Failed to create zenith configuration")?;
     env.init()
-        .with_context(|| "Failed to initialize zenith repository")?;
+        .context("Failed to initialize zenith repository")?;
 
     // Call 'pageserver init'.
     let pageserver = PageServerNode::from_env(&env);
@@ -462,7 +461,7 @@ fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
     if let Some(branchname) = branch_match.value_of("branchname") {
         let startpoint_str = branch_match
             .value_of("start-point")
-            .ok_or_else(|| anyhow!("Missing start-point"))?;
+            .context("Missing start-point")?;
         let branch = pageserver.branch_create(branchname, startpoint_str, &tenantid)?;
         println!(
             "Created branch '{}' at {:?} for tenant: {}",
@@ -574,7 +573,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             let node = cplane
                 .nodes
                 .get(&(tenantid, node_name.to_owned()))
-                .ok_or_else(|| anyhow!("postgres {} is not found", node_name))?;
+                .with_context(|| format!("postgres {} is not found", node_name))?;
             node.stop(destroy)?;
         }
 

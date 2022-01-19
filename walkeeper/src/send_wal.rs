@@ -3,7 +3,7 @@
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 
 use postgres_ffi::xlog_utils::{
     get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
@@ -156,7 +156,7 @@ impl ReplicationConn {
                     // Shutdown the connection, because rust-postgres client cannot be dropped
                     // when connection is alive.
                     let _ = stream_in.shutdown(Shutdown::Both);
-                    return Err(anyhow!("Copy failed"));
+                    bail!("Copy failed");
                 }
                 _ => {
                     // We only handle `CopyData`, 'Sync', 'CopyFail' messages. Anything else is ignored.

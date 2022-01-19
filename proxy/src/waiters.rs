@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use std::collections::HashMap;
 use std::sync::{mpsc, Mutex};
 
@@ -34,7 +34,7 @@ impl<T> Waiters<T> {
             .lock()
             .unwrap()
             .remove(key)
-            .ok_or_else(|| anyhow!("key {} not found", key))?;
+            .with_context(|| format!("key {} not found", key))?;
         tx.send(value).context("channel hangup")
     }
 }

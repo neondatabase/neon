@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 use zenith_utils::{
@@ -214,7 +214,7 @@ impl RemoteTimeline {
         let archive = self
             .checkpoint_archives
             .get(&archive_id)
-            .ok_or_else(|| anyhow!("Archive {:?} not found", archive_id))?;
+            .with_context(|| format!("Archive {:?} not found", archive_id))?;
 
         let mut header_files = Vec::with_capacity(archive.files.len());
         for (expected_archive_position, archive_file) in archive.files.iter().enumerate() {
@@ -226,11 +226,10 @@ impl RemoteTimeline {
                 archive_id,
             );
 
-            let timeline_file = self.timeline_files.get(archive_file).ok_or_else(|| {
-                anyhow!(
+            let timeline_file = self.timeline_files.get(archive_file).with_context(|| {
+                format!(
                     "File with id {:?} not found for archive {:?}",
-                    archive_file,
-                    archive_id
+                    archive_file, archive_id
                 )
             })?;
             header_files.push(timeline_file.clone());
@@ -299,7 +298,7 @@ fn try_parse_index_entry(
         })?
         .iter()
         .next()
-        .ok_or_else(|| anyhow!("Found no tenant id in path '{}'", path.display()))?
+        .with_context(|| format!("Found no tenant id in path '{}'", path.display()))?
         .to_string_lossy()
         .parse::<ZTenantId>()
         .with_context(|| format!("Failed to parse tenant id from path '{}'", path.display()))?;
@@ -321,8 +320,8 @@ fn try_parse_index_entry(
             let mut segments = timelines_subpath.iter();
             let timeline_id = segments
                 .next()
-                .ok_or_else(|| {
-                    anyhow!(
+                .with_context(|| {
+                    format!(
                         "{} directory of tenant {} (path '{}') is not an index entry",
                         TIMELINES_SEGMENT_NAME,
                         tenant_id,
@@ -345,7 +344,7 @@ fn try_parse_index_entry(
 
             let archive_name = path
                 .file_name()
-                .ok_or_else(|| anyhow!("Archive '{}' has no file name", path.display()))?
+                .with_context(|| format!("Archive '{}' has no file name", path.display()))?
                 .to_string_lossy()
                 .to_string();
 

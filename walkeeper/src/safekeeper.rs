@@ -1,13 +1,8 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
-use anyhow::Context;
-use anyhow::{anyhow, bail, Result};
-use byteorder::LittleEndian;
-use byteorder::ReadBytesExt;
-use bytes::Buf;
-use bytes::BufMut;
-use bytes::Bytes;
-use bytes::BytesMut;
+use anyhow::{bail, Context, Result};
+use byteorder::{LittleEndian, ReadBytesExt};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::xlog_utils::TimeLineID;
 use serde::{Deserialize, Serialize};
@@ -346,7 +341,7 @@ impl ProposerAcceptorMessage {
                 let rec_size = hdr
                     .end_lsn
                     .checked_sub(hdr.begin_lsn)
-                    .ok_or_else(|| anyhow!("begin_lsn > end_lsn in AppendRequest"))?
+                    .context("begin_lsn > end_lsn in AppendRequest")?
                     .0 as usize;
                 if rec_size > MAX_SEND_SIZE {
                     bail!(
@@ -362,7 +357,7 @@ impl ProposerAcceptorMessage {
 
                 Ok(ProposerAcceptorMessage::AppendRequest(msg))
             }
-            _ => Err(anyhow!("unknown proposer-acceptor message tag: {}", tag,)),
+            _ => bail!("unknown proposer-acceptor message tag: {}", tag,),
         }
     }
 }
@@ -567,7 +562,7 @@ where
         self.s.server.wal_seg_size = msg.wal_seg_size;
         self.storage
             .persist(&self.s)
-            .with_context(|| "failed to persist shared state")?;
+            .context("failed to persist shared state")?;
 
         self.metrics = SafeKeeperMetrics::new(self.s.server.timeline_id);
 

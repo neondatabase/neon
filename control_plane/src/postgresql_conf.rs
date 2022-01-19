@@ -4,7 +4,7 @@
 /// NOTE: This doesn't implement the full, correct postgresql.conf syntax. Just
 /// enough to extract a few settings we need in Zenith, assuming you don't do
 /// funny stuff like include-directives or funny escaping.
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
@@ -78,7 +78,7 @@ impl PostgresConf {
         <T as FromStr>::Err: std::error::Error + Send + Sync + 'static,
     {
         self.get(field_name)
-            .ok_or_else(|| anyhow!("could not find '{}' option {}", field_name, context))?
+            .with_context(|| format!("could not find '{}' option {}", field_name, context))?
             .parse::<T>()
             .with_context(|| format!("could not parse '{}' option {}", field_name, context))
     }
