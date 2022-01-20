@@ -66,8 +66,8 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
-                    assert row['layer_relfiles_removed'] == 2
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 1
+                    assert row['layer_relfiles_removed'] == 0
                     assert row['layer_relfiles_dropped'] == 0
 
                     # Insert two more rows and run GC.
@@ -81,7 +81,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
-                    assert row['layer_relfiles_removed'] == 2
+                    assert row['layer_relfiles_removed'] == 0
                     assert row['layer_relfiles_dropped'] == 0
 
                     # Do it again. Should again create two new layer files and remove old ones.
@@ -92,8 +92,8 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
-                    assert row['layer_relfiles_removed'] == 2
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 3
+                    assert row['layer_relfiles_removed'] == 0
                     assert row['layer_relfiles_dropped'] == 0
 
                     # Run GC again, with no changes in the database. Should not remove anything.
@@ -101,7 +101,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
-                    assert row['layer_relfiles_total'] == layer_relfiles_remain
+                    assert row['layer_relfiles_total'] == layer_relfiles_remain + 3
                     assert row['layer_relfiles_removed'] == 0
                     assert row['layer_relfiles_dropped'] == 0
 
@@ -121,9 +121,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     # Each relation fork is counted separately, hence 3.
                     assert row['layer_relfiles_needed_as_tombstone'] == 3
 
-                    # The catalog updates also create new layer files of the catalogs, which
-                    # are counted as 'removed'
-                    assert row['layer_relfiles_removed'] > 0
+                    assert row['layer_relfiles_removed'] == 0
 
                     # TODO Change the test to check actual CG of dropped layers.
                     # Each relation fork is counted separately, hence 3.

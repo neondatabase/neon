@@ -1613,7 +1613,10 @@ impl LayeredTimeline {
         if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
             let last_lsn = self.get_last_record_lsn();
             // Avoid creation of image layers if there are not so much deltas
-            if reconstruct_pages && oldest_layer.get_seg_tag().rel.is_blocky() {
+            if reconstruct_pages
+                && oldest_layer.get_seg_tag().rel.is_blocky()
+                && self.conf.image_layer_generation_threshold != 0
+            {
                 let (n_delta_layers, total_delta_size) =
                     layers.count_delta_layers(oldest_layer.get_seg_tag(), last_lsn)?;
                 let logical_segment_size =
