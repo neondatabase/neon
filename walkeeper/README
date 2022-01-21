@@ -99,10 +99,7 @@ A: If the compute node has evicted a page, changes to it have been WAL-logged
 Q: How long may Page Server wait for?
 A: Not too long, hopefully. If a page is evicted, it probably was not used for
    a while, so the WAL service have had enough time to push changes to the Page
-   Server. There may be issues if there is no backpressure and compute node with
-   WAL service run ahead of Page Server, though.
-   There is no backpressure right now, so you may even see some spurious
-   timeouts in tests.
+   Server. To limit the lag, tune backpressure using `max_replication_*_lag` settings.
 
 Q: How do WAL safekeepers communicate with each other?
 A: They may only send each other messages via the compute node, they never
