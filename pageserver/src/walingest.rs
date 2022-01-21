@@ -88,16 +88,6 @@ impl WalIngest {
                 let segno = xid_page / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = xid_page % pg_constants::SLRU_PAGES_PER_SEGMENT;
                 self.last_xid_page = xid_page;
-                timeline.put_wal_record(
-                    lsn,
-                    RelishTag::Slru {
-                        slru: SlruKind::Clog,
-                        segno,
-                    },
-                    rpageno,
-                    ZenithWalRecord::ClogSetInProgress { xid },
-                )?;
-                self.last_xid_page = xid_page;
                 timeline.put_page_image(
                     RelishTag::Slru {
                         slru: SlruKind::Clog,
