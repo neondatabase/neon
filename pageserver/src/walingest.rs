@@ -43,6 +43,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 pub struct WalIngest {
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
+    last_xid_page: u32,
 }
 
 impl WalIngest {
@@ -56,6 +57,7 @@ impl WalIngest {
         Ok(WalIngest {
             checkpoint,
             checkpoint_modified: false,
+            last_xid_page: 0,
         })
     }
 
@@ -79,8 +81,34 @@ impl WalIngest {
         assert!(!self.checkpoint_modified);
         if self.checkpoint.update_next_xid(decoded.xl_xid) {
             self.checkpoint_modified = true;
-        }
 
+            let xid = self.checkpoint.nextXid.value as u32;
+            let xid_page = xid / pg_constants::CLOG_XACTS_PER_PAGE;
+            if xid_page > self.last_xid_page {
+                let segno = xid_page / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                let rpageno = xid_page % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                self.last_xid_page = xid_page;
+                timeline.put_wal_record(
+                    lsn,
+                    RelishTag::Slru {
+                        slru: SlruKind::Clog,
+                        segno,
+                    },
+                    rpageno,
+                    ZenithWalRecord::ClogSetInProgress { xid },
+                )?;
+                self.last_xid_page = xid_page;
+                timeline.put_page_image(
+                    RelishTag::Slru {
+                        slru: SlruKind::Clog,
+                        segno,
+                    },
+                    rpageno,
+                    lsn,
+                    ZERO_PAGE.clone(),
+                )?;
+            }
+        }
         // Heap AM records need some special handling, because they modify VM pages
         // without registering them with the standard mechanism.
         if decoded.xl_rmid == pg_constants::RM_HEAP_ID
