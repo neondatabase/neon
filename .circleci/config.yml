@@ -114,6 +114,10 @@ jobs:
             # changes.
             - v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
 
+      - run:
+          name: Setup postgres headers
+          command: make postgres-headers
+
         # Build the rust code, including test binaries
       - run:
           name: Rust build << parameters.build_type >>
