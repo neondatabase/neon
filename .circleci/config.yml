@@ -116,7 +116,7 @@ jobs:
 
       - run:
           name: Setup postgres headers
-          command: make postgres-headers
+          command: git submodule update --init --depth 1 && make postgres-headers
 
         # Build the rust code, including test binaries
       - run:
