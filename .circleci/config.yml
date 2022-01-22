@@ -1,29 +1,28 @@
 version: 2.1
 
 executors:
-  zenith-build-executor:
+  zenith-xlarge-executor:
     resource_class: xlarge
     docker:
       # NB: when changed, do not forget to update rust image tag in all Dockerfiles
       - image: zimg/rust:1.56
-  zenith-python-executor:
+  zenith-executor:
     docker:
       - image: zimg/rust:1.56
 
 jobs:
   check-codestyle-rust:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     steps:
       - checkout
       - run:
           name: rustfmt
           when: always
-          command: |
-            cargo fmt --all -- --check
+          command: cargo fmt --all -- --check
 
   # A job to build postgres
   build-postgres:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     parameters:
       build_type:
         type: enum
@@ -38,23 +37,13 @@ jobs:
         # Note this works even though the submodule hasn't been checkout out yet.
       - run:
           name: Get postgres cache key
-          command: |
-            git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+          command: git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
 
       - restore_cache:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
             - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
-
-#        # FIXME We could cache our own docker container, instead of installing packages every time.
-#      - run:
-#          name: apt install dependencies
-#          command: |
-#            if [ ! -e tmp_install/bin/postgres ]; then
-#              sudo apt update
-#              sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev
-#            fi
 
         # Build postgres if the restore_cache didn't find a build.
         # `make` can't figure out whether the cache is valid, since
@@ -76,7 +65,7 @@ jobs:
 
   # A job to build zenith rust code
   build-zenith:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     parameters:
       build_type:
         type: enum
@@ -84,12 +73,6 @@ jobs:
     environment:
       BUILD_TYPE: << parameters.build_type >>
     steps:
-#      - run:
-#          name: apt install dependencies
-#          command: |
-#            sudo apt update
-#            sudo apt install libssl-dev clang
-
         # Checkout the git repo (without submodules)
       - checkout
 
@@ -113,10 +96,6 @@ jobs:
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
             - v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
-
-      - run:
-          name: Setup postgres headers
-          command: git submodule update --init --depth 1 && make postgres-headers
 
         # Build the rust code, including test binaries
       - run:
@@ -222,7 +201,7 @@ jobs:
             - "*"
 
   check-codestyle-python:
-    executor: zenith-python-executor
+    executor: zenith-executor
     steps:
       - checkout
       - run:
@@ -238,7 +217,7 @@ jobs:
           command: pipenv run mypy .
 
   run-pytest:
-    executor: zenith-python-executor
+    executor: zenith-executor
     parameters:
       # pytest args to specify the tests to run.
       #
@@ -277,9 +256,6 @@ jobs:
           condition: << parameters.needs_postgres_source >>
           steps:
             - run: git submodule update --init --depth 1
-#      - run:
-#          name: Install deps
-#          command: pipenv --python 3.7 install
       - run:
           name: Install dev deps
           # we need to run moto s3 mock server, we start is as a separate process, so it's in the dev deps
@@ -372,7 +348,7 @@ jobs:
             - "*"
 
   coverage-report:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     steps:
       - attach_workspace:
           at: /tmp/zenith
@@ -384,12 +360,6 @@ jobs:
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
             - v04-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
-#      - run:
-#          name: Install llvm-tools
-#          command: |
-#            # TODO: install a proper symbol demangler, e.g. rustfilt
-#            # TODO: we should embed this into a docker image
-#            rustup component add llvm-tools-preview
       - run:
           name: Build coverage report
           command: |
