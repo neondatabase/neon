@@ -5,10 +5,10 @@ executors:
     resource_class: xlarge
     docker:
       # NB: when changed, do not forget to update rust image tag in all Dockerfiles
-      - image: cimg/rust:1.56.1
+      - image: zimg/rust:1.56
   zenith-python-executor:
     docker:
-      - image: cimg/python:3.7.10  # Oldest available 3.7 with Ubuntu 20.04 (for GLIBC and Rust) at CirlceCI
+      - image: zimg/rust:1.56
 
 jobs:
   check-codestyle-rust:
@@ -47,14 +47,14 @@ jobs:
             # Restore ONLY if the rev key matches exactly
             - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
 
-        # FIXME We could cache our own docker container, instead of installing packages every time.
-      - run:
-          name: apt install dependencies
-          command: |
-            if [ ! -e tmp_install/bin/postgres ]; then
-              sudo apt update
-              sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev
-            fi
+#        # FIXME We could cache our own docker container, instead of installing packages every time.
+#      - run:
+#          name: apt install dependencies
+#          command: |
+#            if [ ! -e tmp_install/bin/postgres ]; then
+#              sudo apt update
+#              sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev
+#            fi
 
         # Build postgres if the restore_cache didn't find a build.
         # `make` can't figure out whether the cache is valid, since
@@ -65,7 +65,7 @@ jobs:
             if [ ! -e tmp_install/bin/postgres ]; then
               # "depth 1" saves some time by not cloning the whole repo
               git submodule update --init --depth 1
-              make postgres -j8
+              make postgres -j$(nproc)
             fi
 
       - save_cache:
@@ -84,11 +84,11 @@ jobs:
     environment:
       BUILD_TYPE: << parameters.build_type >>
     steps:
-      - run:
-          name: apt install dependencies
-          command: |
-            sudo apt update
-            sudo apt install libssl-dev clang
+#      - run:
+#          name: apt install dependencies
+#          command: |
+#            sudo apt update
+#            sudo apt install libssl-dev clang
 
         # Checkout the git repo (without submodules)
       - checkout
@@ -273,9 +273,9 @@ jobs:
           condition: << parameters.needs_postgres_source >>
           steps:
             - run: git submodule update --init --depth 1
-      - run:
-          name: Install deps
-          command: pipenv --python 3.7 install
+#      - run:
+#          name: Install deps
+#          command: pipenv --python 3.7 install
       - run:
           name: Install dev deps
           # we need to run moto s3 mock server, we start is as a separate process, so it's in the dev deps
@@ -380,12 +380,12 @@ jobs:
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
             - v04-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
-      - run:
-          name: Install llvm-tools
-          command: |
-            # TODO: install a proper symbol demangler, e.g. rustfilt
-            # TODO: we should embed this into a docker image
-            rustup component add llvm-tools-preview
+#      - run:
+#          name: Install llvm-tools
+#          command: |
+#            # TODO: install a proper symbol demangler, e.g. rustfilt
+#            # TODO: we should embed this into a docker image
+#            rustup component add llvm-tools-preview
       - run:
           name: Build coverage report
           command: |
