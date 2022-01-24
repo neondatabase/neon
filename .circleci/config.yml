@@ -1,29 +1,28 @@
 version: 2.1
 
 executors:
-  zenith-build-executor:
+  zenith-xlarge-executor:
     resource_class: xlarge
     docker:
       # NB: when changed, do not forget to update rust image tag in all Dockerfiles
-      - image: cimg/rust:1.56.1
-  zenith-python-executor:
+      - image: zimg/rust:1.56
+  zenith-executor:
     docker:
-      - image: cimg/python:3.7.10  # Oldest available 3.7 with Ubuntu 20.04 (for GLIBC and Rust) at CirlceCI
+      - image: zimg/rust:1.56
 
 jobs:
   check-codestyle-rust:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     steps:
       - checkout
       - run:
           name: rustfmt
           when: always
-          command: |
-            cargo fmt --all -- --check
+          command: cargo fmt --all -- --check
 
   # A job to build postgres
   build-postgres:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     parameters:
       build_type:
         type: enum
@@ -38,23 +37,13 @@ jobs:
         # Note this works even though the submodule hasn't been checkout out yet.
       - run:
           name: Get postgres cache key
-          command: |
-            git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+          command: git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
 
       - restore_cache:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
             - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
-
-        # FIXME We could cache our own docker container, instead of installing packages every time.
-      - run:
-          name: apt install dependencies
-          command: |
-            if [ ! -e tmp_install/bin/postgres ]; then
-              sudo apt update
-              sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev
-            fi
 
         # Build postgres if the restore_cache didn't find a build.
         # `make` can't figure out whether the cache is valid, since
@@ -65,7 +54,7 @@ jobs:
             if [ ! -e tmp_install/bin/postgres ]; then
               # "depth 1" saves some time by not cloning the whole repo
               git submodule update --init --depth 1
-              make postgres -j8
+              make postgres -j$(nproc)
             fi
 
       - save_cache:
@@ -76,7 +65,7 @@ jobs:
 
   # A job to build zenith rust code
   build-zenith:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     parameters:
       build_type:
         type: enum
@@ -84,12 +73,6 @@ jobs:
     environment:
       BUILD_TYPE: << parameters.build_type >>
     steps:
-      - run:
-          name: apt install dependencies
-          command: |
-            sudo apt update
-            sudo apt install libssl-dev clang
-
         # Checkout the git repo (without submodules)
       - checkout
 
@@ -218,7 +201,7 @@ jobs:
             - "*"
 
   check-codestyle-python:
-    executor: zenith-python-executor
+    executor: zenith-executor
     steps:
       - checkout
       - run:
@@ -234,7 +217,7 @@ jobs:
           command: poetry run mypy .
 
   run-pytest:
-    executor: zenith-python-executor
+    executor: zenith-executor
     parameters:
       # pytest args to specify the tests to run.
       #
@@ -364,7 +347,7 @@ jobs:
             - "*"
 
   coverage-report:
-    executor: zenith-build-executor
+    executor: zenith-xlarge-executor
     steps:
       - attach_workspace:
           at: /tmp/zenith
@@ -376,12 +359,6 @@ jobs:
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
             - v04-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
-      - run:
-          name: Install llvm-tools
-          command: |
-            # TODO: install a proper symbol demangler, e.g. rustfilt
-            # TODO: we should embed this into a docker image
-            rustup component add llvm-tools-preview
       - run:
           name: Build coverage report
           command: |
