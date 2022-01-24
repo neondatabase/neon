@@ -619,6 +619,7 @@ impl PostgresRedoProcess {
         info!("running initdb in {:?}", datadir.display());
         let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
+            .arg("--data-checksums")
             .arg("-N")
             .env_clear()
             .env("LD_LIBRARY_PATH", conf.pg_lib_dir())

@@ -55,6 +55,7 @@ impl Conf {
         let output = self
             .new_pg_command("initdb")?
             .arg("-D")
+            .arg("--data-checksums")
             .arg(self.datadir.as_os_str())
             .args(&["-U", "postgres", "--no-instructions", "--no-sync"])
             .output()?;
