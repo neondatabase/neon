@@ -1,8 +1,12 @@
-use anyhow::Context;
-use std::collections::HashMap;
-use std::sync::{mpsc, Mutex};
+use anyhow::{anyhow, Context};
+use hashbrown::HashMap;
+use parking_lot::Mutex;
+use pin_project_lite::pin_project;
+use std::pin::Pin;
+use std::task;
+use tokio::sync::oneshot;
 
-pub struct Waiters<T>(pub(self) Mutex<HashMap<String, mpsc::Sender<T>>>);
+pub struct Waiters<T>(pub(self) Mutex<HashMap<String, oneshot::Sender<T>>>);
 
 impl<T> Default for Waiters<T> {
     fn default() -> Self {
@@ -11,48 +15,86 @@ impl<T> Default for Waiters<T> {
 }
 
 impl<T> Waiters<T> {
-    pub fn register(&self, key: String) -> Waiter<T> {
-        let (tx, rx) = mpsc::channel();
+    pub fn register(&self, key: String) -> anyhow::Result<Waiter<T>> {
+        let (tx, rx) = oneshot::channel();
 
-        // TODO: use `try_insert` (unstable)
-        let prev = self.0.lock().unwrap().insert(key.clone(), tx);
-        assert!(matches!(prev, None)); // assert_matches! is nightly-only
+        self.0
+            .lock()
+            .try_insert(key.clone(), tx)
+            .map_err(|_| anyhow!("waiter already registered"))?;
 
-        Waiter {
+        Ok(Waiter {
             receiver: rx,
-            registry: self,
-            key,
-        }
+            guard: DropKey {
+                registry: self,
+                key,
+            },
+        })
     }
 
     pub fn notify(&self, key: &str, value: T) -> anyhow::Result<()>
     where
-        T: Send + Sync + 'static,
+        T: Send + Sync,
     {
         let tx = self
             .0
             .lock()
-            .unwrap()
             .remove(key)
             .with_context(|| format!("key {} not found", key))?;
-        tx.send(value).context("channel hangup")
+
+        tx.send(value).map_err(|_| anyhow!("waiter channel hangup"))
     }
 }
 
-pub struct Waiter<'a, T> {
-    receiver: mpsc::Receiver<T>,
-    registry: &'a Waiters<T>,
+struct DropKey<'a, T> {
     key: String,
+    registry: &'a Waiters<T>,
 }
 
-impl<T> Waiter<'_, T> {
-    pub fn wait(self) -> anyhow::Result<T> {
-        self.receiver.recv().context("channel hangup")
+impl<'a, T> Drop for DropKey<'a, T> {
+    fn drop(&mut self) {
+        self.registry.0.lock().remove(&self.key);
     }
 }
 
-impl<T> Drop for Waiter<'_, T> {
-    fn drop(&mut self) {
-        self.registry.0.lock().unwrap().remove(&self.key);
+pin_project! {
+    pub struct Waiter<'a, T> {
+        #[pin]
+        receiver: oneshot::Receiver<T>,
+        guard: DropKey<'a, T>,
+    }
+}
+
+impl<T> std::future::Future for Waiter<'_, T> {
+    type Output = anyhow::Result<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        self.project()
+            .receiver
+            .poll(cx)
+            .map_err(|_| anyhow!("channel hangup"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_waiter() -> anyhow::Result<()> {
+        let waiters = Arc::new(Waiters::default());
+
+        let key = "Key";
+        let waiter = waiters.register(key.to_owned())?;
+
+        let waiters = Arc::clone(&waiters);
+        let notifier = tokio::spawn(async move {
+            waiters.notify(key, Default::default())?;
+            Ok(())
+        });
+
+        let () = waiter.await?;
+        notifier.await?
     }
 }
