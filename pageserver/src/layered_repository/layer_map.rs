@@ -191,7 +191,7 @@ impl LayerMap {
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    /// We ignoring segments newer than disk_consistent_lsn because them can be removed after restart
+    /// We ignore segments newer than disk_consistent_lsn because they will be removed at restart
     pub fn newer_image_layer_exists(
         &self,
         seg: SegmentTag,
