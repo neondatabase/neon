@@ -167,7 +167,7 @@ impl Repository for LayeredRepository {
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
 
-        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), Lsn(0), initdb_lsn);
+        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
         Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
@@ -973,14 +973,6 @@ impl Timeline for LayeredTimeline {
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
     ) -> Result<()> {
-        let initdb_lsn = self.initdb_lsn;
-        ensure!(
-            lsn >= initdb_lsn,
-            "LSN {} is earlier than initdb lsn {}",
-            lsn,
-            initdb_lsn,
-        );
-
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
             "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
