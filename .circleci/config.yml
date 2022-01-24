@@ -297,6 +297,7 @@ jobs:
             - PLATFORM: zenith-local-ci
           command: |
             PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
+            rm -rf $PERF_REPORT_DIR || true
 
             TEST_SELECTION="test_runner/<< parameters.test_selection >>"
             EXTRA_PARAMS="<< parameters.extra_params >>"
