@@ -111,7 +111,7 @@ fn try_process_query(
                 .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
         Err(e) => {
-            pgb.write_message(&BeMessage::ErrorResponse(e.to_string()))?;
+            pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
         }
     }
 
