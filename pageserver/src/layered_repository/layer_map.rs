@@ -321,9 +321,14 @@ impl SegEntry {
         // We only check on-disk layers, because
         // in-memory layers are not durable
 
+        // The end-LSN is exclusive, while disk_consistent_lsn is
+        // inclusive. For example, if disk_consistent_lsn is 100, it is
+        // OK for a delta layer to have end LSN 101, but if the end LSN
+        // is 102, then it might not have been fully flushed to disk
+        // before crash.
         self.historic
             .iter_newer(lsn)
-            .any(|layer| !layer.is_incremental() && layer.get_end_lsn() <= disk_consistent_lsn)
+            .any(|layer| !layer.is_incremental() && layer.get_end_lsn() <= disk_consistent_lsn + 1)
     }
 
     // Set new open layer for a SegEntry.
