@@ -992,7 +992,7 @@ mod tests {
                     .source()
                     .unwrap()
                     .to_string()
-                    .contains("is earlier than initdb lsn"));
+                    .contains("is earlier than latest GC horizon"));
             }
         }
 
