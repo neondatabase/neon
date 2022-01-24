@@ -1,104 +1,85 @@
-use anyhow::{anyhow, bail, Context};
+use crate::auth::ClientCredentials;
+use crate::compute::DatabaseInfo;
+use crate::waiters::{Waiter, Waiters};
+use anyhow::{anyhow, bail};
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::net::{SocketAddr, ToSocketAddrs};
 
-use crate::state::ProxyWaiters;
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct DatabaseInfo {
-    pub host: String,
-    pub port: u16,
-    pub dbname: String,
-    pub user: String,
-    pub password: Option<String>,
+lazy_static! {
+    static ref CPLANE_WAITERS: Waiters<Result<DatabaseInfo, String>> = Default::default();
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(untagged)]
-enum ProxyAuthResponse {
-    Ready { conn_info: DatabaseInfo },
-    Error { error: String },
-    NotReady { ready: bool }, // TODO: get rid of `ready`
+/// Give caller an opportunity to wait for cplane's reply.
+pub async fn with_waiter<F, R, T>(psql_session_id: impl Into<String>, f: F) -> anyhow::Result<T>
+where
+    F: FnOnce(Waiter<'static, Result<DatabaseInfo, String>>) -> R,
+    R: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let waiter = CPLANE_WAITERS.register(psql_session_id.into())?;
+    f(waiter).await
 }
 
-impl DatabaseInfo {
-    pub fn socket_addr(&self) -> anyhow::Result<SocketAddr> {
-        let host_port = format!("{}:{}", self.host, self.port);
-        host_port
-            .to_socket_addrs()
-            .with_context(|| format!("cannot resolve {} to SocketAddr", host_port))?
-            .next()
-            .context("cannot resolve at least one SocketAddr")
-    }
+pub fn notify(psql_session_id: &str, msg: Result<DatabaseInfo, String>) -> anyhow::Result<()> {
+    CPLANE_WAITERS.notify(psql_session_id, msg)
 }
 
-impl From<DatabaseInfo> for tokio_postgres::Config {
-    fn from(db_info: DatabaseInfo) -> Self {
-        let mut config = tokio_postgres::Config::new();
-
-        config
-            .host(&db_info.host)
-            .port(db_info.port)
-            .dbname(&db_info.dbname)
-            .user(&db_info.user);
-
-        if let Some(password) = db_info.password {
-            config.password(password);
-        }
-
-        config
-    }
-}
-
+/// Zenith console API wrapper.
 pub struct CPlaneApi<'a> {
     auth_endpoint: &'a str,
-    waiters: &'a ProxyWaiters,
 }
 
 impl<'a> CPlaneApi<'a> {
-    pub fn new(auth_endpoint: &'a str, waiters: &'a ProxyWaiters) -> Self {
-        Self {
-            auth_endpoint,
-            waiters,
-        }
+    pub fn new(auth_endpoint: &'a str) -> Self {
+        Self { auth_endpoint }
     }
 }
 
 impl CPlaneApi<'_> {
-    pub fn authenticate_proxy_request(
+    pub async fn authenticate_proxy_request(
         &self,
-        user: &str,
-        database: &str,
+        creds: ClientCredentials,
         md5_response: &[u8],
         salt: &[u8; 4],
         psql_session_id: &str,
     ) -> anyhow::Result<DatabaseInfo> {
         let mut url = reqwest::Url::parse(self.auth_endpoint)?;
         url.query_pairs_mut()
-            .append_pair("login", user)
-            .append_pair("database", database)
+            .append_pair("login", &creds.user)
+            .append_pair("database", &creds.dbname)
             .append_pair("md5response", std::str::from_utf8(md5_response)?)
             .append_pair("salt", &hex::encode(salt))
             .append_pair("psql_session_id", psql_session_id);
 
-        let waiter = self.waiters.register(psql_session_id.to_owned());
+        with_waiter(psql_session_id, |waiter| async {
+            println!("cplane request: {}", url);
+            // TODO: leverage `reqwest::Client` to reuse connections
+            let resp = reqwest::get(url).await?;
+            if !resp.status().is_success() {
+                bail!("Auth failed: {}", resp.status())
+            }
 
-        println!("cplane request: {}", url);
-        let resp = reqwest::blocking::get(url)?;
-        if !resp.status().is_success() {
-            bail!("Auth failed: {}", resp.status())
-        }
+            let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text().await?.as_str())?;
+            println!("got auth info: #{:?}", auth_info);
 
-        let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text()?.as_str())?;
-        println!("got auth info: #{:?}", auth_info);
-
-        use ProxyAuthResponse::*;
-        match auth_info {
-            Ready { conn_info } => Ok(conn_info),
-            Error { error } => bail!(error),
-            NotReady { .. } => waiter.wait()?.map_err(|e| anyhow!(e)),
-        }
+            use ProxyAuthResponse::*;
+            match auth_info {
+                Ready { conn_info } => Ok(conn_info),
+                Error { error } => bail!(error),
+                NotReady { .. } => waiter.await?.map_err(|e| anyhow!(e)),
+            }
+        })
+        .await
     }
+}
+
+// NOTE: the order of constructors is important.
+// https://serde.rs/enum-representations.html#untagged
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+enum ProxyAuthResponse {
+    Ready { conn_info: DatabaseInfo },
+    Error { error: String },
+    NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
 #[cfg(test)]

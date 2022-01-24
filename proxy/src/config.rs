@@ -1,10 +1,9 @@
-use crate::cplane_api::DatabaseInfo;
 use anyhow::{anyhow, ensure, Context};
 use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-pub type SslConfig = Arc<ServerConfig>;
+pub type TlsConfig = Arc<ServerConfig>;
 
 pub struct ProxyConfig {
     /// main entrypoint for users to connect to
@@ -24,26 +23,10 @@ pub struct ProxyConfig {
     /// control plane address where we would check auth.
     pub auth_endpoint: String,
 
-    pub ssl_config: Option<SslConfig>,
+    pub tls_config: Option<TlsConfig>,
 }
 
-pub type ProxyWaiters = crate::waiters::Waiters<Result<DatabaseInfo, String>>;
-
-pub struct ProxyState {
-    pub conf: ProxyConfig,
-    pub waiters: ProxyWaiters,
-}
-
-impl ProxyState {
-    pub fn new(conf: ProxyConfig) -> Self {
-        Self {
-            conf,
-            waiters: ProxyWaiters::default(),
-        }
-    }
-}
-
-pub fn configure_ssl(key_path: &str, cert_path: &str) -> anyhow::Result<SslConfig> {
+pub fn configure_ssl(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfig> {
     let key = {
         let key_bytes = std::fs::read(key_path).context("SSL key file")?;
         let mut keys = pemfile::pkcs8_private_keys(&mut &key_bytes[..])
