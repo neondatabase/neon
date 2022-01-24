@@ -57,6 +57,16 @@ pub struct CancelKeyData {
     pub cancel_key: i32,
 }
 
+use rand::distributions::{Distribution, Standard};
+impl Distribution<CancelKeyData> for Standard {
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
+        CancelKeyData {
+            backend_pid: rng.gen(),
+            cancel_key: rng.gen(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FeQueryMessage {
     pub body: Bytes,

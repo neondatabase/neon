@@ -8,18 +8,19 @@
 use anyhow::bail;
 use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
-use std::thread;
-use zenith_utils::http::endpoint;
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
+mod cancellation;
 mod cplane_api;
 mod http;
 mod mgmt;
 mod proxy;
 mod state;
+mod stream;
 mod waiters;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     zenith_metrics::set_common_metrics_prefix("zenith_proxy");
     let arg_matches = App::new("Zenith proxy/router")
         .version(GIT_VERSION)
@@ -107,35 +108,19 @@ fn main() -> anyhow::Result<()> {
     let http_listener = tcp_listener::bind(state.conf.http_address)?;
 
     println!("Starting proxy on {}", state.conf.proxy_address);
-    let pageserver_listener = tcp_listener::bind(state.conf.proxy_address)?;
+    let proxy_listener = tokio::net::TcpListener::bind(state.conf.proxy_address).await?;
 
     println!("Starting mgmt on {}", state.conf.mgmt_address);
     let mgmt_listener = tcp_listener::bind(state.conf.mgmt_address)?;
 
-    let threads = [
-        thread::Builder::new()
-            .name("Http thread".into())
-            .spawn(move || {
-                let router = http::make_router();
-                endpoint::serve_thread_main(
-                    router,
-                    http_listener,
-                    std::future::pending(), // never shut down
-                )
-            })?,
-        // Spawn a thread to listen for connections. It will spawn further threads
-        // for each connection.
-        thread::Builder::new()
-            .name("Listener thread".into())
-            .spawn(move || proxy::thread_main(state, pageserver_listener))?,
-        thread::Builder::new()
-            .name("Mgmt thread".into())
-            .spawn(move || mgmt::thread_main(state, mgmt_listener))?,
-    ];
+    let http = tokio::spawn(http::thread_main(http_listener));
+    let proxy = tokio::spawn(proxy::thread_main(state, proxy_listener));
+    let mgmt = tokio::task::spawn_blocking(move || mgmt::thread_main(state, mgmt_listener));
 
-    for t in threads {
-        t.join().unwrap()?;
-    }
+    let _ = futures::future::try_join_all([http, proxy, mgmt])
+        .await?
+        .into_iter()
+        .collect::<Result<Vec<()>, _>>()?;
 
     Ok(())
 }

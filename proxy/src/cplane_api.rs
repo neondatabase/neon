@@ -1,8 +1,32 @@
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::collections::HashMap;
 
 use crate::state::ProxyWaiters;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClientCredentials {
+    pub user: String,
+    pub dbname: String,
+}
+
+impl TryFrom<HashMap<String, String>> for ClientCredentials {
+    type Error = anyhow::Error;
+
+    fn try_from(mut value: HashMap<String, String>) -> Result<Self, Self::Error> {
+        let mut get_param = |key| {
+            value
+                .remove(key)
+                .with_context(|| format!("{} is missing in startup packet", key))
+        };
+
+        let user = get_param("user")?;
+        let db = get_param("database")?;
+
+        Ok(Self { user, dbname: db })
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct DatabaseInfo {
