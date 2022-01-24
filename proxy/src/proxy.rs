@@ -152,7 +152,7 @@ impl ProxyConnection {
             Ok(None) => return Ok(None),
             Err(e) => {
                 // Report the error to the client
-                self.pgb.write_message(&Be::ErrorResponse(e.to_string()))?;
+                self.pgb.write_message(&Be::ErrorResponse(&e.to_string()))?;
                 bail!("failed to handle client: {:?}", e);
             }
         };

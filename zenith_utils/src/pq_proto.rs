@@ -367,7 +367,7 @@ pub enum BeMessage<'a> {
     CloseComplete,
     // None means column is NULL
     DataRow(&'a [Option<&'a [u8]>]),
-    ErrorResponse(String),
+    ErrorResponse(&'a str),
     // single byte - used in response to SSLRequest/GSSENCRequest
     EncryptionResponse(bool),
     NoData,
