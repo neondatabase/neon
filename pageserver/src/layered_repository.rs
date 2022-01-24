@@ -651,7 +651,6 @@ impl LayeredRepository {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
-
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
 
                 totals += result;
@@ -1633,6 +1632,7 @@ impl LayeredTimeline {
     pub fn gc_timeline(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) -> Result<GcResult> {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
+        let disk_consistent_lsn = self.get_disk_consistent_lsn();
 
         let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
 
@@ -1718,7 +1718,12 @@ impl LayeredTimeline {
             }
 
             // 3. Is there a later on-disk layer for this relation?
-            if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
+            if !l.is_dropped()
+                && !layers.newer_image_layer_exists(
+                    l.get_seg_tag(),
+                    l.get_end_lsn(),
+                    disk_consistent_lsn,
+                )
             {
                 info!(
                     "keeping {} {}-{} because it is the latest layer",

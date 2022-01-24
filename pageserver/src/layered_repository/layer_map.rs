@@ -191,9 +191,15 @@ impl LayerMap {
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    pub fn newer_image_layer_exists(&self, seg: SegmentTag, lsn: Lsn) -> bool {
+    /// We ignore segments newer than disk_consistent_lsn because they will be removed at restart
+    pub fn newer_image_layer_exists(
+        &self,
+        seg: SegmentTag,
+        lsn: Lsn,
+        disk_consistent_lsn: Lsn,
+    ) -> bool {
         if let Some(segentry) = self.segs.get(&seg) {
-            segentry.newer_image_layer_exists(lsn)
+            segentry.newer_image_layer_exists(lsn, disk_consistent_lsn)
         } else {
             false
         }
@@ -311,13 +317,13 @@ impl SegEntry {
         self.historic.search(lsn)
     }
 
-    pub fn newer_image_layer_exists(&self, lsn: Lsn) -> bool {
+    pub fn newer_image_layer_exists(&self, lsn: Lsn, disk_consistent_lsn: Lsn) -> bool {
         // We only check on-disk layers, because
         // in-memory layers are not durable
 
         self.historic
             .iter_newer(lsn)
-            .any(|layer| !layer.is_incremental())
+            .any(|layer| !layer.is_incremental() && layer.get_end_lsn() <= disk_consistent_lsn)
     }
 
     // Set new open layer for a SegEntry.
