@@ -354,9 +354,7 @@ impl PostgresBackend {
                     }
                     FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
-                            self.write_message(&BeMessage::ErrorResponse(
-                                "must connect with TLS".to_string(),
-                            ))?;
+                            self.write_message(&BeMessage::ErrorResponse("must connect with TLS"))?;
                             bail!("client did not connect with TLS");
                         }
 
@@ -402,7 +400,7 @@ impl PostgresBackend {
                         let (_, md5_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_md5(self, md5_response) {
-                            self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                             bail!("auth failed: {}", e);
                         }
                     }
@@ -410,7 +408,7 @@ impl PostgresBackend {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
-                            self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                             bail!("auth failed: {}", e);
                         }
                     }
@@ -428,17 +426,16 @@ impl PostgresBackend {
                 trace!("got query {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string) {
-                    let errmsg = format!("{}", e);
                     // ":#" uses the alternate formatting style, which makes anyhow display the
                     // full cause of the error, not just the top-level context. We don't want to
                     // send that in the ErrorResponse though, because it's not relevant to the
                     // compute node logs.
                     warn!("query handler for {} failed: {:#}", query_string, e);
+                    self.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?;
+                    // TODO: untangle convoluted control flow
                     if e.to_string().contains("failed to run") {
-                        self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
                         return Ok(ProcessMsgResult::Break);
                     }
-                    self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;
             }
@@ -466,10 +463,8 @@ impl PostgresBackend {
                 trace!("got execute {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string) {
-                    let errmsg = format!("{}", e);
-
                     warn!("query handler for {:?} failed: {:#}", query_string, e);
-                    self.write_message(&BeMessage::ErrorResponse(errmsg))?;
+                    self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
                 // for basebackup and it uses CopyOut which doesnt require

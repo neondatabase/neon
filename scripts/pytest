@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+# This is a helper script to run pytest without going too much
+# into python dependency management details
+
+# It may be desirable to create more sophisticated pytest launcher
+# with commonly used options to simplify launching from e.g CI
+
+poetry run pytest "${@:1}"

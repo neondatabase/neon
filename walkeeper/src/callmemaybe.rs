@@ -7,6 +7,7 @@
 //!
 use crate::SafeKeeperConf;
 use anyhow::{Context, Result};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -41,9 +42,12 @@ async fn request_callback(
     let me_conf: postgres::config::Config = me_connstr.parse().unwrap();
     let (host, port) = connection_host_port(&me_conf);
 
+    // pageserver connstr is needed to be able to distinguish between different pageservers
+    // it is required to correctly manage callmemaybe subscriptions when more than one pageserver is involved
+    // TODO it is better to use some sort of a unique id instead of connection string, see https://github.com/zenithdb/zenith/issues/1105
     let callme = format!(
-        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={}'",
-        tenantid, timelineid, host, port, timelineid, tenantid
+        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={} pageserver_connstr={}'",
+        tenantid, timelineid, host, port, timelineid, tenantid, pageserver_connstr,
     );
 
     let _ = client.simple_query(&callme).await?;
@@ -60,18 +64,36 @@ pub fn thread_main(conf: SafeKeeperConf, rx: UnboundedReceiver<CallmeEvent>) -> 
     runtime.block_on(main_loop(conf, rx))
 }
 
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct SubscriptionStateKey {
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+    pageserver_connstr: String,
+}
+
+impl SubscriptionStateKey {
+    pub fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId, pageserver_connstr: String) -> Self {
+        Self {
+            tenant_id,
+            timeline_id,
+            pageserver_connstr,
+        }
+    }
+}
+
 /// Messages to the callmemaybe thread
 #[derive(Debug)]
 pub enum CallmeEvent {
     // add new subscription to the list
-    Subscribe(ZTenantId, ZTimelineId, String),
+    Subscribe(SubscriptionStateKey),
     // remove the subscription from the list
-    Unsubscribe(ZTenantId, ZTimelineId),
+    Unsubscribe(SubscriptionStateKey),
     // don't serve this subscription, but keep it in the list
-    Pause(ZTenantId, ZTimelineId),
+    Pause(SubscriptionStateKey),
     // resume this subscription, if it exists,
     // but don't create a new one if it is gone
-    Resume(ZTenantId, ZTimelineId),
+    Resume(SubscriptionStateKey),
+    // TODO how do we delete from subscriptions?
 }
 
 #[derive(Debug)]
@@ -117,6 +139,7 @@ impl SubscriptionState {
 
             let timelineid = self.timelineid;
             let tenantid = self.tenantid;
+            let pageserver_connstr = self.pageserver_connstr.clone();
             tokio::spawn(async move {
                 if let Err(err) = handle.await {
                     if err.is_cancelled() {
@@ -124,8 +147,8 @@ impl SubscriptionState {
                             timelineid, tenantid);
                     } else {
                         error!(
-                            "callback task for timelineid={} tenantid={} failed: {}",
-                            timelineid, tenantid, err
+                            "callback task for timelineid={} tenantid={} pageserver_connstr={} failed: {}",
+                            timelineid, tenantid, pageserver_connstr, err
                         );
                     }
                 }
@@ -137,7 +160,7 @@ impl SubscriptionState {
         // Ignore call request if this subscription is paused
         if self.paused {
             debug!(
-                "ignore call request for paused subscription
+                "ignore call request for paused subscription \
                 tenantid: {}, timelineid: {}",
                 self.tenantid, self.timelineid
             );
@@ -147,7 +170,7 @@ impl SubscriptionState {
         // Check if it too early to recall
         if self.handle.is_some() && self.last_call_time.elapsed() < recall_period {
             debug!(
-                "too early to recall. self.last_call_time.elapsed: {:?}, recall_period: {:?}
+                "too early to recall. self.last_call_time.elapsed: {:?}, recall_period: {:?} \
                 tenantid: {}, timelineid: {}",
                 self.last_call_time, recall_period, self.tenantid, self.timelineid
             );
@@ -175,8 +198,7 @@ impl SubscriptionState {
         // Update last_call_time
         self.last_call_time = Instant::now();
         info!(
-            "new call spawned. time {:?}
-            tenantid: {}, timelineid: {}",
+            "new call spawned. last call time {:?} tenantid: {}, timelineid: {}",
             self.last_call_time, self.tenantid, self.timelineid
         );
     }
@@ -189,7 +211,7 @@ impl Drop for SubscriptionState {
 }
 
 pub async fn main_loop(conf: SafeKeeperConf, mut rx: UnboundedReceiver<CallmeEvent>) -> Result<()> {
-    let subscriptions: Mutex<HashMap<(ZTenantId, ZTimelineId), SubscriptionState>> =
+    let subscriptions: Mutex<HashMap<SubscriptionStateKey, SubscriptionState>> =
         Mutex::new(HashMap::new());
 
     let mut ticker = tokio::time::interval(conf.recall_period);
@@ -199,52 +221,80 @@ pub async fn main_loop(conf: SafeKeeperConf, mut rx: UnboundedReceiver<CallmeEve
             {
                 match request.context("done")?
                 {
-                    CallmeEvent::Subscribe(tenantid, timelineid, pageserver_connstr) =>
+                    CallmeEvent::Subscribe(key) =>
                     {
+                        let _enter = info_span!("callmemaybe: subscribe", timelineid = %key.timeline_id, tenantid = %key.tenant_id, pageserver_connstr=%key.pageserver_connstr.clone()).entered();
                         let mut subscriptions = subscriptions.lock().unwrap();
-                        if let Some(sub) = subscriptions.get(&(tenantid, timelineid))
-                        {
-                            info!("callmemaybe. subscription already exists {:?}", sub);
+                        // XXX this clone is ugly, is there a way to use the trick with Borrow trait with entry API?
+                        //  when we switch to node id instead of the connection string key will be Copy and there will be no need to clone
+                        match subscriptions.entry(key.clone()) {
+                            Entry::Occupied(_) => {
+                                // Do nothing if subscription already exists
+                                // If it is paused it means that there is already established replication connection.
+                                // If it is not paused it will be polled with other subscriptions when timeout expires.
+                                // This can occur when replication channel is established before subscription is added.
+                                info!(
+                                    "subscription already exists",
+                                );
+                            }
+                            Entry::Vacant(entry) => {
+                                let subscription = entry.insert(SubscriptionState::new(
+                                    key.tenant_id,
+                                    key.timeline_id,
+                                    key.pageserver_connstr,
+                                ));
+                                subscription.call(conf.recall_period, conf.listen_pg_addr.clone());
+                            }
                         }
-                        if let Some(mut sub) = subscriptions.insert((tenantid, timelineid),
-                            SubscriptionState::new(tenantid, timelineid, pageserver_connstr))
-                        {
-                            sub.call(conf.recall_period, conf.listen_pg_addr.clone());
+                    },
+                    CallmeEvent::Unsubscribe(key) => {
+                        let _enter = debug_span!("callmemaybe: unsubscribe", timelineid = %key.timeline_id, tenantid = %key.tenant_id, pageserver_connstr=%key.pageserver_connstr.clone()).entered();
+                        debug!("unsubscribe");
+                        let mut subscriptions = subscriptions.lock().unwrap();
+                        subscriptions.remove(&key);
+
+                    },
+                    CallmeEvent::Pause(key) => {
+                        let _enter = debug_span!("callmemaybe: pause", timelineid = %key.timeline_id, tenantid = %key.tenant_id, pageserver_connstr=%key.pageserver_connstr.clone()).entered();
+                        let mut subscriptions = subscriptions.lock().unwrap();
+                        // If pause received when no corresponding subscription exists it means that someone started replication
+                        // without using callmemaybe. So we create subscription and pause it.
+                        // In tenant relocation scenario subscribe call will be executed after pause when compute is restarted.
+                        // In that case there is no need to create new/unpause existing subscription.
+                        match subscriptions.entry(key.clone()) {
+                            Entry::Occupied(mut sub) => {
+                                debug!("pause existing");
+                                sub.get_mut().pause();
+                            }
+                            Entry::Vacant(entry) => {
+                                debug!("create paused");
+                                let subscription = entry.insert(SubscriptionState::new(
+                                    key.tenant_id,
+                                    key.timeline_id,
+                                    key.pageserver_connstr,
+                                ));
+                                subscription.pause();
+                            }
                         }
-                        info!("callmemaybe. thread_main. subscribe callback request for timelineid={} tenantid={}",
-                        timelineid, tenantid);
                     },
-                    CallmeEvent::Unsubscribe(tenantid, timelineid) => {
+                    CallmeEvent::Resume(key) => {
+                        debug!(
+                            "callmemaybe. thread_main. resume callback request for timelineid={} tenantid={} pageserver_connstr={}",
+                            key.timeline_id, key.tenant_id, key.pageserver_connstr,
+                        );
                         let mut subscriptions = subscriptions.lock().unwrap();
-                        subscriptions.remove(&(tenantid, timelineid));
-                        info!("callmemaybe. thread_main. unsubscribe callback. request for timelineid={} tenantid={}",
-                        timelineid, tenantid);
-                    },
-                    CallmeEvent::Pause(tenantid, timelineid) => {
-                        let mut subscriptions = subscriptions.lock().unwrap();
-                        if let Some(sub) = subscriptions.get_mut(&(tenantid, timelineid))
-                        {
-                            sub.pause();
-                        };
-                        info!("callmemaybe. thread_main. pause callback request for timelineid={} tenantid={}",
-                        timelineid, tenantid);
-                    },
-                    CallmeEvent::Resume(tenantid, timelineid) => {
-                        let mut subscriptions = subscriptions.lock().unwrap();
-                        if let Some(sub) = subscriptions.get_mut(&(tenantid, timelineid))
+                        if let Some(sub) = subscriptions.get_mut(&key)
                         {
                             sub.resume();
                         };
-
-                        info!("callmemaybe. thread_main. resume callback request for timelineid={} tenantid={}",
-                        timelineid, tenantid);
                     },
                 }
             },
             _ = ticker.tick() => {
+                let _enter = debug_span!("callmemaybe: tick").entered();
                 let mut subscriptions = subscriptions.lock().unwrap();
 
-                for (&(_tenantid, _timelineid), state) in subscriptions.iter_mut() {
+                for (_, state) in subscriptions.iter_mut() {
                     state.call(conf.recall_period, conf.listen_pg_addr.clone());
                 }
              },

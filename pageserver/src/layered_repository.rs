@@ -285,7 +285,46 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    // TODO this method currently does not do anything to prevent (or react to) state updates between a sync task schedule and a sync task end (that causes this update).
+    // Detaches the timeline from the repository.
+    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
+        let mut timelines = self.timelines.lock().unwrap();
+        match timelines.entry(timeline_id) {
+            Entry::Vacant(_) => {
+                bail!("cannot detach non existing timeline");
+            }
+            Entry::Occupied(mut entry) => {
+                let timeline_entry = entry.get_mut();
+
+                let timeline = match timeline_entry {
+                    LayeredTimelineEntry::Remote { .. } => {
+                        bail!("cannot detach remote timeline {}", timeline_id);
+                    }
+                    LayeredTimelineEntry::Local(timeline) => timeline,
+                };
+
+                // TODO (rodionov) keep local state in timeline itself (refactoring related to https://github.com/zenithdb/zenith/issues/997 and #1104)
+
+                // FIXME this is local disk consistent lsn, need to keep the latest succesfully uploaded checkpoint lsn in timeline (metadata?)
+                //  https://github.com/zenithdb/zenith/issues/1104
+                let remote_disk_consistent_lsn = timeline.disk_consistent_lsn.load();
+                // reference to timeline is dropped here
+                entry.insert(LayeredTimelineEntry::Remote {
+                    id: timeline_id,
+                    disk_consistent_lsn: remote_disk_consistent_lsn,
+                });
+            }
+        };
+        // Release the lock to shutdown and remove the files without holding it
+        drop(timelines);
+        // shutdown the timeline (this shuts down the walreceiver)
+        thread_mgr::shutdown_threads(None, Some(self.tenantid), Some(timeline_id));
+
+        // remove timeline files (maybe avoid this for ease of debugging if something goes wrong)
+        fs::remove_dir_all(self.conf.timeline_path(&timeline_id, &self.tenantid))?;
+        Ok(())
+    }
+
+    // TODO this method currentlly does not do anything to prevent (or react to) state updates between a sync task schedule and a sync task end (that causes this update).
     // Sync task is enqueued and can error and be rescheduled, so some significant time may pass between the events.
     //
     /// Reacts on the timeline sync state change, changing pageserver's memory state for this timeline (unload or load of the timeline files).
@@ -294,6 +333,10 @@ impl Repository for LayeredRepository {
         timeline_id: ZTimelineId,
         new_state: TimelineSyncState,
     ) -> Result<()> {
+        debug!(
+            "set_timeline_state: timeline_id: {}, new_state: {:?}",
+            timeline_id, new_state
+        );
         let mut timelines_accessor = self.timelines.lock().unwrap();
 
         match new_state {
@@ -314,6 +357,7 @@ impl Repository for LayeredRepository {
                 },
             ),
         };
+        // NOTE we do not delete local data in case timeline became cloud only, this is performed in detach_timeline
         drop(timelines_accessor);
 
         Ok(())
@@ -651,7 +695,6 @@ impl LayeredRepository {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
-
                 let result = timeline.gc_timeline(branchpoints, cutoff)?;
 
                 totals += result;
@@ -1633,6 +1676,7 @@ impl LayeredTimeline {
     pub fn gc_timeline(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) -> Result<GcResult> {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
+        let disk_consistent_lsn = self.get_disk_consistent_lsn();
 
         let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
 
@@ -1718,7 +1762,12 @@ impl LayeredTimeline {
             }
 
             // 3. Is there a later on-disk layer for this relation?
-            if !l.is_dropped() && !layers.newer_image_layer_exists(l.get_seg_tag(), l.get_end_lsn())
+            if !l.is_dropped()
+                && !layers.newer_image_layer_exists(
+                    l.get_seg_tag(),
+                    l.get_end_lsn(),
+                    disk_consistent_lsn,
+                )
             {
                 info!(
                     "keeping {} {}-{} because it is the latest layer",

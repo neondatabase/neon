@@ -36,20 +36,20 @@ jobs:
     # see https://github.com/actions/setup-python/issues/162
     # and probably https://github.com/actions/setup-python/issues/162#issuecomment-865387976 in particular
     # so the simplest solution to me is to use already installed system python and spin virtualenvs for job runs.
-    # there is Python 3.7.10 already installed on the machine so use it to install pipenv and then use pipenv's virtuealenvs
-    - name: Install pipenv & deps
+    # there is Python 3.7.10 already installed on the machine so use it to install poetry and then use poetry's virtuealenvs
+    - name: Install poetry & deps
       run: |
-        python3 -m pip install --upgrade pipenv wheel
-        # since pip/pipenv caches are reused there shouldn't be any troubles with install every time
-        pipenv install
+        python3 -m pip install --upgrade poetry wheel
+        # since pip/poetry caches are reused there shouldn't be any troubles with install every time
+        poetry install
 
     - name: Show versions
       run: |
         echo Python
         python3 --version
-        pipenv run python3 --version
+        poetry run python3 --version
         echo Pipenv
-        pipenv --version
+        poetry --version
         echo Pgbench
         $PG_BIN/pgbench --version
 
@@ -90,7 +90,7 @@ jobs:
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
       run: |
         mkdir -p perf-report-staging
-        pipenv run pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging
+        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging
 
     - name: Submit result
       env:

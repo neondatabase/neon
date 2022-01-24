@@ -2,6 +2,16 @@
 
 ### Authentication
 
+### Backpresssure
+
+Backpressure is used to limit the lag between pageserver and compute node or WAL service.
+
+If compute node or WAL service run far ahead of Page Server,
+the time of serving page requests increases. This may lead to timeout errors.
+
+To tune backpressure limits use `max_replication_write_lag`, `max_replication_flush_lag` and `max_replication_apply_lag` settings.
+When lag between current LSN (pg_current_wal_flush_lsn() at compute node) and minimal write/flush/apply position of replica exceeds the limit
+backends performing writes are blocked until the replica is caught up.
 ### Base image (page image)
 
 ### Basebackup
@@ -76,7 +86,37 @@ The layer map tracks what layers exist for all the relishes in a timeline.
 Zenith repository implementation that keeps data in layers.
 ### LSN
 
+The Log Sequence Number (LSN) is a unique identifier of the WAL record[] in the WAL log.
+The insert position is a byte offset into the logs, increasing monotonically with each new record.
+Internally, an LSN is a 64-bit integer, representing a byte position in the write-ahead log stream.
+It is printed as two hexadecimal numbers of up to 8 digits each, separated by a slash.
+Check also [PostgreSQL doc about pg_lsn type](https://www.postgresql.org/docs/devel/datatype-pg-lsn.html)
+Values can be compared to calculate the volume of WAL data that separates them, so they are used to measure the progress of replication and recovery.
 
+In postgres and Zenith lsns are used to describe certain points in WAL handling.
+
+PostgreSQL LSNs and functions to monitor them:
+* `pg_current_wal_insert_lsn()` - Returns the current write-ahead log insert location.
+* `pg_current_wal_lsn()` - Returns the current write-ahead log write location.
+* `pg_current_wal_flush_lsn()` - Returns the current write-ahead log flush location.
+* `pg_last_wal_receive_lsn()` - Returns the last write-ahead log location that has been received and synced to disk by streaming replication. While streaming replication is in progress this will increase monotonically.
+* `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically. 
+[source PostgreSQL documentation](https://www.postgresql.org/docs/devel/functions-admin.html):
+
+Zenith safekeeper LSNs. For more check [walkeeper/README_PROTO.md](/walkeeper/README_PROTO.md)
+* `CommitLSN`: position in WAL confirmed by quorum safekeepers.
+* `RestartLSN`: position in WAL confirmed by all safekeepers.
+* `FlushLSN`: part of WAL persisted to the disk by safekeeper.
+* `VCL`: the largerst LSN for which we can guarantee availablity of all prior records.
+
+Zenith pageserver LSNs:
+* `last_record_lsn` - the end of last processed WAL record.
+* `disk_consistent_lsn` - data is known to be fully flushed and fsync'd to local disk on pageserver up to this LSN.
+* `remote_consistent_lsn` - The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash.
+TODO: use this name consistently in remote storage code. Now `disk_consistent_lsn` is used and meaning depends on the context.
+* `ancestor_lsn` - LSN of the branch point (the LSN at which this branch was created)
+
+TODO: add table that describes mapping between PostgreSQL (compute), safekeeper and pageserver LSNs.
 ### Page (block)
 
 The basic structure used to store relation data. All pages are of the same size.

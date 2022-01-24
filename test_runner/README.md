@@ -22,23 +22,24 @@ runtime. Currently, there are only two batches:
 
 ### Running the tests
 
-Because pytest will search all subdirectories for tests, it's easiest to
-run the tests from within the `test_runner` directory.
+There is a wrapper script to invoke pytest: `./scripts/pytest`.
+It accepts all the arguments that are accepted by pytest.
+Depending on your installation options pytest might be invoked directly.
 
 Test state (postgres data, pageserver state, and log files) will
 be stored under a directory `test_output`.
 
 You can run all the tests with:
 
-`pipenv run pytest`
+`./scripts/pytest`
 
 If you want to run all the tests in a particular file:
 
-`pipenv run pytest test_pgbench.py`
+`./scripts/pytest test_pgbench.py`
 
 If you want to run all tests that have the string "bench" in their names:
 
-`pipenv run pytest -k bench`
+`./scripts/pytest -k bench`
 
 Useful environment variables:
 
@@ -53,12 +54,12 @@ should go.
 `RUST_LOG`: logging configuration to pass into Zenith CLI
 
 Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
-`pytest -s --log-cli-level=INFO ...`
+`./scripts/pytest -s --log-cli-level=INFO ...`
 (Note many tests capture subprocess outputs separately, so this may not
 show much.)
 
 Exit after the first test failure:
-`pytest -x ...`
+`./scripts/pytest -x ...`
 (there are many more pytest options; run `pytest -h` to see them.)
 
 ### Writing a test

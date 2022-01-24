@@ -26,7 +26,7 @@ use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody};
 use zenith_utils::sock_split::ReadStream;
 
-use crate::callmemaybe::CallmeEvent;
+use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -90,18 +90,27 @@ impl Drop for ReplicationConnGuard {
 struct ReplicationStreamGuard {
     tx: UnboundedSender<CallmeEvent>,
     tenant_id: ZTenantId,
-    timelineid: ZTimelineId,
+    timeline_id: ZTimelineId,
+    pageserver_connstr: String,
 }
 
 impl Drop for ReplicationStreamGuard {
     fn drop(&mut self) {
         // the connection with pageserver is lost,
         // resume callback subscription
-        debug!("Connection to pageserver is gone. Resume callmemeybe subsciption if necessary. tenantid {} timelineid {}",
-         self.tenant_id, self.timelineid);
+        debug!(
+            "Connection to pageserver is gone. Resume callmemaybe subsciption if necessary. tenantid {} timelineid {}",
+            self.tenant_id, self.timeline_id,
+        );
+
+        let subscription_key = SubscriptionStateKey::new(
+            self.tenant_id,
+            self.timeline_id,
+            self.pageserver_connstr.to_owned(),
+        );
 
         self.tx
-            .send(CallmeEvent::Resume(self.tenant_id, self.timelineid))
+            .send(CallmeEvent::Resume(subscription_key))
             .unwrap_or_else(|e| {
                 error!("failed to send Resume request to callmemaybe thread {}", e);
             });
@@ -194,8 +203,9 @@ impl ReplicationConn {
         spg: &mut SafekeeperPostgresHandler,
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
+        pageserver_connstr: Option<String>,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap()).entered();
+        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap(), pageserver_connstr = %pageserver_connstr.as_deref().unwrap_or_default()).entered();
 
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(spg.timeline.get());
@@ -256,11 +266,14 @@ impl ReplicationConn {
             if spg.appname == Some("wal_proposer_recovery".to_string()) {
                 None
             } else {
-                let timelineid = spg.timeline.get().timelineid;
+                let pageserver_connstr = pageserver_connstr.clone().expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
+                let timeline_id = spg.timeline.get().timeline_id;
                 let tenant_id = spg.ztenantid.unwrap();
                 let tx_clone = spg.tx.clone();
+                let subscription_key =
+                    SubscriptionStateKey::new(tenant_id, timeline_id, pageserver_connstr.clone());
                 spg.tx
-                    .send(CallmeEvent::Pause(tenant_id, timelineid))
+                    .send(CallmeEvent::Pause(subscription_key))
                     .unwrap_or_else(|e| {
                         error!("failed to send Pause request to callmemaybe thread {}", e);
                     });
@@ -269,7 +282,8 @@ impl ReplicationConn {
                 Some(ReplicationStreamGuard {
                     tx: tx_clone,
                     tenant_id,
-                    timelineid,
+                    timeline_id,
+                    pageserver_connstr,
                 })
             }
         };
@@ -293,12 +307,18 @@ impl ReplicationConn {
                 if let Some(lsn) = lsn {
                     end_pos = lsn;
                 } else {
-                    // Is is time to end streaming to this replica?
+                    // Is it time to end streaming to this replica?
                     if spg.timeline.get().check_stop_streaming(replica_id) {
-                        let timelineid = spg.timeline.get().timelineid;
+                        // this expect should never fail because in wal_proposer_recovery mode stop_pos is set
+                        // and this code is not reachable
+                        let pageserver_connstr = pageserver_connstr
+                            .expect("there should be a pageserver connection string");
+                        let timelineid = spg.timeline.get().timeline_id;
                         let tenant_id = spg.ztenantid.unwrap();
+                        let subscription_key =
+                            SubscriptionStateKey::new(tenant_id, timelineid, pageserver_connstr);
                         spg.tx
-                            .send(CallmeEvent::Unsubscribe(tenant_id, timelineid))
+                            .send(CallmeEvent::Unsubscribe(subscription_key))
                             .unwrap_or_else(|e| {
                                 error!("failed to send Pause request to callmemaybe thread {}", e);
                             });
@@ -324,7 +344,7 @@ impl ReplicationConn {
                     // Open a new file.
                     let segno = start_pos.segment_number(wal_seg_size);
                     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-                    let timeline_id = spg.timeline.get().timelineid;
+                    let timeline_id = spg.timeline.get().timeline_id;
                     let wal_file_path = spg.conf.timeline_dir(&timeline_id).join(wal_file_name);
                     Self::open_wal_file(&wal_file_path)?
                 }

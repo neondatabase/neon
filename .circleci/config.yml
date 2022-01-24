@@ -206,15 +206,15 @@ jobs:
       - checkout
       - run:
           name: Install deps
-          command: pipenv --python 3.7 install --dev
+          command: ./scripts/pysync
       - run:
           name: Run yapf to ensure code format
           when: always
-          command: pipenv run yapf --recursive --diff .
+          command: poetry run yapf --recursive --diff .
       - run:
           name: Run mypy to check types
           when: always
-          command: pipenv run mypy .
+          command: poetry run mypy .
 
   run-pytest:
     executor: zenith-executor
@@ -257,9 +257,8 @@ jobs:
           steps:
             - run: git submodule update --init --depth 1
       - run:
-          name: Install dev deps
-          # we need to run moto s3 mock server, we start is as a separate process, so it's in the dev deps
-          command: pipenv --python 3.7 install --dev
+          name: Install deps
+          command: ./scripts/pysync
       - run:
           name: Run pytest
           # pytest doesn't output test logs in real time, so CI job may fail with
@@ -311,7 +310,7 @@ jobs:
             # -n4 uses four processes to run tests via pytest-xdist
             # -s is not used to prevent pytest from capturing output, because tests are running
             # in parallel and logs are mixed between different tests
-            "${cov_prefix[@]}" pipenv run pytest \
+            "${cov_prefix[@]}" ./scripts/pytest \
               --junitxml=$TEST_OUTPUT/junit.xml \
               --tb=short \
               --verbose \

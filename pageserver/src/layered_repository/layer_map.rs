@@ -191,9 +191,15 @@ impl LayerMap {
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    pub fn newer_image_layer_exists(&self, seg: SegmentTag, lsn: Lsn) -> bool {
+    /// We ignore segments newer than disk_consistent_lsn because they will be removed at restart
+    pub fn newer_image_layer_exists(
+        &self,
+        seg: SegmentTag,
+        lsn: Lsn,
+        disk_consistent_lsn: Lsn,
+    ) -> bool {
         if let Some(segentry) = self.segs.get(&seg) {
-            segentry.newer_image_layer_exists(lsn)
+            segentry.newer_image_layer_exists(lsn, disk_consistent_lsn)
         } else {
             false
         }
@@ -311,13 +317,18 @@ impl SegEntry {
         self.historic.search(lsn)
     }
 
-    pub fn newer_image_layer_exists(&self, lsn: Lsn) -> bool {
+    pub fn newer_image_layer_exists(&self, lsn: Lsn, disk_consistent_lsn: Lsn) -> bool {
         // We only check on-disk layers, because
         // in-memory layers are not durable
 
+        // The end-LSN is exclusive, while disk_consistent_lsn is
+        // inclusive. For example, if disk_consistent_lsn is 100, it is
+        // OK for a delta layer to have end LSN 101, but if the end LSN
+        // is 102, then it might not have been fully flushed to disk
+        // before crash.
         self.historic
             .iter_newer(lsn)
-            .any(|layer| !layer.is_incremental())
+            .any(|layer| !layer.is_incremental() && layer.get_end_lsn() <= disk_consistent_lsn + 1)
     }
 
     // Set new open layer for a SegEntry.
