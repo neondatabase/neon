@@ -23,7 +23,7 @@ def test_next_xid(zenith_env_builder: ZenithEnvBuilder):
     cur.execute('CREATE TABLE t(x integer)')
 
     iterations = 32
-    for i in range(1, iterations+1):
+    for i in range(1, iterations + 1):
         print(f'iteration {i} / {iterations}')
 
         # Stop and restart pageserver. This is a more or less graceful shutdown, although
@@ -34,14 +34,14 @@ def test_next_xid(zenith_env_builder: ZenithEnvBuilder):
         env.pageserver.start()
         pg.start()
 
-        retry_sleep=2
-        max_retries=2000
+        retry_sleep = 2
+        max_retries = 2000
         retries = 0
         while True:
             try:
                 conn = pg.connect()
                 cur = conn.cursor()
-                cur.execute(f"INSERT INTO t values({i})");
+                cur.execute(f"INSERT INTO t values({i})")
                 conn.close()
 
             except Exception as error:
