@@ -56,7 +56,6 @@ def test_next_xid(zenith_env_builder: ZenithEnvBuilder):
 
                     # Establish a new connection for the next retry. It's normal for the
                     # connection to be broken if the proxy or the compute node was restarted.
-                    conn = None
                     continue
                 else:
                     raise
