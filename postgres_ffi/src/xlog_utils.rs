@@ -531,4 +531,34 @@ mod tests {
         println!("wal_end={}, tli={}", wal_end, tli);
         assert_eq!(wal_end, waldump_wal_end);
     }
+
+    /// Check the math in update_next_xid
+    ///
+    /// NOTE: These checks are sensitive to the value of XID_CHECKPOINT_INTERVAL,
+    /// currently 1024.
+    #[test]
+    pub fn test_update_next_xid() {
+        let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
+        let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
+
+        checkpoint.nextXid = FullTransactionId { value: 10 };
+        assert_eq!(checkpoint.nextXid.value, 10);
+
+        // The input XID gets rounded up to the next XID_CHECKPOINT_INTERVAL
+        // boundary
+        checkpoint.update_next_xid(100);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+
+        // No change
+        checkpoint.update_next_xid(500);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+        checkpoint.update_next_xid(1023);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+
+        // The function returns the *next* XID, given the highest XID seen so
+        // far. So when we pass 1024, the nextXid gets bumped up to the next
+        // XID_CHECKPOINT_INTERVAL boundary.
+        checkpoint.update_next_xid(1024);
+        assert_eq!(checkpoint.nextXid.value, 2048);
+    }
 }
