@@ -112,6 +112,13 @@ fn main() -> Result<()> {
     let matches = App::new("Zenith CLI")
         .setting(AppSettings::ArgRequiredElseHelp)
         .version(GIT_VERSION)
+        .arg(
+            Arg::with_name("override-config")
+                .long("override-config")
+                .takes_value(true)
+                .help("Override the default configuration file")
+                .required(false)
+        )
         .subcommand(
             SubCommand::with_name("init")
                 .about("Initialize a new Zenith repository")
@@ -220,8 +227,11 @@ fn main() -> Result<()> {
     let subcmd_result = if sub_name == "init" {
         handle_init(sub_args)
     } else {
-        // all other commands need an existing config
-        let env = match LocalEnv::load_config() {
+        // all other commands need an existing config, which is found in base directory,
+        // or can be overridden with --override-config
+
+        let override_config = matches.value_of("override-config");
+        let env = match LocalEnv::load_config(override_config) {
             Ok(conf) => conf,
             Err(e) => {
                 eprintln!("Error loading config: {}", e);

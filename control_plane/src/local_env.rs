@@ -189,20 +189,26 @@ impl LocalEnv {
     }
 
     /// Locate and load config
-    pub fn load_config() -> anyhow::Result<Self> {
+    pub fn load_config(override_config: Option<&str>) -> anyhow::Result<Self> {
         let repopath = base_path();
 
-        if !repopath.exists() {
-            bail!(
-                "Zenith config is not found in {}. You need to run 'zenith init' first",
-                repopath.to_str().unwrap()
-            );
-        }
-
-        // TODO: check that it looks like a zenith repository
+        let config_path = if let Some(override_config) = override_config {
+            PathBuf::from(override_config)
+        } else {
+            if !repopath.exists() {
+                bail!(
+                    "Zenith config is not found in {}. You need to run 'zenith init' first",
+                    repopath.to_str().unwrap()
+                );
+            }
+    
+            // TODO: check that it looks like a zenith repository
+    
+            repopath.join("config")
+        };
 
         // load and parse file
-        let config = fs::read_to_string(repopath.join("config"))?;
+        let config = fs::read_to_string(config_path)?;
         let mut env: LocalEnv = toml::from_str(config.as_str())?;
 
         env.base_data_dir = repopath;
