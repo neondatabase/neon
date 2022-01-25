@@ -204,9 +204,16 @@ jobs:
     executor: zenith-executor
     steps:
       - checkout
+      - restore_cache:
+          keys:
+            - v1-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
+      - save_cache:
+          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          paths:
+            - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
           name: Run yapf to ensure code format
           when: always
@@ -256,9 +263,16 @@ jobs:
           condition: << parameters.needs_postgres_source >>
           steps:
             - run: git submodule update --init --depth 1
+      - restore_cache:
+          keys:
+            - v1-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
+      - save_cache:
+          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          paths:
+            - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
           name: Run pytest
           # pytest doesn't output test logs in real time, so CI job may fail with
