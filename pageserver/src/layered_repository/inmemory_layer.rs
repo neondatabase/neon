@@ -406,6 +406,8 @@ impl InMemoryLayer {
         let mut inner = self.inner.write().unwrap();
 
         inner.assert_writeable();
+        assert!(lsn >= inner.last_lsn);
+        inner.last_lsn = lsn;
 
         let old = inner.page_versions.append_or_update_last(blknum, lsn, pv)?;
 

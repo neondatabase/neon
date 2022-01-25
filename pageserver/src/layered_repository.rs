@@ -1344,7 +1344,7 @@ impl LayeredTimeline {
                     self.timelineid,
                     self.tenantid,
                     seg,
-                    lsn,
+                    last_record_lsn,
                     last_record_lsn,
                 )?;
             } else {
@@ -1404,7 +1404,7 @@ impl LayeredTimeline {
                 self.timelineid,
                 self.tenantid,
                 seg,
-                lsn,
+                last_record_lsn,
                 last_record_lsn,
             )?;
         }
@@ -1452,6 +1452,10 @@ impl LayeredTimeline {
         let mut freeze_end_lsn = Lsn(0);
         let mut evicted_layers = Vec::new();
 
+        //
+        // Determine which llayers we need to evict and calculate max(last_lsn)
+        // for this layers.
+        //
         while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
         {
@@ -1473,6 +1477,7 @@ impl LayeredTimeline {
                 || distance < checkpoint_distance.into()
                 || oldest_generation == current_generation)
                 && oldest_pending_lsn >= freeze_end_lsn
+            // this layer intersects with evicted layer and so also need to be evicted
             {
                 info!(
                     "the oldest layer is now {} which is {} bytes behind last_record_lsn",
@@ -1485,6 +1490,8 @@ impl LayeredTimeline {
             layers.remove_open(oldest_layer_id);
             evicted_layers.push((oldest_layer_id, oldest_layer));
         }
+
+        // Freeze evicted layers
         for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
             evicted_layer.freeze(freeze_end_lsn);
             layers.insert_historic(evicted_layer.clone());
@@ -1500,12 +1507,14 @@ impl LayeredTimeline {
         drop(layers);
         drop(write_guard);
 
+        // Create delta/image layers for evicted layers
         for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
             let mut this_layer_paths =
                 self.evict_layer(evicted_layer.clone(), reconstruct_pages)?;
             layer_paths.append(&mut this_layer_paths);
         }
 
+        // Sync layers
         if !layer_paths.is_empty() {
             // We must fsync the timeline dir to ensure the directory entries for
             // new layer files are durable
