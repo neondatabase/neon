@@ -202,7 +202,6 @@ enum TimelineInfo {
         ancestor_timeline_id: Option<ZTimelineId>,
         last_record_lsn: Lsn,
         prev_record_lsn: Lsn,
-        start_lsn: Lsn,
         disk_consistent_lsn: Lsn,
         timeline_state: Option<TimelineSyncState>,
     },
@@ -237,7 +236,6 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
                 disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
                 last_record_lsn: timeline.get_last_record_lsn(),
                 prev_record_lsn: timeline.get_prev_record_lsn(),
-                start_lsn: timeline.get_start_lsn(),
                 timeline_state: repo.get_timeline_state(timeline_id),
             },
         })

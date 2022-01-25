@@ -220,10 +220,12 @@ pub trait Timeline: Send + Sync {
 
     /// Atomically get both last and prev.
     fn get_last_record_rlsn(&self) -> RecordLsn;
+
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
     fn get_last_record_lsn(&self) -> Lsn;
+
     fn get_prev_record_lsn(&self) -> Lsn;
-    fn get_start_lsn(&self) -> Lsn;
+
     fn get_disk_consistent_lsn(&self) -> Lsn;
 
     /// Mutate the timeline with a [`TimelineWriter`].
