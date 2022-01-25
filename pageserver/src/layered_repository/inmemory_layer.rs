@@ -73,6 +73,8 @@ pub struct InMemoryLayerInner {
     /// a non-blocky rel, 'seg_sizes' is not used and is always empty.
     ///
     seg_sizes: VecMap<Lsn, SegmentBlk>,
+
+    last_lsn: Lsn,
 }
 
 impl InMemoryLayerInner {
@@ -323,6 +325,11 @@ impl InMemoryLayer {
         self.oldest_pending_lsn
     }
 
+    pub fn get_last_lsn(&self) -> Lsn {
+        let inner = self.inner.read().unwrap();
+        inner.last_lsn
+    }
+
     ///
     /// Create a new, empty, in-memory layer
     ///
@@ -362,6 +369,7 @@ impl InMemoryLayer {
                 dropped: false,
                 page_versions: PageVersions::new(file),
                 seg_sizes,
+                last_lsn: oldest_pending_lsn,
             }),
         })
     }
@@ -545,6 +553,7 @@ impl InMemoryLayer {
                 dropped: false,
                 page_versions: PageVersions::new(file),
                 seg_sizes,
+                last_lsn: oldest_pending_lsn,
             }),
         })
     }

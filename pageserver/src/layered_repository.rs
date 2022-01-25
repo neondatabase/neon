@@ -71,7 +71,6 @@ mod storage_layer;
 use delta_layer::DeltaLayer;
 use ephemeral_file::is_ephemeral_file;
 use filename::{DeltaFileName, ImageFileName};
-use global_layer_map::{LayerId, GLOBAL_LAYER_MAP};
 use image_layer::ImageLayer;
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
@@ -1346,7 +1345,7 @@ impl LayeredTimeline {
                     self.tenantid,
                     seg,
                     lsn,
-                    lsn,
+                    last_record_lsn,
                 )?;
             } else {
                 return Ok(open_layer);
@@ -1389,7 +1388,7 @@ impl LayeredTimeline {
                 self.timelineid,
                 self.tenantid,
                 start_lsn,
-                lsn,
+                last_record_lsn,
             )?;
         } else {
             // New relation.
@@ -1400,8 +1399,14 @@ impl LayeredTimeline {
                 lsn
             );
 
-            layer =
-                InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, seg, lsn, lsn)?;
+            layer = InMemoryLayer::create(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                seg,
+                lsn,
+                last_record_lsn,
+            )?;
         }
 
         let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
@@ -1418,7 +1423,7 @@ impl LayeredTimeline {
         // Prevent concurrent checkpoints
         let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
 
-        let mut write_guard = self.write_lock.lock().unwrap();
+        let write_guard = self.write_lock.lock().unwrap();
         let mut layers = self.layers.lock().unwrap();
 
         // Bump the generation number in the layer map, so that we can distinguish
@@ -1444,11 +1449,17 @@ impl LayeredTimeline {
         let mut disk_consistent_lsn = last_record_lsn;
 
         let mut layer_paths = Vec::new();
+        let mut freeze_end_lsn = Lsn(0);
+        let mut evicted_layers = Vec::new();
+
         while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
         {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
-
+            let last_lsn = oldest_layer.get_last_lsn();
+            if last_lsn > freeze_end_lsn {
+                freeze_end_lsn = last_lsn;
+            }
             // Does this layer need freezing?
             //
             // Write out all in-memory layers that contain WAL older than CHECKPOINT_DISTANCE.
@@ -1458,9 +1469,10 @@ impl LayeredTimeline {
             // avoid getting into an infinite loop trying to process again entries that we
             // inserted ourselves.
             let distance = last_record_lsn.widening_sub(oldest_pending_lsn);
-            if distance < 0
+            if (distance < 0
                 || distance < checkpoint_distance.into()
-                || oldest_generation == current_generation
+                || oldest_generation == current_generation)
+                && oldest_pending_lsn >= freeze_end_lsn
             {
                 info!(
                     "the oldest layer is now {} which is {} bytes behind last_record_lsn",
@@ -1470,15 +1482,12 @@ impl LayeredTimeline {
                 disk_consistent_lsn = oldest_pending_lsn;
                 break;
             }
-
-            drop(layers);
-            drop(write_guard);
-
-            let mut this_layer_paths = self.evict_layer(oldest_layer_id, reconstruct_pages)?;
-            layer_paths.append(&mut this_layer_paths);
-
-            write_guard = self.write_lock.lock().unwrap();
-            layers = self.layers.lock().unwrap();
+            layers.remove_open(oldest_layer_id);
+            evicted_layers.push((oldest_layer_id, oldest_layer));
+        }
+        for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
+            evicted_layer.freeze(freeze_end_lsn);
+            layers.insert_historic(evicted_layer.clone());
         }
 
         // Call unload() on all frozen layers, to release memory.
@@ -1490,6 +1499,12 @@ impl LayeredTimeline {
 
         drop(layers);
         drop(write_guard);
+
+        for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
+            let mut this_layer_paths =
+                self.evict_layer(evicted_layer.clone(), reconstruct_pages)?;
+            layer_paths.append(&mut this_layer_paths);
+        }
 
         if !layer_paths.is_empty() {
             // We must fsync the timeline dir to ensure the directory entries for
@@ -1558,52 +1573,29 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn evict_layer(&self, layer_id: LayerId, reconstruct_pages: bool) -> Result<Vec<PathBuf>> {
-        // Mark the layer as no longer accepting writes and record the end_lsn.
-        // This happens in-place, no new layers are created now.
-        // We call `get_last_record_lsn` again, which may be different from the
-        // original load, as we may have released the write lock since then.
-
-        let mut write_guard = self.write_lock.lock().unwrap();
-        let mut layers = self.layers.lock().unwrap();
+    fn evict_layer(
+        &self,
+        layer: Arc<InMemoryLayer>,
+        reconstruct_pages: bool,
+    ) -> Result<Vec<PathBuf>> {
+        let new_historics = layer.write_to_disk(self, reconstruct_pages)?;
 
         let mut layer_paths = Vec::new();
+        let _write_guard = self.write_lock.lock().unwrap();
+        let mut layers = self.layers.lock().unwrap();
 
-        let global_layer_map = GLOBAL_LAYER_MAP.read().unwrap();
-        if let Some(oldest_layer) = global_layer_map.get(&layer_id) {
-            drop(global_layer_map);
-            oldest_layer.freeze(self.get_last_record_lsn());
+        // Finally, replace the frozen in-memory layer with the new on-disk layers
+        layers.remove_historic(layer);
 
-            // The layer is no longer open, update the layer map to reflect this.
-            // We will replace it with on-disk historics below.
-            layers.remove_open(layer_id);
-            layers.insert_historic(oldest_layer.clone());
-
-            // Write the now-frozen layer to disk. That could take a while, so release the lock while do it
-            drop(layers);
-            drop(write_guard);
-
-            let new_historics = oldest_layer.write_to_disk(self, reconstruct_pages)?;
-
-            write_guard = self.write_lock.lock().unwrap();
-            layers = self.layers.lock().unwrap();
-
-            // Finally, replace the frozen in-memory layer with the new on-disk layers
-            layers.remove_historic(oldest_layer);
-
-            // Add the historics to the LayerMap
-            for delta_layer in new_historics.delta_layers {
-                layer_paths.push(delta_layer.path());
-                layers.insert_historic(Arc::new(delta_layer));
-            }
-            for image_layer in new_historics.image_layers {
-                layer_paths.push(image_layer.path());
-                layers.insert_historic(Arc::new(image_layer));
-            }
+        // Add the historics to the LayerMap
+        for delta_layer in new_historics.delta_layers {
+            layer_paths.push(delta_layer.path());
+            layers.insert_historic(Arc::new(delta_layer));
         }
-        drop(layers);
-        drop(write_guard);
-
+        for image_layer in new_historics.image_layers {
+            layer_paths.push(image_layer.path());
+            layers.insert_historic(Arc::new(image_layer));
+        }
         Ok(layer_paths)
     }
 
