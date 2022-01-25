@@ -1460,10 +1460,6 @@ impl LayeredTimeline {
             layers.peek_oldest_open()
         {
             let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
-            let last_lsn = oldest_layer.get_last_lsn();
-            if last_lsn > freeze_end_lsn {
-                freeze_end_lsn = last_lsn;
-            }
             // Does this layer need freezing?
             //
             // Write out all in-memory layers that contain WAL older than CHECKPOINT_DISTANCE.
@@ -1486,6 +1482,10 @@ impl LayeredTimeline {
                 );
                 disk_consistent_lsn = oldest_pending_lsn;
                 break;
+            }
+            let last_lsn = oldest_layer.get_last_lsn();
+            if last_lsn > freeze_end_lsn {
+                freeze_end_lsn = last_lsn; // calculate max of last_lsn of evicted layers
             }
             layers.remove_open(oldest_layer_id);
             evicted_layers.push((oldest_layer_id, oldest_layer));
