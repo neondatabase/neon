@@ -1075,11 +1075,6 @@ impl LayeredTimeline {
         let current_logical_size_gauge = LOGICAL_TIMELINE_SIZE
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
-        info!(
-            "Load metadata: disk_consistent_lsn={}, prev_lsn={:?}",
-            metadata.disk_consistent_lsn(),
-            metadata.prev_record_lsn()
-        );
         LayeredTimeline {
             conf,
             timelineid,
@@ -1147,7 +1142,12 @@ impl LayeredTimeline {
             } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
                 // Create a DeltaLayer struct for each delta file.
                 ensure!(deltafilename.start_lsn < deltafilename.end_lsn);
-                if deltafilename.start_lsn > disk_consistent_lsn {
+                // The end-LSN is exclusive, while disk_consistent_lsn is
+                // inclusive. For example, if disk_consistent_lsn is 100, it is
+                // OK for a delta layer to have end LSN 101, but if the end LSN
+                // is 102, then it might not have been fully flushed to disk
+                // before crash.
+                if deltafilename.end_lsn > disk_consistent_lsn + 1 {
                     warn!(
                         "found future delta layer {} on timeline {}",
                         deltafilename, self.timelineid
