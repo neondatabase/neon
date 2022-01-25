@@ -2,7 +2,7 @@
 name = "zenith_utils"
 version = "0.1.0"
 authors = ["Eric Seppanen <eric@zenith.tech>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
