@@ -604,9 +604,11 @@ def test_safekeeper_without_pageserver(test_output_dir: str,
         res = env.postgres.safe_psql("select sum(i) from t")[0][0]
         assert res == 5050
 
+
 def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     def safekeepers_guc(env: ZenithEnv, sk_names: List[str]) -> str:
-        return ','.join([f'localhost:{sk.port.pg}' for sk in env.safekeepers if sk.name in sk_names])
+        return ','.join(
+            [f'localhost:{sk.port.pg}' for sk in env.safekeepers if sk.name in sk_names])
 
     def execute_payload(pg: Postgres):
         with closing(pg.connect()) as conn:
@@ -631,7 +633,6 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
                 log.info(f"Safekeeper {sk.name} status: {status}")
             except Exception as e:
                 log.info(f"Safekeeper {sk.name} status error: {e}")
-
 
     zenith_env_builder.num_safekeepers = 4
     env = zenith_env_builder.init()
