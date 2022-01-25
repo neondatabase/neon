@@ -1075,6 +1075,11 @@ impl LayeredTimeline {
         let current_logical_size_gauge = LOGICAL_TIMELINE_SIZE
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
+        info!(
+            "Load metadata: disk_consistent_lsn={}, prev_lsn={:?}",
+            metadata.disk_consistent_lsn(),
+            metadata.prev_record_lsn()
+        );
         LayeredTimeline {
             conf,
             timelineid,
@@ -1142,12 +1147,7 @@ impl LayeredTimeline {
             } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
                 // Create a DeltaLayer struct for each delta file.
                 ensure!(deltafilename.start_lsn < deltafilename.end_lsn);
-                // The end-LSN is exclusive, while disk_consistent_lsn is
-                // inclusive. For example, if disk_consistent_lsn is 100, it is
-                // OK for a delta layer to have end LSN 101, but if the end LSN
-                // is 102, then it might not have been fully flushed to disk
-                // before crash.
-                if deltafilename.end_lsn > disk_consistent_lsn + 1 {
+                if deltafilename.start_lsn > disk_consistent_lsn {
                     warn!(
                         "found future delta layer {} on timeline {}",
                         deltafilename, self.timelineid
@@ -1442,7 +1442,7 @@ impl LayeredTimeline {
         // check, though. We should also aim at flushing layers that consume
         // a lot of memory and/or aren't receiving much updates anymore.
         let mut disk_consistent_lsn = last_record_lsn;
-
+        let mut last_evicted_lsn = Lsn(0);
         let mut layer_paths = Vec::new();
         while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
@@ -1463,13 +1463,17 @@ impl LayeredTimeline {
                 || oldest_generation == current_generation
             {
                 info!(
-                    "the oldest layer is now {} which is {} bytes behind last_record_lsn",
+                    "the oldest layer is now {} which is {} bytes behind last_record_lsn, new disk_consistent_lsn={}",
                     oldest_layer.filename().display(),
-                    distance
+                    distance,
+					oldest_pending_lsn
                 );
-                disk_consistent_lsn = oldest_pending_lsn;
+                if last_evicted_lsn < oldest_pending_lsn {
+                    disk_consistent_lsn = last_evicted_lsn;
+                }
                 break;
             }
+            last_evicted_lsn = Lsn::max(oldest_layer.get_last_lsn(), last_evicted_lsn);
 
             drop(layers);
             drop(write_guard);
@@ -1501,6 +1505,8 @@ impl LayeredTimeline {
             par_fsync::par_fsync(&layer_paths)?;
 
             layer_paths.pop().unwrap();
+        } else {
+            info!("No open layers, disk_consitent_lsn={}", disk_consistent_lsn);
         }
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.

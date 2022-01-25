@@ -55,6 +55,10 @@ pub struct InMemoryLayerInner {
     /// Writes are only allowed when this is None
     end_lsn: Option<Lsn>,
 
+    /// Last written LSN
+    /// TODO: can it be combined with end_lsn?
+    last_lsn: Lsn,
+
     /// If this relation was dropped, remember when that happened.
     /// The drop LSN is recorded in [`end_lsn`].
     dropped: bool,
@@ -323,6 +327,11 @@ impl InMemoryLayer {
         self.oldest_pending_lsn
     }
 
+    pub fn get_last_lsn(&self) -> Lsn {
+        let inner = self.inner.read().unwrap();
+        inner.last_lsn
+    }
+
     ///
     /// Create a new, empty, in-memory layer
     ///
@@ -359,6 +368,7 @@ impl InMemoryLayer {
             incremental: false,
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
+                last_lsn: oldest_pending_lsn,
                 dropped: false,
                 page_versions: PageVersions::new(file),
                 seg_sizes,
@@ -400,6 +410,8 @@ impl InMemoryLayer {
         inner.assert_writeable();
 
         let old = inner.page_versions.append_or_update_last(blknum, lsn, pv)?;
+        assert!(inner.last_lsn <= lsn);
+        inner.last_lsn = lsn;
 
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -542,6 +554,7 @@ impl InMemoryLayer {
             incremental: true,
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
+                last_lsn: oldest_pending_lsn,
                 dropped: false,
                 page_versions: PageVersions::new(file),
                 seg_sizes,
