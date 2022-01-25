@@ -324,12 +324,13 @@ pub(crate) fn create_branch(
         timeline.wait_lsn(startpoint.lsn)?;
     }
     startpoint.lsn = startpoint.lsn.align();
-    if timeline.get_start_lsn() > startpoint.lsn {
+    if timeline.get_ancestor_lsn() > startpoint.lsn {
+        // can we safely just branch from the ancestor instead?
         anyhow::bail!(
-            "invalid startpoint {} for the branch {}: less than timeline start {}",
+            "invalid startpoint {} for the branch {}: less than timeline ancestor lsn {:?}",
             startpoint.lsn,
             branchname,
-            timeline.get_start_lsn()
+            timeline.get_ancestor_lsn()
         );
     }
 

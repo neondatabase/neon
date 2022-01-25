@@ -611,7 +611,7 @@ impl LayeredRepository {
             }
         }
 
-        //Now collect info about branchpoints
+        // Now collect info about branchpoints
         let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
         for &timelineid in &timelineids {
             let timeline = match self.get_or_init_timeline(timelineid, &mut timelines)? {
@@ -1044,14 +1044,6 @@ impl Timeline for LayeredTimeline {
 
     fn get_last_record_rlsn(&self) -> RecordLsn {
         self.last_record_lsn.load()
-    }
-
-    fn get_start_lsn(&self) -> Lsn {
-        self.ancestor_timeline
-            .as_ref()
-            .and_then(|ancestor_entry| ancestor_entry.local_or_schedule_download(self.tenantid))
-            .map(Timeline::get_start_lsn)
-            .unwrap_or(self.ancestor_lsn)
     }
 
     fn get_current_logical_size(&self) -> usize {
