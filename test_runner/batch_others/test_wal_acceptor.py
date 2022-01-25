@@ -652,6 +652,27 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     execute_payload(pg)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
+    log.info("Restart all safekeepers to flush everything")
+    env.safekeepers[0].stop(immediate=True)
+    execute_payload(pg)
+    env.safekeepers[0].start()
+    env.safekeepers[1].stop(immediate=True)
+    execute_payload(pg)
+    env.safekeepers[1].start()
+    env.safekeepers[2].stop(immediate=True)
+    execute_payload(pg)
+    env.safekeepers[2].start()
+
+    env.safekeepers[0].stop(immediate=True)
+    env.safekeepers[1].stop(immediate=True)
+    env.safekeepers[2].stop(immediate=True)
+    env.safekeepers[0].start()
+    env.safekeepers[1].start()
+    env.safekeepers[2].start()
+
+    execute_payload(pg)
+    show_statuses(env.safekeepers, tenant_id, timeline_id)
+
     log.info("Stop sk1 (simulate failure) and use only quorum of sk2 and sk3")
     env.safekeepers[0].stop(immediate=True)
     execute_payload(pg)
