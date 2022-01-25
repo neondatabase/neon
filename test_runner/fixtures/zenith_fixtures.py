@@ -1014,8 +1014,6 @@ class Postgres(PgProtocol):
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
-        if self.env.safekeepers:
-            self.adjust_for_wal_acceptors(self.env.get_safekeeper_connstrs())
         if config_lines is None:
             config_lines = []
         self.config(config_lines)
@@ -1072,7 +1070,9 @@ class Postgres(PgProtocol):
                 # walproposer uses different application_name
                 if ("synchronous_standby_names" in cfg_line or
                         # don't ask pageserver to fetch WAL from compute
-                        "callmemaybe_connstring" in cfg_line):
+                        "callmemaybe_connstring" in cfg_line or
+                        # don't repeat wal_acceptors multiple times
+                        "wal_acceptors" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
