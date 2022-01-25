@@ -1,7 +1,7 @@
 [package]
 name = "zenith_metrics"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 prometheus = {version = "0.12", default_features=false} # removes protobuf dependency

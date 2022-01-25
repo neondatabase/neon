@@ -1,7 +1,7 @@
 [package]
 name = "workspace_hack"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 [target.'cfg(all())'.dependencies]
 libc = { version = "0.2", features = ["default", "extra_traits", "std"] }
