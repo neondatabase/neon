@@ -524,7 +524,6 @@ impl InMemoryLayer {
         let seg = src.get_seg_tag();
 
         assert!(oldest_pending_lsn.is_aligned());
-        assert!(oldest_pending_lsn >= start_lsn);
 
         trace!(
             "initializing new InMemoryLayer for writing {} on timeline {} at {}",

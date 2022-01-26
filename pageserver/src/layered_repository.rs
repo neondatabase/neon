@@ -1124,8 +1124,8 @@ impl LayeredTimeline {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
                     warn!(
-                        "found future image layer {} on timeline {}",
-                        imgfilename, self.timelineid
+                        "found future image layer {} on timeline {} disk_consistent_lsn is {}",
+                        imgfilename, self.timelineid, disk_consistent_lsn
                     );
 
                     rename_to_backup(direntry.path())?;
@@ -1148,8 +1148,8 @@ impl LayeredTimeline {
                 // before crash.
                 if deltafilename.end_lsn > disk_consistent_lsn + 1 {
                     warn!(
-                        "found future delta layer {} on timeline {}",
-                        deltafilename, self.timelineid
+                        "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
+                        deltafilename, self.timelineid, disk_consistent_lsn
                     );
 
                     rename_to_backup(direntry.path())?;
@@ -1344,7 +1344,7 @@ impl LayeredTimeline {
                     self.timelineid,
                     self.tenantid,
                     seg,
-                    last_record_lsn,
+                    lsn,
                     last_record_lsn,
                 )?;
             } else {
@@ -1404,7 +1404,7 @@ impl LayeredTimeline {
                 self.timelineid,
                 self.tenantid,
                 seg,
-                last_record_lsn,
+                lsn,
                 last_record_lsn,
             )?;
         }
