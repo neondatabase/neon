@@ -1453,13 +1453,13 @@ impl LayeredTimeline {
         let mut evicted_layers = Vec::new();
 
         //
-        // Determine which llayers we need to evict and calculate max(last_lsn)
-        // for this layers.
+        // Determine which layers we need to evict and calculate max(latest_lsn)
+        // among those layers.
         //
         while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
             layers.peek_oldest_open()
         {
-            let oldest_pending_lsn = oldest_layer.get_oldest_pending_lsn();
+            let oldest_lsn = oldest_layer.get_oldest_lsn();
             // Does this layer need freezing?
             //
             // Write out all in-memory layers that contain WAL older than CHECKPOINT_DISTANCE.
@@ -1468,11 +1468,36 @@ impl LayeredTimeline {
             // when we started. We don't want to process layers inserted after we started, to
             // avoid getting into an infinite loop trying to process again entries that we
             // inserted ourselves.
-            let distance = last_record_lsn.widening_sub(oldest_pending_lsn);
+            //
+            // Once we have decided to write out at least one layer, we must also write out
+            // any other layers that contain WAL older than the end LSN of the layers we have
+            // already decided to write out. In other words, we must write out all layers
+            // whose [oldest_lsn, latest_lsn) range overlaps with any of the other layers
+            // that we are writing out. Otherwise, when we advance 'disk_consistent_lsn', it's
+            // ambiguous whether those layers are already durable on disk or not. For example,
+            // imagine that there are two layers in memory that contain page versions in the
+            // following LSN ranges:
+            //
+            // A: 100-150
+            // B: 110-200
+            //
+            // If we flush layer A, we must also flush layer B, because they overlap. If we
+            // flushed only A, and advanced 'disk_consistent_lsn' to 150, we would break the
+            // rule that all WAL older than 'disk_consistent_lsn' are durable on disk, because
+            // B contains some WAL older than 150. On the other hand, if we flushed out A and
+            // advanced 'disk_consistent_lsn' only up to 110, after crash and restart we would
+            // delete the first layer because its end LSN is larger than 110. If we changed
+            // the deletion logic to not delete it, then we would start streaming at 110, and
+            // process again the WAL records in the range 110-150 that are already in layer A,
+            // and the WAL processing code does not cope with that. We solve that dilemma by
+            // insisting that if we write out the first layer, we also write out the second
+            // layer, and advance disk_consistent_lsn all the way up to 200.
+            //
+            let distance = last_record_lsn.widening_sub(oldest_lsn);
             if (distance < 0
                 || distance < checkpoint_distance.into()
                 || oldest_generation == current_generation)
-                && oldest_pending_lsn >= freeze_end_lsn
+                && oldest_lsn >= freeze_end_lsn
             // this layer intersects with evicted layer and so also need to be evicted
             {
                 info!(
@@ -1480,12 +1505,12 @@ impl LayeredTimeline {
                     oldest_layer.filename().display(),
                     distance
                 );
-                disk_consistent_lsn = oldest_pending_lsn;
+                disk_consistent_lsn = oldest_lsn;
                 break;
             }
-            let last_lsn = oldest_layer.get_last_lsn();
-            if last_lsn > freeze_end_lsn {
-                freeze_end_lsn = last_lsn; // calculate max of last_lsn of evicted layers
+            let latest_lsn = oldest_layer.get_latest_lsn();
+            if latest_lsn > freeze_end_lsn {
+                freeze_end_lsn = latest_lsn; // calculate max of latest_lsn of the layers we're about to evict
             }
             layers.remove_open(oldest_layer_id);
             evicted_layers.push((oldest_layer_id, oldest_layer));

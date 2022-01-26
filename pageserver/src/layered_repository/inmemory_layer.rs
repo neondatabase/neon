@@ -39,8 +39,17 @@ pub struct InMemoryLayer {
     ///
     start_lsn: Lsn,
 
-    /// LSN of the oldest page version stored in this layer
-    oldest_pending_lsn: Lsn,
+    ///
+    /// LSN of the oldest page version stored in this layer.
+    ///
+    /// This is different from 'start_lsn' in that we enforce that the 'start_lsn'
+    /// of a layer always matches the 'end_lsn' of its predecessor, even if there
+    /// are no page versions until at a later LSN. That way you can detect any
+    /// missing layer files more easily. 'oldest_lsn' is the first page version
+    /// actually stored in this layer. In the range between 'start_lsn' and
+    /// 'oldest_lsn', there are no changes to the segment.
+    ///
+    oldest_lsn: Lsn,
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
@@ -74,7 +83,13 @@ pub struct InMemoryLayerInner {
     ///
     seg_sizes: VecMap<Lsn, SegmentBlk>,
 
-    last_lsn: Lsn,
+    ///
+    /// LSN of the newest page version stored in this layer.
+    ///
+    /// The difference between 'end_lsn' and 'latest_lsn' is the same as between
+    /// 'start_lsn' and 'oldest_lsn'. See comments in 'oldest_lsn'.
+    ///
+    latest_lsn: Lsn,
 }
 
 impl InMemoryLayerInner {
@@ -321,13 +336,13 @@ pub struct LayersOnDisk {
 
 impl InMemoryLayer {
     /// Return the oldest page version that's stored in this layer
-    pub fn get_oldest_pending_lsn(&self) -> Lsn {
-        self.oldest_pending_lsn
+    pub fn get_oldest_lsn(&self) -> Lsn {
+        self.oldest_lsn
     }
 
-    pub fn get_last_lsn(&self) -> Lsn {
+    pub fn get_latest_lsn(&self) -> Lsn {
         let inner = self.inner.read().unwrap();
-        inner.last_lsn
+        inner.latest_lsn
     }
 
     ///
@@ -339,7 +354,7 @@ impl InMemoryLayer {
         tenantid: ZTenantId,
         seg: SegmentTag,
         start_lsn: Lsn,
-        oldest_pending_lsn: Lsn,
+        oldest_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new empty InMemoryLayer for writing {} on timeline {} at {}",
@@ -362,14 +377,14 @@ impl InMemoryLayer {
             tenantid,
             seg,
             start_lsn,
-            oldest_pending_lsn,
+            oldest_lsn,
             incremental: false,
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::new(file),
                 seg_sizes,
-                last_lsn: oldest_pending_lsn,
+                latest_lsn: oldest_lsn,
             }),
         })
     }
@@ -406,8 +421,8 @@ impl InMemoryLayer {
         let mut inner = self.inner.write().unwrap();
 
         inner.assert_writeable();
-        assert!(lsn >= inner.last_lsn);
-        inner.last_lsn = lsn;
+        assert!(lsn >= inner.latest_lsn);
+        inner.latest_lsn = lsn;
 
         let old = inner.page_versions.append_or_update_last(blknum, lsn, pv)?;
 
@@ -519,11 +534,11 @@ impl InMemoryLayer {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         start_lsn: Lsn,
-        oldest_pending_lsn: Lsn,
+        oldest_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         let seg = src.get_seg_tag();
 
-        assert!(oldest_pending_lsn.is_aligned());
+        assert!(oldest_lsn.is_aligned());
 
         trace!(
             "initializing new InMemoryLayer for writing {} on timeline {} at {}",
@@ -547,14 +562,14 @@ impl InMemoryLayer {
             tenantid,
             seg,
             start_lsn,
-            oldest_pending_lsn,
+            oldest_lsn,
             incremental: true,
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 dropped: false,
                 page_versions: PageVersions::new(file),
                 seg_sizes,
-                last_lsn: oldest_pending_lsn,
+                latest_lsn: oldest_lsn,
             }),
         })
     }
