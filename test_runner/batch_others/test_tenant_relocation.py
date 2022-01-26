@@ -192,7 +192,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                                new_pageserver_pg_port,
                                new_pageserver_http_port):
 
-        # call to attach timeline to new timeline
+        # call to attach timeline to new pageserver
         new_pageserver_http_client.timeline_attach(UUID(tenant), UUID(timeline))
         # FIXME cannot handle duplicate download requests, subject to fix in https://github.com/zenithdb/zenith/issues/997
         time.sleep(5)

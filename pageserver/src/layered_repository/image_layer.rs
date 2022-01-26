@@ -173,7 +173,14 @@ impl Layer for ImageLayer {
                     .as_ref()
                     .unwrap()
                     .chapter_reader(BLOCKY_IMAGES_CHAPTER)?;
-                chapter.read_exact_at(&mut buf, offset)?;
+
+                chapter.read_exact_at(&mut buf, offset).with_context(|| {
+                    format!(
+                        "failed to read page from data file {} at offset {}",
+                        self.filename().display(),
+                        offset
+                    )
+                })?;
 
                 buf
             }

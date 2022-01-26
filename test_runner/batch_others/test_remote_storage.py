@@ -74,8 +74,13 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    log.info("waiting for timeline redownload")
     client = env.pageserver.http_client()
+    client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    # FIXME cannot handle duplicate download requests (which might be caused by repeated timeline detail calls)
+    #   subject to fix in https://github.com/zenithdb/zenith/issues/997
+    time.sleep(5)
+
+    log.info("waiting for timeline redownload")
     attempts = 0
     while True:
         timeline_details = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
