@@ -54,7 +54,7 @@ jobs:
             if [ ! -e tmp_install/bin/postgres ]; then
               # "depth 1" saves some time by not cloning the whole repo
               git submodule update --init --depth 1
-              make postgres -j$(nproc)
+              mold -run make postgres -j$(nproc)
             fi
 
       - save_cache:
@@ -110,7 +110,7 @@ jobs:
             fi
 
             export CARGO_INCREMENTAL=0
-            "${cov_prefix[@]}" cargo build $CARGO_FLAGS --bins --tests
+            "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --bins --tests
 
       - save_cache:
           name: Save rust cache
