@@ -109,6 +109,10 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
 
     # branch at pre-initdb lsn
     with pytest.raises(Exception, match="invalid branch start lsn"):
+        env.zenith_cli(["branch", "test_branch_preinitdb", "main@0/42"])
+
+    # branch at pre-ancestor lsn
+    with pytest.raises(Exception, match="less than timeline ancestor lsn"):
         env.zenith_cli(["branch", "test_branch_preinitdb", "test_branch_behind@0/42"])
 
     # check that we cannot create branch based on garbage collected data
