@@ -1550,58 +1550,58 @@ impl LayeredTimeline {
             par_fsync::par_fsync(&layer_paths)?;
 
             layer_paths.pop().unwrap();
+        }
 
-            // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
-            // After crash, we will restart WAL streaming and processing from that point.
-            let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
-            if disk_consistent_lsn != old_disk_consistent_lsn {
-                assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
+        // After crash, we will restart WAL streaming and processing from that point.
+        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
+        if disk_consistent_lsn != old_disk_consistent_lsn {
+            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
 
-                // We can only save a valid 'prev_record_lsn' value on disk if we
-                // flushed *all* in-memory changes to disk. We only track
-                // 'prev_record_lsn' in memory for the latest processed record, so we
-                // don't remember what the correct value that corresponds to some old
-                // LSN is. But if we flush everything, then the value corresponding
-                // current 'last_record_lsn' is correct and we can store it on disk.
-                let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
-                    Some(prev_record_lsn)
-                } else {
-                    None
-                };
+            // We can only save a valid 'prev_record_lsn' value on disk if we
+            // flushed *all* in-memory changes to disk. We only track
+            // 'prev_record_lsn' in memory for the latest processed record, so we
+            // don't remember what the correct value that corresponds to some old
+            // LSN is. But if we flush everything, then the value corresponding
+            // current 'last_record_lsn' is correct and we can store it on disk.
+            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+                Some(prev_record_lsn)
+            } else {
+                None
+            };
 
-                let ancestor_timelineid = self
-                    .ancestor_timeline
-                    .as_ref()
-                    .map(LayeredTimelineEntry::timeline_id);
+            let ancestor_timelineid = self
+                .ancestor_timeline
+                .as_ref()
+                .map(LayeredTimelineEntry::timeline_id);
 
-                let metadata = TimelineMetadata::new(
-                    disk_consistent_lsn,
-                    ondisk_prev_record_lsn,
-                    ancestor_timelineid,
-                    self.ancestor_lsn,
-                    self.latest_gc_cutoff_lsn.load(),
-                    self.initdb_lsn,
-                );
+            let metadata = TimelineMetadata::new(
+                disk_consistent_lsn,
+                ondisk_prev_record_lsn,
+                ancestor_timelineid,
+                self.ancestor_lsn,
+                self.latest_gc_cutoff_lsn.load(),
+                self.initdb_lsn,
+            );
 
-                LayeredRepository::save_metadata(
-                    self.conf,
-                    self.timelineid,
+            LayeredRepository::save_metadata(
+                self.conf,
+                self.timelineid,
+                self.tenantid,
+                &metadata,
+                false,
+            )?;
+            if self.upload_relishes.load(atomic::Ordering::Relaxed) {
+                schedule_timeline_checkpoint_upload(
                     self.tenantid,
-                    &metadata,
-                    false,
-                )?;
-                if self.upload_relishes.load(atomic::Ordering::Relaxed) {
-                    schedule_timeline_checkpoint_upload(
-                        self.tenantid,
-                        self.timelineid,
-                        layer_paths,
-                        metadata,
-                    );
-                }
-
-                // Also update the in-memory copy
-                self.disk_consistent_lsn.store(disk_consistent_lsn);
+                    self.timelineid,
+                    layer_paths,
+                    metadata,
+                );
             }
+
+            // Also update the in-memory copy
+            self.disk_consistent_lsn.store(disk_consistent_lsn);
         }
 
         Ok(())
