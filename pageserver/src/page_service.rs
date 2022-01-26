@@ -13,6 +13,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
+use postgres_ffi::pg_constants::BLCKSZ;
 use regex::Regex;
 use std::io;
 use std::net::TcpListener;
@@ -42,6 +43,8 @@ use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::walreceiver;
 use crate::CheckpointConfig;
+
+const CHUNK_SIZE: u32 = 128; // 1Mb
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
@@ -92,7 +95,8 @@ struct PagestreamNblocksResponse {
 
 #[derive(Debug)]
 struct PagestreamGetPageResponse {
-    page: Bytes,
+    n_blocks: u32,
+    data: Bytes,
 }
 
 #[derive(Debug)]
@@ -163,7 +167,8 @@ impl PagestreamBeMessage {
 
             Self::GetPage(resp) => {
                 bytes.put_u8(102); /* tag from pagestore_client.h */
-                bytes.put(&resp.page[..]);
+                bytes.put_u32(resp.n_blocks);
+                bytes.put(&resp.data[..]);
             }
 
             Self::Error(resp) => {
@@ -483,11 +488,18 @@ impl PageServerHandler {
             .entered();
         let tag = RelishTag::Relation(req.rel);
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
-
-        let page = timeline.get_page_at_lsn(tag, req.blkno, lsn)?;
-
+        let rel_size = timeline.get_relish_size(tag, lsn)?.unwrap_or(0);
+        let blkno = req.blkno;
+        let n_blocks = u32::min(blkno + CHUNK_SIZE, rel_size) - blkno;
+        let mut data = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
+        for i in 0..n_blocks {
+            let page = timeline.get_page_at_lsn(tag, blkno + i, lsn)?;
+            data.extend_from_slice(&page);
+        }
+        assert!(data.len() == n_blocks as usize * BLCKSZ as usize);
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
-            page,
+            n_blocks,
+            data: data.freeze(),
         }))
     }
 

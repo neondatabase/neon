@@ -290,6 +290,7 @@ impl PostgresNode {
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
         conf.append("shared_buffers", "1MB");
+        conf.append("zenith.file_cache_size", "4096");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
         conf.append("wal_level", "replica");
