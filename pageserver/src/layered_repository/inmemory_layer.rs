@@ -48,6 +48,9 @@ pub struct InMemoryLayer {
     /// missing layer files more easily. 'oldest_lsn' is the first page version
     /// actually stored in this layer. In the range between 'start_lsn' and
     /// 'oldest_lsn', there are no changes to the segment.
+    /// 'oldest_lsn' is used to adjust 'disk_consistent_lsn' and that is why it should
+    /// point to the beginning of WAL record. This is the other difference with 'start_lsn'
+    /// which points to end of WAL record. This is why 'oldest_lsn' can be smaller than 'start_lsn'.
     ///
     oldest_lsn: Lsn,
 
