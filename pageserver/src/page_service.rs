@@ -18,7 +18,7 @@ use std::io;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLockReadGuard};
 use tracing::*;
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
@@ -398,7 +398,12 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
-    fn wait_or_get_last_lsn(timeline: &dyn Timeline, lsn: Lsn, latest: bool) -> Result<Lsn> {
+    fn wait_or_get_last_lsn(
+        timeline: &dyn Timeline,
+        mut lsn: Lsn,
+        latest: bool,
+        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+    ) -> Result<Lsn> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
             // to the page server that there have been no modifications to the
@@ -419,22 +424,26 @@ impl PageServerHandler {
             // walsender completes the authentication and starts streaming the
             // WAL.
             if lsn <= last_record_lsn {
-                Ok(last_record_lsn)
+                lsn = last_record_lsn;
             } else {
                 timeline.wait_lsn(lsn)?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
                 // anyway)
-                Ok(lsn)
             }
         } else {
             if lsn == Lsn(0) {
                 bail!("invalid LSN(0) in request");
             }
             timeline.wait_lsn(lsn)?;
-            Ok(lsn)
         }
+        ensure!(
+            lsn >= **latest_gc_cutoff_lsn,
+            "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
+            lsn, **latest_gc_cutoff_lsn
+        );
+        Ok(lsn)
     }
 
     fn handle_get_rel_exists_request(
@@ -445,7 +454,8 @@ impl PageServerHandler {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
 
         let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let exists = timeline.get_rel_exists(tag, lsn)?;
 
@@ -461,7 +471,8 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
         let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let n_blocks = timeline.get_relish_size(tag, lsn)?;
 
@@ -482,8 +493,16 @@ impl PageServerHandler {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
             .entered();
         let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
-
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+        /*
+        // Add a 1s delay to some requests. The delayed causes the requests to
+        // hit the race condition from github issue #1047 more easily.
+        use rand::Rng;
+        if rand::thread_rng().gen::<u8>() < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
+        */
         let page = timeline.get_page_at_lsn(tag, req.blkno, lsn)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
@@ -504,9 +523,10 @@ impl PageServerHandler {
         // check that the timeline exists
         let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
             .context("Cannot handle basebackup request for a remote timeline")?;
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             timeline
-                .check_lsn_is_in_scope(lsn)
+                .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
         }
 

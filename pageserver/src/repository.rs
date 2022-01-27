@@ -7,7 +7,7 @@ use postgres_ffi::{MultiXactId, MultiXactOffset, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::{AddAssign, Deref};
-use std::sync::Arc;
+use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
 use zenith_utils::lsn::{Lsn, RecordLsn};
 use zenith_utils::zid::ZTimelineId;
@@ -184,6 +184,9 @@ pub trait Timeline: Send + Sync {
     ///
     fn wait_lsn(&self, lsn: Lsn) -> Result<()>;
 
+    /// Lock and get timeline's GC cuttof
+    fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn>;
+
     /// Look up given page version.
     fn get_page_at_lsn(&self, tag: RelishTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes>;
 
@@ -235,7 +238,11 @@ pub trait Timeline: Send + Sync {
 
     ///
     /// Check that it is valid to request operations with that lsn.
-    fn check_lsn_is_in_scope(&self, lsn: Lsn) -> Result<()>;
+    fn check_lsn_is_in_scope(
+        &self,
+        lsn: Lsn,
+        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+    ) -> Result<()>;
 
     /// Retrieve current logical size of the timeline
     ///
@@ -987,7 +994,7 @@ mod tests {
                     .source()
                     .unwrap()
                     .to_string()
-                    .contains("is earlier than initdb lsn"));
+                    .contains("is earlier than latest GC horizon"));
             }
         }
 
@@ -1004,12 +1011,11 @@ mod tests {
         make_some_layers(&tline, Lsn(0x20))?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-
+        let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
+        assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
         match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
             Ok(_) => panic!("request for page should have failed"),
-            Err(err) => assert!(err
-                .to_string()
-                .contains("tried to request a page version that was garbage collected")),
+            Err(err) => assert!(err.to_string().contains("not found at")),
         }
         Ok(())
     }
