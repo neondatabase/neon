@@ -1518,6 +1518,8 @@ impl LayeredTimeline {
 
         // Freeze evicted layers
         for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
+            // Mark the layer as no longer accepting writes and record the end_lsn.
+            // This happens in-place, no new layers are created now.
             evicted_layer.freeze(freeze_end_lsn);
             layers.insert_historic(evicted_layer.clone());
         }
