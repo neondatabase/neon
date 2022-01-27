@@ -40,7 +40,7 @@ pub struct LayerMap {
     /// All the layers keyed by segment tag
     segs: HashMap<SegmentTag, SegEntry>,
 
-    /// All in-memory layers, ordered by 'oldest_pending_lsn' and generation
+    /// All in-memory layers, ordered by 'oldest_lsn' and generation
     /// of each layer. This allows easy access to the in-memory layer that
     /// contains the oldest WAL record.
     open_layers: BinaryHeap<OpenLayerEntry>,
@@ -83,16 +83,16 @@ impl LayerMap {
 
         let layer_id = segentry.update_open(Arc::clone(&layer));
 
-        let oldest_pending_lsn = layer.get_oldest_pending_lsn();
+        let oldest_lsn = layer.get_oldest_lsn();
 
-        // After a crash and restart, 'oldest_pending_lsn' of the oldest in-memory
+        // After a crash and restart, 'oldest_lsn' of the oldest in-memory
         // layer becomes the WAL streaming starting point, so it better not point
         // in the middle of a WAL record.
-        assert!(oldest_pending_lsn.is_aligned());
+        assert!(oldest_lsn.is_aligned());
 
         // Also add it to the binary heap
         let open_layer_entry = OpenLayerEntry {
-            oldest_pending_lsn: layer.get_oldest_pending_lsn(),
+            oldest_lsn: layer.get_oldest_lsn(),
             layer_id,
             generation: self.current_generation,
         };
@@ -352,23 +352,23 @@ impl SegEntry {
 }
 
 /// Entry held in LayerMap::open_layers, with boilerplate comparison routines
-/// to implement a min-heap ordered by 'oldest_pending_lsn' and 'generation'
+/// to implement a min-heap ordered by 'oldest_lsn' and 'generation'
 ///
 /// The generation number associated with each entry can be used to distinguish
 /// recently-added entries (i.e after last call to increment_generation()) from older
-/// entries with the same 'oldest_pending_lsn'.
+/// entries with the same 'oldest_lsn'.
 struct OpenLayerEntry {
-    oldest_pending_lsn: Lsn, // copy of layer.get_oldest_pending_lsn()
+    oldest_lsn: Lsn, // copy of layer.get_oldest_lsn()
     generation: u64,
     layer_id: LayerId,
 }
 impl Ord for OpenLayerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
-        // to get that. Entries with identical oldest_pending_lsn are ordered by generation
+        // to get that. Entries with identical oldest_lsn are ordered by generation
         other
-            .oldest_pending_lsn
-            .cmp(&self.oldest_pending_lsn)
+            .oldest_lsn
+            .cmp(&self.oldest_lsn)
             .then_with(|| other.generation.cmp(&self.generation))
     }
 }
@@ -437,7 +437,7 @@ mod tests {
         conf: &'static PageServerConf,
         segno: u32,
         start_lsn: Lsn,
-        oldest_pending_lsn: Lsn,
+        oldest_lsn: Lsn,
     ) -> Arc<InMemoryLayer> {
         Arc::new(
             InMemoryLayer::create(
@@ -449,7 +449,7 @@ mod tests {
                     segno,
                 },
                 start_lsn,
-                oldest_pending_lsn,
+                oldest_lsn,
             )
             .unwrap(),
         )
