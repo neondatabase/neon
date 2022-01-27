@@ -286,12 +286,13 @@ impl PostgresNode {
         conf.append("max_wal_senders", "10");
         // wal_log_hints is mandatory when running against pageserver (see gh issue#192)
         // TODO: is it possible to check wal_log_hints at pageserver side via XLOG_PARAMETER_CHANGE?
-        conf.append("wal_log_hints", "on");
+        conf.append("wal_log_hints", "off"); // Wal logging hint bits may cause significant (>5 times) write amplification
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
+        conf.append("max_wal_size", "10GB"); // reduce checkpoint frequency (and FPIs)
         conf.append("wal_level", "replica");
         // wal_sender_timeout is the maximum time to wait for WAL replication.
         // It also defines how often the walreciever will send a feedback message to the wal sender.
@@ -334,14 +335,24 @@ impl PostgresNode {
         if let Some(lsn) = self.lsn {
             conf.append("recovery_target_lsn", &lsn.to_string());
         }
+
         conf.append_line("");
+        // Configure backpressure
+        // - Replication write lag depends on speed of inserting data in storage (in inmem-layer) by walreceiver.
+        //   This lag determines latency of get_page_at_lsn. Speed of applying WAL is about 10Mb/sec,
+        //   So to avoid expiration of 1 minute timeout, this lag should not be larger than 600Mb.
+        //   Actually latency should be much smaller (better if < 1sec). But we assume that recently updated
+        //   pages are not requested from pageserver.
+        // - Replication flush lag depends on speed of persisting data by checkpointer (creation of delta/image layers)
+        //   and advancing disk_consistent_lsn. Safekeepers are able to remove/archive WAL only beyond disk_consistent_lsn.
+        //   Too large lag can cause long recovery time (in case of pageserver crash) and disk space overflow at safekeepers.
+        // - Replication apply lag depends on speed of uploading changes to S3 by uploader thread.
+        //   To be able to restore database in case of pageserver node crash, safekeeper should not remove WAL beyond this point.
+        //   Too large lag can cause space exhaustion at S3 and safekeepers (if them are not able to upload WAL to S3).
+        conf.append("max_replication_write_lag", "500MB");
+        conf.append("max_replication_flush_lag", "10GB");
 
         if !self.env.safekeepers.is_empty() {
-            // Configure backpressure
-            // In setup with safekeepers apply_lag depends on
-            // speed of data checkpointing on pageserver (see disk_consistent_lsn).
-            conf.append("max_replication_apply_lag", "1500MB");
-
             // Configure the node to connect to the safekeepers
             conf.append("synchronous_standby_names", "walproposer");
 
@@ -354,11 +365,6 @@ impl PostgresNode {
                 .join(",");
             conf.append("wal_acceptors", &wal_acceptors);
         } else {
-            // Configure backpressure
-            // In setup without safekeepers, flush_lag depends on
-            // speed of of data checkpointing on pageserver (see disk_consistent_lsn)
-            conf.append("max_replication_flush_lag", "1500MB");
-
             // We only use setup without safekeepers for tests,
             // and don't care about data durability on pageserver,
             // so set more relaxed synchronous_commit.
