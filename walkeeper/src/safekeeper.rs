@@ -454,24 +454,26 @@ struct SafeKeeperMetrics {
     write_wal_seconds: Histogram,
 }
 
-impl SafeKeeperMetrics {
-    fn new(ztli: ZTimelineId) -> SafeKeeperMetrics {
-        let ztli_str = format!("{}", ztli);
-        SafeKeeperMetrics {
+struct SafeKeeperMetricsBuilder {
+    ztli: Option<ZTimelineId>,
+    flush_lsn: Lsn,
+    commit_lsn: Lsn,
+}
+
+impl SafeKeeperMetricsBuilder {
+    fn build(self) -> SafeKeeperMetrics {
+        let ztli_str = self
+            .ztli
+            .map_or("n/a".to_string(), |ztli| format!("{}", ztli));
+        let m = SafeKeeperMetrics {
             flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&ztli_str]),
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
             write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&ztli_str]),
             write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&ztli_str]),
-        }
-    }
-
-    fn new_noname() -> SafeKeeperMetrics {
-        SafeKeeperMetrics {
-            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&["n/a"]),
-            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&["n/a"]),
-            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&["n/a"]),
-            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&["n/a"]),
-        }
+        };
+        m.flush_lsn.set(u64::from(self.flush_lsn) as f64);
+        m.commit_lsn.set(u64::from(self.commit_lsn) as f64);
+        m
     }
 }
 
@@ -499,7 +501,12 @@ where
     pub fn new(flush_lsn: Lsn, storage: ST, state: SafeKeeperState) -> SafeKeeper<ST> {
         SafeKeeper {
             flush_lsn,
-            metrics: SafeKeeperMetrics::new_noname(),
+            metrics: SafeKeeperMetricsBuilder {
+                ztli: None,
+                flush_lsn,
+                commit_lsn: state.commit_lsn,
+            }
+            .build(),
             commit_lsn: state.commit_lsn,
             truncate_lsn: state.truncate_lsn,
             storage,
@@ -565,7 +572,12 @@ where
             .persist(&self.s)
             .context("failed to persist shared state")?;
 
-        self.metrics = SafeKeeperMetrics::new(self.s.server.timeline_id);
+        self.metrics = SafeKeeperMetricsBuilder {
+            ztli: Some(self.s.server.timeline_id),
+            flush_lsn: self.flush_lsn,
+            commit_lsn: self.commit_lsn,
+        }
+        .build();
 
         info!(
             "processed greeting from proposer {:?}, sending term {:?}",
