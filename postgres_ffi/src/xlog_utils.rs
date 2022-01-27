@@ -51,6 +51,13 @@ pub type TimeLineID = u32;
 pub type TimestampTz = i64;
 pub type XLogSegNo = u64;
 
+/// Interval of checkpointing metadata file. We should store metadata file to enforce
+/// predicate that checkpoint.nextXid is larger than any XID in WAL.
+/// But flushing checkpoint file for each transaction seems to be too expensive,
+/// so XID_CHECKPOINT_INTERVAL is used to forward align nextXid and so perform
+/// metadata checkpoint only once per XID_CHECKPOINT_INTERVAL transactions.
+/// XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
+/// in order to let CLOG_TRUNCATE mechanism correctly extend CLOG.
 const XID_CHECKPOINT_INTERVAL: u32 = 1024;
 
 #[allow(non_snake_case)]
@@ -400,9 +407,13 @@ impl CheckPoint {
     ///
     /// Returns 'true' if the XID was updated.
     pub fn update_next_xid(&mut self, xid: u32) -> bool {
-        let xid = xid.wrapping_add(XID_CHECKPOINT_INTERVAL - 1) & !(XID_CHECKPOINT_INTERVAL - 1);
+        // nextXid should nw greate than any XID in WAL, so increment provided XID and check for wraparround.
+        let mut new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
+        // To reduce number of metadata checkpoints, we forward align XID on XID_CHECKPOINT_INTERVAL.
+        // XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
+        new_xid =
+            new_xid.wrapping_add(XID_CHECKPOINT_INTERVAL - 1) & !(XID_CHECKPOINT_INTERVAL - 1);
         let full_xid = self.nextXid.value;
-        let new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
         let old_xid = full_xid as u32;
         if new_xid.wrapping_sub(old_xid) as i32 > 0 {
             let mut epoch = full_xid >> 32;
@@ -519,5 +530,35 @@ mod tests {
         let wal_end = Lsn(wal_end);
         println!("wal_end={}, tli={}", wal_end, tli);
         assert_eq!(wal_end, waldump_wal_end);
+    }
+
+    /// Check the math in update_next_xid
+    ///
+    /// NOTE: These checks are sensitive to the value of XID_CHECKPOINT_INTERVAL,
+    /// currently 1024.
+    #[test]
+    pub fn test_update_next_xid() {
+        let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
+        let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
+
+        checkpoint.nextXid = FullTransactionId { value: 10 };
+        assert_eq!(checkpoint.nextXid.value, 10);
+
+        // The input XID gets rounded up to the next XID_CHECKPOINT_INTERVAL
+        // boundary
+        checkpoint.update_next_xid(100);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+
+        // No change
+        checkpoint.update_next_xid(500);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+        checkpoint.update_next_xid(1023);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+
+        // The function returns the *next* XID, given the highest XID seen so
+        // far. So when we pass 1024, the nextXid gets bumped up to the next
+        // XID_CHECKPOINT_INTERVAL boundary.
+        checkpoint.update_next_xid(1024);
+        assert_eq!(checkpoint.nextXid.value, 2048);
     }
 }
