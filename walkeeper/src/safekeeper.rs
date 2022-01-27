@@ -653,6 +653,7 @@ where
         }
         // update our end of WAL pointer
         self.flush_lsn = msg.start_streaming_at;
+        self.metrics.flush_lsn.set(u64::from(self.flush_lsn) as f64);
         // and now adopt term history from proposer
         self.s.acceptor_state.term_history = msg.term_history.clone();
         self.storage.persist(&self.s)?;
