@@ -27,7 +27,7 @@ async def update_table(pg: Postgres):
 
     while updates_performed < updates_to_perform:
         updates_performed += 1
-        id = random.randrange(0, num_rows)
+        id = random.randrange(1, num_rows)
         row = await pg_conn.fetchrow(f'UPDATE foo SET counter = counter + 1 WHERE id = {id}')
 
 
