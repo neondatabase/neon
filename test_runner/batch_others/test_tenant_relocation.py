@@ -114,6 +114,7 @@ def assert_local(pageserver_http_client: ZenithPageserverHttpClient, tenant: str
     return timeline_detail
 
 
+@pytest.mark.skip(reason="will be fixed with https://github.com/zenithdb/zenith/issues/1193")
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                            port_distributor: PortDistributor,

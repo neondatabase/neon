@@ -28,6 +28,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #   * queries the specific data, ensuring that it matches the one stored before
 #
 # The tests are done for all types of remote storage pageserver supports.
+@pytest.mark.skip(reason="will be fixed with https://github.com/zenithdb/zenith/issues/1193")
 @pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
 def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
     zenith_env_builder.rust_log_override = 'debug'
