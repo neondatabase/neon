@@ -91,7 +91,7 @@ jobs:
       run: |
         # just to be sure that no data was cached on self hosted runner
         # since it might generate duplicates when calling ingest_perf_test_result.py
-        rm -rf perf-report-staging || true
+        rm -rf perf-report-staging
         mkdir -p perf-report-staging
         ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging
 

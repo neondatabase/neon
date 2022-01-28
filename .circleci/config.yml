@@ -297,7 +297,7 @@ jobs:
             - PLATFORM: zenith-local-ci
           command: |
             PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
-            rm -rf $PERF_REPORT_DIR || true
+            rm -rf $PERF_REPORT_DIR
 
             TEST_SELECTION="test_runner/<< parameters.test_selection >>"
             EXTRA_PARAMS="<< parameters.extra_params >>"
@@ -342,7 +342,6 @@ jobs:
 
             if << parameters.save_perf_report >>; then
               if [[ $CIRCLE_BRANCH == "main" ]]; then
-                # TODO: reuse scripts/git-upload
                 export REPORT_FROM="$PERF_REPORT_DIR"
                 export REPORT_TO=local
                 scripts/generate_and_push_perf_report.sh
