@@ -229,6 +229,19 @@ impl PostgresBackend {
         }
     }
 
+    pub fn take_streams_io(&mut self) -> Option<(ReadStream, WriteStream)> {
+        let stream = self.stream.take();
+        match stream {
+            Some(Stream::Bidirectional(bidi_stream)) => {
+                Some(bidi_stream.split())
+            }
+            stream => {
+                self.stream = stream;
+                None
+            }
+        }
+    }
+
     /// Read full message or return None if connection is closed.
     pub fn read_message(&mut self) -> Result<Option<FeMessage>> {
         let (state, stream) = (self.state, self.get_stream_in()?);

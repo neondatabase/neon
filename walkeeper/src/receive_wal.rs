@@ -11,6 +11,9 @@ use tracing::*;
 use crate::timeline::Timeline;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::mpsc::channel;
+use std::thread;
+use std::io::{self, Write};
 
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
@@ -100,16 +103,80 @@ impl<'pg> ReceiveWalConn<'pg> {
             callmemaybe_tx: spg.tx.clone(),
         };
 
+        let (mut r, mut w) = self.pg_backend.take_streams_io().unwrap();
+
+        let (reply_tx, reply_rx) = channel::<Option<AcceptorProposerMessage>>();
+
+        let write_thread = thread::Builder::new()
+            .name("Reply feedback thread".into())
+            .spawn(move|| -> Result<()> {
+                let mut buf_out = BytesMut::with_capacity(10 * 1024);
+
+                // thread code
+                while let Ok(msg) = reply_rx.recv() {
+                    if let Some(reply) = msg {
+                        let mut buf = BytesMut::with_capacity(128);
+                        reply.serialize(&mut buf)?;
+                        let copy_data = BeMessage::CopyData(&buf);
+                        BeMessage::write(&mut buf_out, &copy_data)?;
+                        w.write_all(&buf_out)?;
+                        buf_out.clear();
+                    }
+                }
+                Ok(())
+            }).unwrap();
+
+        let (request_tx, request_rx) = channel();
+
+        let read_thread = thread::Builder::new()
+            .name("Read WAL thread".into())
+            .spawn(move|| -> Result<()> {
+                request_tx.send(msg)?;
+                
+                loop {
+                    let copy_data = match FeMessage::read(&mut r)? {
+                        Some(FeMessage::CopyData(bytes)) => bytes,
+                        Some(msg) => bail!("expected `CopyData` message, found {:?}", msg),
+                        None => bail!("connection closed unexpectedly"),
+                    };
+            
+                    msg = ProposerAcceptorMessage::parse(copy_data)?;
+                    request_tx.send(msg)?;
+                }
+            }).unwrap();
+
+        let mut pending_flush = false;
+        let mut pending_reply = None;
         loop {
+            let msg;
+            let res = request_rx.try_recv();
+            if res.is_ok() && matches!(res, Ok(ProposerAcceptorMessage::AppendRequest(_))) {
+                msg = res.unwrap();
+            } else {
+                if pending_flush {
+                    reply_tx.send(pending_reply)?;
+                    pending_flush = false;
+                    pending_reply = None;
+                }
+                if res.is_ok() {
+                    msg = res.unwrap();
+                } else {
+                    msg = request_rx.recv()?;
+                }
+            }
+
             let reply = spg
                 .timeline
                 .get()
                 .process_msg(&msg)
                 .context("failed to process ProposerAcceptorMessage")?;
-            if let Some(reply) = reply {
-                self.write_msg(&reply)?;
+
+            if let Some(AcceptorProposerMessage::AppendResponse(_)) = reply {
+                pending_reply = reply;
+                pending_flush = true;
+            } else {
+                reply_tx.send(reply)?;
             }
-            msg = self.read_msg()?;
         }
     }
 }
