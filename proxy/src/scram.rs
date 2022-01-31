@@ -7,7 +7,7 @@
 //! * <https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf4b391f1e7393c1962841/src/interfaces/libpq/fe-auth-scram.c>
 
 mod channel_binding;
-mod key;
+pub mod key;  // TODO do I have to make it pub?
 mod messages;
 mod secret;
 mod signature;

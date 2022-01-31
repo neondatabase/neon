@@ -1,6 +1,8 @@
 use crate::auth::{self, AuthStream};
 use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
+use crate::db::{AuthSecret, DatabaseAuthInfo, ScramAuthSecret};
+use crate::scram::key::{SCRAM_KEY_LEN, ScramKey};
 use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
@@ -127,7 +129,7 @@ impl ProxyConnection {
         };
 
         let conn = match authenticate() {
-            Ok(Some(db_info)) => connect_to_db(db_info),
+            Ok(Some(db_auth_info)) => connect_to_db(db_auth_info),
             Ok(None) => return Ok(None),
             Err(e) => {
                 // Report the error to the client
@@ -212,7 +214,7 @@ impl ProxyConnection {
         }
     }
 
-    fn handle_existing_user(&mut self, _user: &str, _db: &str) -> anyhow::Result<DatabaseInfo> {
+    fn handle_existing_user(&mut self, user: &str, db: &str) -> anyhow::Result<DatabaseAuthInfo> {
         let _cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
 
         // TODO: fetch secret from console
@@ -239,10 +241,30 @@ impl ProxyConnection {
             .write_message_noflush(&Be::AuthenticationOk)?
             .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
-        todo!()
+        // TODO get this info from console and tell it to start the db
+        let host = "";
+        let port = 0;
+
+        // TODO fish out the real client_key from the authenticate() call above
+        let client_key: ScramKey = [0; SCRAM_KEY_LEN].into();
+        let scram_auth_secret = ScramAuthSecret {
+            iterations: secret.iterations,
+            salt_base64: secret.salt_base64,
+            client_key,
+            server_key: secret.server_key,
+        };
+        let auth_info = DatabaseAuthInfo {
+            host: host.into(),
+            port,
+            dbname: db.into(),
+            user: user.into(),
+            auth_secret: AuthSecret::Scram(scram_auth_secret)
+        };
+
+        Ok(auth_info)
     }
 
-    fn handle_new_user(&mut self) -> anyhow::Result<DatabaseInfo> {
+    fn handle_new_user(&mut self) -> anyhow::Result<DatabaseAuthInfo> {
         let greeting = hello_message(&self.state.conf.redirect_uri, &self.psql_session_id);
 
         // First, register this session
@@ -260,7 +282,15 @@ impl ProxyConnection {
         self.pgb
             .write_message_noflush(&Be::NoticeResponse("Connecting to database.".into()))?;
 
-        Ok(db_info)
+        let db_auth_info = DatabaseAuthInfo {
+            host: db_info.host,
+            port: db_info.port,
+            dbname: db_info.dbname,
+            user: db_info.user,
+            auth_secret: AuthSecret::Password(db_info.password.unwrap())
+        };
+
+        Ok(db_auth_info)
     }
 }
 
@@ -281,7 +311,7 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
 
 /// Create a TCP connection to a postgres database, authenticate with it, and receive the ReadyForQuery message
 async fn connect_to_db(
-    db_info: DatabaseInfo,
+    db_info: DatabaseAuthInfo,
 ) -> anyhow::Result<(String, tokio::net::TcpStream, CancelKeyData)> {
     // Make raw connection. When connect_raw finishes we've received ReadyForQuery.
     let socket_addr = db_info.socket_addr()?;

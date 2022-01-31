@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 pub const SCRAM_KEY_LEN: usize = 32;
 
 /// Thin wrapper for byte array.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]  // TODO maybe no debug? Avoid accidental logging.
 #[repr(transparent)]
 pub struct ScramKey {
-    bytes: [u8; SCRAM_KEY_LEN],
+    pub bytes: [u8; SCRAM_KEY_LEN],  // TODO does it have to be public?
 }
 
 impl ScramKey {

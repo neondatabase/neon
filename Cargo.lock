@@ -1193,8 +1193,8 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "postgres",
- "postgres-protocol",
- "postgres-types",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
  "postgres_ffi",
  "rand",
  "regex",
@@ -1208,7 +1208,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-postgres",
+ "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
  "tokio-stream",
  "toml_edit",
  "tracing",
@@ -1326,9 +1326,9 @@ dependencies = [
  "fallible-iterator",
  "futures",
  "log",
- "postgres-protocol",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
  "tokio",
- "tokio-postgres",
+ "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
 ]
 
 [[package]]
@@ -1350,13 +1350,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres-protocol"
+version = "0.6.1"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d#f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"
+dependencies = [
+ "base64 0.13.0",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "hmac 0.10.1",
+ "lazy_static",
+ "md-5",
+ "memchr",
+ "rand",
+ "sha2",
+ "stringprep",
+]
+
+[[package]]
 name = "postgres-types"
 version = "0.2.1"
 source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
 dependencies = [
  "bytes",
  "fallible-iterator",
- "postgres-protocol",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+]
+
+[[package]]
+name = "postgres-types"
+version = "0.2.1"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d#f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"
+dependencies = [
+ "bytes",
+ "fallible-iterator",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
 ]
 
 [[package]]
@@ -1437,7 +1465,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
- "tokio-postgres",
+ "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
  "zenith_utils",
 ]
 
@@ -2098,8 +2126,30 @@ dependencies = [
  "percent-encoding",
  "phf",
  "pin-project-lite",
- "postgres-protocol",
- "postgres-types",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "socket2",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "tokio-postgres"
+version = "0.7.1"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d#f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "futures",
+ "log",
+ "parking_lot",
+ "percent-encoding",
+ "phf",
+ "pin-project-lite",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
+ "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
  "socket2",
  "tokio",
  "tokio-util",
@@ -2337,7 +2387,7 @@ dependencies = [
  "hyper",
  "lazy_static",
  "postgres",
- "postgres-protocol",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
  "postgres_ffi",
  "regex",
  "routerify",
@@ -2347,7 +2397,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tokio",
- "tokio-postgres",
+ "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
  "tracing",
  "walkdir",
  "workspace_hack",

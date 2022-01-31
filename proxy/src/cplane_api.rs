@@ -21,35 +21,6 @@ enum ProxyAuthResponse {
     NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
-impl DatabaseInfo {
-    pub fn socket_addr(&self) -> anyhow::Result<SocketAddr> {
-        let host_port = format!("{}:{}", self.host, self.port);
-        host_port
-            .to_socket_addrs()
-            .with_context(|| format!("cannot resolve {} to SocketAddr", host_port))?
-            .next()
-            .ok_or_else(|| anyhow!("cannot resolve at least one SocketAddr"))
-    }
-}
-
-impl From<DatabaseInfo> for tokio_postgres::Config {
-    fn from(db_info: DatabaseInfo) -> Self {
-        let mut config = tokio_postgres::Config::new();
-
-        config
-            .host(&db_info.host)
-            .port(db_info.port)
-            .dbname(&db_info.dbname)
-            .user(&db_info.user);
-
-        if let Some(password) = db_info.password {
-            config.password(password);
-        }
-
-        config
-    }
-}
-
 pub struct CPlaneApi<'a> {
     auth_endpoint: &'a str,
     waiters: &'a ProxyWaiters,
