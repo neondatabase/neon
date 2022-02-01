@@ -42,7 +42,7 @@ impl From<DatabaseAuthInfo> for tokio_postgres::Config {
         match auth_info.auth_secret {
             AuthSecret::Scram(scram_secret) => {
                 config.add_scram_key(
-                    scram_secret.salt_base64.into_bytes(),  // TODO test this
+                    base64::decode(scram_secret.salt_base64).unwrap(),
                     scram_secret.iterations,
                     scram_secret.client_key.bytes.to_vec(),
                     scram_secret.server_key.bytes.to_vec(),
