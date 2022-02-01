@@ -61,7 +61,9 @@ impl<'a> ScramExchangeServer<'a> {
     }
 }
 
-impl SaslMechanism<key::ScramKey> for ScramExchangeServer<'_> {
+impl SaslMechanism for ScramExchangeServer<'_> {
+    type Outcome = key::ScramKey;
+
     fn exchange(mut self, input: &str) -> sasl::Result<(sasl::SaslStep<Self, key::ScramKey>, String)> {
         use ScramExchangeServerState::*;
         use sasl::SaslStep::*;

@@ -115,14 +115,17 @@ pub enum SaslStep<T, R> {
 }
 
 /// Every SASL mechanism (e.g. [SCRAM](crate::scram)) is expected to implement this trait.
-pub trait SaslMechanism<T>: Sized {
+pub trait SaslMechanism: Sized {
+    /// What's produced as a result of successful authentication.
+    type Outcome;
+
     /// Produce a server challenge to be sent to the client.
     /// This is how this method is called in PostgreSQL (libpq/sasl.h).
-    fn exchange(self, input: &str) -> Result<(SaslStep<Self, T>, String)>;
+    fn exchange(self, input: &str) -> Result<(SaslStep<Self, Self::Outcome>, String)>;
 
     /// Perform SASL message exchange according to the underlying algorithm
     /// until user is either authenticated or denied access.
-    fn authenticate(mut self, mut stream: impl SaslStream) -> Result<T> {
+    fn authenticate(mut self, mut stream: impl SaslStream) -> Result<Self::Outcome> {
         loop {
             let msg = stream.recv()?;
             let input = std::str::from_utf8(msg.as_ref()).context("bad encoding")?;
