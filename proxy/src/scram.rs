@@ -15,7 +15,7 @@ mod signature;
 pub use channel_binding::*;
 pub use secret::*;
 
-use crate::sasl::{self, SaslError, SaslMechanism};
+use crate::sasl::{self, SaslError, SaslMechanism, SaslStep};
 use messages::{ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage};
 use signature::SignatureBuilder;
 
@@ -61,9 +61,10 @@ impl<'a> ScramExchangeServer<'a> {
     }
 }
 
-impl SaslMechanism for ScramExchangeServer<'_> {
-    fn exchange(mut self, input: &str) -> sasl::Result<(Option<Self>, String)> {
+impl SaslMechanism<key::ScramKey> for ScramExchangeServer<'_> {
+    fn exchange(mut self, input: &str) -> sasl::Result<(sasl::SaslStep<Self, key::ScramKey>, String)> {
         use ScramExchangeServerState::*;
+        use sasl::SaslStep::*;
         match &self.state {
             Initial => {
                 let client_first_message =
@@ -83,7 +84,7 @@ impl SaslMechanism for ScramExchangeServer<'_> {
                     server_first_message,
                 };
 
-                Ok((Some(self), msg))
+                Ok((Transition(self), msg))
             }
             SaltSent {
                 cbind_flag,
@@ -124,7 +125,7 @@ impl SaslMechanism for ScramExchangeServer<'_> {
                 let msg = client_final_message
                     .build_server_final_message(signature_builder, &self.secret.server_key);
 
-                Ok((None, msg))
+                Ok((Authenticated(client_key), msg))
             }
         }
     }

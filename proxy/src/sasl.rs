@@ -109,33 +109,36 @@ pub enum SaslError {
 /// A convenient result type for SASL exchange.
 pub type Result<T> = std::result::Result<T, SaslError>;
 
+pub enum SaslStep<T, R> {
+    Transition(T),
+    Authenticated(R),
+}
+
 /// Every SASL mechanism (e.g. [SCRAM](crate::scram)) is expected to implement this trait.
-pub trait SaslMechanism: Sized {
+pub trait SaslMechanism<T>: Sized {
     /// Produce a server challenge to be sent to the client.
     /// This is how this method is called in PostgreSQL (libpq/sasl.h).
-    fn exchange(self, input: &str) -> Result<(Option<Self>, String)>;
+    fn exchange(self, input: &str) -> Result<(SaslStep<Self, T>, String)>;
 
     /// Perform SASL message exchange according to the underlying algorithm
     /// until user is either authenticated or denied access.
-    fn authenticate(mut self, mut stream: impl SaslStream) -> Result<()> {
+    fn authenticate(mut self, mut stream: impl SaslStream) -> Result<T> {
         loop {
             let msg = stream.recv()?;
             let input = std::str::from_utf8(msg.as_ref()).context("bad encoding")?;
 
             let (this, reply) = self.exchange(input)?;
             match this {
-                Some(this) => {
+                SaslStep::Transition(this) => {
                     stream.send(&SaslMessage::Continue(reply))?;
                     self = this;
                 }
-                None => {
+                SaslStep::Authenticated(outcome) => {
                     stream.send(&SaslMessage::Final(reply))?;
-                    break;
+                    return Ok(outcome);
                 }
             }
         }
-
-        Ok(())
     }
 }
 

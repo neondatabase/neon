@@ -1,6 +1,7 @@
 //! Authentication machinery.
 
 use crate::sasl::{SaslFirstMessage, SaslMechanism, SaslMessage, SaslStream};
+use crate::scram::key::ScramKey;
 use crate::scram::{ScramExchangeServer, ScramSecret};
 use anyhow::{bail, Context};
 use zenith_utils::postgres_backend::{PostgresBackend, ProtoState};
@@ -87,7 +88,7 @@ impl AuthStream<'_, Md5> {
 /// Stream wrapper for handling [SCRAM](crate::scram) auth.
 impl AuthStream<'_, Scram<'_>> {
     /// Perform user authentication; Raise an error in case authentication failed.
-    pub fn authenticate(mut self) -> anyhow::Result<()> {
+    pub fn authenticate(mut self) -> anyhow::Result<ScramKey> {
         // Initial client message contains the chosen auth method's name
         let msg = self.read_password_message()?;
         let sasl = SaslFirstMessage::parse(&msg).context("bad SASL message")?;
@@ -99,9 +100,9 @@ impl AuthStream<'_, Scram<'_>> {
 
         let secret = self.state.0;
         let stream = (Some(msg.slice_ref(sasl.message)), &mut self);
-        ScramExchangeServer::new(secret).authenticate(stream)?;
+        let client_key = ScramExchangeServer::new(secret).authenticate(stream)?;
 
-        Ok(())
+        Ok(client_key)
     }
 }
 

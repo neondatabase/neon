@@ -22,10 +22,9 @@ rustls = "0.19.1"
 serde = "1"
 serde_json = "1"
 sha2 = "0.9.8"
-stringprep = "0.1.2"
 thiserror = "1.0.30"
 tokio = { version = "1.11", features = ['macros'] }
-tokio-postgres = { path = "../../rust-postgres/tokio-postgres" }
-# tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev = "f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"}
+# tokio-postgres = { path = "../../rust-postgres/tokio-postgres" } TODO remove this
+tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev = "f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"}
 
 zenith_utils = { path = "../zenith_utils" }

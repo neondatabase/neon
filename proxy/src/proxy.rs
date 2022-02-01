@@ -115,39 +115,6 @@ pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow:
     proxy(client.split(), server.split())
 }
 
-// HACK copied from tokio-postgres
-// since postgres passwords are not required to exclude saslprep-prohibited
-// characters or even be valid UTF8, we run saslprep if possible and otherwise
-// return the raw password.
-fn normalize(pass: &str) -> Vec<u8> {
-    match stringprep::saslprep(pass) {
-        Ok(pass) => pass.into_owned().into_bytes(),
-        Err(_) => pass.as_bytes().to_vec(),
-    }
-}
-
-// HACK copied from tokio-postgres
-fn hi(str: &[u8], salt: &[u8], i: u32) -> [u8; 32] {
-    let mut hmac = Hmac::<Sha256>::new_varkey(str).expect("HMAC is able to accept all key sizes");
-    hmac.update(salt);
-    hmac.update(&[0, 0, 0, 1]);
-    let mut prev = hmac.finalize().into_bytes();
-
-    let mut hi = prev;
-
-    for _ in 1..i {
-        let mut hmac = Hmac::<Sha256>::new_varkey(str).expect("already checked above");
-        hmac.update(&prev);
-        prev = hmac.finalize().into_bytes();
-
-        for (hi, prev) in hi.iter_mut().zip(prev) {
-            *hi ^= prev;
-        }
-    }
-
-    hi.into()
-}
-
 impl ProxyConnection {
     /// Returns Ok(None) when connection was successfully closed.
     fn handle_client(mut self) -> anyhow::Result<Option<(Stream, TcpStream)>> {
@@ -254,53 +221,10 @@ impl ProxyConnection {
     fn handle_existing_user(&mut self, user: &str, db: &str) -> anyhow::Result<DatabaseAuthInfo> {
         let _cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
 
-        // TODO read from postres instance
-        // I got these values from the proxy error log on key cache miss
-        let salt = [180, 76, 114, 155, 212, 214, 236, 192, 101, 236, 235, 4, 212, 87, 25, 85];
-        let iterations = 4096;
+        // I got this by running `select rolname, rolpassword from pg_authid;`
+        let secret = crate::scram::ScramSecret::parse("SCRAM-SHA-256$4096:tExym9TW7MBl7OsE1FcZVQ==$Ao3nb0bStHOVIqOEUSfXdlvF9XIynqIGzSmDCs2O4p8=:WV6Eenyz5FGwuuVfKh0AXQVnzz4NLnKVV7FpVz1/1zY=").unwrap();
 
-        // TODO read from CLI
-        let password = "postgres";
-
-        let normalized = normalize(password);
-        let salted = hi(&normalized, &salt, iterations);
-
-        let mut mac = Hmac::<Sha256>::new_varkey(&salted).unwrap();
-        mac.update(b"Client Key");
-        let client_key = mac.finalize().into_bytes();
-
-        let mut mac = Hmac::<Sha256>::new_varkey(&salted).unwrap();
-        mac.update(b"Server Key");
-        let server_key = mac.finalize().into_bytes();
-
-        let mut hash = Sha256::default();
-        hash.update(client_key);
-        let stored_key = hash.finalize_fixed();
-
-        let secret = crate::scram::ScramSecret {
-            iterations,
-            salt_base64: base64::encode(salt),
-            stored_key: ScramKey { bytes: stored_key.try_into()? },
-            server_key: ScramKey { bytes: server_key.try_into()? },
-        };
-
-        // TODO: fetch secret from console
-        // user='user' password='password'
-        // let secret = crate::scram::ScramSecret::parse(
-        //     &[
-        //         "SCRAM-SHA-256",
-        //         "4096:XiWzgkfGNyY3ipsz08PY+A==",
-        //         &[
-        //             "YMmirZHYtTB6erVDCxL4Zjn66Kn7RCfS+aV3qROV4o8=",
-        //             "aCSKHnugk1l9Ut6VhO5VeeWsB8xhVdPk/NyEgjOJ3nk=",
-        //         ]
-        //         .join(":"),
-        //     ]
-        //     .join("$"),
-        // )
-        // .unwrap();
-
-        AuthStream::new(&mut self.pgb)
+        let client_key = AuthStream::new(&mut self.pgb)
             .begin(auth::Scram(&secret))?
             .authenticate()?;
 
@@ -312,9 +236,6 @@ impl ProxyConnection {
         let host = "127.0.0.1";
         let port = 5432;
 
-        // TODO fish out the real client_key from the authenticate() call above
-        // let client_key: ScramKey = [0; SCRAM_KEY_LEN].into();
-        let client_key = ScramKey { bytes: client_key.as_slice().try_into().unwrap() };
         let scram_auth_secret = ScramAuthSecret {
             iterations: secret.iterations,
             salt_base64: secret.salt_base64,
