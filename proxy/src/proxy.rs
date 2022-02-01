@@ -119,6 +119,7 @@ impl ProxyConnection {
                 None => return Ok(None),
             };
 
+            // HACK for local testing only
             // Both scenarios here should end up producing database credentials
             if true || username.ends_with("@zenith") {
                 self.handle_existing_user(&username, &dbname).map(Some)
