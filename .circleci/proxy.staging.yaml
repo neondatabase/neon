@@ -5,6 +5,13 @@ settings:
   authEndpoint: "https://console.stage.zenith.tech/authenticate_proxy_request/"
   uri: "https://console.stage.zenith.tech/psql_session/"
 
+# -- Additional labels for zenith-proxy pods
+podLabels:
+  zenith_service: proxy
+  zenith_env: staging
+  zenith_region: us-east-1
+  zenith_region_slug: virginia
+
 exposedService:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
@@ -17,4 +24,4 @@ metrics:
   serviceMonitor:
     enabled: true
     selector:
-      prometheus: zenith
+      release: kube-prometheus-stack
