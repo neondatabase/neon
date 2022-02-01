@@ -1,19 +1,14 @@
 use crate::auth::{self, AuthStream};
-use crate::cplane_api::{CPlaneApi, DatabaseInfo};
+use crate::cplane_api::CPlaneApi;
 use crate::ProxyState;
 use crate::db::{AuthSecret, DatabaseAuthInfo, ScramAuthSecret};
-use crate::scram::key::{SCRAM_KEY_LEN, ScramKey};
 use anyhow::{anyhow, bail};
-use hmac::digest::{FixedOutput};
-use hmac::{Hmac, Mac, NewMac};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use rand::prelude::StdRng;
-use rand::{Fill, Rng, SeedableRng};
-use sha2::{Digest, Sha256};
+use rand::{Rng, SeedableRng};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::net::{SocketAddr, TcpStream};
 use std::{io, thread};
 use tokio_postgres::NoTls;
@@ -221,6 +216,7 @@ impl ProxyConnection {
     fn handle_existing_user(&mut self, user: &str, db: &str) -> anyhow::Result<DatabaseAuthInfo> {
         let _cplane = CPlaneApi::new(&self.state.conf.auth_endpoint, &self.state.waiters);
 
+        // TODO read from console
         // I got this by running `select rolname, rolpassword from pg_authid;`
         let secret = crate::scram::ScramSecret::parse("SCRAM-SHA-256$4096:tExym9TW7MBl7OsE1FcZVQ==$Ao3nb0bStHOVIqOEUSfXdlvF9XIynqIGzSmDCs2O4p8=:WV6Eenyz5FGwuuVfKh0AXQVnzz4NLnKVV7FpVz1/1zY=").unwrap();
 
