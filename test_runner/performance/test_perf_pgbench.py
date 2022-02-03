@@ -9,15 +9,6 @@ from fixtures.log_helper import log
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
 
-def get_dir_size(path: str):
-
-    totalbytes = 0
-    for root, dirs, files in os.walk(path):
-        for name in files:
-            totalbytes += os.path.getsize(os.path.join(root, name))
-
-    return totalbytes
-
 #
 # Run a very short pgbench test.
 #
@@ -73,38 +64,29 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
                         report=MetricReport.LOWER_IS_BETTER)
 
 
-# TODO kill the pg instance at the end
-def test_baseline_pgbench(test_output_dir, pg_bin, zenbenchmark):
-    print("test_output_dir: " + test_output_dir)
-    pgdatadir = os.path.join(test_output_dir, 'pgdata-vanilla')
-    print("pgdatadir: " + pgdatadir)
-    pg_bin.run_capture(['initdb', '-D', pgdatadir])
+def test_baseline_pgbench(vanilla_pg, zenbenchmark):
+    vanilla_pg.configure(['shared_buffers=1MB'])
+    vanilla_pg.start()
 
-    conf = open(os.path.join(pgdatadir, 'postgresql.conf'), 'a')
-    conf.write('shared_buffers=1MB\n')
-    conf.close()
-
-    pg_bin.run_capture(['pg_ctl', '-D', pgdatadir, 'start'])
-
-    connstr = 'host=localhost port=5432 dbname=postgres'
-    conn = psycopg2.connect(connstr)
+    connstr = vanilla_pg.connstr()
+    conn = vanilla_pg.connect()
     cur = conn.cursor()
 
     with zenbenchmark.record_duration('init'):
-        pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+        vanilla_pg.pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
 
         # This is roughly equivalent to flushing the layers from memory to disk with Zenith.
         cur.execute(f"checkpoint")
 
     # Run pgbench for 5000 transactions
     with zenbenchmark.record_duration('5000_xacts'):
-        pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
+        vanilla_pg.pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
 
     # This is roughly equivalent to flush the layers from memory to disk with Zenith.
     cur.execute(f"checkpoint")
 
     # Report disk space used by the repository
-    data_size = get_dir_size(os.path.join(pgdatadir, 'base'))
+    data_size = vanilla_pg.get_subdir_size('base')
     zenbenchmark.record('data_size', data_size / (1024*1024), 'MB', report=MetricReport.LOWER_IS_BETTER)
-    wal_size = get_dir_size(os.path.join(pgdatadir, 'pg_wal'))
+    wal_size = vanilla_pg.get_subdir_size('pg_wal')
     zenbenchmark.record('wal_size', wal_size / (1024*1024), 'MB', report=MetricReport.LOWER_IS_BETTER)
