@@ -2,7 +2,7 @@
 name = "zenith"
 version = "0.1.0"
 authors = ["Stas Kelvich <stas@zenith.tech>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,11 +10,12 @@ edition = "2018"
 clap = "2.33.0"
 anyhow = "1.0"
 serde_json = "1"
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 
 # FIXME: 'pageserver' is needed for BranchInfo. Refactor
 pageserver = { path = "../pageserver" }
 control_plane = { path = "../control_plane" }
+walkeeper = { path = "../walkeeper" }
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_utils = { path = "../zenith_utils" }
 workspace_hack = { path = "../workspace_hack" }

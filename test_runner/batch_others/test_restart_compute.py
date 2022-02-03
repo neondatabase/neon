@@ -1,7 +1,8 @@
 import pytest
 
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithPageserver, PostgresFactory
+from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
@@ -9,28 +10,17 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 # Test restarting and recreating a postgres instance
 #
-# XXX: with_wal_acceptors=True fails now, would be fixed with
-# `postgres --sync-walkeepers` patches.
-#
-@pytest.mark.parametrize('with_wal_acceptors', [False])
-def test_restart_compute(
-        zenith_cli,
-        pageserver: ZenithPageserver,
-        postgres: PostgresFactory,
-        pg_bin,
-        wa_factory,
-        with_wal_acceptors: bool,
-    ):
-    wal_acceptor_connstrs = None
-    zenith_cli.run(["branch", "test_restart_compute", "empty"])
-
+@pytest.mark.parametrize('with_wal_acceptors', [False, True])
+def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptors: bool):
+    zenith_env_builder.pageserver_auth_enabled = True
     if with_wal_acceptors:
-        wa_factory.start_n_new(3)
-        wal_acceptor_connstrs = wa_factory.get_connstrs()
+        zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init()
 
-    pg = postgres.create_start('test_restart_compute',
-                               wal_acceptors=wal_acceptor_connstrs)
-    print("postgres is running on 'test_restart_compute' branch")
+    env.zenith_cli(["branch", "test_restart_compute", "main"])
+
+    pg = env.postgres.create_start('test_restart_compute')
+    log.info("postgres is running on 'test_restart_compute' branch")
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -39,12 +29,10 @@ def test_restart_compute(
             cur.execute('SELECT sum(key) FROM t')
             r = cur.fetchone()
             assert r == (5000050000, )
-            print("res = ", r)
+            log.info(f"res = {r}")
 
     # Remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute',
-                                       wal_acceptors=wal_acceptor_connstrs)
-
+    pg.stop_and_destroy().create_start('test_restart_compute')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -52,7 +40,7 @@ def test_restart_compute(
             cur.execute('SELECT sum(key) FROM t')
             r = cur.fetchone()
             assert r == (5000050000, )
-            print("res = ", r)
+            log.info(f"res = {r}")
 
             # Insert another row
             cur.execute("INSERT INTO t VALUES (100001, 'payload2')")
@@ -60,11 +48,10 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            print("res = ", r)
+            log.info(f"res = {r}")
 
     # Again remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute',
-                                       wal_acceptors=wal_acceptor_connstrs)
+    pg.stop_and_destroy().create_start('test_restart_compute')
 
     # That select causes lots of FPI's and increases probability of wakeepers
     # lagging behind after query completion
@@ -75,11 +62,10 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            print("res = ", r)
+            log.info(f"res = {r}")
 
     # And again remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute',
-                                       wal_acceptors=wal_acceptor_connstrs)
+    pg.stop_and_destroy().create_start('test_restart_compute')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -88,4 +74,4 @@ def test_restart_compute(
 
             r = cur.fetchone()
             assert r == (100001, )
-            print("res = ", r)
+            log.info(f"res = {r}")

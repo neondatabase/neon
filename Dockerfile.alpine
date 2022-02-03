@@ -81,7 +81,7 @@ FROM alpine:3.13
 RUN apk add --update openssl build-base libseccomp-dev
 RUN apk --no-cache --update --repository https://dl-cdn.alpinelinux.org/alpine/edge/testing add rocksdb
 COPY --from=build /zenith/target/release/pageserver /usr/local/bin
-COPY --from=build /zenith/target/release/wal_acceptor /usr/local/bin
+COPY --from=build /zenith/target/release/safekeeper /usr/local/bin
 COPY --from=build /zenith/target/release/proxy /usr/local/bin
 COPY --from=pg-build /zenith/tmp_install /usr/local
 COPY docker-entrypoint.sh /docker-entrypoint.sh

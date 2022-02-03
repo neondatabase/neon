@@ -2,6 +2,16 @@
 
 ### Authentication
 
+### Backpresssure
+
+Backpressure is used to limit the lag between pageserver and compute node or WAL service.
+
+If compute node or WAL service run far ahead of Page Server,
+the time of serving page requests increases. This may lead to timeout errors.
+
+To tune backpressure limits use `max_replication_write_lag`, `max_replication_flush_lag` and `max_replication_apply_lag` settings.
+When lag between current LSN (pg_current_wal_flush_lsn() at compute node) and minimal write/flush/apply position of replica exceeds the limit
+backends performing writes are blocked until the replica is caught up.
 ### Base image (page image)
 
 ### Basebackup
@@ -26,35 +36,87 @@ A checkpoint record in the WAL marks a point in the WAL sequence at which it is 
 NOTE: This is an overloaded term.
 
 Whenever enough WAL has been accumulated in memory, the page server []
-writes out the changes in memory into new layer files[]. This process
+writes out the changes from in-memory layers into new layer files[]. This process
 is called "checkpointing". The page server only creates layer files for
 relations that have been modified since the last checkpoint. 
 
+Configuration parameter `checkpoint_distance` defines the distance
+from current LSN to perform checkpoint of in-memory layers.
+Default is `DEFAULT_CHECKPOINT_DISTANCE`.
+Set this parameter to `0` to force checkpoint of every layer.
+
+Configuration parameter `checkpoint_period` defines the interval between checkpoint iterations.
+Default is `DEFAULT_CHECKPOINT_PERIOD`.
 ### Compute node
 
 Stateless Postgres node that stores data in pageserver.
 
 ### Garbage collection
 
+The process of removing old on-disk layers that are not needed by any timeline anymore.
 ### Fork
 
 Each of the separate segmented file sets in which a relation is stored. The main fork is where the actual data resides. There also exist two secondary forks for metadata: the free space map and the visibility map.
 Each PostgreSQL fork is considered a separate relish.
 
-### Layer file
+### Layer
+
+A layer contains data needed to reconstruct any page versions within the
+layer's Segment and range of LSNs.
+
+There are two kinds of layers, in-memory and on-disk layers. In-memory
+layers are used to ingest incoming WAL, and provide fast access
+to the recent page versions. On-disk layers are stored as files on disk, and
+are immutable. See pageserver/src/layered_repository/README.md for more.
+
+### Layer file (on-disk layer)
 
 Layered repository on-disk format is based on immutable files.  The
-files are called "layer files". Each file corresponds to one 10 MB
+files are called "layer files". Each file corresponds to one RELISH_SEG_SIZE
 segment of a PostgreSQL relation fork. There are two kinds of layer
 files: image files and delta files. An image file contains a
 "snapshot" of the segment at a particular LSN, and a delta file
 contains WAL records applicable to the segment, in a range of LSNs.
 
+### Layer map
+
+The layer map tracks what layers exist for all the relishes in a timeline.
 ### Layered repository
 
+Zenith repository implementation that keeps data in layers.
 ### LSN
 
+The Log Sequence Number (LSN) is a unique identifier of the WAL record[] in the WAL log.
+The insert position is a byte offset into the logs, increasing monotonically with each new record.
+Internally, an LSN is a 64-bit integer, representing a byte position in the write-ahead log stream.
+It is printed as two hexadecimal numbers of up to 8 digits each, separated by a slash.
+Check also [PostgreSQL doc about pg_lsn type](https://www.postgresql.org/docs/devel/datatype-pg-lsn.html)
+Values can be compared to calculate the volume of WAL data that separates them, so they are used to measure the progress of replication and recovery.
 
+In postgres and Zenith lsns are used to describe certain points in WAL handling.
+
+PostgreSQL LSNs and functions to monitor them:
+* `pg_current_wal_insert_lsn()` - Returns the current write-ahead log insert location.
+* `pg_current_wal_lsn()` - Returns the current write-ahead log write location.
+* `pg_current_wal_flush_lsn()` - Returns the current write-ahead log flush location.
+* `pg_last_wal_receive_lsn()` - Returns the last write-ahead log location that has been received and synced to disk by streaming replication. While streaming replication is in progress this will increase monotonically.
+* `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically. 
+[source PostgreSQL documentation](https://www.postgresql.org/docs/devel/functions-admin.html):
+
+Zenith safekeeper LSNs. For more check [walkeeper/README_PROTO.md](/walkeeper/README_PROTO.md)
+* `CommitLSN`: position in WAL confirmed by quorum safekeepers.
+* `RestartLSN`: position in WAL confirmed by all safekeepers.
+* `FlushLSN`: part of WAL persisted to the disk by safekeeper.
+* `VCL`: the largerst LSN for which we can guarantee availablity of all prior records.
+
+Zenith pageserver LSNs:
+* `last_record_lsn` - the end of last processed WAL record.
+* `disk_consistent_lsn` - data is known to be fully flushed and fsync'd to local disk on pageserver up to this LSN.
+* `remote_consistent_lsn` - The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash.
+TODO: use this name consistently in remote storage code. Now `disk_consistent_lsn` is used and meaning depends on the context.
+* `ancestor_lsn` - LSN of the branch point (the LSN at which this branch was created)
+
+TODO: add table that describes mapping between PostgreSQL (compute), safekeeper and pageserver LSNs.
 ### Page (block)
 
 The basic structure used to store relation data. All pages are of the same size.
@@ -111,6 +173,20 @@ One repository corresponds to one Tenant.
 
 How much history do we need to keep around for PITR and read-only nodes?
 
+### Segment (PostgreSQL)
+
+NOTE: This is an overloaded term.
+
+A physical file that stores data for a given relation. File segments are
+limited in size by a compile-time setting (1 gigabyte by default), so if a
+relation exceeds that size, it is split into multiple segments.
+
+### Segment (Layered Repository)
+
+NOTE: This is an overloaded term.
+
+Segment is a RELISH_SEG_SIZE slice of relish (identified by a SegmentTag).
+
 ### SLRU
 
 SLRUs include pg_clog, pg_multixact/members, and
@@ -121,7 +197,7 @@ Each SLRU segment is considered a separate relish[].
 
 ### Tenant (Multitenancy)
 Tenant represents a single customer, interacting with Zenith.
-Wal redo[] activity, timelines[], snapshots[] are managed for each tenant independently.
+Wal redo[] activity, timelines[], layers[] are managed for each tenant independently.
 One pageserver[] can serve multiple tenants at once.
 One safekeeper 
 

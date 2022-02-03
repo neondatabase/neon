@@ -1,92 +1,139 @@
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
-};
+use std::net::{SocketAddr, ToSocketAddrs};
 
-pub struct CPlaneApi {
-    // address: SocketAddr,
-}
+use crate::state::ProxyWaiters;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct DatabaseInfo {
-    pub host: IpAddr, // TODO: allow host name here too
+    pub host: String,
     pub port: u16,
     pub dbname: String,
     pub user: String,
-    pub password: String,
+    pub password: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+enum ProxyAuthResponse {
+    Ready { conn_info: DatabaseInfo },
+    Error { error: String },
+    NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
 impl DatabaseInfo {
-    pub fn socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.host, self.port)
-    }
-
-    pub fn conn_string(&self) -> String {
-        format!(
-            "dbname={} user={} password={}",
-            self.dbname, self.user, self.password
-        )
+    pub fn socket_addr(&self) -> anyhow::Result<SocketAddr> {
+        let host_port = format!("{}:{}", self.host, self.port);
+        host_port
+            .to_socket_addrs()
+            .with_context(|| format!("cannot resolve {} to SocketAddr", host_port))?
+            .next()
+            .context("cannot resolve at least one SocketAddr")
     }
 }
 
-// mock cplane api
-impl CPlaneApi {
-    pub fn new(_address: &SocketAddr) -> CPlaneApi {
-        CPlaneApi {
-            // address: address.clone(),
+impl From<DatabaseInfo> for tokio_postgres::Config {
+    fn from(db_info: DatabaseInfo) -> Self {
+        let mut config = tokio_postgres::Config::new();
+
+        config
+            .host(&db_info.host)
+            .port(db_info.port)
+            .dbname(&db_info.dbname)
+            .user(&db_info.user);
+
+        if let Some(password) = db_info.password {
+            config.password(password);
+        }
+
+        config
+    }
+}
+
+pub struct CPlaneApi<'a> {
+    auth_endpoint: &'a str,
+    waiters: &'a ProxyWaiters,
+}
+
+impl<'a> CPlaneApi<'a> {
+    pub fn new(auth_endpoint: &'a str, waiters: &'a ProxyWaiters) -> Self {
+        Self {
+            auth_endpoint,
+            waiters,
         }
     }
+}
 
-    pub fn check_auth(&self, user: &str, md5_response: &[u8], salt: &[u8; 4]) -> Result<()> {
-        // passwords for both is "mypass"
-        let auth_map: HashMap<_, &str> = vec![
-            ("stas@zenith", "716ee6e1c4a9364d66285452c47402b1"),
-            ("stas2@zenith", "3996f75df64c16a8bfaf01301b61d582"),
-        ]
-        .into_iter()
-        .collect();
+impl CPlaneApi<'_> {
+    pub fn authenticate_proxy_request(
+        &self,
+        user: &str,
+        database: &str,
+        md5_response: &[u8],
+        salt: &[u8; 4],
+        psql_session_id: &str,
+    ) -> anyhow::Result<DatabaseInfo> {
+        let mut url = reqwest::Url::parse(self.auth_endpoint)?;
+        url.query_pairs_mut()
+            .append_pair("login", user)
+            .append_pair("database", database)
+            .append_pair("md5response", std::str::from_utf8(md5_response)?)
+            .append_pair("salt", &hex::encode(salt))
+            .append_pair("psql_session_id", psql_session_id);
 
-        let stored_hash = auth_map
-            .get(&user)
-            .ok_or_else(|| anyhow::Error::msg("user not found"))?;
-        let salted_stored_hash = format!(
-            "md5{:x}",
-            md5::compute([stored_hash.as_bytes(), salt].concat())
-        );
+        let waiter = self.waiters.register(psql_session_id.to_owned());
 
-        let received_hash = std::str::from_utf8(&md5_response)?;
+        println!("cplane request: {}", url);
+        let resp = reqwest::blocking::get(url)?;
+        if !resp.status().is_success() {
+            bail!("Auth failed: {}", resp.status())
+        }
 
-        println!(
-            "auth: {} rh={} sh={} ssh={} {:?}",
-            user, received_hash, stored_hash, salted_stored_hash, salt
-        );
+        let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text()?.as_str())?;
+        println!("got auth info: #{:?}", auth_info);
 
-        if received_hash == salted_stored_hash {
-            Ok(())
-        } else {
-            bail!("Auth failed")
+        use ProxyAuthResponse::*;
+        match auth_info {
+            Ready { conn_info } => Ok(conn_info),
+            Error { error } => bail!(error),
+            NotReady { .. } => waiter.wait()?.map_err(|e| anyhow!(e)),
         }
     }
+}
 
-    pub fn get_database_uri(&self, _user: &str, _database: &str) -> Result<DatabaseInfo> {
-        Ok(DatabaseInfo {
-            host: "127.0.0.1".parse()?,
-            port: 5432,
-            dbname: "stas".to_string(),
-            user: "stas".to_string(),
-            password: "mypass".to_string(),
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_proxy_auth_response() {
+        // Ready
+        let auth: ProxyAuthResponse = serde_json::from_value(json!({
+            "ready": true,
+            "conn_info": DatabaseInfo::default(),
+        }))
+        .unwrap();
+        assert!(matches!(
+            auth,
+            ProxyAuthResponse::Ready {
+                conn_info: DatabaseInfo { .. }
+            }
+        ));
+
+        // Error
+        let auth: ProxyAuthResponse = serde_json::from_value(json!({
+            "ready": false,
+            "error": "too bad, so sad",
+        }))
+        .unwrap();
+        assert!(matches!(auth, ProxyAuthResponse::Error { .. }));
+
+        // NotReady
+        let auth: ProxyAuthResponse = serde_json::from_value(json!({
+            "ready": false,
+        }))
+        .unwrap();
+        assert!(matches!(auth, ProxyAuthResponse::NotReady { .. }));
     }
-
-    // pub fn create_database(&self, _user: &String, _database: &String) -> Result<DatabaseInfo> {
-    //     Ok(DatabaseInfo {
-    //         host: "127.0.0.1".parse()?,
-    //         port: 5432,
-    //         dbname: "stas".to_string(),
-    //         user: "stas".to_string(),
-    //         password: "mypass".to_string(),
-    //     })
-    // }
 }

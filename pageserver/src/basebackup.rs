@@ -10,8 +10,10 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
+use anyhow::{Context, Result};
 use bytes::{BufMut, BytesMut};
 use log::*;
+use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use crate::relish::*;
 use crate::repository::Timeline;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
-use zenith_utils::lsn::{Lsn, RecordLsn};
+use zenith_utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
@@ -30,7 +32,7 @@ use zenith_utils::lsn::{Lsn, RecordLsn};
 pub struct Basebackup<'a> {
     ar: Builder<&'a mut dyn Write>,
     timeline: &'a Arc<dyn Timeline>,
-    lsn: Lsn,
+    pub lsn: Lsn,
     prev_record_lsn: Lsn,
 }
 
@@ -46,36 +48,56 @@ impl<'a> Basebackup<'a> {
         write: &'a mut dyn Write,
         timeline: &'a Arc<dyn Timeline>,
         req_lsn: Option<Lsn>,
-    ) -> Basebackup<'a> {
-        let RecordLsn {
-            last: lsn,
-            prev: prev_record_lsn,
-        } = if let Some(lsn) = req_lsn {
-            // FIXME: that wouldn't work since we don't know prev for old LSN's.
-            // Probably it is better to avoid using prev in compute node start
-            // at all and acept the fact that first WAL record in the timeline would
-            // have zero as prev. https://github.com/zenithdb/zenith/issues/506
-            RecordLsn {
-                last: lsn,
-                prev: lsn,
+    ) -> Result<Basebackup<'a>> {
+        // Compute postgres doesn't have any previous WAL files, but the first
+        // record that it's going to write needs to include the LSN of the
+        // previous record (xl_prev). We include prev_record_lsn in the
+        // "zenith.signal" file, so that postgres can read it during startup.
+        //
+        // We don't keep full history of record boundaries in the page server,
+        // however, only the predecessor of the latest record on each
+        // timeline. So we can only provide prev_record_lsn when you take a
+        // base backup at the end of the timeline, i.e. at last_record_lsn.
+        // Even at the end of the timeline, we sometimes don't have a valid
+        // prev_lsn value; that happens if the timeline was just branched from
+        // an old LSN and it doesn't have any WAL of its own yet. We will set
+        // prev_lsn to Lsn(0) if we cannot provide the correct value.
+        let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
+            // Backup was requested at a particular LSN. Wait for it to arrive.
+            timeline.wait_lsn(req_lsn)?;
+
+            // If the requested point is the end of the timeline, we can
+            // provide prev_lsn. (get_last_record_rlsn() might return it as
+            // zero, though, if no WAL has been generated on this timeline
+            // yet.)
+            let end_of_timeline = timeline.get_last_record_rlsn();
+            if req_lsn == end_of_timeline.last {
+                (end_of_timeline.prev, req_lsn)
+            } else {
+                (Lsn(0), req_lsn)
             }
         } else {
-            // Atomically get last and prev LSN's
-            timeline.get_last_record_rlsn()
+            // Backup was requested at end of the timeline.
+            let end_of_timeline = timeline.get_last_record_rlsn();
+            (end_of_timeline.prev, end_of_timeline.last)
         };
 
-        Basebackup {
+        info!(
+            "taking basebackup lsn={}, prev_lsn={}",
+            backup_lsn, backup_prev
+        );
+
+        Ok(Basebackup {
             ar: Builder::new(write),
             timeline,
-            lsn,
-            prev_record_lsn,
-        }
+            lsn: backup_lsn,
+            prev_record_lsn: backup_prev,
+        })
     }
 
     pub fn send_tarball(&mut self) -> anyhow::Result<()> {
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
-            info!("send subdir {:?}", *dir);
             let header = new_tar_header_dir(*dir)?;
             self.ar.append(&header, &mut io::empty())?;
         }
@@ -84,10 +106,10 @@ impl<'a> Basebackup<'a> {
         for filepath in pg_constants::PGDATA_SPECIAL_FILES.iter() {
             if *filepath == "pg_hba.conf" {
                 let data = pg_constants::PG_HBA.as_bytes();
-                let header = new_tar_header(&filepath, data.len() as u64)?;
-                self.ar.append(&header, &data[..])?;
+                let header = new_tar_header(filepath, data.len() as u64)?;
+                self.ar.append(&header, data)?;
             } else {
-                let header = new_tar_header(&filepath, 0)?;
+                let header = new_tar_header(filepath, 0)?;
                 self.ar.append(&header, &mut io::empty())?;
             }
         }
@@ -137,11 +159,9 @@ impl<'a> Basebackup<'a> {
         let mut slru_buf: Vec<u8> =
             Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img = self.timeline.get_page_at_lsn_nowait(
-                RelishTag::Slru { slru, segno },
-                blknum,
-                self.lsn,
-            )?;
+            let img =
+                self.timeline
+                    .get_page_at_lsn(RelishTag::Slru { slru, segno }, blknum, self.lsn)?;
             assert!(img.len() == pg_constants::BLCKSZ as usize);
 
             slru_buf.extend_from_slice(&img);
@@ -160,20 +180,18 @@ impl<'a> Basebackup<'a> {
     // Along with them also send PG_VERSION for each database.
     //
     fn add_relmap_file(&mut self, spcnode: u32, dbnode: u32) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn_nowait(
+        let img = self.timeline.get_page_at_lsn(
             RelishTag::FileNodeMap { spcnode, dbnode },
             0,
             self.lsn,
         )?;
         let path = if spcnode == pg_constants::GLOBALTABLESPACE_OID {
-            let dst_path = "PG_VERSION";
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
-            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, &version_bytes[..])?;
+            let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
+            self.ar.append(&header, version_bytes)?;
 
-            let dst_path = format!("global/PG_VERSION");
-            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, &version_bytes[..])?;
+            let header = new_tar_header("global/PG_VERSION", version_bytes.len() as u64)?;
+            self.ar.append(&header, version_bytes)?;
 
             String::from("global/pg_filenode.map") // filenode map for global tablespace
         } else {
@@ -188,7 +206,7 @@ impl<'a> Basebackup<'a> {
             let dst_path = format!("base/{}/PG_VERSION", dbnode);
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, &version_bytes[..])?;
+            self.ar.append(&header, version_bytes)?;
 
             format!("base/{}/pg_filenode.map", dbnode)
         };
@@ -204,7 +222,7 @@ impl<'a> Basebackup<'a> {
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
         let img = self
             .timeline
-            .get_page_at_lsn_nowait(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
+            .get_page_at_lsn(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -222,23 +240,19 @@ impl<'a> Basebackup<'a> {
     // Also send zenith.signal file with extra bootstrap data.
     //
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
-        let checkpoint_bytes =
-            self.timeline
-                .get_page_at_lsn_nowait(RelishTag::Checkpoint, 0, self.lsn)?;
-        let pg_control_bytes =
-            self.timeline
-                .get_page_at_lsn_nowait(RelishTag::ControlFile, 0, self.lsn)?;
+        let checkpoint_bytes = self
+            .timeline
+            .get_page_at_lsn(RelishTag::Checkpoint, 0, self.lsn)
+            .context("failed to get checkpoint bytes")?;
+        let pg_control_bytes = self
+            .timeline
+            .get_page_at_lsn(RelishTag::ControlFile, 0, self.lsn)
+            .context("failed get control bytes")?;
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
-        // Generate new pg_control and WAL needed for bootstrap
-        let checkpoint_segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-        let checkpoint_lsn = XLogSegNoOffsetToRecPtr(
-            checkpoint_segno,
-            XLOG_SIZE_OF_XLOG_LONG_PHD as u32,
-            pg_constants::WAL_SEGMENT_SIZE,
-        );
-        checkpoint.redo = self.lsn.0 + self.lsn.calc_padding(8u32);
+        // Generate new pg_control needed for bootstrap
+        checkpoint.redo = normalize_lsn(self.lsn, pg_constants::WAL_SEGMENT_SIZE).0;
 
         //reset some fields we don't want to preserve
         //TODO Check this.
@@ -246,14 +260,24 @@ impl<'a> Basebackup<'a> {
         checkpoint.oldestActiveXid = 0;
 
         //save new values in pg_control
-        pg_control.checkPoint = checkpoint_lsn;
+        pg_control.checkPoint = 0;
         pg_control.checkPointCopy = checkpoint;
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
         // add zenith.signal file
+        let mut zenith_signal = String::new();
+        if self.prev_record_lsn == Lsn(0) {
+            if self.lsn == self.timeline.get_ancestor_lsn() {
+                write!(zenith_signal, "PREV LSN: none")?;
+            } else {
+                write!(zenith_signal, "PREV LSN: invalid")?;
+            }
+        } else {
+            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
+        }
         self.ar.append(
-            &new_tar_header("zenith.signal", 8)?,
-            &self.prev_record_lsn.0.to_le_bytes()[..],
+            &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
+            zenith_signal.as_bytes(),
         )?;
 
         //send pg_control
@@ -262,14 +286,11 @@ impl<'a> Basebackup<'a> {
         self.ar.append(&header, &pg_control_bytes[..])?;
 
         //send wal segment
-        let wal_file_name = XLogFileName(
-            1, // FIXME: always use Postgres timeline 1
-            checkpoint_segno,
-            pg_constants::WAL_SEGMENT_SIZE,
-        );
+        let segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
+        let wal_file_name = XLogFileName(PG_TLI, segno, pg_constants::WAL_SEGMENT_SIZE);
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
-        let wal_seg = generate_wal_segment(&pg_control);
+        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier);
         assert!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())

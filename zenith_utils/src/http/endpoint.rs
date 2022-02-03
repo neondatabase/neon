@@ -8,21 +8,25 @@ use lazy_static::lazy_static;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
-use zenith_metrics::{register_int_counter, IntCounter};
+use tracing::info;
+use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use zenith_metrics::{Encoder, TextEncoder};
+
+use std::future::Future;
+use std::net::TcpListener;
 
 use super::error::ApiError;
 
 lazy_static! {
     static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
-        "pageserver_serve_metrics_count",
+        new_common_metric_name("serve_metrics_count"),
         "Number of metric requests made"
     )
     .expect("failed to define a metric");
 }
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
-    log::info!("{} {} {}", info.method(), info.uri().path(), res.status(),);
+    info!("{} {} {}", info.method(), info.uri().path(), res.status(),);
     Ok(res)
 }
 
@@ -95,13 +99,13 @@ pub fn attach_openapi_ui(
 
 fn parse_token(header_value: &str) -> Result<&str, ApiError> {
     // header must be in form Bearer <token>
-    let (prefix, token) = header_value.split_once(' ').ok_or(ApiError::Unauthorized(
-        "malformed authorization header".to_string(),
-    ))?;
+    let (prefix, token) = header_value
+        .split_once(' ')
+        .ok_or_else(|| ApiError::Unauthorized("malformed authorization header".to_string()))?;
     if prefix != "Bearer" {
-        Err(ApiError::Unauthorized(
+        return Err(ApiError::Unauthorized(
             "malformed authorization header".to_string(),
-        ))?
+        ));
     }
     Ok(token)
 }
@@ -123,9 +127,11 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                         .map_err(|_| ApiError::Unauthorized("malformed jwt token".to_string()))?;
                     req.set_context(data.claims);
                 }
-                None => Err(ApiError::Unauthorized(
-                    "missing authorization header".to_string(),
-                ))?,
+                None => {
+                    return Err(ApiError::Unauthorized(
+                        "missing authorization header".to_string(),
+                    ))
+                }
             }
         }
         Ok(req)
@@ -140,12 +146,21 @@ pub fn check_permission(req: &Request<Body>, tenantid: Option<ZTenantId>) -> Res
     }
 }
 
-pub fn serve_thread_main(
+///
+/// Start listening for HTTP requests on given socket.
+///
+/// 'shutdown_future' can be used to stop. If the Future becomes
+/// ready, we stop listening for new requests, and the function returns.
+///
+pub fn serve_thread_main<S>(
     router_builder: RouterBuilder<hyper::Body, ApiError>,
-    addr: String,
-) -> anyhow::Result<()> {
-    let addr = addr.parse()?;
-    log::info!("Starting a http endoint at {}", addr);
+    listener: TcpListener,
+    shutdown_future: S,
+) -> anyhow::Result<()>
+where
+    S: Future<Output = ()> + Send + Sync,
+{
+    info!("Starting a http endpoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
@@ -157,7 +172,9 @@ pub fn serve_thread_main(
 
     let _guard = runtime.enter();
 
-    let server = Server::bind(&addr).serve(service);
+    let server = Server::from_tcp(listener)?
+        .serve(service)
+        .with_graceful_shutdown(shutdown_future);
 
     runtime.block_on(server)?;
 

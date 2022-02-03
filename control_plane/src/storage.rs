@@ -1,26 +1,61 @@
-use std::collections::HashMap;
+use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
 use std::time::Duration;
+use std::{io, result, thread};
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::bail;
+use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use pageserver::http::models::{BranchCreateRequest, TenantCreateRequest};
 use postgres::{Config, NoTls};
-use reqwest::blocking::{Client, RequestBuilder};
-use reqwest::{IntoUrl, Method, StatusCode};
+use reqwest::blocking::{Client, RequestBuilder, Response};
+use reqwest::{IntoUrl, Method};
+use thiserror::Error;
+use zenith_utils::http::error::HttpErrorBody;
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::ZTenantId;
 
 use crate::local_env::LocalEnv;
-use crate::read_pidfile;
+use crate::{fill_rust_env_vars, read_pidfile};
 use pageserver::branches::BranchInfo;
+use pageserver::tenant_mgr::TenantInfo;
 use zenith_utils::connstring::connection_address;
 
-const HTTP_BASE_URL: &str = "http://127.0.0.1:9898/v1";
+#[derive(Error, Debug)]
+pub enum PageserverHttpError {
+    #[error("Reqwest error: {0}")]
+    Transport(#[from] reqwest::Error),
+
+    #[error("Error: {0}")]
+    Response(String),
+}
+
+type Result<T> = result::Result<T, PageserverHttpError>;
+
+pub trait ResponseErrorMessageExt: Sized {
+    fn error_from_body(self) -> Result<Self>;
+}
+
+impl ResponseErrorMessageExt for Response {
+    fn error_from_body(self) -> Result<Self> {
+        let status = self.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            return Ok(self);
+        }
+
+        // reqwest do not export it's error construction utility functions, so lets craft the message ourselves
+        let url = self.url().to_owned();
+        Err(PageserverHttpError::Response(
+            match self.json::<HttpErrorBody>() {
+                Ok(err_body) => format!("Error: {}", err_body.msg),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            },
+        ))
+    }
+}
 
 //
 // Control routines for pageserver.
@@ -29,7 +64,6 @@ const HTTP_BASE_URL: &str = "http://127.0.0.1:9898/v1";
 //
 #[derive(Debug)]
 pub struct PageServerNode {
-    pub kill_on_exit: bool,
     pub pg_connection_config: Config,
     pub env: LocalEnv,
     pub http_client: Client,
@@ -38,55 +72,81 @@ pub struct PageServerNode {
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let password = if env.auth_type == AuthType::ZenithJWT {
-            &env.auth_token
+        let password = if env.pageserver.auth_type == AuthType::ZenithJWT {
+            &env.pageserver.auth_token
         } else {
             ""
         };
 
-        PageServerNode {
-            kill_on_exit: false,
-            pg_connection_config: Self::default_config(password), // default
+        Self {
+            pg_connection_config: Self::pageserver_connection_config(
+                password,
+                &env.pageserver.listen_pg_addr,
+            ),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: HTTP_BASE_URL.to_owned(),
+            http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
         }
     }
 
-    fn default_config(password: &str) -> Config {
-        format!("postgresql://no_user:{}@localhost:64000/no_db", password)
+    /// Construct libpq connection string for connecting to the pageserver.
+    fn pageserver_connection_config(password: &str, listen_addr: &str) -> Config {
+        format!("postgresql://no_user:{}@{}/no_db", password, listen_addr)
             .parse()
             .unwrap()
     }
 
-    pub fn init(&self, create_tenant: Option<&str>, enable_auth: bool) -> Result<()> {
+    pub fn init(
+        &self,
+        create_tenant: Option<&str>,
+        config_overrides: &[&str],
+    ) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        let mut args = vec![
-            "--init",
-            "-D",
-            self.env.base_data_dir.to_str().unwrap(),
-            "--postgres-distrib",
-            self.env.pg_distrib_dir.to_str().unwrap(),
-        ];
 
-        if enable_auth {
-            args.extend(&["--auth-validation-public-key-path", "auth_public_key.pem"]);
-            args.extend(&["--auth-type", "ZenithJWT"]);
+        // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
+        let base_data_dir_param = self.env.base_data_dir.display().to_string();
+        let pg_distrib_dir_param =
+            format!("pg_distrib_dir='{}'", self.env.pg_distrib_dir.display());
+        let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
+        let listen_http_addr_param = format!(
+            "listen_http_addr='{}'",
+            self.env.pageserver.listen_http_addr
+        );
+        let listen_pg_addr_param =
+            format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let mut args = Vec::with_capacity(20);
+
+        args.push("--init");
+        args.extend(["-D", &base_data_dir_param]);
+        args.extend(["-c", &pg_distrib_dir_param]);
+        args.extend(["-c", &authg_type_param]);
+        args.extend(["-c", &listen_http_addr_param]);
+        args.extend(["-c", &listen_pg_addr_param]);
+
+        for config_override in config_overrides {
+            args.extend(["-c", config_override]);
         }
 
-        create_tenant.map(|tenantid| args.extend(&["--create-tenant", tenantid]));
-        let status = cmd
-            .args(args)
-            .env_clear()
-            .env("RUST_BACKTRACE", "1")
+        if self.env.pageserver.auth_type != AuthType::Trust {
+            args.extend([
+                "-c",
+                "auth_validation_public_key_path='auth_public_key.pem'",
+            ]);
+        }
+
+        if let Some(tenantid) = create_tenant {
+            args.extend(["--create-tenant", tenantid])
+        }
+
+        let status = fill_rust_env_vars(cmd.args(args))
             .status()
             .expect("pageserver init failed");
 
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("pageserver init failed"))
+        if !status.success() {
+            bail!("pageserver init failed");
         }
+
+        Ok(())
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -97,18 +157,24 @@ impl PageServerNode {
         self.repo_path().join("pageserver.pid")
     }
 
-    pub fn start(&self) -> Result<()> {
-        println!(
-            "Starting pageserver at '{}' in {}",
+    pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        print!(
+            "Starting pageserver at '{}' in '{}'",
             connection_address(&self.pg_connection_config),
             self.repo_path().display()
         );
+        io::stdout().flush().unwrap();
 
         let mut cmd = Command::new(self.env.pageserver_bin()?);
-        cmd.args(&["-D", self.repo_path().to_str().unwrap()])
-            .arg("-d")
-            .env_clear()
-            .env("RUST_BACKTRACE", "1");
+
+        let repo_path = self.repo_path();
+        let mut args = vec!["-D", repo_path.to_str().unwrap()];
+
+        for config_override in config_overrides {
+            args.extend(["-c", config_override]);
+        }
+
+        fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
 
         if !cmd.status()?.success() {
             bail!(
@@ -119,41 +185,103 @@ impl PageServerNode {
 
         // It takes a while for the page server to start up. Wait until it is
         // open for business.
-        for retries in 1..15 {
+        const RETRIES: i8 = 15;
+        for retries in 1..RETRIES {
             match self.check_status() {
                 Ok(_) => {
-                    println!("Pageserver started");
+                    println!("\nPageserver started");
                     return Ok(());
                 }
                 Err(err) => {
-                    println!(
-                        "Pageserver not responding yet, err {} retrying ({})...",
-                        err, retries
-                    );
+                    match err {
+                        PageserverHttpError::Transport(err) => {
+                            if err.is_connect() && retries < 5 {
+                                print!(".");
+                                io::stdout().flush().unwrap();
+                            } else {
+                                if retries == 5 {
+                                    println!() // put a line break after dots for second message
+                                }
+                                println!(
+                                    "Pageserver not responding yet, err {} retrying ({})...",
+                                    err, retries
+                                );
+                            }
+                        }
+                        PageserverHttpError::Response(msg) => {
+                            bail!("pageserver failed to start: {} ", msg)
+                        }
+                    }
                     thread::sleep(Duration::from_secs(1));
                 }
             }
         }
-        bail!("pageserver failed to start");
+        bail!("pageserver failed to start in {} seconds", RETRIES);
     }
 
-    pub fn stop(&self) -> Result<()> {
-        let pid = read_pidfile(&self.pid_file())?;
-        let pid = Pid::from_raw(pid);
-        if kill(pid, Signal::SIGTERM).is_err() {
-            bail!("Failed to kill pageserver with pid {}", pid);
+    ///
+    /// Stop the server.
+    ///
+    /// If 'immediate' is true, we use SIGQUIT, killing the process immediately.
+    /// Otherwise we use SIGTERM, triggering a clean shutdown
+    ///
+    /// If the server is not running, returns success
+    ///
+    pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
+        let pid_file = self.pid_file();
+        if !pid_file.exists() {
+            println!("Pageserver is already stopped");
+            return Ok(());
         }
+        let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
-        // wait for pageserver stop
-        let address = connection_address(&self.pg_connection_config);
-        for _ in 0..5 {
-            let stream = TcpStream::connect(&address);
-            thread::sleep(Duration::from_secs(1));
-            if let Err(_e) = stream {
-                println!("Pageserver stopped");
+        let sig = if immediate {
+            println!("Stop pageserver immediately");
+            Signal::SIGQUIT
+        } else {
+            println!("Stop pageserver gracefully");
+            Signal::SIGTERM
+        };
+        match kill(pid, sig) {
+            Ok(_) => (),
+            Err(Errno::ESRCH) => {
+                println!(
+                    "Pageserver with pid {} does not exist, but a PID file was found",
+                    pid
+                );
                 return Ok(());
             }
-            println!("Stopping pageserver on {}", address);
+            Err(err) => bail!(
+                "Failed to send signal to pageserver with pid {}: {}",
+                pid,
+                err.desc()
+            ),
+        }
+
+        let address = connection_address(&self.pg_connection_config);
+
+        // TODO Remove this "timeout" and handle it on caller side instead.
+        // Shutting down may take a long time,
+        // if pageserver checkpoints a lot of data
+        for _ in 0..100 {
+            if let Err(_e) = TcpStream::connect(&address) {
+                println!("Pageserver stopped receiving connections");
+
+                //Now check status
+                match self.check_status() {
+                    Ok(_) => {
+                        println!("Pageserver status is OK. Wait a bit.");
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                    Err(err) => {
+                        println!("Pageserver status is: {}", err);
+                        return Ok(());
+                    }
+                }
+            } else {
+                println!("Pageserver still receives connections");
+                thread::sleep(Duration::from_secs(1));
+            }
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
@@ -166,35 +294,30 @@ impl PageServerNode {
         client.simple_query(sql).unwrap()
     }
 
-    pub fn page_server_psql_client(&self) -> Result<postgres::Client, postgres::Error> {
+    pub fn page_server_psql_client(&self) -> result::Result<postgres::Client, postgres::Error> {
         self.pg_connection_config.connect(NoTls)
     }
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         let mut builder = self.http_client.request(method, url);
-        if self.env.auth_type == AuthType::ZenithJWT {
-            builder = builder.bearer_auth(&self.env.auth_token)
+        if self.env.pageserver.auth_type == AuthType::ZenithJWT {
+            builder = builder.bearer_auth(&self.env.pageserver.auth_token)
         }
         builder
     }
 
     pub fn check_status(&self) -> Result<()> {
-        let status = self
-            .http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
+        self.http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
             .send()?
-            .status();
-        ensure!(
-            status == StatusCode::OK,
-            format!("got unexpected response status {}", status)
-        );
+            .error_from_body()?;
         Ok(())
     }
 
-    pub fn tenant_list(&self) -> Result<Vec<String>> {
+    pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
             .http_request(Method::GET, format!("{}/{}", self.http_base_url, "tenant"))
             .send()?
-            .error_for_status()?
+            .error_from_body()?
             .json()?)
     }
 
@@ -205,7 +328,7 @@ impl PageServerNode {
                 tenant_id: tenantid,
             })
             .send()?
-            .error_for_status()?
+            .error_from_body()?
             .json()?)
     }
 
@@ -216,7 +339,7 @@ impl PageServerNode {
                 format!("{}/branch/{}", self.http_base_url, tenantid),
             )
             .send()?
-            .error_for_status()?
+            .error_from_body()?
             .json()?)
     }
 
@@ -227,42 +350,29 @@ impl PageServerNode {
         tenantid: &ZTenantId,
     ) -> Result<BranchInfo> {
         Ok(self
-            .http_request(Method::POST, format!("{}/{}", self.http_base_url, "branch"))
+            .http_request(Method::POST, format!("{}/branch", self.http_base_url))
             .json(&BranchCreateRequest {
                 tenant_id: tenantid.to_owned(),
                 name: branch_name.to_owned(),
                 start_point: startpoint.to_owned(),
             })
             .send()?
-            .error_for_status()?
+            .error_from_body()?
             .json()?)
     }
 
-    // TODO: make this a separate request type and avoid loading all the branches
     pub fn branch_get_by_name(
         &self,
         tenantid: &ZTenantId,
         branch_name: &str,
     ) -> Result<BranchInfo> {
-        let branch_infos = self.branch_list(tenantid)?;
-        let branch_by_name: Result<HashMap<String, BranchInfo>> = branch_infos
-            .into_iter()
-            .map(|branch_info| Ok((branch_info.name.clone(), branch_info)))
-            .collect();
-        let branch_by_name = branch_by_name?;
-
-        let branch = branch_by_name
-            .get(branch_name)
-            .ok_or_else(|| anyhow!("Branch {} not found", branch_name))?;
-
-        Ok(branch.clone())
-    }
-}
-
-impl Drop for PageServerNode {
-    fn drop(&mut self) {
-        if self.kill_on_exit {
-            let _ = self.stop();
-        }
+        Ok(self
+            .http_request(
+                Method::GET,
+                format!("{}/branch/{}/{}", self.http_base_url, tenantid, branch_name),
+            )
+            .send()?
+            .error_for_status()?
+            .json()?)
     }
 }

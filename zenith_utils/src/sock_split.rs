@@ -107,12 +107,12 @@ impl io::Write for WriteStream {
     }
 }
 
+type TlsStream<T> = rustls::StreamOwned<rustls::ServerSession, T>;
+
 pub enum BidiStream {
     Tcp(BufStream),
-    Tls {
-        stream: BufStream,
-        session: rustls::ServerSession,
-    },
+    /// This variant is boxed, because [`rustls::ServerSession`] is quite larger than [`BufStream`].
+    Tls(Box<TlsStream<BufStream>>),
 }
 
 impl BidiStream {
@@ -123,17 +123,13 @@ impl BidiStream {
     pub fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.get_ref().shutdown(how),
-            Self::Tls {
-                stream: reader,
-                session,
-            } => {
+            Self::Tls(tls_boxed) => {
                 if how == Shutdown::Read {
-                    reader.get_ref().shutdown(how)
+                    tls_boxed.sock.get_ref().shutdown(how)
                 } else {
-                    session.send_close_notify();
-                    let mut stream = rustls::Stream::new(session, reader);
-                    let res = stream.flush();
-                    reader.get_ref().shutdown(how)?;
+                    tls_boxed.sess.send_close_notify();
+                    let res = tls_boxed.flush();
+                    tls_boxed.sock.get_ref().shutdown(how)?;
                     res
                 }
             }
@@ -149,8 +145,8 @@ impl BidiStream {
 
                 (ReadStream::Tcp(reader), WriteStream::Tcp(stream))
             }
-            Self::Tls { stream, session } => {
-                let reader = stream.into_reader();
+            Self::Tls(tls_boxed) => {
+                let reader = tls_boxed.sock.into_reader();
                 let buffer_data = reader.buffer().to_owned();
                 let read_buf_cfg = rustls_split::BufCfg::with_data(buffer_data, 8192);
                 let write_buf_cfg = rustls_split::BufCfg::with_capacity(8192);
@@ -159,7 +155,7 @@ impl BidiStream {
                 let socket = Arc::try_unwrap(reader.into_inner().0).unwrap();
 
                 let (read_half, write_half) =
-                    rustls_split::split(socket, session, read_buf_cfg, write_buf_cfg);
+                    rustls_split::split(socket, tls_boxed.sess, read_buf_cfg, write_buf_cfg);
                 (ReadStream::Tls(read_half), WriteStream::Tls(write_half))
             }
         }
@@ -170,7 +166,7 @@ impl BidiStream {
             Self::Tcp(mut stream) => {
                 session.complete_io(&mut stream)?;
                 assert!(!session.is_handshaking());
-                Ok(Self::Tls { stream, session })
+                Ok(Self::Tls(Box::new(TlsStream::new(session, stream))))
             }
             Self::Tls { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -184,7 +180,7 @@ impl io::Read for BidiStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.read(buf),
-            Self::Tls { stream, session } => rustls::Stream::new(session, stream).read(buf),
+            Self::Tls(tls_boxed) => tls_boxed.read(buf),
         }
     }
 }
@@ -193,14 +189,14 @@ impl io::Write for BidiStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.write(buf),
-            Self::Tls { stream, session } => rustls::Stream::new(session, stream).write(buf),
+            Self::Tls(tls_boxed) => tls_boxed.write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.flush(),
-            Self::Tls { stream, session } => rustls::Stream::new(session, stream).flush(),
+            Self::Tls(tls_boxed) => tls_boxed.flush(),
         }
     }
 }

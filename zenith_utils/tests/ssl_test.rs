@@ -35,7 +35,7 @@ lazy_static! {
 fn ssl() {
     let (mut client_sock, server_sock) = make_tcp_pair();
 
-    const QUERY: &[u8] = b"hello world";
+    const QUERY: &str = "hello world";
 
     let client_jh = std::thread::spawn(move || {
         // SSLRequest
@@ -43,7 +43,7 @@ fn ssl() {
         client_sock.write_u32::<BigEndian>(80877103).unwrap();
 
         let ssl_response = client_sock.read_u8().unwrap();
-        assert_eq!(b'Y', ssl_response);
+        assert_eq!(b'S', ssl_response);
 
         let mut cfg = rustls::ClientConfig::new();
         cfg.root_store.add(&CERT).unwrap();
@@ -82,7 +82,7 @@ fn ssl() {
         stream
             .write_u32::<BigEndian>(4u32 + QUERY.len() as u32)
             .unwrap();
-        stream.write_all(QUERY).unwrap();
+        stream.write_all(QUERY.as_ref()).unwrap();
         stream.flush().unwrap();
 
         // ReadyForQuery
@@ -97,9 +97,9 @@ fn ssl() {
         fn process_query(
             &mut self,
             _pgb: &mut PostgresBackend,
-            query_string: bytes::Bytes,
+            query_string: &str,
         ) -> anyhow::Result<()> {
-            self.got_query = query_string.as_ref() == QUERY;
+            self.got_query = query_string == QUERY;
             Ok(())
         }
     }
@@ -110,7 +110,7 @@ fn ssl() {
         .unwrap();
     let tls_config = Some(Arc::new(cfg));
 
-    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config).unwrap();
+    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config, true).unwrap();
     pgb.run(&mut handler).unwrap();
     assert!(handler.got_query);
 
@@ -142,7 +142,7 @@ fn no_ssl() {
         fn process_query(
             &mut self,
             _pgb: &mut PostgresBackend,
-            _query_string: bytes::Bytes,
+            _query_string: &str,
         ) -> anyhow::Result<()> {
             panic!()
         }
@@ -150,7 +150,7 @@ fn no_ssl() {
 
     let mut handler = TestHandler;
 
-    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, None).unwrap();
+    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, None, true).unwrap();
     pgb.run(&mut handler).unwrap();
 
     client_jh.join().unwrap();
@@ -202,7 +202,7 @@ fn server_forces_ssl() {
         fn process_query(
             &mut self,
             _pgb: &mut PostgresBackend,
-            _query_string: bytes::Bytes,
+            _query_string: &str,
         ) -> anyhow::Result<()> {
             panic!()
         }
@@ -214,7 +214,7 @@ fn server_forces_ssl() {
         .unwrap();
     let tls_config = Some(Arc::new(cfg));
 
-    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config).unwrap();
+    let pgb = PostgresBackend::new(server_sock, AuthType::Trust, tls_config, true).unwrap();
     let res = pgb.run(&mut handler).unwrap_err();
     assert_eq!("client did not connect with TLS", format!("{}", res));
 

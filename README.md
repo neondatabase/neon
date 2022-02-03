@@ -1,12 +1,12 @@
 # Zenith
 
-Zenith substitutes PostgreSQL storage layer and redistributes data across a cluster of nodes
+Zenith is a serverless open source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
 ## Architecture overview
 
-A Zenith installation consists of Compute nodes and Storage engine.
+A Zenith installation consists of compute nodes and Zenith storage engine.
 
-Compute nodes are stateles PostgreSQL nodes, backed by zenith storage.
+Compute nodes are stateless PostgreSQL nodes, backed by Zenith storage engine.
 
 Zenith storage engine consists of two major components:
 - Pageserver. Scalable storage backend for compute nodes.
@@ -25,15 +25,15 @@ Pageserver consists of:
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
 ```text
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang
+libssl-dev clang pkg-config libpq-dev
 ```
 
-[Rust] 1.52 or later is also required.
+[Rust] 1.56.1 or later is also required.
 
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
-To run the integration tests (not required to use the code), install
-Python (3.6 or higher), and install python3 packages with `pipenv` using `pipenv install` in the project directory.
+To run the integration tests or Python scripts (not required to use the code), install
+Python (3.7 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
 
 2. Build zenith and patched postgres
 ```sh
@@ -47,17 +47,26 @@ make -j5
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/zenith init
+initializing tenantid c03ba6b7ad4c5e9cf556f059ade44229
+created initial timeline 5b014a9e41b4b63ce1a1febc04503636 timeline.lsn 0/169C3C8
+created main branch
 pageserver init succeeded
 
-# start pageserver
+# start pageserver and safekeeper
 > ./target/debug/zenith start
-Starting pageserver at '127.0.0.1:64000' in .zenith
+Starting pageserver at 'localhost:64000' in '.zenith'
 Pageserver started
+initializing for single for 7676
+Starting safekeeper at 'localhost:5454' in '.zenith/safekeepers/single'
+Safekeeper started
 
-# start postgres on top on the pageserver
+# start postgres compute node
 > ./target/debug/zenith pg start main
-Starting postgres node at 'host=127.0.0.1 port=55432 user=stas'
+Starting new postgres main on main...
+Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/c03ba6b7ad4c5e9cf556f059ade44229/main port=55432
+Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
 waiting for server to start.... done
+server started
 
 # check list of running postgres instances
 > ./target/debug/zenith pg list
@@ -108,13 +117,18 @@ postgres=# insert into t values(2,2);
 INSERT 0 1
 ```
 
+6. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
+   you have just started. You can stop them all with one command:
+```sh
+> ./target/debug/zenith stop
+```
+
 ## Running tests
 
 ```sh
 git clone --recursive https://github.com/zenithdb/zenith.git
 make # builds also postgres and installs it to ./tmp_install
-cd test_runner
-pytest
+./scripts/pytest
 ```
 
 ## Documentation
@@ -125,9 +139,19 @@ Now we use README files to cover design ideas and overall architecture for each 
 
 To view your `rustdoc` documentation in a browser, try running `cargo doc --no-deps --open`
 
+### Postgres-specific terms
+
+Due to Zenith's very close relation with PostgreSQL internals, there are numerous specific terms used.
+Same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
+
+To get more familiar with this aspect, refer to:
+
+- [Zenith glossary](/docs/glossary.md)
+- [PostgreSQL glossary](https://www.postgresql.org/docs/13/glossary.html)
+- Other PostgreSQL documentation and sources (Zenith fork sources can be found [here](https://github.com/zenithdb/postgres))
+
 ## Join the development
 
 - Read `CONTRIBUTING.md` to learn about project code style and practices.
-- Use glossary in [/docs/glossary.md](/docs/glossary.md)
 - To get familiar with a source tree layout, use [/docs/sourcetree.md](/docs/sourcetree.md).
 - To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html

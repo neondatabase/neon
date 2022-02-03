@@ -9,23 +9,26 @@
 
 use crate::pg_constants;
 use crate::CheckPoint;
-use crate::ControlFileData;
 use crate::FullTransactionId;
 use crate::XLogLongPageHeaderData;
 use crate::XLogPageHeaderData;
 use crate::XLogRecord;
 use crate::XLOG_PAGE_MAGIC;
 
+use anyhow::{bail, Result};
 use byteorder::{ByteOrder, LittleEndian};
+use bytes::BytesMut;
 use bytes::{Buf, Bytes};
-use bytes::{BufMut, BytesMut};
 use crc32c::*;
 use log::*;
+use std::cmp::max;
 use std::cmp::min;
 use std::fs::{self, File};
 use std::io::prelude::*;
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use zenith_utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
 pub const XLOG_BLCKSZ: usize = 8192;
@@ -37,13 +40,24 @@ pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = std::mem::size_of::<XLogPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
+#[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
+
+// PG timeline is always 1, changing it doesn't have useful meaning in Zenith.
+pub const PG_TLI: u32 = 1;
 
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
 pub type TimestampTz = i64;
 pub type XLogSegNo = u64;
 
+/// Interval of checkpointing metadata file. We should store metadata file to enforce
+/// predicate that checkpoint.nextXid is larger than any XID in WAL.
+/// But flushing checkpoint file for each transaction seems to be too expensive,
+/// so XID_CHECKPOINT_INTERVAL is used to forward align nextXid and so perform
+/// metadata checkpoint only once per XID_CHECKPOINT_INTERVAL transactions.
+/// XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
+/// in order to let CLOG_TRUNCATE mechanism correctly extend CLOG.
 const XID_CHECKPOINT_INTERVAL: u32 = 1024;
 
 #[allow(non_snake_case)]
@@ -88,6 +102,21 @@ pub fn IsPartialXLogFileName(fname: &str) -> bool {
     fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
 }
 
+/// If LSN points to the beginning of the page, then shift it to first record,
+/// otherwise align on 8-bytes boundary (required for WAL records)
+pub fn normalize_lsn(lsn: Lsn, seg_sz: usize) -> Lsn {
+    if lsn.0 % XLOG_BLCKSZ as u64 == 0 {
+        let hdr_size = if lsn.0 % seg_sz as u64 == 0 {
+            XLOG_SIZE_OF_XLOG_LONG_PHD
+        } else {
+            XLOG_SIZE_OF_XLOG_SHORT_PHD
+        };
+        lsn + hdr_size as u64
+    } else {
+        lsn.align()
+    }
+}
+
 pub fn get_current_timestamp() -> TimestampTz {
     const UNIX_EPOCH_JDATE: u64 = 2440588; /* == date2j(1970, 1, 1) */
     const POSTGRES_EPOCH_JDATE: u64 = 2451545; /* == date2j(2000, 1, 1) */
@@ -108,8 +137,10 @@ fn find_end_of_wal_segment(
     segno: XLogSegNo,
     tli: TimeLineID,
     wal_seg_size: usize,
-) -> u32 {
-    let mut offs: usize = 0;
+    start_offset: usize, // start reading at this point
+) -> Result<u32> {
+    // step back to the beginning of the page to read it in...
+    let mut offs: usize = start_offset - start_offset % XLOG_BLCKSZ;
     let mut contlen: usize = 0;
     let mut wal_crc: u32 = 0;
     let mut crc: u32 = 0;
@@ -118,24 +149,33 @@ fn find_end_of_wal_segment(
     let file_name = XLogFileName(tli, segno, wal_seg_size);
     let mut last_valid_rec_pos: usize = 0;
     let mut file = File::open(data_dir.join(file_name.clone() + ".partial")).unwrap();
+    file.seek(SeekFrom::Start(offs as u64))?;
     let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];
 
     while offs < wal_seg_size {
         // we are at the beginning of the page; read it in
         if offs % XLOG_BLCKSZ == 0 {
-            if let Ok(bytes_read) = file.read(&mut buf) {
-                if bytes_read != buf.len() {
-                    break;
-                }
-            } else {
-                break;
+            let bytes_read = file.read(&mut buf)?;
+            if bytes_read != buf.len() {
+                bail!(
+                    "failed to read {} bytes from {} at {}",
+                    XLOG_BLCKSZ,
+                    file_name,
+                    offs
+                );
             }
+
             let xlp_magic = LittleEndian::read_u16(&buf[0..2]);
             let xlp_info = LittleEndian::read_u16(&buf[2..4]);
             let xlp_rem_len = LittleEndian::read_u32(&buf[XLP_REM_LEN_OFFS..XLP_REM_LEN_OFFS + 4]);
+            // this is expected in current usage when valid WAL starts after page header
             if xlp_magic != XLOG_PAGE_MAGIC as u16 {
-                info!("Invalid WAL file {}.partial magic {}", file_name, xlp_magic);
-                break;
+                trace!(
+                    "invalid WAL file {}.partial magic {} at {:?}",
+                    file_name,
+                    xlp_magic,
+                    Lsn(XLogSegNoOffsetToRecPtr(segno, offs as u32, wal_seg_size)),
+                );
             }
             if offs == 0 {
                 offs = XLOG_SIZE_OF_XLOG_LONG_PHD;
@@ -145,11 +185,23 @@ fn find_end_of_wal_segment(
             } else {
                 offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
             }
+            // ... and step forward again if asked
+            offs = max(offs, start_offset);
+
         // beginning of the next record
         } else if contlen == 0 {
             let page_offs = offs % XLOG_BLCKSZ;
             let xl_tot_len = LittleEndian::read_u32(&buf[page_offs..page_offs + 4]) as usize;
             if xl_tot_len == 0 {
+                info!(
+                    "find_end_of_wal_segment reached zeros at {:?}, last records ends at {:?}",
+                    Lsn(XLogSegNoOffsetToRecPtr(segno, offs as u32, wal_seg_size)),
+                    Lsn(XLogSegNoOffsetToRecPtr(
+                        segno,
+                        last_valid_rec_pos as u32,
+                        wal_seg_size
+                    ))
+                );
                 break; // zeros, reached the end
             }
             last_valid_rec_pos = offs;
@@ -173,12 +225,11 @@ fn find_end_of_wal_segment(
                 let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
                 wal_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
                 crc = crc32c_append(0, &buf[crc_offs + 4..page_offs + n]);
-                crc = !crc;
             } else {
                 crc ^= 0xFFFFFFFFu32;
                 crc = crc32c_append(crc, &buf[page_offs..page_offs + n]);
-                crc = !crc;
             }
+            crc = !crc;
             rec_offs += n;
             offs += n;
             contlen -= n;
@@ -201,7 +252,7 @@ fn find_end_of_wal_segment(
             }
         }
     }
-    last_valid_rec_pos as u32
+    Ok(last_valid_rec_pos as u32)
 }
 
 ///
@@ -214,7 +265,8 @@ pub fn find_end_of_wal(
     data_dir: &Path,
     wal_seg_size: usize,
     precise: bool,
-) -> (XLogRecPtr, TimeLineID) {
+    start_lsn: Lsn, // start reading WAL at this point or later
+) -> Result<(XLogRecPtr, TimeLineID)> {
     let mut high_segno: XLogSegNo = 0;
     let mut high_tli: TimeLineID = 0;
     let mut high_ispartial = false;
@@ -256,19 +308,37 @@ pub fn find_end_of_wal(
             high_segno += 1;
         } else if precise {
             /* otherwise locate last record in last partial segment */
-            high_offs = find_end_of_wal_segment(data_dir, high_segno, high_tli, wal_seg_size);
+            if start_lsn.segment_number(wal_seg_size) > high_segno {
+                bail!(
+                    "provided start_lsn {:?} is beyond highest segno {:?} available",
+                    start_lsn,
+                    high_segno,
+                );
+            }
+            let start_offset = if start_lsn.segment_number(wal_seg_size) == high_segno {
+                start_lsn.segment_offset(wal_seg_size)
+            } else {
+                0
+            };
+            high_offs = find_end_of_wal_segment(
+                data_dir,
+                high_segno,
+                high_tli,
+                wal_seg_size,
+                start_offset,
+            )?;
         }
         let high_ptr = XLogSegNoOffsetToRecPtr(high_segno, high_offs, wal_seg_size);
-        return (high_ptr, high_tli);
+        return Ok((high_ptr, high_tli));
     }
-    (0, 0)
+    Ok((0, 0))
 }
 
 pub fn main() {
     let mut data_dir = PathBuf::new();
     data_dir.push(".");
     let wal_seg_size = 16 * 1024 * 1024;
-    let (wal_end, tli) = find_end_of_wal(&data_dir, wal_seg_size, true);
+    let (wal_end, tli) = find_end_of_wal(&data_dir, wal_seg_size, true, Lsn(0)).unwrap();
     println!(
         "wal_end={:>08X}{:>08X}, tli={}",
         (wal_end >> 32) as u32,
@@ -278,7 +348,12 @@ pub fn main() {
 }
 
 impl XLogRecord {
-    pub fn from_bytes(buf: &mut Bytes) -> XLogRecord {
+    pub fn from_slice(buf: &[u8]) -> XLogRecord {
+        use zenith_utils::bin_ser::LeSer;
+        XLogRecord::des(buf).unwrap()
+    }
+
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogRecord {
         use zenith_utils::bin_ser::LeSer;
         XLogRecord::des_from(&mut buf.reader()).unwrap()
     }
@@ -326,13 +401,19 @@ impl CheckPoint {
         Ok(CheckPoint::des(buf)?)
     }
 
-    // Update next XID based on provided new_xid and stored epoch.
-    // Next XID should be greater than new_xid.
-    // Also take in account 32-bit wrap-around.
-    pub fn update_next_xid(&mut self, xid: u32) {
-        let xid = xid.wrapping_add(XID_CHECKPOINT_INTERVAL - 1) & !(XID_CHECKPOINT_INTERVAL - 1);
+    /// Update next XID based on provided new_xid and stored epoch.
+    /// Next XID should be greater than new_xid. This handles 32-bit
+    /// XID wraparound correctly.
+    ///
+    /// Returns 'true' if the XID was updated.
+    pub fn update_next_xid(&mut self, xid: u32) -> bool {
+        // nextXid should nw greate than any XID in WAL, so increment provided XID and check for wraparround.
+        let mut new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
+        // To reduce number of metadata checkpoints, we forward align XID on XID_CHECKPOINT_INTERVAL.
+        // XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
+        new_xid =
+            new_xid.wrapping_add(XID_CHECKPOINT_INTERVAL - 1) & !(XID_CHECKPOINT_INTERVAL - 1);
         let full_xid = self.nextXid.value;
-        let new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
         let old_xid = full_xid as u32;
         if new_xid.wrapping_sub(old_xid) as i32 > 0 {
             let mut epoch = full_xid >> 32;
@@ -340,71 +421,43 @@ impl CheckPoint {
                 // wrap-around
                 epoch += 1;
             }
-            self.nextXid = FullTransactionId {
-                value: (epoch << 32) | new_xid as u64,
-            };
+            let nextXid = (epoch << 32) | new_xid as u64;
+
+            if nextXid != self.nextXid.value {
+                self.nextXid = FullTransactionId { value: nextXid };
+                return true;
+            }
         }
+        false
     }
 }
 
 //
-// Generate new WAL segment with single XLOG_CHECKPOINT_SHUTDOWN record.
+// Generate new, empty WAL segment.
 // We need this segment to start compute node.
-// In order to minimize changes in Postgres core, we prefer to
-// provide WAL segment from which is can extract checkpoint record in standard way,
-// rather then implement some alternative mechanism.
 //
-pub fn generate_wal_segment(pg_control: &ControlFileData) -> Bytes {
+pub fn generate_wal_segment(segno: u64, system_id: u64) -> Bytes {
     let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
 
+    let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, pg_constants::WAL_SEGMENT_SIZE);
     let hdr = XLogLongPageHeaderData {
         std: {
             XLogPageHeaderData {
                 xlp_magic: XLOG_PAGE_MAGIC as u16,
                 xlp_info: pg_constants::XLP_LONG_HEADER,
-                xlp_tli: 1, // FIXME: always use Postgres timeline 1
-                xlp_pageaddr: pg_control.checkPoint - XLOG_SIZE_OF_XLOG_LONG_PHD as u64,
+                xlp_tli: PG_TLI,
+                xlp_pageaddr: pageaddr,
                 xlp_rem_len: 0,
                 ..Default::default() // Put 0 in padding fields.
             }
         },
-        xlp_sysid: pg_control.system_identifier,
+        xlp_sysid: system_id,
         xlp_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32,
         xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
     };
 
     let hdr_bytes = hdr.encode();
     seg_buf.extend_from_slice(&hdr_bytes);
-
-    let rec_hdr = XLogRecord {
-        xl_tot_len: (XLOG_SIZE_OF_XLOG_RECORD
-            + SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT
-            + SIZEOF_CHECKPOINT) as u32,
-        xl_xid: 0, //0 is for InvalidTransactionId
-        xl_prev: 0,
-        xl_info: pg_constants::XLOG_CHECKPOINT_SHUTDOWN,
-        xl_rmid: pg_constants::RM_XLOG_ID,
-        xl_crc: 0,
-        ..Default::default() // Put 0 in padding fields.
-    };
-
-    let mut rec_shord_hdr_bytes = BytesMut::new();
-    rec_shord_hdr_bytes.put_u8(pg_constants::XLR_BLOCK_ID_DATA_SHORT);
-    rec_shord_hdr_bytes.put_u8(SIZEOF_CHECKPOINT as u8);
-
-    let rec_bytes = rec_hdr.encode();
-    let checkpoint_bytes = pg_control.checkPointCopy.encode();
-
-    //calculate record checksum
-    let mut crc = 0;
-    crc = crc32c_append(crc, &rec_shord_hdr_bytes[..]);
-    crc = crc32c_append(crc, &checkpoint_bytes[..]);
-    crc = crc32c_append(crc, &rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
-
-    seg_buf.extend_from_slice(&rec_bytes[0..XLOG_RECORD_CRC_OFFS]);
-    seg_buf.put_u32_le(crc);
-    seg_buf.extend_from_slice(&rec_shord_hdr_bytes);
-    seg_buf.extend_from_slice(&checkpoint_bytes);
 
     //zero out the rest of the file
     seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
@@ -416,7 +469,6 @@ mod tests {
     use super::*;
     use regex::Regex;
     use std::{env, process::Command, str::FromStr};
-    use zenith_utils::lsn::Lsn;
 
     // Run find_end_of_wal against file in test_wal dir
     // Ensure that it finds last record correctly
@@ -448,7 +500,7 @@ mod tests {
         let wal_seg_size = 16 * 1024 * 1024;
 
         // 3. Check end_of_wal on non-partial WAL segment (we treat it as fully populated)
-        let (wal_end, tli) = find_end_of_wal(&wal_dir, wal_seg_size, true);
+        let (wal_end, tli) = find_end_of_wal(&wal_dir, wal_seg_size, true, Lsn(0)).unwrap();
         let wal_end = Lsn(wal_end);
         println!("wal_end={}, tli={}", wal_end, tli);
         assert_eq!(wal_end, "0/2000000".parse::<Lsn>().unwrap());
@@ -465,7 +517,7 @@ mod tests {
         let waldump_output = std::str::from_utf8(&waldump_output.stderr).unwrap();
         println!("waldump_output = '{}'", &waldump_output);
         let re = Regex::new(r"invalid record length at (.+):").unwrap();
-        let caps = re.captures(&waldump_output).unwrap();
+        let caps = re.captures(waldump_output).unwrap();
         let waldump_wal_end = Lsn::from_str(caps.get(1).unwrap().as_str()).unwrap();
 
         // 5. Rename file to partial to actually find last valid lsn
@@ -474,9 +526,39 @@ mod tests {
             wal_dir.join("000000010000000000000001.partial"),
         )
         .unwrap();
-        let (wal_end, tli) = find_end_of_wal(&wal_dir, wal_seg_size, true);
+        let (wal_end, tli) = find_end_of_wal(&wal_dir, wal_seg_size, true, Lsn(0)).unwrap();
         let wal_end = Lsn(wal_end);
         println!("wal_end={}, tli={}", wal_end, tli);
         assert_eq!(wal_end, waldump_wal_end);
+    }
+
+    /// Check the math in update_next_xid
+    ///
+    /// NOTE: These checks are sensitive to the value of XID_CHECKPOINT_INTERVAL,
+    /// currently 1024.
+    #[test]
+    pub fn test_update_next_xid() {
+        let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
+        let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
+
+        checkpoint.nextXid = FullTransactionId { value: 10 };
+        assert_eq!(checkpoint.nextXid.value, 10);
+
+        // The input XID gets rounded up to the next XID_CHECKPOINT_INTERVAL
+        // boundary
+        checkpoint.update_next_xid(100);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+
+        // No change
+        checkpoint.update_next_xid(500);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+        checkpoint.update_next_xid(1023);
+        assert_eq!(checkpoint.nextXid.value, 1024);
+
+        // The function returns the *next* XID, given the highest XID seen so
+        // far. So when we pass 1024, the nextXid gets bumped up to the next
+        // XID_CHECKPOINT_INTERVAL boundary.
+        checkpoint.update_next_xid(1024);
+        assert_eq!(checkpoint.nextXid.value, 2048);
     }
 }

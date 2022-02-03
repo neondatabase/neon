@@ -32,6 +32,12 @@ impl Lsn {
         self.0.checked_sub(other).map(Lsn)
     }
 
+    /// Subtract a number, returning the difference as i128 to avoid overflow.
+    pub fn widening_sub<T: Into<u64>>(self, other: T) -> i128 {
+        let other: u64 = other.into();
+        i128::from(self.0) - i128::from(other)
+    }
+
     /// Parse an LSN from a filename in the form `0000000000000000`
     pub fn from_filename<F>(filename: F) -> Result<Self, LsnParseError>
     where
@@ -186,9 +192,7 @@ impl AtomicLsn {
     /// This operation will panic on overflow.
     pub fn fetch_add(&self, val: u64) -> Lsn {
         let prev = self.inner.fetch_add(val, Ordering::AcqRel);
-        if prev.checked_add(val).is_none() {
-            panic!("AtomicLsn overflow");
-        }
+        assert!(prev.checked_add(val).is_some(), "AtomicLsn overflow");
         Lsn(prev)
     }
 
@@ -196,6 +200,12 @@ impl AtomicLsn {
     pub fn fetch_max(&self, lsn: Lsn) -> Lsn {
         let prev = self.inner.fetch_max(lsn.0, Ordering::AcqRel);
         Lsn(prev)
+    }
+}
+
+impl From<Lsn> for AtomicLsn {
+    fn from(lsn: Lsn) -> Self {
+        Self::new(lsn.0)
     }
 }
 
@@ -263,6 +273,11 @@ mod tests {
 
         assert_eq!(Lsn(1234).checked_sub(1233u64), Some(Lsn(1)));
         assert_eq!(Lsn(1234).checked_sub(1235u64), None);
+
+        assert_eq!(Lsn(1235).widening_sub(1234u64), 1);
+        assert_eq!(Lsn(1234).widening_sub(1235u64), -1);
+        assert_eq!(Lsn(u64::MAX).widening_sub(0u64), i128::from(u64::MAX));
+        assert_eq!(Lsn(0).widening_sub(u64::MAX), -i128::from(u64::MAX));
 
         let seg_sz: usize = 16 * 1024 * 1024;
         assert_eq!(Lsn(0x1000007).segment_offset(seg_sz), 7);

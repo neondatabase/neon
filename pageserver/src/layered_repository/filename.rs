@@ -1,16 +1,12 @@
 //!
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
+use crate::config::PageServerConf;
 use crate::layered_repository::storage_layer::SegmentTag;
 use crate::relish::*;
-use crate::PageServerConf;
-use crate::{ZTenantId, ZTimelineId};
 use std::fmt;
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Result;
-use log::*;
 use zenith_utils::lsn::Lsn;
 
 // Note: LayeredTimeline::load_layer_map() relies on this sort order
@@ -35,7 +31,7 @@ impl DeltaFileName {
     /// Parse a string as a delta file name. Returns None if the filename does not
     /// match the expected pattern.
     ///
-    pub fn from_str(fname: &str) -> Option<Self> {
+    pub fn parse_str(fname: &str) -> Option<Self> {
         let rel;
         let mut parts;
         if let Some(rest) = fname.strip_prefix("rel_") {
@@ -111,8 +107,10 @@ impl DeltaFileName {
             dropped,
         })
     }
+}
 
-    fn to_string(&self) -> String {
+impl fmt::Display for DeltaFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let basename = match self.seg.rel {
             RelishTag::Relation(reltag) => format!(
                 "rel_{}_{}_{}_{}",
@@ -134,11 +132,12 @@ impl DeltaFileName {
                 format!("pg_filenodemap_{}_{}", spcnode, dbnode)
             }
             RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
-            RelishTag::Checkpoint => format!("pg_control_checkpoint"),
-            RelishTag::ControlFile => format!("pg_control"),
+            RelishTag::Checkpoint => "pg_control_checkpoint".to_string(),
+            RelishTag::ControlFile => "pg_control".to_string(),
         };
 
-        format!(
+        write!(
+            f,
             "{}_{}_{:016X}_{:016X}{}",
             basename,
             self.seg.segno,
@@ -146,12 +145,6 @@ impl DeltaFileName {
             u64::from(self.end_lsn),
             if self.dropped { "_DROPPED" } else { "" }
         )
-    }
-}
-
-impl fmt::Display for DeltaFileName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
     }
 }
 
@@ -171,7 +164,7 @@ impl ImageFileName {
     /// Parse a string as an image file name. Returns None if the filename does not
     /// match the expected pattern.
     ///
-    pub fn from_str(fname: &str) -> Option<Self> {
+    pub fn parse_str(fname: &str) -> Option<Self> {
         let rel;
         let mut parts;
         if let Some(rest) = fname.strip_prefix("rel_") {
@@ -233,8 +226,10 @@ impl ImageFileName {
 
         Some(ImageFileName { seg, lsn })
     }
+}
 
-    fn to_string(&self) -> String {
+impl fmt::Display for ImageFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let basename = match self.seg.rel {
             RelishTag::Relation(reltag) => format!(
                 "rel_{}_{}_{}_{}",
@@ -256,53 +251,18 @@ impl ImageFileName {
                 format!("pg_filenodemap_{}_{}", spcnode, dbnode)
             }
             RelishTag::TwoPhase { xid } => format!("pg_twophase_{}", xid),
-            RelishTag::Checkpoint => format!("pg_control_checkpoint"),
-            RelishTag::ControlFile => format!("pg_control"),
+            RelishTag::Checkpoint => "pg_control_checkpoint".to_string(),
+            RelishTag::ControlFile => "pg_control".to_string(),
         };
 
-        format!(
+        write!(
+            f,
             "{}_{}_{:016X}",
             basename,
             self.seg.segno,
             u64::from(self.lsn),
         )
     }
-}
-
-impl fmt::Display for ImageFileName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
-    }
-}
-
-/// Scan timeline directory and create ImageFileName and DeltaFilename
-/// structs representing all files on disk
-///
-/// TODO: returning an Iterator would be more idiomatic
-pub fn list_files(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-) -> Result<(Vec<ImageFileName>, Vec<DeltaFileName>)> {
-    let path = conf.timeline_path(&timelineid, &tenantid);
-
-    let mut deltafiles: Vec<DeltaFileName> = Vec::new();
-    let mut imgfiles: Vec<ImageFileName> = Vec::new();
-    for direntry in fs::read_dir(path)? {
-        let fname = direntry?.file_name();
-        let fname = fname.to_str().unwrap();
-
-        if let Some(deltafilename) = DeltaFileName::from_str(fname) {
-            deltafiles.push(deltafilename);
-        } else if let Some(imgfilename) = ImageFileName::from_str(fname) {
-            imgfiles.push(imgfilename);
-        } else if fname == "wal" || fname == "metadata" || fname == "ancestor" {
-            // ignore these
-        } else {
-            warn!("unrecognized filename in timeline dir: {}", fname);
-        }
-    }
-    return Ok((imgfiles, deltafiles));
 }
 
 /// Helper enum to hold a PageServerConf, or a path

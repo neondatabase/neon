@@ -2,6 +2,7 @@ import os
 import subprocess
 
 from typing import Any, List
+from fixtures.log_helper import log
 
 
 def get_self_dir() -> str:
@@ -14,13 +15,14 @@ def mkdir_if_needed(path: str) -> None:
 
     Note this won't try to create intermediate directories.
     """
-    if os.path.exists(path):
-        assert os.path.isdir(path)
-        return
-    os.mkdir(path)
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass
+    assert os.path.isdir(path)
 
 
-def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
+def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     """ Run a process and capture its output
 
     Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
@@ -28,6 +30,7 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
     counter.
 
     If those files already exist, we will overwrite them.
+    Returns basepath for files with captured output.
     """
     assert type(cmd) is list
     base = os.path.basename(cmd[0]) + '_{}'.format(global_counter())
@@ -37,8 +40,10 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> None:
 
     with open(stdout_filename, 'w') as stdout_f:
         with open(stderr_filename, 'w') as stderr_f:
-            print('(capturing output to "{}.stdout")'.format(base))
+            log.info('(capturing output to "{}.stdout")'.format(base))
             subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+
+    return basepath
 
 
 _global_counter = 0
@@ -53,3 +58,24 @@ def global_counter() -> int:
     global _global_counter
     _global_counter += 1
     return _global_counter
+
+
+def lsn_to_hex(num: int) -> str:
+    """ Convert lsn from int to standard hex notation. """
+    return "{:X}/{:X}".format(num >> 32, num & 0xffffffff)
+
+
+def lsn_from_hex(lsn_hex: str) -> int:
+    """ Convert lsn from hex notation to int. """
+    l, r = lsn_hex.split('/')
+    return (int(l, 16) << 32) + int(r, 16)
+
+
+def print_gc_result(row):
+    log.info("GC duration {elapsed} ms".format_map(row))
+    log.info(
+        "  REL    total: {layer_relfiles_total}, needed_by_cutoff {layer_relfiles_needed_by_cutoff}, needed_by_branches: {layer_relfiles_needed_by_branches}, not_updated: {layer_relfiles_not_updated}, needed_as_tombstone {layer_relfiles_needed_as_tombstone}, removed: {layer_relfiles_removed}, dropped: {layer_relfiles_dropped}"
+        .format_map(row))
+    log.info(
+        "  NONREL total: {layer_nonrelfiles_total}, needed_by_cutoff {layer_nonrelfiles_needed_by_cutoff}, needed_by_branches: {layer_nonrelfiles_needed_by_branches}, not_updated: {layer_nonrelfiles_not_updated}, needed_as_tombstone {layer_nonrelfiles_needed_as_tombstone}, removed: {layer_nonrelfiles_removed}, dropped: {layer_nonrelfiles_dropped}"
+        .format_map(row))

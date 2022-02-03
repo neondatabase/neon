@@ -10,40 +10,26 @@ FROM zenithdb/build:buster AS pg-build
 WORKDIR /zenith
 COPY ./vendor/postgres vendor/postgres
 COPY ./Makefile Makefile
+ENV BUILD_TYPE release
 RUN make -j $(getconf _NPROCESSORS_ONLN) -s postgres
-
-#
-# Calculate cargo dependencies.
-# This will always run, but only generate recipe.json with list of dependencies without
-# installing them.
-#
-FROM zenithdb/build:buster AS cargo-deps-inspect
-WORKDIR /zenith
-COPY . .
-RUN cargo chef prepare --recipe-path /zenith/recipe.json
-
-#
-# Build cargo dependencies.
-# This temp cantainner should be rebuilt only if recipe.json was changed.
-#
-FROM zenithdb/build:buster AS deps-build
-WORKDIR /zenith
-COPY --from=pg-build /zenith/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
-COPY --from=cargo-deps-inspect /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/
-COPY --from=cargo-deps-inspect /zenith/recipe.json recipe.json
-RUN ROCKSDB_LIB_DIR=/usr/lib/ cargo chef cook --release --recipe-path recipe.json
+RUN rm -rf postgres_install/build
 
 #
 # Build zenith binaries
 #
+# TODO: build cargo deps as separate layer. We used cargo-chef before but that was
+# net time waste in a lot of cases. Copying Cargo.lock with empty lib.rs should do the work.
+#
 FROM zenithdb/build:buster AS build
+
+ARG GIT_VERSION
+RUN if [ -z "$GIT_VERSION" ]; then echo "GIT_VERSION is reqired, use build_arg to pass it"; exit 1; fi
+
 WORKDIR /zenith
-COPY . .
-# Copy cached dependencies
 COPY --from=pg-build /zenith/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
-COPY --from=deps-build /zenith/target target
-COPY --from=deps-build /usr/local/cargo/ /usr/local/cargo/
-RUN cargo build --release
+
+COPY . .
+RUN GIT_VERSION=$GIT_VERSION cargo build --release
 
 #
 # Copy binaries to resulting image.
@@ -51,11 +37,11 @@ RUN cargo build --release
 FROM debian:buster-slim
 WORKDIR /data
 
-RUN apt-get update && apt-get -yq install librocksdb-dev libseccomp-dev openssl && \
+RUN apt-get update && apt-get -yq install libreadline-dev libseccomp-dev openssl ca-certificates && \
     mkdir zenith_install
 
 COPY --from=build /zenith/target/release/pageserver /usr/local/bin
-COPY --from=build /zenith/target/release/wal_acceptor /usr/local/bin
+COPY --from=build /zenith/target/release/safekeeper /usr/local/bin
 COPY --from=build /zenith/target/release/proxy /usr/local/bin
 COPY --from=pg-build /zenith/tmp_install postgres_install
 COPY docker-entrypoint.sh /docker-entrypoint.sh

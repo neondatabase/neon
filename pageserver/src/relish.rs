@@ -125,11 +125,7 @@ impl RelishTag {
 
     // convenience function to check if this relish is a normal relation.
     pub const fn is_relation(&self) -> bool {
-        if let RelishTag::Relation(_) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, RelishTag::Relation(_))
     }
 }
 
@@ -228,8 +224,3 @@ impl SlruKind {
         }
     }
 }
-
-pub const FIRST_NONREL_RELISH_TAG: RelishTag = RelishTag::Slru {
-    slru: SlruKind::Clog,
-    segno: 0,
-};

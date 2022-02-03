@@ -11,7 +11,7 @@
 //! data directory is compatible with a postgres binary. That includes
 //! a version number, configuration options that can be set at
 //! compilation time like the block size, and the platform's alignment
-//! and endianess information. (The PostgreSQL on-disk file format is
+//! and endianness information. (The PostgreSQL on-disk file format is
 //! not portable across platforms.)
 //!
 //! The control file is stored in the PostgreSQL data directory, as
@@ -58,7 +58,7 @@ impl ControlFileData {
         let expectedcrc = crc32c::crc32c(&buf[0..OFFSETOF_CRC]);
 
         // Use serde to deserialize the input as a ControlFileData struct.
-        let controlfile = ControlFileData::des(buf)?;
+        let controlfile = ControlFileData::des_prefix(buf)?;
 
         // Check the CRC
         if expectedcrc != controlfile.crc {

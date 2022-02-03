@@ -64,10 +64,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      # Use `env CARGO_INCREMENTAL=0` to mitigate https://github.com/rust-lang/rust/issues/91696 for rustc 1.57.0
       - name: Run cargo build
         run: |
-          cargo build --workspace --bins --examples --tests
+          env CARGO_INCREMENTAL=0 cargo build --workspace --bins --examples --tests
 
       - name: Run cargo test
         run: |
-          cargo test -- --nocapture --test-threads=1
+          env CARGO_INCREMENTAL=0 cargo test -- --nocapture --test-threads=1

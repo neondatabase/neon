@@ -19,40 +19,36 @@
 //! process, he cannot escape out of it.
 //!
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use log::*;
-use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use nix::poll::*;
+use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
-use std::io::Error;
+use std::io::{Error, ErrorKind};
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::time::timeout;
 use zenith_metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::nonblock::set_nonblock;
 use zenith_utils::zid::ZTenantId;
 
+use crate::config::PageServerConf;
 use crate::relish::*;
-use crate::repository::WALRecord;
-use crate::waldecoder::XlMultiXactCreate;
-use crate::waldecoder::XlXactParsedRecord;
-use crate::PageServerConf;
+use crate::repository::ZenithWalRecord;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
-use postgres_ffi::XLogRecord;
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -60,7 +56,7 @@ use postgres_ffi::XLogRecord;
 /// In Postgres `BufferTag` structure is used for exactly the same purpose.
 /// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
 ///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
 pub struct BufferTag {
     pub rel: RelTag,
     pub blknum: u32,
@@ -83,7 +79,7 @@ pub trait WalRedoManager: Send + Sync {
         blknum: u32,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: Vec<WALRecord>,
+        records: Vec<(Lsn, ZenithWalRecord)>,
     ) -> Result<Bytes, WalRedoError>;
 }
 
@@ -100,7 +96,7 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
         _blknum: u32,
         _lsn: Lsn,
         _base_img: Option<Bytes>,
-        _records: Vec<WALRecord>,
+        _records: Vec<(Lsn, ZenithWalRecord)>,
     ) -> Result<Bytes, WalRedoError> {
         Err(WalRedoError::InvalidState)
     }
@@ -140,18 +136,44 @@ pub struct PostgresRedoManager {
     tenantid: ZTenantId,
     conf: &'static PageServerConf,
 
-    runtime: tokio::runtime::Runtime,
     process: Mutex<Option<PostgresRedoProcess>>,
 }
 
-#[derive(Debug)]
-struct WalRedoRequest {
-    rel: RelishTag,
-    blknum: u32,
-    lsn: Lsn,
+/// Can this request be served by zenith redo funcitons
+/// or we need to pass it to wal-redo postgres process?
+fn can_apply_in_zenith(rec: &ZenithWalRecord) -> bool {
+    // Currently, we don't have bespoken Rust code to replay any
+    // Postgres WAL records. But everything else is handled in zenith.
+    #[allow(clippy::match_like_matches_macro)]
+    match rec {
+        ZenithWalRecord::Postgres {
+            will_init: _,
+            rec: _,
+        } => false,
+        _ => true,
+    }
+}
 
-    base_img: Option<Bytes>,
-    records: Vec<WALRecord>,
+fn check_forknum(rel: &RelishTag, expected_forknum: u8) -> bool {
+    if let RelishTag::Relation(RelTag {
+        forknum,
+        spcnode: _,
+        dbnode: _,
+        relnode: _,
+    }) = rel
+    {
+        *forknum == expected_forknum
+    } else {
+        false
+    }
+}
+
+fn check_slru_segno(rel: &RelishTag, expected_slru: SlruKind, expected_segno: u32) -> bool {
+    if let RelishTag::Slru { slru, segno } = rel {
+        *slru == expected_slru && *segno == expected_segno
+    } else {
+        false
+    }
 }
 
 /// An error happened in WAL redo
@@ -162,6 +184,8 @@ pub enum WalRedoError {
 
     #[error("cannot perform WAL redo now")]
     InvalidState,
+    #[error("cannot perform WAL redo for this request")]
+    InvalidRequest,
 }
 
 ///
@@ -180,43 +204,37 @@ impl WalRedoManager for PostgresRedoManager {
         blknum: u32,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: Vec<WALRecord>,
+        records: Vec<(Lsn, ZenithWalRecord)>,
     ) -> Result<Bytes, WalRedoError> {
-        let start_time;
-        let lock_time;
-        let end_time;
+        if records.is_empty() {
+            error!("invalid WAL redo request with no records");
+            return Err(WalRedoError::InvalidRequest);
+        }
 
-        let request = WalRedoRequest {
-            rel,
-            blknum,
-            lsn,
-            base_img,
-            records,
-        };
+        let mut img: Option<Bytes> = base_img;
+        let mut batch_zenith = can_apply_in_zenith(&records[0].1);
+        let mut batch_start = 0;
+        for i in 1..records.len() {
+            let rec_zenith = can_apply_in_zenith(&records[i].1);
 
-        start_time = Instant::now();
-        let result = {
-            let mut process_guard = self.process.lock().unwrap();
-            lock_time = Instant::now();
+            if rec_zenith != batch_zenith {
+                let result = if batch_zenith {
+                    self.apply_batch_zenith(rel, blknum, lsn, img, &records[batch_start..i])
+                } else {
+                    self.apply_batch_postgres(rel, blknum, lsn, img, &records[batch_start..i])
+                };
+                img = Some(result?);
 
-            // launch the WAL redo process on first use
-            if process_guard.is_none() {
-                let p = self
-                    .runtime
-                    .block_on(PostgresRedoProcess::launch(self.conf, &self.tenantid))?;
-                *process_guard = Some(p);
+                batch_zenith = rec_zenith;
+                batch_start = i;
             }
-            let process = (*process_guard).as_ref().unwrap();
-
-            self.runtime
-                .block_on(self.handle_apply_request(&process, &request))
-        };
-        end_time = Instant::now();
-
-        WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
-        WAL_REDO_TIME.observe(end_time.duration_since(lock_time).as_secs_f64());
-
-        result
+        }
+        // last batch
+        if batch_zenith {
+            self.apply_batch_zenith(rel, blknum, lsn, img, &records[batch_start..])
+        } else {
+            self.apply_batch_postgres(rel, blknum, lsn, img, &records[batch_start..])
+        }
     }
 }
 
@@ -225,17 +243,8 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
-        // We block on waiting for requests on the walredo request channel, but
-        // use async I/O to communicate with the child process. Initialize the
-        // runtime for the async part.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
-            runtime,
             tenantid,
             conf,
             process: Mutex::new(None),
@@ -243,194 +252,231 @@ impl PostgresRedoManager {
     }
 
     ///
-    /// Process one request for WAL redo.
+    /// Process one request for WAL redo using wal-redo postgres
     ///
-    async fn handle_apply_request(
+    fn apply_batch_postgres(
         &self,
-        process: &PostgresRedoProcess,
-        request: &WalRedoRequest,
+        rel: RelishTag,
+        blknum: u32,
+        lsn: Lsn,
+        base_img: Option<Bytes>,
+        records: &[(Lsn, ZenithWalRecord)],
     ) -> Result<Bytes, WalRedoError> {
-        let rel = request.rel;
-        let blknum = request.blknum;
-        let lsn = request.lsn;
-        let base_img = request.base_img.clone();
-        let records = &request.records;
-
-        let nrecords = records.len();
-
-        let start = Instant::now();
+        let start_time = Instant::now();
 
         let apply_result: Result<Bytes, Error>;
-        if let RelishTag::Relation(rel) = rel {
+
+        let mut process_guard = self.process.lock().unwrap();
+        let lock_time = Instant::now();
+
+        // launch the WAL redo process on first use
+        if process_guard.is_none() {
+            let p = PostgresRedoProcess::launch(self.conf, &self.tenantid)?;
+            *process_guard = Some(p);
+        }
+        let process = process_guard.as_mut().unwrap();
+
+        WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
+
+        let result = if let RelishTag::Relation(rel) = rel {
             // Relational WAL records are applied using wal-redo-postgres
             let buf_tag = BufferTag { rel, blknum };
-            apply_result = process.apply_wal_records(buf_tag, base_img, records).await;
+            apply_result = process.apply_wal_records(buf_tag, base_img, records);
+
+            apply_result.map_err(WalRedoError::IoError)
         } else {
-            // Non-relational WAL records are handled here, with custom code that has the
-            // same effects as the corresponding Postgres WAL redo function.
-            const ZERO_PAGE: [u8; 8192] = [0u8; 8192];
-            let mut page = BytesMut::new();
-            if let Some(fpi) = base_img {
-                // If full-page image is provided, then use it...
-                page.extend_from_slice(&fpi[..]);
-            } else {
-                // otherwise initialize page with zeros
-                page.extend_from_slice(&ZERO_PAGE);
-            }
-            // Apply all collected WAL records
-            for record in records {
-                let mut buf = record.rec.clone();
+            error!("unexpected non-relation relish: {:?}", rel);
+            Err(WalRedoError::InvalidRequest)
+        };
 
-                WAL_REDO_RECORD_COUNTER.inc();
-
-                // 1. Parse XLogRecord struct
-                // FIXME: refactor to avoid code duplication.
-                let xlogrec = XLogRecord::from_bytes(&mut buf);
-
-                //move to main data
-                // TODO probably, we should store some records in our special format
-                // to avoid this weird parsing on replay
-                let skip = (record.main_data_offset - pg_constants::SIZEOF_XLOGRECORD) as usize;
-                if buf.remaining() > skip {
-                    buf.advance(skip);
-                }
-
-                if xlogrec.xl_rmid == pg_constants::RM_XACT_ID {
-                    // Transaction manager stuff
-                    let rec_segno = match rel {
-                        RelishTag::Slru { slru, segno } => {
-                            if slru != SlruKind::Clog {
-                                panic!("Not valid XACT relish tag {:?}", rel);
-                            }
-                            segno
-                        }
-                        _ => panic!("Not valid XACT relish tag {:?}", rel),
-                    };
-                    let parsed_xact =
-                        XlXactParsedRecord::decode(&mut buf, xlogrec.xl_xid, xlogrec.xl_info);
-                    if parsed_xact.info == pg_constants::XLOG_XACT_COMMIT
-                        || parsed_xact.info == pg_constants::XLOG_XACT_COMMIT_PREPARED
-                    {
-                        transaction_id_set_status(
-                            parsed_xact.xid,
-                            pg_constants::TRANSACTION_STATUS_COMMITTED,
-                            &mut page,
-                        );
-                        for subxact in &parsed_xact.subxacts {
-                            let pageno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
-                            let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                            let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                            // only update xids on the requested page
-                            if rec_segno == segno && blknum == rpageno {
-                                transaction_id_set_status(
-                                    *subxact,
-                                    pg_constants::TRANSACTION_STATUS_SUB_COMMITTED,
-                                    &mut page,
-                                );
-                            }
-                        }
-                    } else if parsed_xact.info == pg_constants::XLOG_XACT_ABORT
-                        || parsed_xact.info == pg_constants::XLOG_XACT_ABORT_PREPARED
-                    {
-                        transaction_id_set_status(
-                            parsed_xact.xid,
-                            pg_constants::TRANSACTION_STATUS_ABORTED,
-                            &mut page,
-                        );
-                        for subxact in &parsed_xact.subxacts {
-                            let pageno = *subxact as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
-                            let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                            let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                            // only update xids on the requested page
-                            if rec_segno == segno && blknum == rpageno {
-                                transaction_id_set_status(
-                                    *subxact,
-                                    pg_constants::TRANSACTION_STATUS_ABORTED,
-                                    &mut page,
-                                );
-                            }
-                        }
-                    }
-                } else if xlogrec.xl_rmid == pg_constants::RM_MULTIXACT_ID {
-                    // Multixact operations
-                    let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-                    if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
-                        let xlrec = XlMultiXactCreate::decode(&mut buf);
-                        if let RelishTag::Slru {
-                            slru,
-                            segno: rec_segno,
-                        } = rel
-                        {
-                            if slru == SlruKind::MultiXactMembers {
-                                for i in 0..xlrec.nmembers {
-                                    let pageno =
-                                        i / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
-                                    let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                                    let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                                    if segno == rec_segno && rpageno == blknum {
-                                        // update only target block
-                                        let offset = xlrec.moff + i;
-                                        let memberoff = mx_offset_to_member_offset(offset);
-                                        let flagsoff = mx_offset_to_flags_offset(offset);
-                                        let bshift = mx_offset_to_flags_bitshift(offset);
-                                        let mut flagsval =
-                                            LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
-                                        flagsval &= !(((1
-                                            << pg_constants::MXACT_MEMBER_BITS_PER_XACT)
-                                            - 1)
-                                            << bshift);
-                                        flagsval |= xlrec.members[i as usize].status << bshift;
-                                        LittleEndian::write_u32(
-                                            &mut page[flagsoff..flagsoff + 4],
-                                            flagsval,
-                                        );
-                                        LittleEndian::write_u32(
-                                            &mut page[memberoff..memberoff + 4],
-                                            xlrec.members[i as usize].xid,
-                                        );
-                                    }
-                                }
-                            } else {
-                                // Multixact offsets SLRU
-                                let offs = (xlrec.mid
-                                    % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32
-                                    * 4) as usize;
-                                LittleEndian::write_u32(&mut page[offs..offs + 4], xlrec.moff);
-                            }
-                        } else {
-                            panic!();
-                        }
-                    } else {
-                        panic!();
-                    }
-                }
-            }
-
-            apply_result = Ok::<Bytes, Error>(page.freeze());
-        }
-
-        let duration = start.elapsed();
-
-        let result: Result<Bytes, WalRedoError>;
-
+        let end_time = Instant::now();
+        let duration = end_time.duration_since(lock_time);
+        WAL_REDO_TIME.observe(duration.as_secs_f64());
         debug!(
-            "applied {} WAL records in {} ms to reconstruct page image at LSN {}",
-            nrecords,
-            duration.as_millis(),
+            "postgres applied {} WAL records in {} us to reconstruct page image at LSN {}",
+            records.len(),
+            duration.as_micros(),
             lsn
         );
 
-        if let Err(e) = apply_result {
-            error!("could not apply WAL records: {}", e);
-            result = Err(WalRedoError::IoError(e));
-        } else {
-            let img = apply_result.unwrap();
+        // If something went wrong, don't try to reuse the process. Kill it, and
+        // next request will launch a new one.
+        if result.is_err() {
+            let process = process_guard.take().unwrap();
+            process.kill();
+        }
+        result
+    }
 
-            result = Ok(img);
+    ///
+    /// Process a batch of WAL records using bespoken Zenith code.
+    ///
+    fn apply_batch_zenith(
+        &self,
+        rel: RelishTag,
+        blknum: u32,
+        lsn: Lsn,
+        base_img: Option<Bytes>,
+        records: &[(Lsn, ZenithWalRecord)],
+    ) -> Result<Bytes, WalRedoError> {
+        let start_time = Instant::now();
+
+        let mut page = BytesMut::new();
+        if let Some(fpi) = base_img {
+            // If full-page image is provided, then use it...
+            page.extend_from_slice(&fpi[..]);
+        } else {
+            // All the current WAL record types that we can handle require a base image.
+            error!("invalid zenith WAL redo request with no base image");
+            return Err(WalRedoError::InvalidRequest);
         }
 
-        // The caller is responsible for sending the response
-        result
+        // Apply all the WAL records in the batch
+        for (record_lsn, record) in records.iter() {
+            self.apply_record_zenith(rel, blknum, &mut page, *record_lsn, record)?;
+        }
+        // Success!
+        let end_time = Instant::now();
+        let duration = end_time.duration_since(start_time);
+        WAL_REDO_TIME.observe(duration.as_secs_f64());
+
+        debug!(
+            "zenith applied {} WAL records in {} ms to reconstruct page image at LSN {}",
+            records.len(),
+            duration.as_micros(),
+            lsn
+        );
+
+        Ok(page.freeze())
+    }
+
+    fn apply_record_zenith(
+        &self,
+        rel: RelishTag,
+        blknum: u32,
+        page: &mut BytesMut,
+        _record_lsn: Lsn,
+        record: &ZenithWalRecord,
+    ) -> Result<(), WalRedoError> {
+        match record {
+            ZenithWalRecord::Postgres {
+                will_init: _,
+                rec: _,
+            } => panic!("tried to pass postgres wal record to zenith WAL redo"),
+            ZenithWalRecord::ClearVisibilityMapFlags { heap_blkno, flags } => {
+                // Calculate the VM block and offset that corresponds to the heap block.
+                let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(*heap_blkno);
+                let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(*heap_blkno);
+                let map_offset = pg_constants::HEAPBLK_TO_OFFSET(*heap_blkno);
+
+                // Check that we're modifying the correct VM block.
+                assert!(
+                    check_forknum(&rel, pg_constants::VISIBILITYMAP_FORKNUM),
+                    "ClearVisibilityMapFlags record on unexpected rel {:?}",
+                    rel
+                );
+                assert!(map_block == blknum);
+
+                // equivalent to PageGetContents(page)
+                let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+
+                let mask: u8 = flags << map_offset;
+                map[map_byte as usize] &= !mask;
+            }
+            // Non-relational WAL records are handled here, with custom code that has the
+            // same effects as the corresponding Postgres WAL redo function.
+            ZenithWalRecord::ClogSetCommitted { xids } => {
+                for &xid in xids {
+                    let pageno = xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                    let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+
+                    // Check that we're modifying the correct CLOG block.
+                    assert!(
+                        check_slru_segno(&rel, SlruKind::Clog, expected_segno),
+                        "ClogSetCommitted record for XID {} with unexpected rel {:?}",
+                        xid,
+                        rel
+                    );
+                    assert!(blknum == expected_blknum);
+
+                    transaction_id_set_status(
+                        xid,
+                        pg_constants::TRANSACTION_STATUS_COMMITTED,
+                        page,
+                    );
+                }
+            }
+            ZenithWalRecord::ClogSetAborted { xids } => {
+                for &xid in xids {
+                    let pageno = xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                    let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+
+                    // Check that we're modifying the correct CLOG block.
+                    assert!(
+                        check_slru_segno(&rel, SlruKind::Clog, expected_segno),
+                        "ClogSetCommitted record for XID {} with unexpected rel {:?}",
+                        xid,
+                        rel
+                    );
+                    assert!(blknum == expected_blknum);
+
+                    transaction_id_set_status(xid, pg_constants::TRANSACTION_STATUS_ABORTED, page);
+                }
+            }
+            ZenithWalRecord::MultixactOffsetCreate { mid, moff } => {
+                // Compute the block and offset to modify.
+                // See RecordNewMultiXact in PostgreSQL sources.
+                let pageno = mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+                let entryno = mid % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+                let offset = (entryno * 4) as usize;
+
+                // Check that we're modifying the correct multixact-offsets block.
+                let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                assert!(
+                    check_slru_segno(&rel, SlruKind::MultiXactOffsets, expected_segno),
+                    "MultiXactOffsetsCreate record for multi-xid {} with unexpected rel {:?}",
+                    mid,
+                    rel
+                );
+                assert!(blknum == expected_blknum);
+
+                LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
+            }
+            ZenithWalRecord::MultixactMembersCreate { moff, members } => {
+                for (i, member) in members.iter().enumerate() {
+                    let offset = moff + i as u32;
+
+                    // Compute the block and offset to modify.
+                    // See RecordNewMultiXact in PostgreSQL sources.
+                    let pageno = offset / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32;
+                    let memberoff = mx_offset_to_member_offset(offset);
+                    let flagsoff = mx_offset_to_flags_offset(offset);
+                    let bshift = mx_offset_to_flags_bitshift(offset);
+
+                    // Check that we're modifying the correct multixact-members block.
+                    let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    assert!(
+                        check_slru_segno(&rel, SlruKind::MultiXactMembers, expected_segno),
+                        "MultiXactMembersCreate record at offset {} with unexpected rel {:?}",
+                        moff,
+                        rel
+                    );
+                    assert!(blknum == expected_blknum);
+
+                    let mut flagsval = LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
+                    flagsval &= !(((1 << pg_constants::MXACT_MEMBER_BITS_PER_XACT) - 1) << bshift);
+                    flagsval |= member.status << bshift;
+                    LittleEndian::write_u32(&mut page[flagsoff..flagsoff + 4], flagsval);
+                    LittleEndian::write_u32(&mut page[memberoff..memberoff + 4], member.xid);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -438,28 +484,27 @@ impl PostgresRedoManager {
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
-    stdin: RefCell<ChildStdin>,
-    stdout: RefCell<ChildStdout>,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
 }
 
 impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    async fn launch(
-        conf: &PageServerConf,
-        tenantid: &ZTenantId,
-    ) -> Result<PostgresRedoProcess, Error> {
+    fn launch(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
-        let datadir = conf.tenant_path(&tenantid).join("wal-redo-datadir");
+        let datadir = conf.tenant_path(tenantid).join("wal-redo-datadir");
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
             info!("directory {:?} exists, removing", &datadir);
             if let Err(e) = fs::remove_dir_all(&datadir) {
-                error!("could not remove old wal-redo-datadir: {:?}", e);
+                error!("could not remove old wal-redo-datadir: {:#}", e);
             }
         }
         info!("running initdb in {:?}", datadir.display());
@@ -470,7 +515,6 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
             .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
             .output()
-            .await
             .expect("failed to execute initdb");
 
         if !initdb.status.success() {
@@ -507,110 +551,147 @@ impl PostgresRedoProcess {
             datadir.display()
         );
 
-        let stdin = child.stdin.take().expect("failed to open child's stdin");
-        let stderr = child.stderr.take().expect("failed to open child's stderr");
-        let stdout = child.stdout.take().expect("failed to open child's stdout");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
 
-        // This async block reads the child's stderr, and forwards it to the logger
-        let f_stderr = async {
-            let mut stderr_buffered = tokio::io::BufReader::new(stderr);
-
-            let mut line = String::new();
-            loop {
-                let res = stderr_buffered.read_line(&mut line).await;
-                if res.is_err() {
-                    debug!("could not convert line to utf-8");
-                    continue;
-                }
-                if res.unwrap() == 0 {
-                    break;
-                }
-                error!("wal-redo-postgres: {}", line.trim());
-                line.clear();
-            }
-            Ok::<(), Error>(())
-        };
-        tokio::spawn(f_stderr);
+        set_nonblock(stdin.as_raw_fd())?;
+        set_nonblock(stdout.as_raw_fd())?;
+        set_nonblock(stderr.as_raw_fd())?;
 
         Ok(PostgresRedoProcess {
-            stdin: RefCell::new(stdin),
-            stdout: RefCell::new(stdout),
+            child,
+            stdin,
+            stdout,
+            stderr,
         })
+    }
+
+    fn kill(mut self) {
+        let _ = self.child.kill();
+        if let Ok(exit_status) = self.child.wait() {
+            error!("wal-redo-postgres exited with code {}", exit_status);
+        }
+        drop(self);
     }
 
     //
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
-    async fn apply_wal_records(
-        &self,
+    fn apply_wal_records(
+        &mut self,
         tag: BufferTag,
         base_img: Option<Bytes>,
-        records: &[WALRecord],
+        records: &[(Lsn, ZenithWalRecord)],
     ) -> Result<Bytes, std::io::Error> {
-        let mut stdin = self.stdin.borrow_mut();
-        let mut stdout = self.stdout.borrow_mut();
+        // Serialize all the messages to send the WAL redo process first.
+        //
+        // This could be problematic if there are millions of records to replay,
+        // but in practice the number of records is usually so small that it doesn't
+        // matter, and it's better to keep this code simple.
+        let mut writebuf: Vec<u8> = Vec::new();
+        build_begin_redo_for_block_msg(tag, &mut writebuf);
+        if let Some(img) = base_img {
+            build_push_page_msg(tag, &img, &mut writebuf);
+        }
+        for (lsn, rec) in records.iter() {
+            if let ZenithWalRecord::Postgres {
+                will_init: _,
+                rec: postgres_rec,
+            } = rec
+            {
+                build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
+            } else {
+                panic!("tried to pass zenith wal record to postgres WAL redo");
+            }
+        }
+        build_get_page_msg(tag, &mut writebuf);
+        WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
+
+        // The input is now in 'writebuf'. Do a blind write first, writing as much as
+        // we can, before calling poll(). That skips one call to poll() if the stdin is
+        // already available for writing, which it almost certainly is because the
+        // process is idle.
+        let mut nwrite = self.stdin.write(&writebuf)?;
+
+        // We expect the WAL redo process to respond with an 8k page image. We read it
+        // into this buffer.
+        let mut resultbuf = vec![0; pg_constants::BLCKSZ.into()];
+        let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
+
+        // Prepare for calling poll()
+        let mut pollfds = [
+            PollFd::new(self.stdout.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(self.stderr.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(self.stdin.as_raw_fd(), PollFlags::POLLOUT),
+        ];
 
         // We do three things simultaneously: send the old base image and WAL records to
         // the child process's stdin, read the result from child's stdout, and forward any logging
         // information that the child writes to its stderr to the page server's log.
-        //
-        // 'f_stdin' handles writing the base image and WAL records to the child process.
-        // 'f_stdout' below reads the result back. And 'f_stderr', which was spawned into the
-        // tokio runtime in the 'launch' function already, forwards the logging.
-        let f_stdin = async {
-            // Send base image, if any. (If the record initializes the page, previous page
-            // version is not needed.)
-            timeout(
-                TIMEOUT,
-                stdin.write_all(&build_begin_redo_for_block_msg(tag)),
-            )
-            .await??;
-            if base_img.is_some() {
-                timeout(
-                    TIMEOUT,
-                    stdin.write_all(&build_push_page_msg(tag, base_img.unwrap())),
-                )
-                .await??;
+        while nresult < pg_constants::BLCKSZ.into() {
+            // If we have more data to write, wake up if 'stdin' becomes writeable or
+            // we have data to read. Otherwise only wake up if there's data to read.
+            let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
+            let n = nix::poll::poll(&mut pollfds[0..nfds], TIMEOUT.as_millis() as i32)?;
+
+            if n == 0 {
+                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
             }
 
-            // Send WAL records.
-            for rec in records.iter() {
-                let r = rec.clone();
+            // If we have some messages in stderr, forward them to the log.
+            let err_revents = pollfds[1].revents().unwrap();
+            if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                let mut errbuf: [u8; 16384] = [0; 16384];
+                let n = self.stderr.read(&mut errbuf)?;
 
-                WAL_REDO_RECORD_COUNTER.inc();
+                // The message might not be split correctly into lines here. But this is
+                // good enough, the important thing is to get the message to the log.
+                if n > 0 {
+                    error!(
+                        "wal-redo-postgres: {}",
+                        String::from_utf8_lossy(&errbuf[0..n])
+                    );
 
-                stdin
-                    .write_all(&build_apply_record_msg(r.lsn, r.rec))
-                    .await?;
-
-                //debug!("sent WAL record to wal redo postgres process ({:X}/{:X}",
-                //       r.lsn >> 32, r.lsn & 0xffff_ffff);
+                    // To make sure we capture all log from the process if it fails, keep
+                    // reading from the stderr, before checking the stdout.
+                    continue;
+                }
+            } else if err_revents.contains(PollFlags::POLLHUP) {
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "WAL redo process closed its stderr unexpectedly",
+                ));
             }
-            //debug!("sent {} WAL records to wal redo postgres process ({:X}/{:X}",
-            //       records.len(), lsn >> 32, lsn & 0xffff_ffff);
 
-            // Send GetPage command to get the result back
-            timeout(TIMEOUT, stdin.write_all(&build_get_page_msg(tag))).await??;
-            timeout(TIMEOUT, stdin.flush()).await??;
-            //debug!("sent GetPage for {}", tag.blknum);
-            Ok::<(), Error>(())
-        };
+            // If we have more data to write and 'stdin' is writeable, do write.
+            if nwrite < writebuf.len() {
+                let in_revents = pollfds[2].revents().unwrap();
+                if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
+                    nwrite += self.stdin.write(&writebuf[nwrite..])?;
+                } else if in_revents.contains(PollFlags::POLLHUP) {
+                    // We still have more data to write, but the process closed the pipe.
+                    return Err(Error::new(
+                        ErrorKind::BrokenPipe,
+                        "WAL redo process closed its stdin unexpectedly",
+                    ));
+                }
+            }
 
-        // Read back new page image
-        let f_stdout = async {
-            let mut buf = [0u8; 8192];
+            // If we have some data in stdout, read it to the result buffer.
+            let out_revents = pollfds[0].revents().unwrap();
+            if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                nresult += self.stdout.read(&mut resultbuf[nresult..])?;
+            } else if out_revents.contains(PollFlags::POLLHUP) {
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "WAL redo process closed its stdout unexpectedly",
+                ));
+            }
+        }
 
-            timeout(TIMEOUT, stdout.read_exact(&mut buf)).await??;
-            //debug!("got response for {}", tag.blknum);
-            Ok::<[u8; 8192], Error>(buf)
-        };
-
-        let res = tokio::try_join!(f_stdout, f_stdin)?;
-
-        let buf = res.0;
-
-        Ok::<Bytes, Error>(Bytes::from(std::vec::Vec::from(buf)))
+        Ok(Bytes::from(resultbuf))
     }
 }
 
@@ -618,81 +699,42 @@ impl PostgresRedoProcess {
 // process. See vendor/postgres/src/backend/tcop/zenith_wal_redo.c for
 // explanation of the protocol.
 
-fn build_begin_redo_for_block_msg(tag: BufferTag) -> Bytes {
+fn build_begin_redo_for_block_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     let len = 4 + 1 + 4 * 4;
-    let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'B');
     buf.put_u32(len as u32);
 
-    // FIXME: this is a temporary hack that should go away when we refactor
-    // the postgres protocol serialization + handlers.
-    //
-    // BytesMut is a dynamic growable buffer, used a lot in tokio code but
-    // not in the std library. To write to a BytesMut from a serde serializer,
-    // we need to either:
-    // - pre-allocate the required buffer space. This is annoying because we
-    //   shouldn't care what the exact serialized size is-- that's the
-    //   serializer's job.
-    // - Or, we need to create a temporary "writer" (which implements the
-    //   `Write` trait). It's a bit awkward, because the writer consumes the
-    //   underlying BytesMut, and we need to extract it later with
-    //   `into_inner`.
-    let mut writer = buf.writer();
-    tag.ser_into(&mut writer)
+    tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
-    let buf = writer.into_inner();
-
-    debug_assert!(buf.len() == 1 + len);
-
-    buf.freeze()
 }
 
-fn build_push_page_msg(tag: BufferTag, base_img: Bytes) -> Bytes {
+fn build_push_page_msg(tag: BufferTag, base_img: &[u8], buf: &mut Vec<u8>) {
     assert!(base_img.len() == 8192);
 
     let len = 4 + 1 + 4 * 4 + base_img.len();
-    let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'P');
     buf.put_u32(len as u32);
-    let mut writer = buf.writer();
-    tag.ser_into(&mut writer)
+    tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
-    let mut buf = writer.into_inner();
     buf.put(base_img);
-
-    debug_assert!(buf.len() == 1 + len);
-
-    buf.freeze()
 }
 
-fn build_apply_record_msg(endlsn: Lsn, rec: Bytes) -> Bytes {
+fn build_apply_record_msg(endlsn: Lsn, rec: &[u8], buf: &mut Vec<u8>) {
     let len = 4 + 8 + rec.len();
-    let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'A');
     buf.put_u32(len as u32);
     buf.put_u64(endlsn.0);
     buf.put(rec);
-
-    debug_assert!(buf.len() == 1 + len);
-
-    buf.freeze()
 }
 
-fn build_get_page_msg(tag: BufferTag) -> Bytes {
+fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     let len = 4 + 1 + 4 * 4;
-    let mut buf = BytesMut::with_capacity(1 + len);
 
     buf.put_u8(b'G');
     buf.put_u32(len as u32);
-    let mut writer = buf.writer();
-    tag.ser_into(&mut writer)
+    tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
-    let buf = writer.into_inner();
-
-    debug_assert!(buf.len() == 1 + len);
-
-    buf.freeze()
 }

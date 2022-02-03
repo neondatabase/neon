@@ -1,7 +1,6 @@
 use bytes::Buf;
 use hyper::{header, Body, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json;
 
 use super::error::ApiError;
 

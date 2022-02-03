@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use hyper::{header, Body, Response, StatusCode};
-use serde::Serialize;
-use serde_json;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -45,7 +44,7 @@ impl ApiError {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct HttpErrorBody {
     pub msg: String,
 }
@@ -56,10 +55,10 @@ impl HttpErrorBody {
     }
 
     pub fn response_from_msg_and_status(msg: String, status: StatusCode) -> Response<Body> {
-        HttpErrorBody { msg }.into_response(status)
+        HttpErrorBody { msg }.to_response(status)
     }
 
-    pub fn into_response(&self, status: StatusCode) -> Response<Body> {
+    pub fn to_response(&self, status: StatusCode) -> Response<Body> {
         Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, "application/json")
@@ -70,7 +69,7 @@ impl HttpErrorBody {
 }
 
 pub async fn handler(err: routerify::RouteError) -> Response<Body> {
-    log::error!("{}", err);
+    tracing::error!("Error processing HTTP request: {:?}", err);
     err.downcast::<ApiError>()
         .expect("handler should always return api error")
         .into_response()

@@ -1,17 +1,21 @@
-from fixtures.zenith_fixtures import PostgresFactory, ZenithPageserver
+from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures")
+
 
 #
 # Test that the VM bit is cleared correctly at a HEAP_DELETE and
 # HEAP_UPDATE record.
 #
-def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, pg_bin, zenith_cli, base_dir):
-    # Create a branch for us
-    zenith_cli.run(["branch", "test_vm_bit_clear", "empty"])
-    pg = postgres.create_start('test_vm_bit_clear')
+def test_vm_bit_clear(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
 
-    print("postgres is running on 'test_vm_bit_clear' branch")
+    # Create a branch for us
+    env.zenith_cli(["branch", "test_vm_bit_clear", "empty"])
+    pg = env.postgres.create_start('test_vm_bit_clear')
+
+    log.info("postgres is running on 'test_vm_bit_clear' branch")
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
@@ -32,7 +36,7 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     cur.execute('UPDATE vmtest_update SET id = 5000 WHERE id = 1')
 
     # Branch at this point, to test that later
-    zenith_cli.run(["branch", "test_vm_bit_clear_new", "test_vm_bit_clear"])
+    env.zenith_cli(["branch", "test_vm_bit_clear_new", "test_vm_bit_clear"])
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server
@@ -48,12 +52,11 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     ''')
 
     cur.execute('SELECT * FROM vmtest_delete WHERE id = 1')
-    assert(cur.fetchall() == []);
+    assert (cur.fetchall() == [])
     cur.execute('SELECT * FROM vmtest_update WHERE id = 1')
-    assert(cur.fetchall() == []);
+    assert (cur.fetchall() == [])
 
     cur.close()
-
 
     # Check the same thing on the branch that we created right after the DELETE
     #
@@ -61,9 +64,9 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     # a dirty VM page is evicted. If the VM bit was not correctly cleared by the
     # earlier WAL record, the full-page image hides the problem. Starting a new
     # server at the right point-in-time avoids that full-page image.
-    pg_new = postgres.create_start('test_vm_bit_clear_new')
+    pg_new = env.postgres.create_start('test_vm_bit_clear_new')
 
-    print("postgres is running on 'test_vm_bit_clear_new' branch")
+    log.info("postgres is running on 'test_vm_bit_clear_new' branch")
     pg_new_conn = pg_new.connect()
     cur_new = pg_new_conn.cursor()
 
@@ -74,6 +77,6 @@ def test_vm_bit_clear(pageserver: ZenithPageserver, postgres: PostgresFactory, p
     ''')
 
     cur_new.execute('SELECT * FROM vmtest_delete WHERE id = 1')
-    assert(cur_new.fetchall() == []);
+    assert (cur_new.fetchall() == [])
     cur_new.execute('SELECT * FROM vmtest_update WHERE id = 1')
-    assert(cur_new.fetchall() == []);
+    assert (cur_new.fetchall() == [])

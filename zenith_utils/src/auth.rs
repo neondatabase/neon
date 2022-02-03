@@ -1,6 +1,6 @@
 // For details about authentication see docs/authentication.md
 // TODO there are two issues for our use case in jsonwebtoken library which will be resolved in next release
-// The fisrt one is that there is no way to disable expiration claim, but it can be excluded from validation, so use this as a workaround for now.
+// The first one is that there is no way to disable expiration claim, but it can be excluded from validation, so use this as a workaround for now.
 // Relevant issue: https://github.com/Keats/jsonwebtoken/issues/190
 // The second one is that we wanted to use ed25519 keys, but they are also not supported until next version. So we go with RSA keys for now.
 // Relevant issue: https://github.com/Keats/jsonwebtoken/issues/162
@@ -8,7 +8,8 @@
 use hex::{self, FromHex};
 use serde::de::Error;
 use serde::{self, Deserializer, Serializer};
-use std::{fs, path::PathBuf};
+use std::fs;
+use std::path::Path;
 
 use anyhow::{bail, Result};
 use jsonwebtoken::{
@@ -43,8 +44,8 @@ where
 {
     let opt: Option<String> = Option::deserialize(deserializer)?;
     match opt {
-        Some(tid) => return Ok(Some(ZTenantId::from_hex(tid).map_err(Error::custom)?)),
-        None => return Ok(None),
+        Some(tid) => Ok(Some(ZTenantId::from_hex(tid).map_err(Error::custom)?)),
+        None => Ok(None),
     }
 }
 
@@ -91,7 +92,7 @@ pub struct JwtAuth {
 }
 
 impl JwtAuth {
-    pub fn new<'a>(decoding_key: DecodingKey<'a>) -> Self {
+    pub fn new(decoding_key: DecodingKey<'_>) -> Self {
         Self {
             decoding_key: decoding_key.into_static(),
             validation: Validation {
@@ -102,9 +103,9 @@ impl JwtAuth {
         }
     }
 
-    pub fn from_key_path(key_path: &PathBuf) -> Result<Self> {
-        let public_key = fs::read_to_string(key_path)?;
-        Ok(Self::new(DecodingKey::from_rsa_pem(public_key.as_bytes())?))
+    pub fn from_key_path(key_path: &Path) -> Result<Self> {
+        let public_key = fs::read(key_path)?;
+        Ok(Self::new(DecodingKey::from_rsa_pem(&public_key)?))
     }
 
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
@@ -113,8 +114,7 @@ impl JwtAuth {
 }
 
 // this function is used only for testing purposes in CLI e g generate tokens during init
-pub fn encode_from_key_path(claims: &Claims, key_path: &PathBuf) -> Result<String> {
-    let key_data = fs::read_to_string(key_path)?;
-    let key = EncodingKey::from_rsa_pem(&key_data.as_bytes())?;
+pub fn encode_from_key_file(claims: &Claims, key_data: &[u8]) -> Result<String> {
+    let key = EncodingKey::from_rsa_pem(key_data)?;
     Ok(encode(&Header::new(JWT_ALGORITHM), claims, &key)?)
 }

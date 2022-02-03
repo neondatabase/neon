@@ -1,0 +1,99 @@
+name: benchmarking
+
+on:
+  # uncomment to run on push for debugging your PR
+  # push:
+  #   branches: [ mybranch ]
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:  '36 7 * * *' # run once a day, timezone is utc
+
+  workflow_dispatch: # adds ability to run this manually
+
+jobs:
+  bench:
+    # this workflow runs on self hosteed runner
+    # it's environment is quite different from usual guthub runner
+    # probably the most important difference is that it doesnt start from clean workspace each time
+    # e g if you install system packages they are not cleaned up since you install them directly in host machine
+    # not a container or something
+    # See documentation for more info: https://docs.github.com/en/actions/hosting-your-own-runners/about-self-hosted-runners
+    runs-on: [self-hosted, zenith-benchmarker]
+
+    env:
+      PG_BIN: "/usr/pgsql-13/bin"
+
+    steps:
+    - name: Checkout zenith repo
+      uses: actions/checkout@v2
+
+    # actions/setup-python@v2 is not working correctly on self-hosted runners
+    # see https://github.com/actions/setup-python/issues/162
+    # and probably https://github.com/actions/setup-python/issues/162#issuecomment-865387976 in particular
+    # so the simplest solution to me is to use already installed system python and spin virtualenvs for job runs.
+    # there is Python 3.7.10 already installed on the machine so use it to install poetry and then use poetry's virtuealenvs
+    - name: Install poetry & deps
+      run: |
+        python3 -m pip install --upgrade poetry wheel
+        # since pip/poetry caches are reused there shouldn't be any troubles with install every time
+        poetry install
+
+    - name: Show versions
+      run: |
+        echo Python
+        python3 --version
+        poetry run python3 --version
+        echo Pipenv
+        poetry --version
+        echo Pgbench
+        $PG_BIN/pgbench --version
+
+    # FIXME cluster setup is skipped due to various changes in console API
+    # for now pre created cluster is used. When API gain some stability
+    # after massive changes dynamic cluster setup will be revived.
+    # So use pre created cluster. It needs to be started manually, but stop is automatic after 5 minutes of inactivity
+    - name: Setup cluster
+      env:
+        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
+      shell: bash
+      run: |
+        set -e
+
+        echo "Starting cluster"
+        # wake up the cluster
+        $PG_BIN/psql $BENCHMARK_CONNSTR -c "SELECT 1"
+
+    - name: Run benchmark
+      # pgbench is installed system wide from official repo
+      # https://download.postgresql.org/pub/repos/yum/13/redhat/rhel-7-x86_64/
+      # via
+      # sudo tee /etc/yum.repos.d/pgdg.repo<<EOF
+      # [pgdg13]
+      # name=PostgreSQL 13 for RHEL/CentOS 7 - x86_64
+      # baseurl=https://download.postgresql.org/pub/repos/yum/13/redhat/rhel-7-x86_64/
+      # enabled=1
+      # gpgcheck=0
+      # EOF
+      # sudo yum makecache
+      # sudo yum install postgresql13-contrib
+      # actual binaries are located in /usr/pgsql-13/bin/
+      env:
+        TEST_PG_BENCH_TRANSACTIONS_MATRIX: "5000,10000,20000"
+        TEST_PG_BENCH_SCALES_MATRIX: "10,15"
+        PLATFORM: "zenith-staging"
+        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
+        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+      run: |
+        mkdir -p perf-report-staging
+        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging
+
+    - name: Submit result
+      env:
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+      run: |
+        REPORT_FROM=$(realpath perf-report-staging) REPORT_TO=staging scripts/generate_and_push_perf_report.sh

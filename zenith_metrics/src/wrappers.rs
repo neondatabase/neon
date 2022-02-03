@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(total, stream.len());
     }
 
-    // This mimicks the constraints of std::thread::spawn
+    // This mimics the constraints of std::thread::spawn
     fn assert_send_sync(_x: impl Sync + Send + 'static) {}
 
     #[test]

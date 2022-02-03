@@ -7,6 +7,8 @@
 //! comments on them.
 //!
 
+use crate::PageHeaderData;
+
 //
 // From pg_tablespace_d.h
 //
@@ -32,6 +34,14 @@ pub const BLCKSZ: u16 = 8192;
 pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 
 //
+// From bufpage.h
+//
+
+// Assumes 8 byte alignment
+const SIZEOF_PAGE_HEADER_DATA: usize = std::mem::size_of::<PageHeaderData>();
+pub const MAXALIGN_SIZE_OF_PAGE_HEADER_DATA: usize = (SIZEOF_PAGE_HEADER_DATA + 7) & !7;
+
+//
 // constants from clog.h
 //
 pub const CLOG_XACTS_PER_BYTE: u32 = 4;
@@ -39,19 +49,36 @@ pub const CLOG_XACTS_PER_PAGE: u32 = BLCKSZ as u32 * CLOG_XACTS_PER_BYTE;
 pub const CLOG_BITS_PER_XACT: u8 = 2;
 pub const CLOG_XACT_BITMASK: u8 = (1 << CLOG_BITS_PER_XACT) - 1;
 
-//
-// Constants from visbilitymap.h
-//
-pub const SIZE_OF_PAGE_HEADER: u16 = 24;
-pub const BITS_PER_HEAPBLOCK: u16 = 2;
-pub const HEAPBLOCKS_PER_PAGE: u16 = (BLCKSZ - SIZE_OF_PAGE_HEADER) * 8 / BITS_PER_HEAPBLOCK;
-
 pub const TRANSACTION_STATUS_COMMITTED: u8 = 0x01;
 pub const TRANSACTION_STATUS_ABORTED: u8 = 0x02;
 pub const TRANSACTION_STATUS_SUB_COMMITTED: u8 = 0x03;
 
 pub const CLOG_ZEROPAGE: u8 = 0x00;
 pub const CLOG_TRUNCATE: u8 = 0x10;
+
+//
+// Constants from visibilitymap.h, visibilitymapdefs.h and visibilitymap.c
+//
+pub const SIZE_OF_PAGE_HEADER: u16 = 24;
+pub const BITS_PER_BYTE: u16 = 8;
+pub const HEAPBLOCKS_PER_PAGE: u32 =
+    (BLCKSZ - SIZE_OF_PAGE_HEADER) as u32 * 8 / BITS_PER_HEAPBLOCK as u32;
+pub const HEAPBLOCKS_PER_BYTE: u16 = BITS_PER_BYTE / BITS_PER_HEAPBLOCK;
+
+pub const fn HEAPBLK_TO_MAPBLOCK(x: u32) -> u32 {
+    x / HEAPBLOCKS_PER_PAGE
+}
+pub const fn HEAPBLK_TO_MAPBYTE(x: u32) -> u32 {
+    (x % HEAPBLOCKS_PER_PAGE) / HEAPBLOCKS_PER_BYTE as u32
+}
+pub const fn HEAPBLK_TO_OFFSET(x: u32) -> u32 {
+    (x % HEAPBLOCKS_PER_BYTE as u32) * BITS_PER_HEAPBLOCK as u32
+}
+
+pub const BITS_PER_HEAPBLOCK: u16 = 2;
+pub const VISIBILITYMAP_ALL_VISIBLE: u8 = 0x01;
+pub const VISIBILITYMAP_ALL_FROZEN: u8 = 0x02;
+pub const VISIBILITYMAP_VALID_BITS: u8 = 0x03;
 
 // From xact.h
 pub const XLOG_XACT_COMMIT: u8 = 0x00;
@@ -189,11 +216,11 @@ pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
-pub const PG_MAJORVERSION: &'static str = "14";
+pub const PG_MAJORVERSION: &str = "14";
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
-pub const PGDATA_SUBDIRS: [&'static str; 22] = [
+pub const PGDATA_SUBDIRS: [&str; 22] = [
     "global",
     "pg_wal/archive_status",
     "pg_commit_ts",
@@ -218,11 +245,11 @@ pub const PGDATA_SUBDIRS: [&'static str; 22] = [
     "pg_logical/mappings",
 ];
 
-pub const PGDATA_SPECIAL_FILES: [&'static str; 4] = [
-    "pg_hba.conf",
-    "pg_ident.conf",
-    "postgresql.conf",
-    "postgresql.auto.conf",
-];
+// Don't include postgresql.conf as it is inconvenient on node start:
+// we need postgresql.conf before basebackup to synchronize safekeepers
+// so no point in overwriting it during backup restore. Rest of the files
+// here are not needed before backup so it is okay to edit them after.
+pub const PGDATA_SPECIAL_FILES: [&str; 3] =
+    ["pg_hba.conf", "pg_ident.conf", "postgresql.auto.conf"];
 
-pub static PG_HBA: &'static str = include_str!("../samples/pg_hba.conf");
+pub static PG_HBA: &str = include_str!("../samples/pg_hba.conf");

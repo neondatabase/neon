@@ -3,31 +3,36 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::pq_proto::{BeMessage, FeMessage, FeStartupMessage, StartupRequestCode};
+use crate::pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
-use log::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tracing::*;
+
+static PGBACKEND_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub trait Handler {
     /// Handle single query.
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care).
-    fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: Bytes) -> Result<()>;
+    fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()>;
 
     /// Called on startup packet receival, allows to process params.
     ///
     /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
     /// creation is the proxy code. That is quite hacky and ad-hoc solution, may be we could allow
     /// to override whole init logic in implementations.
-    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupMessage) -> Result<()> {
+    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupPacket) -> Result<()> {
         Ok(())
     }
 
@@ -52,7 +57,7 @@ pub enum ProtoState {
     Established,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub enum AuthType {
     Trust,
     MD5,
@@ -70,6 +75,16 @@ impl FromStr for AuthType {
             "ZenithJWT" => Ok(Self::ZenithJWT),
             _ => bail!("invalid value \"{}\" for auth type", s),
         }
+    }
+}
+
+impl fmt::Display for AuthType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AuthType::Trust => "Trust",
+            AuthType::MD5 => "MD5",
+            AuthType::ZenithJWT => "ZenithJWT",
+        })
     }
 }
 
@@ -135,13 +150,43 @@ pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
     query_string
 }
 
+// Helper function for socket read loops
+pub fn is_socket_read_timed_out(error: &anyhow::Error) -> bool {
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            if io_error.kind() == std::io::ErrorKind::WouldBlock {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// Truncate 0 from C string in Bytes and stringify it (returns slice, no allocations)
+// PG protocol strings are always C strings.
+fn cstr_to_str(b: &Bytes) -> Result<&str> {
+    let without_null = if b.last() == Some(&0) {
+        &b[..b.len() - 1]
+    } else {
+        &b[..]
+    };
+    std::str::from_utf8(without_null).map_err(|e| e.into())
+}
+
 impl PostgresBackend {
     pub fn new(
         socket: TcpStream,
         auth_type: AuthType,
         tls_config: Option<Arc<rustls::ServerConfig>>,
+        set_read_timeout: bool,
     ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
+        if set_read_timeout {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+        }
+
         Ok(Self {
             stream: Some(Stream::Bidirectional(BidiStream::from_tcp(socket))),
             buf_out: BytesMut::with_capacity(10 * 1024),
@@ -161,7 +206,7 @@ impl PostgresBackend {
     fn get_stream_in(&mut self) -> Result<&mut BidiStream> {
         match &mut self.stream {
             Some(Stream::Bidirectional(stream)) => Ok(stream),
-            _ => Err(anyhow!("reader taken")),
+            _ => bail!("reader taken"),
         }
     }
 
@@ -190,7 +235,7 @@ impl PostgresBackend {
 
         use ProtoState::*;
         match state {
-            Initialization | Encrypted => FeStartupMessage::read(stream),
+            Initialization | Encrypted => FeStartupPacket::read(stream),
             Authentication | Established => FeMessage::read(stream),
         }
     }
@@ -229,12 +274,26 @@ impl PostgresBackend {
 
         let mut unnamed_query_string = Bytes::new();
 
-        while let Some(msg) = self.read_message()? {
-            trace!("got message {:?}", msg);
+        while !PGBACKEND_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            match self.read_message() {
+                Ok(message) => {
+                    if let Some(msg) = message {
+                        trace!("got message {:?}", msg);
 
-            match self.process_message(handler, msg, &mut unnamed_query_string)? {
-                ProcessMsgResult::Continue => continue,
-                ProcessMsgResult::Break => break,
+                        match self.process_message(handler, msg, &mut unnamed_query_string)? {
+                            ProcessMsgResult::Continue => continue,
+                            ProcessMsgResult::Break => break,
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // If it is a timeout error, continue the loop
+                    if !is_socket_read_timed_out(&e) {
+                        return Err(e);
+                    }
+                }
             }
         }
 
@@ -268,38 +327,34 @@ impl PostgresBackend {
             ensure!(
                 matches!(
                     msg,
-                    FeMessage::PasswordMessage(_) | FeMessage::StartupMessage(_)
+                    FeMessage::PasswordMessage(_) | FeMessage::StartupPacket(_)
                 ),
                 "protocol violation"
             );
         }
 
+        let have_tls = self.tls_config.is_some();
         match msg {
-            FeMessage::StartupMessage(m) => {
+            FeMessage::StartupPacket(m) => {
                 trace!("got startup message {:?}", m);
 
-                match m.kind {
-                    StartupRequestCode::NegotiateSsl => {
+                match m {
+                    FeStartupPacket::SslRequest => {
                         info!("SSL requested");
 
-                        if self.tls_config.is_some() {
-                            self.write_message(&BeMessage::EncryptionResponse(true))?;
+                        self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
+                        if have_tls {
                             self.start_tls()?;
                             self.state = ProtoState::Encrypted;
-                        } else {
-                            self.write_message(&BeMessage::EncryptionResponse(false))?;
                         }
                     }
-                    StartupRequestCode::NegotiateGss => {
+                    FeStartupPacket::GssEncRequest => {
                         info!("GSS requested");
                         self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
-                    StartupRequestCode::Normal => {
-                        if self.tls_config.is_some() && !matches!(self.state, ProtoState::Encrypted)
-                        {
-                            self.write_message(&BeMessage::ErrorResponse(
-                                "must connect with TLS".to_string(),
-                            ))?;
+                    FeStartupPacket::StartupMessage { .. } => {
+                        if have_tls && !matches!(self.state, ProtoState::Encrypted) {
+                            self.write_message(&BeMessage::ErrorResponse("must connect with TLS"))?;
                             bail!("client did not connect with TLS");
                         }
 
@@ -309,11 +364,13 @@ impl PostgresBackend {
 
                         match self.auth_type {
                             AuthType::Trust => {
-                                self.write_message_noflush(&BeMessage::AuthenticationOk)?;
-                                // psycopg2 will not connect if client_encoding is not
-                                // specified by the server
-                                self.write_message_noflush(&BeMessage::ParameterStatus)?;
-                                self.write_message(&BeMessage::ReadyForQuery)?;
+                                self.write_message_noflush(&BeMessage::AuthenticationOk)?
+                                    .write_message_noflush(&BeParameterStatusMessage::encoding())?
+                                    // The async python driver requires a valid server_version
+                                    .write_message_noflush(&BeMessage::ParameterStatus(
+                                        BeParameterStatusMessage::ServerVersion("14.1"),
+                                    ))?
+                                    .write_message(&BeMessage::ReadyForQuery)?;
                                 self.state = ProtoState::Established;
                             }
                             AuthType::MD5 => {
@@ -330,7 +387,7 @@ impl PostgresBackend {
                             }
                         }
                     }
-                    StartupRequestCode::Cancel => {
+                    FeStartupPacket::CancelRequest { .. } => {
                         return Ok(ProcessMsgResult::Break);
                     }
                 }
@@ -344,41 +401,45 @@ impl PostgresBackend {
                 match self.auth_type {
                     AuthType::Trust => unreachable!(),
                     AuthType::MD5 => {
-                        let (_, md5_response) = m
-                            .split_last()
-                            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
+                        let (_, md5_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_md5(self, md5_response) {
-                            self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                             bail!("auth failed: {}", e);
                         }
                     }
                     AuthType::ZenithJWT => {
-                        let (_, jwt_response) = m
-                            .split_last()
-                            .ok_or_else(|| anyhow::Error::msg("protocol violation"))?;
+                        let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
-                            self.write_message(&BeMessage::ErrorResponse(format!("{}", e)))?;
+                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                             bail!("auth failed: {}", e);
                         }
                     }
                 }
-                self.write_message_noflush(&BeMessage::AuthenticationOk)?;
-                // psycopg2 will not connect if client_encoding is not
-                // specified by the server
-                self.write_message_noflush(&BeMessage::ParameterStatus)?;
-                self.write_message(&BeMessage::ReadyForQuery)?;
+                self.write_message_noflush(&BeMessage::AuthenticationOk)?
+                    .write_message_noflush(&BeParameterStatusMessage::encoding())?
+                    .write_message(&BeMessage::ReadyForQuery)?;
                 self.state = ProtoState::Established;
             }
 
             FeMessage::Query(m) => {
-                trace!("got query {:?}", m.body);
+                // remove null terminator
+                let query_string = cstr_to_str(&m.body)?;
+
+                trace!("got query {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
-                if let Err(e) = handler.process_query(self, m.body.clone()) {
-                    let errmsg = format!("{}", e);
-                    warn!("query handler for {:?} failed: {}", m.body, errmsg);
-                    self.write_message_noflush(&BeMessage::ErrorResponse(errmsg))?;
+                if let Err(e) = handler.process_query(self, query_string) {
+                    // ":#" uses the alternate formatting style, which makes anyhow display the
+                    // full cause of the error, not just the top-level context. We don't want to
+                    // send that in the ErrorResponse though, because it's not relevant to the
+                    // compute node logs.
+                    warn!("query handler for {} failed: {:#}", query_string, e);
+                    self.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?;
+                    // TODO: untangle convoluted control flow
+                    if e.to_string().contains("failed to run") {
+                        return Ok(ProcessMsgResult::Break);
+                    }
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;
             }
@@ -402,7 +463,17 @@ impl PostgresBackend {
             }
 
             FeMessage::Execute(_) => {
-                handler.process_query(self, unnamed_query_string.clone())?;
+                let query_string = cstr_to_str(unnamed_query_string)?;
+                trace!("got execute {:?}", query_string);
+                // xxx distinguish fatal and recoverable errors?
+                if let Err(e) = handler.process_query(self, query_string) {
+                    warn!("query handler for {:?} failed: {:#}", query_string, e);
+                    self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
+                }
+                // NOTE there is no ReadyForQuery message. This handler is used
+                // for basebackup and it uses CopyOut which doesnt require
+                // ReadyForQuery message and backend just switches back to
+                // processing mode after sending CopyDone or ErrorResponse.
             }
 
             FeMessage::Sync => {
@@ -422,4 +493,9 @@ impl PostgresBackend {
 
         Ok(ProcessMsgResult::Continue)
     }
+}
+
+// Set the flag to inform connections to cancel
+pub fn set_pgbackend_shutdown_requested() {
+    PGBACKEND_SHUTDOWN_REQUESTED.swap(true, Ordering::Relaxed);
 }
