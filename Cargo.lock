@@ -1352,7 +1352,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d#f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f45d998b62d76f7cf0787ee5c62851d578aca538#f45d998b62d76f7cf0787ee5c62851d578aca538"
 dependencies = [
  "base64 0.13.0",
  "byteorder",
@@ -1380,11 +1380,11 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d#f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f45d998b62d76f7cf0787ee5c62851d578aca538#f45d998b62d76f7cf0787ee5c62851d578aca538"
 dependencies = [
  "bytes",
  "fallible-iterator",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f45d998b62d76f7cf0787ee5c62851d578aca538)",
 ]
 
 [[package]]
@@ -1465,7 +1465,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
+ "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f45d998b62d76f7cf0787ee5c62851d578aca538)",
  "zenith_utils",
 ]
 
@@ -2136,7 +2136,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d#f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d"
+source = "git+https://github.com/zenithdb/rust-postgres.git?rev=f45d998b62d76f7cf0787ee5c62851d578aca538#f45d998b62d76f7cf0787ee5c62851d578aca538"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -2148,8 +2148,8 @@ dependencies = [
  "percent-encoding",
  "phf",
  "pin-project-lite",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
- "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f1f16657aaebe2b9b4b16ef7abf6dc42301bad5d)",
+ "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f45d998b62d76f7cf0787ee5c62851d578aca538)",
+ "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=f45d998b62d76f7cf0787ee5c62851d578aca538)",
  "socket2",
  "tokio",
  "tokio-util",
