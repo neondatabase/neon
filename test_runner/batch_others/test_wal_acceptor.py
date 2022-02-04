@@ -325,7 +325,7 @@ class ProposerPostgres(PgProtocol):
                  tenant_id: str,
                  listen_addr: str,
                  port: int):
-        super().__init__(host=listen_addr, port=port)
+        super().__init__(host=listen_addr, port=port, username='zenith_admin')
 
         self.pgdata_dir: str = pgdata_dir
         self.pg_bin: PgBin = pg_bin
