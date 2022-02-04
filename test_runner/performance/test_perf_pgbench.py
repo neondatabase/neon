@@ -39,6 +39,6 @@ def test_pgbench(zenith_with_baseline: PgCompare):
 
     with env.record_duration('5000_xacts'):
         pgbench_run_5000_transactions(env.pg_bin, env.pg.connstr())
-        env.flush()
+    env.flush()
 
     env.report_size()
