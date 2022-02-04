@@ -1,0 +1,164 @@
+import pytest
+from contextlib import contextmanager
+
+from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, ZenithEnv
+from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
+
+# Type-related stuff
+from typing import Iterator
+
+
+# TODO vanilla_pg.get_subdir_size won't work
+class Benchmarker:
+    def __init__(self, zenbenchmark: ZenithBenchmarker):
+        self.zenbenchmark = zenbenchmark
+
+    @contextmanager
+    def record_duration(self, metric_name: str):
+        yield
+
+
+class PgCompare:
+    """Common interface of all postgres implementations, useful for benchmarks."""
+    @property
+    def pg(self) -> PgProtocol:
+        raise NotImplemented()
+
+    @property
+    def pg_bin(self) -> PgProtocol:
+        raise NotImplemented()
+
+    @property
+    def benchmarker(self) -> Benchmarker:
+        raise NotImplemented()
+
+    def flush(self) -> None:
+        raise NotImplemented()
+
+    def report_size(self) -> None:
+        raise NotImplemented()
+
+    @contextmanager
+    def record_pageserver_writes(self, out_name):
+        raise NotImplemented()
+
+    @contextmanager
+    def record_duration(self, out_name):
+        raise NotImplemented()
+
+
+class ZenithCompare:
+    def __init__(self, zenbenchmark: ZenithBenchmarker, zenith_simple_env: ZenithEnv, pg_bin: PgBin, branch_name):
+        self.env = zenith_simple_env
+        self.zenbenchmark = zenbenchmark
+        self._pg_bin = pg_bin
+
+        # We only use one branch and one timeline
+        self.branch = branch_name
+        self.env.zenith_cli(["branch", self.branch, "empty"])
+        self._pg = self.env.postgres.create_start(self.branch)
+        self.timeline = self.pg.safe_psql("SHOW zenith.zenith_timeline")[0][0]
+
+        # Long-lived cursor, useful for flushing
+        self.psconn = self.env.pageserver.connect()
+        self.pscur = self.psconn.cursor()
+
+    @property
+    def pg(self):
+        return self._pg
+
+    @property
+    def pg_bin(self):
+        return self._pg_bin
+
+    @property
+    def benchmarker(self):
+        raise NotImplemented()
+
+    def flush(self):
+        self.pscur.execute(f"do_gc {self.env.initial_tenant} {self.timeline} 0")
+
+    def report_size(self) -> None:
+        timeline_size = self.zenbenchmark.get_timeline_size(
+            self.env.repo_dir, self.env.initial_tenant, self.timeline
+        )
+        self.zenbenchmark.record('size',
+                                 timeline_size / (1024 * 1024),
+                                 'MB',
+                                 report=MetricReport.LOWER_IS_BETTER)
+
+    def record_pageserver_writes(self, out_name):
+        return self.zenbenchmark.record_pageserver_writes(self.env.pageserver, out_name)
+
+    def record_duration(self, out_name):
+        return self.zenbenchmark.record_duration(out_name)
+
+
+class VanillaCompare:
+    def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
+        self._pg = vanilla_pg
+        self.zenbenchmark = zenbenchmark
+        vanilla_pg.configure(['shared_buffers=1MB'])
+        vanilla_pg.start()
+
+        # Long-lived cursor, useful for flushing
+        self.conn = self.pg.connect()
+        self.cur = self.conn.cursor()
+
+    @property
+    def pg(self):
+        return self._pg
+
+    @property
+    def pg_bin(self):
+        return self._pg.pg_bin
+
+    @property
+    def benchmarker(self):
+        raise NotImplemented()
+
+    def flush(self):
+        self.cur.execute("checkpoint")
+
+    def report_size(self) -> None:
+        data_size = self.pg.get_subdir_size('base')
+        self.zenbenchmark.record('data_size',
+                                 data_size / (1024 * 1024),
+                                 'MB',
+                                 report=MetricReport.LOWER_IS_BETTER)
+        wal_size = self.pg.get_subdir_size('pg_wal')
+        self.zenbenchmark.record('wal_size',
+                                 wal_size / (1024 * 1024),
+                                 'MB',
+                                 report=MetricReport.LOWER_IS_BETTER)
+
+    @contextmanager
+    def record_pageserver_writes(self, out_name):
+        yield  # Do nothing
+
+    def record_duration(self, out_name):
+        return self.zenbenchmark.record_duration(out_name)
+
+
+@pytest.fixture(scope='function')
+def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCompare:
+    branch_name = request.node.name
+    return ZenithCompare(zenbenchmark, zenith_simple_env, pg_bin, branch_name)
+
+
+@pytest.fixture(scope='function')
+def vanilla_compare(zenbenchmark, vanilla_pg) -> VanillaCompare:
+    return VanillaCompare(zenbenchmark, vanilla_pg)
+
+
+@pytest.fixture(params=["vanilla_compare", "zenith_compare"], ids=["vanilla", "zenith"])
+def zenith_with_baseline(request) -> Iterator[PgCompare]:
+    """Parameterized fixture that helps compare zenith against vanilla postgres.
+
+    A test that uses this fixture turns into a parameterized test that runs against:
+    1. A vanilla postgres instance
+    2. A simple zenith env (see zenith_simple_env)
+
+    Both instances are configured for fair comparison.
+    """
+    return request.getfixturevalue(request.param)
