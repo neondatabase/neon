@@ -1,5 +1,4 @@
 pub mod basebackup;
-pub mod branches;
 pub mod config;
 pub mod http;
 pub mod import_datadir;
@@ -12,6 +11,7 @@ pub mod repository;
 pub mod tenant_mgr;
 pub mod tenant_threads;
 pub mod thread_mgr;
+pub mod timelines;
 pub mod virtual_file;
 pub mod walingest;
 pub mod walreceiver;

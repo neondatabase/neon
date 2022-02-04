@@ -9,18 +9,18 @@ use anyhow::bail;
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{BranchCreateRequest, TenantCreateRequest};
+use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use zenith_utils::http::error::HttpErrorBody;
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::local_env::LocalEnv;
 use crate::{fill_rust_env_vars, read_pidfile};
-use pageserver::branches::BranchInfo;
 use pageserver::tenant_mgr::TenantInfo;
 use zenith_utils::connstring::connection_address;
 
@@ -335,47 +335,32 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn branch_list(&self, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
+    pub fn timeline_list(&self, tenantid: &ZTenantId) -> Result<Vec<TimelineInfo>> {
         Ok(self
             .http_request(
                 Method::GET,
-                format!("{}/branch/{}", self.http_base_url, tenantid),
+                format!("{}/timeline/{}", self.http_base_url, tenantid),
             )
             .send()?
             .error_from_body()?
             .json()?)
     }
 
-    pub fn branch_create(
+    pub fn timeline_create(
         &self,
-        branch_name: &str,
-        startpoint: &str,
-        tenantid: &ZTenantId,
-    ) -> Result<BranchInfo> {
+        timeline_id: ZTimelineId,
+        start_point: String,
+        tenant_id: ZTenantId,
+    ) -> Result<TimelineInfo> {
         Ok(self
-            .http_request(Method::POST, format!("{}/branch", self.http_base_url))
-            .json(&BranchCreateRequest {
-                tenant_id: tenantid.to_owned(),
-                name: branch_name.to_owned(),
-                start_point: startpoint.to_owned(),
+            .http_request(Method::POST, format!("{}/timeline", self.http_base_url))
+            .json(&TimelineCreateRequest {
+                tenant_id,
+                timeline_id,
+                start_point,
             })
             .send()?
             .error_from_body()?
-            .json()?)
-    }
-
-    pub fn branch_get_by_name(
-        &self,
-        tenantid: &ZTenantId,
-        branch_name: &str,
-    ) -> Result<BranchInfo> {
-        Ok(self
-            .http_request(
-                Method::GET,
-                format!("{}/branch/{}/{}", self.http_base_url, tenantid, branch_name),
-            )
-            .send()?
-            .error_for_status()?
             .json()?)
     }
 }

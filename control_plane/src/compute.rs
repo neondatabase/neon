@@ -73,39 +73,43 @@ impl ComputeControlPlane {
             .unwrap_or(self.base_port)
     }
 
-    // FIXME: see also parse_point_in_time in branches.rs.
+    // FIXME: see also parse_point_in_time in timelines.rs.
     fn parse_point_in_time(
         &self,
-        tenantid: ZTenantId,
+        tenant_id: ZTenantId,
         s: &str,
     ) -> Result<(ZTimelineId, Option<Lsn>)> {
-        let mut strings = s.split('@');
-        let name = strings.next().unwrap();
+        let _strings = s.split('@');
+        // let name = strings.next().unwrap();
 
-        let lsn = strings
-            .next()
-            .map(Lsn::from_str)
-            .transpose()
-            .context("invalid LSN in point-in-time specification")?;
+        // let lsn = strings
+        //     .next()
+        //     .map(Lsn::from_str)
+        //     .transpose()
+        //     .context("invalid LSN in point-in-time specification")?;
 
-        // Resolve the timeline ID, given the human-readable branch name
-        let timeline_id = self
-            .pageserver
-            .branch_get_by_name(&tenantid, name)?
-            .timeline_id;
+        // // Resolve the timeline ID, given the human-readable branch name
+        // let timeline_id = self
+        //     .pageserver
+        //     .branch_get_by_name(&tenant_id, name)?
+        //     .timeline_id;
 
-        Ok((timeline_id, lsn))
+        // Ok((timeline_id, lsn))
+        todo!("TODO kb check more about the '@name' format")
     }
 
     pub fn new_node(
         &mut self,
         tenantid: ZTenantId,
         name: &str,
-        timeline_spec: &str,
+        timeline_spec: Option<&str>,
         port: Option<u16>,
     ) -> Result<Arc<PostgresNode>> {
         // Resolve the human-readable timeline spec into timeline ID and LSN
-        let (timelineid, lsn) = self.parse_point_in_time(tenantid, timeline_spec)?;
+        let (timelineid, lsn) = match timeline_spec {
+            Some(timeline_spec) => self.parse_point_in_time(tenantid, timeline_spec)?,
+            None => (ZTimelineId::generate(), None),
+        };
 
         let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {

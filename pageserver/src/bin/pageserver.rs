@@ -10,11 +10,10 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches,
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, remote_storage, tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
-    virtual_file, LOG_FILE_NAME,
+    timelines, virtual_file, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
@@ -143,7 +142,7 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
+        timelines::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
         // write the config file
         std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
             format!(

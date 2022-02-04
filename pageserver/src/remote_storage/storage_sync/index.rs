@@ -5,7 +5,7 @@
 //! This way in the future, the index could be restored fast from its serialized stored form.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
 };
 
@@ -49,10 +49,9 @@ impl RelativePath {
 }
 
 /// An index to track tenant files that exist on the remote storage.
-/// Currently, timeline archives and branch files are tracked.
+/// Currently, timeline archives files are tracked only.
 #[derive(Debug, Clone)]
 pub struct RemoteTimelineIndex {
-    branch_files: HashMap<ZTenantId, HashSet<RelativePath>>,
     timeline_files: HashMap<ZTenantTimelineId, TimelineIndexEntry>,
 }
 
@@ -65,7 +64,6 @@ impl RemoteTimelineIndex {
         paths: impl Iterator<Item = P>,
     ) -> Self {
         let mut index = Self {
-            branch_files: HashMap::new(),
             timeline_files: HashMap::new(),
         };
         for path in paths {
@@ -97,17 +95,6 @@ impl RemoteTimelineIndex {
 
     pub fn all_sync_ids(&self) -> impl Iterator<Item = ZTenantTimelineId> + '_ {
         self.timeline_files.keys().copied()
-    }
-
-    pub fn add_branch_file(&mut self, tenant_id: ZTenantId, path: RelativePath) {
-        self.branch_files
-            .entry(tenant_id)
-            .or_insert_with(HashSet::new)
-            .insert(path);
-    }
-
-    pub fn branch_files(&self, tenant_id: ZTenantId) -> Option<&HashSet<RelativePath>> {
-        self.branch_files.get(&tenant_id)
     }
 }
 
@@ -306,20 +293,9 @@ fn try_parse_index_entry(
         .parse::<ZTenantId>()
         .with_context(|| format!("Failed to parse tenant id from path '{}'", path.display()))?;
 
-    let branches_path = conf.branches_path(&tenant_id);
     let timelines_path = conf.timelines_path(&tenant_id);
-    match (
-        RelativePath::new(&branches_path, &path),
-        path.strip_prefix(&timelines_path),
-    ) {
-        (Ok(_), Ok(_)) => bail!(
-            "Path '{}' cannot start with both branches '{}' and the timelines '{}' prefixes",
-            path.display(),
-            branches_path.display(),
-            timelines_path.display()
-        ),
-        (Ok(branches_entry), Err(_)) => index.add_branch_file(tenant_id, branches_entry),
-        (Err(_), Ok(timelines_subpath)) => {
+    match path.strip_prefix(&timelines_path) {
+        Ok(timelines_subpath) => {
             let mut segments = timelines_subpath.iter();
             let timeline_id = segments
                 .next()
@@ -375,11 +351,10 @@ fn try_parse_index_entry(
                 }
             }
         }
-        (Err(branches_error), Err(timelines_strip_error)) => {
+        Err(timelines_strip_error) => {
             bail!(
-                "Path '{}' is not an index entry: it's neither parsable as a branch entry '{:#}' nor as an archive entry '{}'",
+                "Path '{}' is not an archive entry '{}'",
                 path.display(),
-                branches_error,
                 timelines_strip_error,
             )
         }

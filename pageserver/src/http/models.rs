@@ -1,13 +1,15 @@
 use serde::{Deserialize, Serialize};
+use zenith_utils::zid::ZTimelineId;
 
 use crate::ZTenantId;
 use zenith_utils::zid::ZNodeId;
 
 #[derive(Serialize, Deserialize)]
-pub struct BranchCreateRequest {
+pub struct TimelineCreateRequest {
     #[serde(with = "hex")]
     pub tenant_id: ZTenantId,
-    pub name: String,
+    #[serde(with = "hex")]
+    pub timeline_id: ZTimelineId,
     pub start_point: String,
 }
 

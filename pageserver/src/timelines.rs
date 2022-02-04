@@ -1,5 +1,5 @@
 //!
-//! Branch management code
+//! Timeline management code
 //!
 // TODO: move all paths construction to conf impl
 //
@@ -27,8 +27,7 @@ use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct BranchInfo {
-    pub name: String,
+pub struct TimelineInfo {
     #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
     pub latest_valid_lsn: Lsn,
@@ -36,59 +35,6 @@ pub struct BranchInfo {
     pub ancestor_lsn: Option<String>,
     pub current_logical_size: usize,
     pub current_logical_size_non_incremental: Option<usize>,
-}
-
-impl BranchInfo {
-    pub fn from_path<T: AsRef<Path>>(
-        path: T,
-        repo: &Arc<dyn Repository>,
-        include_non_incremental_logical_size: bool,
-    ) -> Result<Self> {
-        let path = path.as_ref();
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let timeline_id = std::fs::read_to_string(path)
-            .with_context(|| {
-                format!(
-                    "Failed to read branch file contents at path '{}'",
-                    path.display()
-                )
-            })?
-            .parse::<ZTimelineId>()?;
-
-        let timeline = match repo.get_timeline(timeline_id)? {
-            RepositoryTimeline::Local(local_entry) => local_entry,
-            RepositoryTimeline::Remote { .. } => {
-                bail!("Timeline {} is remote, no branches to display", timeline_id)
-            }
-        };
-
-        // we use ancestor lsn zero if we don't have an ancestor, so turn this into an option based on timeline id
-        let (ancestor_id, ancestor_lsn) = match timeline.get_ancestor_timeline_id() {
-            Some(ancestor_id) => (
-                Some(ancestor_id.to_string()),
-                Some(timeline.get_ancestor_lsn().to_string()),
-            ),
-            None => (None, None),
-        };
-
-        // non incremental size calculation can be heavy, so let it be optional
-        // needed for tests to check size calculation
-        let current_logical_size_non_incremental = include_non_incremental_logical_size
-            .then(|| {
-                timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn())
-            })
-            .transpose()?;
-
-        Ok(BranchInfo {
-            name,
-            timeline_id,
-            latest_valid_lsn: timeline.get_last_record_lsn(),
-            ancestor_id,
-            ancestor_lsn,
-            current_logical_size: timeline.get_current_logical_size(),
-            current_logical_size_non_incremental,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -140,7 +86,6 @@ pub fn create_repo(
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
 
     crashsafe_dir::create_dir(conf.timelines_path(&tenantid))?;
-    crashsafe_dir::create_dir_all(conf.branches_path(&tenantid))?;
     crashsafe_dir::create_dir_all(conf.tags_path(&tenantid))?;
 
     info!("created directory structure in {}", repo_dir.display());
@@ -198,7 +143,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         .output()
         .context("failed to execute initdb")?;
     if !initdb_output.status.success() {
-        anyhow::bail!(
+        bail!(
             "initdb failed: '{}'",
             String::from_utf8_lossy(&initdb_output.stderr)
         );
@@ -245,65 +190,80 @@ fn bootstrap_timeline(
         timeline.get_last_record_lsn()
     );
 
-    let data = tli.to_string();
-    fs::write(conf.branch_path("main", &tenantid), data)?;
-    println!("created main branch");
-
     // Remove temp dir. We don't need it anymore
     fs::remove_dir_all(pgdata_path)?;
 
     Ok(())
 }
 
-pub(crate) fn get_branches(
-    conf: &PageServerConf,
-    tenantid: &ZTenantId,
+pub(crate) fn get_timelines(
+    tenant_id: ZTenantId,
     include_non_incremental_logical_size: bool,
-) -> Result<Vec<BranchInfo>> {
-    let repo = tenant_mgr::get_repository_for_tenant(*tenantid)?;
+) -> Result<Vec<TimelineInfo>> {
+    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
+        .with_context(|| format!("Failed to get repo for tenant {}", tenant_id))?;
 
-    // Each branch has a corresponding record (text file) in the refs/branches
-    // with timeline_id.
-    let branches_dir = conf.branches_path(tenantid);
-
-    std::fs::read_dir(&branches_dir)
-        .with_context(|| {
-            format!(
-                "Found no branches directory '{}' for tenant {}",
-                branches_dir.display(),
-                tenantid
-            )
-        })?
-        .map(|dir_entry_res| {
-            let dir_entry = dir_entry_res.with_context(|| {
-                format!(
-                    "Failed to list branches directory '{}' content for tenant {}",
-                    branches_dir.display(),
-                    tenantid
-                )
-            })?;
-            BranchInfo::from_path(
-                dir_entry.path(),
-                &repo,
-                include_non_incremental_logical_size,
-            )
+    Ok(repo
+        .list_timelines()
+        .with_context(|| format!("Failed to list timelines for tenant {}", tenant_id))?
+        .into_iter()
+        .filter_map(|timeline| match timeline {
+            RepositoryTimeline::Local { timeline, id } => Some((id, timeline)),
+            RepositoryTimeline::Remote { .. } => None,
         })
-        .collect()
+        .map(|(timeline_id, timeline)| {
+            let (ancestor_id, ancestor_lsn) = match timeline.get_ancestor_timeline_id() {
+                Some(ancestor_id) => (
+                    Some(ancestor_id.to_string()),
+                    Some(timeline.get_ancestor_lsn().to_string()),
+                ),
+                None => (None, None),
+            };
+
+            let current_logical_size_non_incremental = if include_non_incremental_logical_size {
+                match timeline
+                    .get_current_logical_size_non_incremental(timeline.get_last_record_lsn())
+                {
+                    Ok(size) => Some(size),
+                    Err(e) => {
+                        error!(
+                            "Failed to get current logical size for timeline {}: {:?}",
+                            timeline_id, e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            TimelineInfo {
+                timeline_id,
+                latest_valid_lsn: timeline.get_last_record_lsn(),
+                ancestor_id,
+                ancestor_lsn,
+                current_logical_size: timeline.get_current_logical_size(),
+                // non incremental size calculation can be heavy, so let it be optional
+                // needed for tests to check size calculation
+                current_logical_size_non_incremental,
+            }
+        })
+        .collect())
 }
 
-pub(crate) fn create_branch(
+pub(crate) fn create_timeline(
     conf: &PageServerConf,
-    branchname: &str,
     startpoint_str: &str,
-    tenantid: &ZTenantId,
-) -> Result<BranchInfo> {
-    let repo = tenant_mgr::get_repository_for_tenant(*tenantid)?;
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+) -> Result<TimelineInfo> {
+    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
-    if conf.branch_path(branchname, tenantid).exists() {
-        anyhow::bail!("branch {} already exists", branchname);
+    if conf.timeline_path(&timeline_id, &tenant_id).exists() {
+        bail!("timeline {} already exists", timeline_id);
     }
 
-    let mut startpoint = parse_point_in_time(conf, startpoint_str, tenantid)?;
+    let mut startpoint = parse_point_in_time(conf, startpoint_str, &tenant_id)?;
     let timeline = repo
         .get_timeline(startpoint.timelineid)?
         .local_timeline()
@@ -325,10 +285,10 @@ pub(crate) fn create_branch(
     startpoint.lsn = startpoint.lsn.align();
     if timeline.get_ancestor_lsn() > startpoint.lsn {
         // can we safely just branch from the ancestor instead?
-        anyhow::bail!(
-            "invalid startpoint {} for the branch {}: less than timeline ancestor lsn {:?}",
+        bail!(
+            "invalid startpoint {} for the timeline {}: less than timeline ancestor lsn {:?}",
             startpoint.lsn,
-            branchname,
+            timeline_id,
             timeline.get_ancestor_lsn()
         );
     }
@@ -342,11 +302,11 @@ pub(crate) fn create_branch(
     // Remember the human-readable branch name for the new timeline.
     // FIXME: there's a race condition, if you create a branch with the same
     // name concurrently.
+    // TODO kb timeline creation needs more
     let data = new_timeline_id.to_string();
-    fs::write(conf.branch_path(branchname, tenantid), data)?;
+    fs::write(conf.timeline_path(&timeline_id, &tenant_id), data)?;
 
-    Ok(BranchInfo {
-        name: branchname.to_string(),
+    Ok(TimelineInfo {
         timeline_id: new_timeline_id,
         latest_valid_lsn: startpoint.lsn,
         ancestor_id: Some(startpoint.timelineid.to_string()),
@@ -366,14 +326,6 @@ pub(crate) fn create_branch(
 //
 // A specific LSN on a timeline:
 //    bc62e7d612d0e6fe8f99a6dd2f281f9d@2/15D3DD8
-//
-// Same, with a human-friendly branch name:
-//    main
-//    main@2/15D3DD8
-//
-// Human-friendly tag name:
-//    mytag
-//
 //
 fn parse_point_in_time(
     conf: &PageServerConf,
@@ -397,18 +349,6 @@ fn parse_point_in_time(
 
             return parse_point_in_time(conf, &pointstr, tenantid);
         }
-    }
-
-    // Check if it's a branch
-    // Check if it's branch @ LSN
-    let branchpath = conf.branch_path(name, tenantid);
-    if branchpath.exists() {
-        let pointstr = fs::read_to_string(branchpath)?;
-
-        let mut result = parse_point_in_time(conf, &pointstr, tenantid)?;
-
-        result.lsn = lsn.unwrap_or(Lsn(0));
-        return Ok(result);
     }
 
     // Check if it's a timelineid

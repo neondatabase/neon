@@ -30,19 +30,22 @@ paths:
         schema:
           type: string
           format: hex
+      - name: include-non-incremental-logical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_logical_size_non_incremental
     get:
-      description: List tenant timelines
+      description: Get timelines for tenant
       responses:
         "200":
-          description: array of brief timeline descriptions
+          description: TimelineInfo
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  # currently, just a timeline id string, but when remote index gets to be accessed
-                  # remote/local timeline field would be added at least
-                  type: string
+                  $ref: "#/components/schemas/TimelineInfo"
         "400":
           description: Error when no tenant id found in path
           content:
@@ -81,8 +84,13 @@ paths:
         schema:
           type: string
           format: hex
+      - name: include-non-incremental-logical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_logical_size_non_incremental
     get:
-      description: Get timeline info for tenant's remote timeline
+      description: Get timelines for tenant
       responses:
         "200":
           description: TimelineInfo
@@ -91,7 +99,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/TimelineInfo"
         "400":
-          description: Error when no tenant id found in path or no branch name
+          description: Error when no tenant id found in path or no timeline id
           content:
             application/json:
               schema:
@@ -114,108 +122,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /v1/branch/{tenant_id}:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-      - name: include-non-incremental-logical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_logical_size_non_incremental
-    get:
-      description: Get branches for tenant
-      responses:
-        "200":
-          description: BranchInfo
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/BranchInfo"
-        "400":
-          description: Error when no tenant id found in path
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  /v1/branch/{tenant_id}/{branch_name}:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-      - name: branch_name
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: include-non-incremental-logical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_logical_size_non_incremental
-    get:
-      description: Get branches for tenant
-      responses:
-        "200":
-          description: BranchInfo
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BranchInfo"
-        "400":
-          description: Error when no tenant id found in path or no branch name
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  /v1/branch/:
+  /v1/timeline/:
     post:
-      description: Create branch
+      description: Create timeline
       requestBody:
         content:
           application/json:
@@ -223,25 +132,26 @@ paths:
               type: object
               required:
                 - "tenant_id"
-                - "name"
+                - "timeline_id"
                 - "start_point"
               properties:
                 tenant_id:
                   type: string
                   format: hex
-                name:
+                timeline_id:
                   type: string
+                  format: hex
                 start_point:
                   type: string
       responses:
         "201":
-          description: BranchInfo
+          description: TimelineInfo
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BranchInfo"
+                $ref: "#/components/schemas/TImelineInfo"
         "400":
-          description: Malformed branch create request
+          description: Malformed timeline create request
           content:
             application/json:
               schema:
@@ -358,16 +268,13 @@ components:
           type: string
         state:
           type: string
-    BranchInfo:
+    TimelineInfo:
       type: object
       required:
-        - name
         - timeline_id
         - latest_valid_lsn
         - current_logical_size
       properties:
-        name:
-          type: string
         timeline_id:
           type: string
           format: hex
