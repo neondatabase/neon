@@ -1,6 +1,4 @@
 from contextlib import closing
-import os
-import psycopg2
 from fixtures.zenith_fixtures import PgBin, ZenithEnv
 
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
