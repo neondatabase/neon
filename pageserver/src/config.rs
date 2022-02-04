@@ -400,14 +400,6 @@ impl PageServerConf {
         self.tags_path(tenantid).join(tag_name)
     }
 
-    pub fn branches_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenant_path(tenantid).join("refs").join("branches")
-    }
-
-    pub fn branch_path(&self, branch_name: &str, tenantid: &ZTenantId) -> PathBuf {
-        self.branches_path(tenantid).join(branch_name)
-    }
-
     pub fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
         self.tenant_path(tenantid).join(TIMELINES_SEGMENT_NAME)
     }

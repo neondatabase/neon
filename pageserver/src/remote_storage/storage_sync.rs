@@ -14,13 +14,6 @@
 //! Only GC removes local timeline files, the GC support is not added to sync currently,
 //! yet downloading extra files is not critically bad at this stage, GC can remove those again.
 //!
-//! Along the timeline files, branch files are uploaded and downloaded every time a corresponding sync task is processed.
-//! For simplicity, branch files are also treated as immutable: only missing files are uploaded or downloaded, no removals, amendments or file contents checks are done.
-//! Also, the branches are copied as separate files, with no extra compressions done.
-//! Despite branches information currently belonging to tenants, a tenants' timeline sync is required to upload or download the branch files, also, there's no way to know
-//! the branch sync state outside of the sync loop.
-//! This implementation is currently considered as temporary and is a subjec to change later.
-//!
 //! During the loop startup, an initial [`RemoteTimelineIndex`] state is constructed via listing the remote storage contents.
 //! It's enough to poll the remote state once on startup only, due to agreement that the pageserver has
 //! an exclusive write access to the remote storage: new files appear in the storage only after the same
@@ -66,7 +59,6 @@
 //! NOTE: No real contents or checksum check happens right now and is a subject to improve later.
 //!
 //! After the whole timeline is downloaded, [`crate::tenant_mgr::set_timeline_states`] function is used to update pageserver memory stage for the timeline processed.
-//! No extra branch registration is done.
 //!
 //! When pageserver signals shutdown, current sync task gets finished and the loop exists.
 
@@ -77,7 +69,7 @@ pub mod index;
 mod upload;
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
@@ -87,7 +79,6 @@ use anyhow::{bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
 use tokio::{
-    fs,
     runtime::Runtime,
     sync::{
         mpsc::{self, UnboundedReceiver},
@@ -101,8 +92,7 @@ use self::{
     compression::ArchiveHeader,
     download::{download_timeline, DownloadedTimeline},
     index::{
-        ArchiveDescription, ArchiveId, RelativePath, RemoteTimeline, RemoteTimelineIndex,
-        TimelineIndexEntry,
+        ArchiveDescription, ArchiveId, RemoteTimeline, RemoteTimelineIndex, TimelineIndexEntry,
     },
     upload::upload_timeline_checkpoint,
 };
@@ -843,28 +833,6 @@ async fn download_archive_header<
     Ok(header)
 }
 
-async fn tenant_branch_files(
-    conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<HashSet<RelativePath>> {
-    let branches_dir = conf.branches_path(&tenant_id);
-    if !branches_dir.exists() {
-        return Ok(HashSet::new());
-    }
-
-    let mut branch_entries = fs::read_dir(&branches_dir)
-        .await
-        .context("Failed to list tenant branches dir contents")?;
-
-    let mut branch_files = HashSet::new();
-    while let Some(branch_entry) = branch_entries.next_entry().await? {
-        if branch_entry.file_type().await?.is_file() {
-            branch_files.insert(RelativePath::new(&branches_dir, branch_entry.path())?);
-        }
-    }
-    Ok(branch_files)
-}
-
 #[cfg(test)]
 mod test_utils {
     use std::{
@@ -971,30 +939,9 @@ mod test_utils {
             "Index contains unexpected sync ids"
         );
 
-        let mut actual_branches = BTreeMap::new();
-        let mut expected_branches = BTreeMap::new();
         let mut actual_timeline_entries = BTreeMap::new();
         let mut expected_timeline_entries = BTreeMap::new();
         for sync_id in actual_sync_ids {
-            actual_branches.insert(
-                sync_id.tenant_id,
-                index_read
-                    .branch_files(sync_id.tenant_id)
-                    .into_iter()
-                    .flat_map(|branch_paths| branch_paths.iter())
-                    .cloned()
-                    .collect::<BTreeSet<_>>(),
-            );
-            expected_branches.insert(
-                sync_id.tenant_id,
-                expected_index_with_descriptions
-                    .branch_files(sync_id.tenant_id)
-                    .into_iter()
-                    .flat_map(|branch_paths| branch_paths.iter())
-                    .cloned()
-                    .collect::<BTreeSet<_>>(),
-            );
-
             actual_timeline_entries.insert(
                 sync_id,
                 index_read.timeline_entry(&sync_id).unwrap().clone(),
@@ -1008,11 +955,6 @@ mod test_utils {
             );
         }
         drop(index_read);
-
-        assert_eq!(
-            actual_branches, expected_branches,
-            "Index contains unexpected branches"
-        );
 
         for (sync_id, actual_timeline_entry) in actual_timeline_entries {
             let expected_timeline_description = expected_timeline_entries

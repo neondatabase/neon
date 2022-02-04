@@ -137,19 +137,20 @@ pub struct LayeredRepository {
 /// Public interface
 impl Repository for LayeredRepository {
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline> {
-        let mut timelines = self.timelines.lock().unwrap();
-        Ok(
-            match self.get_or_init_timeline(timelineid, &mut timelines)? {
-                LayeredTimelineEntry::Local(local) => RepositoryTimeline::Local(local),
-                LayeredTimelineEntry::Remote {
-                    id,
-                    disk_consistent_lsn,
-                } => RepositoryTimeline::Remote {
-                    id,
-                    disk_consistent_lsn,
-                },
-            },
-        )
+        Ok(RepositoryTimeline::from(self.get_or_init_timeline(
+            timelineid,
+            &mut self.timelines.lock().unwrap(),
+        )?))
+    }
+
+    fn list_timelines(&self) -> Result<Vec<RepositoryTimeline>> {
+        Ok(self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .map(|timeline_entry| RepositoryTimeline::from(timeline_entry.clone()))
+            .collect())
     }
 
     fn create_empty_timeline(
@@ -424,6 +425,24 @@ impl LayeredTimelineEntry {
                 disk_consistent_lsn,
                 ..
             } => *disk_consistent_lsn,
+        }
+    }
+}
+
+impl From<LayeredTimelineEntry> for RepositoryTimeline {
+    fn from(layered_timeline: LayeredTimelineEntry) -> Self {
+        match layered_timeline {
+            LayeredTimelineEntry::Local(timeline) => RepositoryTimeline::Local {
+                id: timeline.timelineid,
+                timeline,
+            },
+            LayeredTimelineEntry::Remote {
+                id,
+                disk_consistent_lsn,
+            } => RepositoryTimeline::Remote {
+                id,
+                disk_consistent_lsn,
+            },
         }
     }
 }
