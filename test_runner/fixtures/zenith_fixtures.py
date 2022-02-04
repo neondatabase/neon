@@ -184,8 +184,8 @@ def worker_base_port(worker_seq_no: int):
     return BASE_PORT + worker_seq_no * WORKER_PORT_NUM
 
 
-def get_dir_size(path: str):
-
+def get_dir_size(path: str) -> int:
+    """Return size in bytes."""
     totalbytes = 0
     for root, dirs, files in os.walk(path):
         for name in files:
@@ -996,23 +996,24 @@ class VanillaPostgres(PgProtocol):
         self.running = False
         self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
 
-    def configure(self, options: List[str]):
+    def configure(self, options: List[str]) -> None:
         """Append lines into postgresql.conf file."""
         assert not self.running
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
             conf_file.writelines(options)
 
-    def start(self):
+    def start(self) -> None:
         assert not self.running
         self.running = True
         self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'start'])
 
-    def stop(self):
+    def stop(self) -> None:
         assert self.running
         self.running = False
         self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'stop'])
 
-    def get_subdir_size(self, subdir):
+    def get_subdir_size(self, subdir) -> int:
+        """Return size of pgdatadir subdirectory in bytes."""
         return get_dir_size(os.path.join(self.pgdatadir, subdir))
 
     def __enter__(self):
@@ -1022,12 +1023,14 @@ class VanillaPostgres(PgProtocol):
         if self.running:
             self.stop()
 
+
 @pytest.fixture(scope='function')
-def vanilla_pg(test_output_dir: str) -> VanillaPostgres:
+def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
     pgdatadir = os.path.join(test_output_dir, "pgdata-vanilla")
     pg_bin = PgBin(test_output_dir)
     with VanillaPostgres(pgdatadir, pg_bin, 5432) as vanilla_pg:
         yield vanilla_pg
+
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """

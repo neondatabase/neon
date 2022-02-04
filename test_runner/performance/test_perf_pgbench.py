@@ -1,5 +1,5 @@
 from contextlib import closing
-from fixtures.zenith_fixtures import PgBin, ZenithEnv
+from fixtures.zenith_fixtures import PgBin, VanillaPostgres, ZenithEnv
 
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from fixtures.log_helper import log
@@ -12,7 +12,7 @@ def pgbench_init(pg_bin: PgBin, connstr: str):
 
 
 def pgbench_run_5000_transactions(pg_bin: PgBin, connstr: str):
-        pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
+    pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
 
 
 #
@@ -70,7 +70,7 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
                         report=MetricReport.LOWER_IS_BETTER)
 
 
-def test_pgbench_baseline(vanilla_pg, zenbenchmark):
+def test_pgbench_baseline(vanilla_pg: VanillaPostgres, zenbenchmark: ZenithBenchmarker):
     vanilla_pg.configure(['shared_buffers=1MB'])
     vanilla_pg.start()
 
@@ -94,6 +94,12 @@ def test_pgbench_baseline(vanilla_pg, zenbenchmark):
 
     # Report disk space used by the repository
     data_size = vanilla_pg.get_subdir_size('base')
-    zenbenchmark.record('data_size', data_size / (1024*1024), 'MB', report=MetricReport.LOWER_IS_BETTER)
+    zenbenchmark.record('data_size',
+                        data_size / (1024 * 1024),
+                        'MB',
+                        report=MetricReport.LOWER_IS_BETTER)
     wal_size = vanilla_pg.get_subdir_size('pg_wal')
-    zenbenchmark.record('wal_size', wal_size / (1024*1024), 'MB', report=MetricReport.LOWER_IS_BETTER)
+    zenbenchmark.record('wal_size',
+                        wal_size / (1024 * 1024),
+                        'MB',
+                        report=MetricReport.LOWER_IS_BETTER)
