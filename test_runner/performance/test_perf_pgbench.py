@@ -9,6 +9,14 @@ from fixtures.log_helper import log
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
 
+def pgbench_init(pg_bin: PgBin, connstr: str):
+    pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+
+
+def pgbench_run_5000_transactions(pg_bin: PgBin, connstr: str):
+        pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
+
+
 #
 # Run a very short pgbench test.
 #
@@ -42,7 +50,7 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
     # Initialize pgbench database, recording the time and I/O it takes
     with zenbenchmark.record_pageserver_writes(env.pageserver, 'pageserver_writes'):
         with zenbenchmark.record_duration('init'):
-            pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+            pgbench_init(pg_bin, connstr)
 
             # Flush the layers from memory to disk. This is included in the reported
             # time and I/O
@@ -50,7 +58,7 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
 
     # Run pgbench for 5000 transactions
     with zenbenchmark.record_duration('5000_xacts'):
-        pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
+        pgbench_run_5000_transactions(pg_bin, connstr)
 
     # Flush the layers to disk again. This is *not' included in the reported time,
     # though.
@@ -64,23 +72,24 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
                         report=MetricReport.LOWER_IS_BETTER)
 
 
-def test_baseline_pgbench(vanilla_pg, zenbenchmark):
+def test_pgbench_baseline(vanilla_pg, zenbenchmark):
     vanilla_pg.configure(['shared_buffers=1MB'])
     vanilla_pg.start()
 
+    pg_bin = vanilla_pg.pg_bin
     connstr = vanilla_pg.connstr()
     conn = vanilla_pg.connect()
     cur = conn.cursor()
 
     with zenbenchmark.record_duration('init'):
-        vanilla_pg.pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+        pgbench_init(pg_bin, connstr)
 
         # This is roughly equivalent to flushing the layers from memory to disk with Zenith.
         cur.execute(f"checkpoint")
 
     # Run pgbench for 5000 transactions
     with zenbenchmark.record_duration('5000_xacts'):
-        vanilla_pg.pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
+        pgbench_run_5000_transactions(pg_bin, connstr)
 
     # This is roughly equivalent to flush the layers from memory to disk with Zenith.
     cur.execute(f"checkpoint")
