@@ -13,7 +13,7 @@
 import os
 from contextlib import closing
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.zenith_fixtures import VanillaPostgres, ZenithEnv
+from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
