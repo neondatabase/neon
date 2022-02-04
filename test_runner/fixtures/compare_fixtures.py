@@ -8,16 +8,6 @@ from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from typing import Iterator
 
 
-# TODO vanilla_pg.get_subdir_size won't work
-class Benchmarker:
-    def __init__(self, zenbenchmark: ZenithBenchmarker):
-        self.zenbenchmark = zenbenchmark
-
-    @contextmanager
-    def record_duration(self, metric_name: str):
-        yield
-
-
 class PgCompare:
     """Common interface of all postgres implementations, useful for benchmarks."""
     @property
@@ -26,10 +16,6 @@ class PgCompare:
 
     @property
     def pg_bin(self) -> PgProtocol:
-        raise NotImplemented()
-
-    @property
-    def benchmarker(self) -> Benchmarker:
         raise NotImplemented()
 
     def flush(self) -> None:
@@ -71,10 +57,6 @@ class ZenithCompare:
     def pg_bin(self):
         return self._pg_bin
 
-    @property
-    def benchmarker(self):
-        raise NotImplemented()
-
     def flush(self):
         self.pscur.execute(f"do_gc {self.env.initial_tenant} {self.timeline} 0")
 
@@ -112,10 +94,6 @@ class VanillaCompare:
     @property
     def pg_bin(self):
         return self._pg.pg_bin
-
-    @property
-    def benchmarker(self):
-        raise NotImplemented()
 
     def flush(self):
         self.cur.execute("checkpoint")
