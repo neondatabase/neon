@@ -175,7 +175,10 @@ impl Write for EphemeralFile {
     }
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
-        todo!()
+        // we don't need to flush data:
+        // * we either write input bytes or not, not keeping any intermediate data buffered
+        // * rust unix file `flush` impl does not flush things either, returning `Ok(())`
+        Ok(())
     }
 }
 
