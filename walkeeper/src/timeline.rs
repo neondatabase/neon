@@ -136,7 +136,7 @@ impl SharedState {
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(Lsn(flush_lsn), file_storage, state),
+            sk: SafeKeeper::new(zttid.timeline_id, Lsn(flush_lsn), file_storage, state),
             replicas: Vec::new(),
             active: false,
             num_computes: 0,

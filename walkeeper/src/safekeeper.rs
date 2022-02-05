@@ -498,11 +498,21 @@ where
     ST: Storage,
 {
     // constructor
-    pub fn new(flush_lsn: Lsn, storage: ST, state: SafeKeeperState) -> SafeKeeper<ST> {
+    pub fn new(
+        ztli: ZTimelineId,
+        flush_lsn: Lsn,
+        storage: ST,
+        state: SafeKeeperState,
+    ) -> SafeKeeper<ST> {
+        if state.server.timeline_id != ZTimelineId::from([0u8; 16]) {
+            if ztli != state.server.timeline_id {
+                panic!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.server.timeline_id);
+            }
+        }
         SafeKeeper {
             flush_lsn,
             metrics: SafeKeeperMetricsBuilder {
-                ztli: None,
+                ztli: Some(ztli),
                 flush_lsn,
                 commit_lsn: state.commit_lsn,
             }
@@ -807,7 +817,8 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: SafeKeeperState::new(),
         };
-        let mut sk = SafeKeeper::new(Lsn(0), storage, SafeKeeperState::new());
+        let ztli = ZTimelineId::from([0u8; 16]);
+        let mut sk = SafeKeeper::new(ztli, Lsn(0), storage, SafeKeeperState::new());
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -822,7 +833,7 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: state.clone(),
         };
-        sk = SafeKeeper::new(Lsn(0), storage, state);
+        sk = SafeKeeper::new(ztli, Lsn(0), storage, state);
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -837,7 +848,8 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: SafeKeeperState::new(),
         };
-        let mut sk = SafeKeeper::new(Lsn(0), storage, SafeKeeperState::new());
+        let ztli = ZTimelineId::from([0u8; 16]);
+        let mut sk = SafeKeeper::new(ztli, Lsn(0), storage, SafeKeeperState::new());
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
