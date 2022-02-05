@@ -160,7 +160,7 @@ fn walreceiver_main(
     // This is from tokio-postgres docs, but it is a bit weird in our case because we extensively use block_on
     runtime.spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            error!("connection error: {}", e);
         }
     });
 
