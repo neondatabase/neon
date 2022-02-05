@@ -502,10 +502,10 @@ where
         storage: ST,
         state: SafeKeeperState,
     ) -> SafeKeeper<ST> {
-        if state.server.timeline_id != ZTimelineId::from([0u8; 16]) {
-            if ztli != state.server.timeline_id {
-                panic!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.server.timeline_id);
-            }
+        if state.server.timeline_id != ZTimelineId::from([0u8; 16])
+            && ztli != state.server.timeline_id
+        {
+            panic!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.server.timeline_id);
         }
         SafeKeeper {
             flush_lsn,
