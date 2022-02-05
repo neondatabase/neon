@@ -455,16 +455,14 @@ struct SafeKeeperMetrics {
 }
 
 struct SafeKeeperMetricsBuilder {
-    ztli: Option<ZTimelineId>,
+    ztli: ZTimelineId,
     flush_lsn: Lsn,
     commit_lsn: Lsn,
 }
 
 impl SafeKeeperMetricsBuilder {
     fn build(self) -> SafeKeeperMetrics {
-        let ztli_str = self
-            .ztli
-            .map_or("n/a".to_string(), |ztli| format!("{}", ztli));
+        let ztli_str = format!("{}", self.ztli);
         let m = SafeKeeperMetrics {
             flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&ztli_str]),
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
@@ -512,7 +510,7 @@ where
         SafeKeeper {
             flush_lsn,
             metrics: SafeKeeperMetricsBuilder {
-                ztli: Some(ztli),
+                ztli,
                 flush_lsn,
                 commit_lsn: state.commit_lsn,
             }
@@ -583,7 +581,7 @@ where
             .context("failed to persist shared state")?;
 
         self.metrics = SafeKeeperMetricsBuilder {
-            ztli: Some(self.s.server.timeline_id),
+            ztli: self.s.server.timeline_id,
             flush_lsn: self.flush_lsn,
             commit_lsn: self.commit_lsn,
         }
