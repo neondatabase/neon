@@ -137,8 +137,8 @@ impl SharedState {
             "timeline {} created or restored: flush_lsn={}, commit_lsn={}, truncate_lsn={}",
             zttid.timeline_id, flush_lsn, state.commit_lsn, state.truncate_lsn,
         );
-        if flush_lsn < state.truncate_lsn {
-            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than truncate_lsn from control file", zttid.timeline_id);
+        if flush_lsn < state.commit_lsn || flush_lsn < state.truncate_lsn {
+            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or truncate_lsn from control file", zttid.timeline_id);
         }
 
         Ok(Self {
