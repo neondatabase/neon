@@ -123,20 +123,27 @@ impl SharedState {
         let file_storage = FileStorage::new(zttid, conf);
         let flush_lsn = if state.server.wal_seg_size != 0 {
             let wal_dir = conf.timeline_dir(zttid);
-            find_end_of_wal(
+            Lsn(find_end_of_wal(
                 &wal_dir,
                 state.server.wal_seg_size as usize,
                 true,
                 state.wal_start_lsn,
             )?
-            .0
+            .0)
         } else {
-            0
+            Lsn(0)
         };
+        info!(
+            "timeline {} created or restored: flush_lsn={}, commit_lsn={}, truncate_lsn={}",
+            zttid.timeline_id, flush_lsn, state.commit_lsn, state.truncate_lsn,
+        );
+        if flush_lsn < state.commit_lsn || flush_lsn < state.truncate_lsn {
+            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or truncate_lsn from control file", zttid.timeline_id);
+        }
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(Lsn(flush_lsn), file_storage, state),
+            sk: SafeKeeper::new(zttid.timeline_id, flush_lsn, file_storage, state),
             replicas: Vec::new(),
             active: false,
             num_computes: 0,
