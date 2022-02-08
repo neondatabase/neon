@@ -22,7 +22,6 @@ postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 tokio-stream = "0.1.8"
-routerify = "3"
 anyhow = { version = "1.0", features = ["backtrace"] }
 crc32c = "0.6.0"
 thiserror = "1.0"

@@ -110,7 +110,6 @@ fn parse_token(header_value: &str) -> Result<&str, ApiError> {
     Ok(token)
 }
 
-// TODO kb now test_auth fails, is it after jsonwebtoken update?
 pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
     provide_auth: fn(&Request<Body>) -> Option<&JwtAuth>,
 ) -> Middleware<B, ApiError> {
@@ -124,7 +123,7 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                     let token = parse_token(header_value)?;
 
                     let data = auth
-                        .decode(dbg!(token))
+                        .decode(token)
                         .map_err(|_| ApiError::Unauthorized("malformed jwt token".to_string()))?;
                     req.set_context(data.claims);
                 }

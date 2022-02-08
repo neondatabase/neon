@@ -1,5 +1,5 @@
 use hyper::{Body, Request, Response, StatusCode};
-use routerify::RouterBuilder;
+use zenith_utils::http::RouterBuilder;
 
 use zenith_utils::http::endpoint;
 use zenith_utils::http::error::ApiError;

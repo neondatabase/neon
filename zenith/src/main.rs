@@ -416,7 +416,7 @@ fn handle_init(init_match: &ArgMatches) -> Result<()> {
     Ok(())
 }
 
-fn pageserver_config_overrides<'a>(init_match: &'a ArgMatches) -> Vec<&'a str> {
+fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
     init_match
         .values_of("pageserver-config-override")
         .into_iter()

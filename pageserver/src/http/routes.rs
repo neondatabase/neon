@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
-use routerify::{ext::RequestExt, RouterBuilder};
 use serde::Serialize;
 use tracing::*;
 use zenith_utils::auth::JwtAuth;
@@ -19,6 +18,7 @@ use zenith_utils::http::{
     request::get_request_param,
     request::parse_request_param,
 };
+use zenith_utils::http::{RequestExt, RouterBuilder};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{opt_display_serde, ZTimelineId};
 
