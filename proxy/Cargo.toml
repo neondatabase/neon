@@ -13,7 +13,6 @@ hex = "0.4.3"
 hyper = "0.14"
 # TODO kb reexport this from zenith_utils
 routerify = "3"
-parking_lot = "0.12"
 serde = "1"
 serde_json = "1"
 tokio = { version = "1.11", features = ["macros"] }
