@@ -90,7 +90,7 @@ impl<'a> CPlaneApi<'a> {
 }
 
 impl CPlaneApi<'_> {
-    pub fn authenticate_proxy_request(
+    pub async fn authenticate_proxy_request(
         &self,
         user: &str,
         database: &str,
@@ -121,7 +121,7 @@ impl CPlaneApi<'_> {
         match auth_info {
             Ready { conn_info } => Ok(conn_info),
             Error { error } => bail!(error),
-            NotReady { .. } => waiter.wait()?.map_err(|e| anyhow!(e)),
+            NotReady { .. } => waiter.await.map_err(|e| anyhow!(e)),
         }
     }
 }

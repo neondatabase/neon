@@ -43,6 +43,7 @@ pub async fn thread_main(
                 .set_nodelay(true)
                 .context("failed to set socket option")?;
 
+            // TODO fix this
             let cplane = cplane::CPlaneApi::new("", &state.waiters);
             let tls = state.conf.ssl_config.clone();
             handle_client(socket, cplane, tls).await

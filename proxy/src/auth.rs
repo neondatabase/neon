@@ -60,7 +60,7 @@ impl LinkAuth<'_> {
             .write_message(&Be::NoticeResponse(greeting)).await?;
 
         // Wait for web console response
-        let db_info = waiter.wait()?.map_err(|e| anyhow::anyhow!(e))?;
+        let db_info = waiter.await.map_err(|e| anyhow::anyhow!(e))?;
 
         client.write_message(&Be::NoticeResponse("Connecting to database.".into())).await?;
 
@@ -92,7 +92,7 @@ impl Md5Auth<'_> {
             &creds.dbname,
             md5_response,
             &md5_salt,
-        )?;
+        ).await?;
 
         client
             .write_message_noflush(&Be::AuthenticationOk)?

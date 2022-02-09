@@ -104,7 +104,9 @@ fn try_process_query(
         Failure(message) => Err(message),
     };
 
-    match mgmt.state.waiters.notify(&resp.session_id, msg) {
+    // XXX deal with this
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    match rt.block_on(mgmt.state.waiters.notify(&resp.session_id, msg)) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
