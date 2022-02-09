@@ -85,7 +85,6 @@ pub fn check_permission(claims: &Claims, tenantid: Option<ZTenantId>) -> Result<
     }
 }
 
-#[derive(Debug)]
 pub struct JwtAuth {
     decoding_key: DecodingKey<'static>,
     validation: Validation,
@@ -110,6 +109,14 @@ impl JwtAuth {
 
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
         Ok(decode(token, &self.decoding_key, &self.validation)?)
+    }
+}
+
+impl std::fmt::Debug for JwtAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtAuth")
+            .field("validation", &self.validation)
+            .finish()
     }
 }
 
