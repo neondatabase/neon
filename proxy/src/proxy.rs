@@ -1,3 +1,4 @@
+use crate::auth::Auth;
 use crate::cancellation::{self, CancelClosure};
 use crate::cplane_api as cplane;
 use crate::state::SslConfig;
@@ -140,20 +141,18 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-// TODO: implement proper authentication
 async fn connect_client_to_db(
     mut client: PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     creds: cplane::ClientCredentials,
     session: cancellation::Session,
 ) -> anyhow::Result<()> {
-    // TODO: get this from an api call
-    let db_info = cplane::DatabaseInfo {
+    // TODO pass auth from caller
+    let auth = crate::auth::Auth::Forward(crate::auth::ForwardAuth {
         host: "127.0.0.1".into(),
         port: 5432,
-        dbname: creds.dbname,
-        user: "dmitry".into(),
-        password: None,
-    };
+    });
+
+    let db_info = crate::auth::authenticate(auth, &mut client, &creds).await?;
 
     let (mut db, version, cancel_closure) = connect_to_db(db_info).await?;
     let cancel_key_data = session.enable_cancellation(cancel_closure);
@@ -172,21 +171,6 @@ async fn connect_client_to_db(
     let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
 
     Ok(())
-}
-
-fn hello_message(redirect_uri: &str, session_id: &str) -> String {
-    format!(
-        concat![
-            "☀️  Welcome to Zenith!\n",
-            "To proceed with database creation, open the following link:\n\n",
-            "    {redirect_uri}{session_id}\n\n",
-            "It needs to be done once and we will send you '.pgpass' file,\n",
-            "which will allow you to access or create ",
-            "databases without opening your web browser."
-        ],
-        redirect_uri = redirect_uri,
-        session_id = session_id,
-    )
 }
 
 /// Connect to a corresponding compute node.

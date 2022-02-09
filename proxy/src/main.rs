@@ -10,6 +10,7 @@ use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
+mod auth;
 mod cancellation;
 mod cplane_api;
 mod http;

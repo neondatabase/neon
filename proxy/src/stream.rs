@@ -49,6 +49,14 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
             other => anyhow::bail!("bad message type: {:?}", other),
         }
     }
+
+    pub async fn read_password_message(&mut self) -> anyhow::Result<bytes::Bytes> {
+        match FeMessage::read_fut(&mut self.stream).await? {
+            Some(FeMessage::PasswordMessage(msg)) => Ok(msg),
+            None => anyhow::bail!("connection is lost"),
+            other => anyhow::bail!("bad message type: {:?}", other),
+        }
+    }
 }
 
 impl<S: AsyncWrite + Unpin> PqStream<S> {
