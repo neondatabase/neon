@@ -1,5 +1,9 @@
+use crate::auth::{self, StoredSecret, SecretStore};
 use crate::cancellation::{self, CancelClosure};
+use crate::compute::ComputeProvider;
 use crate::cplane_api as cplane;
+use crate::db::{AuthSecret, DatabaseAuthInfo};
+use crate::mock::MockConsole;
 use crate::state::SslConfig;
 use crate::stream::{PqStream, Stream};
 use crate::ProxyState;
@@ -140,24 +144,28 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-// TODO: implement proper authentication
 async fn connect_client_to_db(
     mut client: PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     creds: cplane::ClientCredentials,
     session: cancellation::Session,
 ) -> anyhow::Result<()> {
-    // TODO: get this from an api call
-    let db_info = cplane::DatabaseInfo {
-        host: "127.0.0.1".into(),
-        port: 5432,
-        dbname: creds.dbname,
-        user: "dmitry".into(),
-        password: None,
+    // Authenticate
+    // TODO use real console
+    let console = MockConsole {};
+    let stored_secret = console.get_stored_secret(&creds).await?;
+    let auth_secret = auth::authenticate(&mut client, stored_secret).await?;
+    let conn_info = console.get_compute_node(&creds).await?;
+    let db_auth_info = DatabaseAuthInfo {
+        conn_info,
+        creds,
+        auth_secret,
     };
 
-    let (mut db, version, cancel_closure) = connect_to_db(db_info).await?;
+    // Connect to db
+    let (mut db, version, cancel_closure) = connect_to_db(db_auth_info).await?;
     let cancel_key_data = session.enable_cancellation(cancel_closure);
 
+    // Report success to client
     client
         .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&BeParameterStatusMessage::encoding())?
@@ -191,10 +199,10 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
 
 /// Connect to a corresponding compute node.
 async fn connect_to_db(
-    db_info: cplane::DatabaseInfo,
+    db_info: DatabaseAuthInfo,
 ) -> anyhow::Result<(TcpStream, String, CancelClosure)> {
     // TODO: establish a secure connection to the DB
-    let socket_addr = db_info.socket_addr()?;
+    let socket_addr = db_info.conn_info.socket_addr()?;
     let mut socket = TcpStream::connect(socket_addr).await?;
 
     let (client, conn) = tokio_postgres::Config::from(db_info)
