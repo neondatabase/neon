@@ -24,55 +24,55 @@ fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("Zenith proxy/router")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("proxy")
-                .short("p")
+            Arg::new("proxy")
+                .short('p')
                 .long("proxy")
                 .takes_value(true)
                 .help("listen for incoming client connections on ip:port")
                 .default_value("127.0.0.1:4432"),
         )
         .arg(
-            Arg::with_name("mgmt")
-                .short("m")
+            Arg::new("mgmt")
+                .short('m')
                 .long("mgmt")
                 .takes_value(true)
                 .help("listen for management callback connection on ip:port")
                 .default_value("127.0.0.1:7000"),
         )
         .arg(
-            Arg::with_name("http")
-                .short("h")
+            Arg::new("http")
+                .short('h')
                 .long("http")
                 .takes_value(true)
                 .help("listen for incoming http connections (metrics, etc) on ip:port")
                 .default_value("127.0.0.1:7001"),
         )
         .arg(
-            Arg::with_name("uri")
-                .short("u")
+            Arg::new("uri")
+                .short('u')
                 .long("uri")
                 .takes_value(true)
                 .help("redirect unauthenticated users to given uri")
                 .default_value("http://localhost:3000/psql_session/"),
         )
         .arg(
-            Arg::with_name("auth-endpoint")
-                .short("a")
+            Arg::new("auth-endpoint")
+                .short('a')
                 .long("auth-endpoint")
                 .takes_value(true)
                 .help("API endpoint for authenticating users")
                 .default_value("http://localhost:3000/authenticate_proxy_request/"),
         )
         .arg(
-            Arg::with_name("ssl-key")
-                .short("k")
+            Arg::new("ssl-key")
+                .short('k')
                 .long("ssl-key")
                 .takes_value(true)
                 .help("path to SSL key for client postgres connections"),
         )
         .arg(
-            Arg::with_name("ssl-cert")
-                .short("c")
+            Arg::new("ssl-cert")
+                .short('c')
                 .long("ssl-cert")
                 .takes_value(true)
                 .help("path to SSL cert for client postgres connections"),

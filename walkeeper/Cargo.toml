@@ -1,22 +1,19 @@
 [package]
 name = "walkeeper"
 version = "0.1.0"
-authors = ["Stas Kelvich <stas@zenith.tech>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 regex = "1.4.5"
 bytes = "1.0.1"
 byteorder = "1.4.3"
 hyper = "0.14"
-routerify = "2"
+routerify = "3"
 fs2 = "0.4.3"
 lazy_static = "1.4.0"
 serde_json = "1"
 tracing = "0.1.27"
-clap = "2.33.0"
+clap = "3.0"
 daemonize = "0.4.1"
 rust-s3 = { version = "0.28", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls"] }
 tokio = { version = "1.11", features = ["macros"] }

@@ -4,7 +4,7 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{bail, ensure, Context};
-use clap::{App, Arg, SubCommand};
+use clap::{App, Arg};
 use pageserver::{
     layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
     remote_storage::compression,
@@ -26,38 +26,38 @@ async fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("pageserver zst blob [un]compressor utility")
         .version(GIT_VERSION)
         .subcommands(vec![
-            SubCommand::with_name(LIST_SUBCOMMAND)
+            App::new(LIST_SUBCOMMAND)
                 .about("List the archive contents")
                 .arg(
-                    Arg::with_name(ARCHIVE_ARG_NAME)
+                    Arg::new(ARCHIVE_ARG_NAME)
                         .required(true)
                         .takes_value(true)
                         .help("An archive to list the contents of"),
                 ),
-            SubCommand::with_name(EXTRACT_SUBCOMMAND)
+            App::new(EXTRACT_SUBCOMMAND)
                 .about("Extracts the archive into the directory")
                 .arg(
-                    Arg::with_name(ARCHIVE_ARG_NAME)
+                    Arg::new(ARCHIVE_ARG_NAME)
                         .required(true)
                         .takes_value(true)
                         .help("An archive to extract"),
                 )
                 .arg(
-                    Arg::with_name(TARGET_DIRECTORY_ARG_NAME)
+                    Arg::new(TARGET_DIRECTORY_ARG_NAME)
                         .required(false)
                         .takes_value(true)
                         .help("A directory to extract the archive into. Optional, will use the current directory if not specified"),
                 ),
-            SubCommand::with_name(CREATE_SUBCOMMAND)
+            App::new(CREATE_SUBCOMMAND)
                 .about("Creates an archive with the contents of a directory (only the first level files are taken, metadata file has to be present in the same directory)")
                 .arg(
-                    Arg::with_name(SOURCE_DIRECTORY_ARG_NAME)
+                    Arg::new(SOURCE_DIRECTORY_ARG_NAME)
                         .required(true)
                         .takes_value(true)
                         .help("A directory to use for creating the archive"),
                 )
                 .arg(
-                    Arg::with_name(TARGET_DIRECTORY_ARG_NAME)
+                    Arg::new(TARGET_DIRECTORY_ARG_NAME)
                         .required(false)
                         .takes_value(true)
                         .help("A directory to create the archive in. Optional, will use the current directory if not specified"),

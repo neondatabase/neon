@@ -2,7 +2,7 @@
 name = "zenith"
 version = "0.1.0"
 description = ""
-authors = ["Dmitry Rodionov <dmitry@zenith.tech>"]
+authors = []
 
 [tool.poetry.dependencies]
 python = "^3.7"

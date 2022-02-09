@@ -32,22 +32,22 @@ fn main() -> Result<()> {
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("datadir")
-                .short("D")
+            Arg::new("datadir")
+                .short('D')
                 .long("dir")
                 .takes_value(true)
                 .help("Path to the safekeeper data directory"),
         )
         .arg(
-            Arg::with_name("listen-pg")
-                .short("l")
+            Arg::new("listen-pg")
+                .short('l')
                 .long("listen-pg")
                 .alias("listen") // for compatibility
                 .takes_value(true)
                 .help(formatcp!("listen for incoming WAL data connections on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
         )
         .arg(
-            Arg::with_name("listen-http")
+            Arg::new("listen-http")
                 .long("listen-http")
                 .takes_value(true)
                 .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
@@ -56,39 +56,39 @@ fn main() -> Result<()> {
         // However because this argument is in use by console's e2e tests lets keep it for now and remove separately.
         // So currently it is a noop.
         .arg(
-            Arg::with_name("pageserver")
-                .short("p")
+            Arg::new("pageserver")
+                .short('p')
                 .long("pageserver")
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("ttl")
+            Arg::new("ttl")
                 .long("ttl")
                 .takes_value(true)
                 .help("interval for keeping WAL at safekeeper node, after which them will be uploaded to S3 and removed locally"),
         )
         .arg(
-            Arg::with_name("recall")
+            Arg::new("recall")
                 .long("recall")
                 .takes_value(true)
                 .help("Period for requestion pageserver to call for replication"),
         )
         .arg(
-            Arg::with_name("daemonize")
-                .short("d")
+            Arg::new("daemonize")
+                .short('d')
                 .long("daemonize")
                 .takes_value(false)
                 .help("Run in the background"),
         )
         .arg(
-            Arg::with_name("no-sync")
-                .short("n")
+            Arg::new("no-sync")
+                .short('n')
                 .long("no-sync")
                 .takes_value(false)
                 .help("Do not wait for changes to be written safely to disk"),
         )
         .arg(
-            Arg::with_name("dump-control-file")
+            Arg::new("dump-control-file")
                 .long("dump-control-file")
                 .takes_value(true)
                 .help("Dump control file at path specifed by this argument and exit"),
