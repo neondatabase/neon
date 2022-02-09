@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-prometheus = {version = "0.12", default_features=false} # removes protobuf dependency
+prometheus = {version = "0.13", default_features=false} # removes protobuf dependency
 libc = "0.2"
 lazy_static = "1.4"
 once_cell = "1.8.0"

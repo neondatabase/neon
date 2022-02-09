@@ -27,27 +27,27 @@ fn main() -> Result<()> {
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("daemonize")
-                .short("d")
+            Arg::new("daemonize")
+                .short('d')
                 .long("daemonize")
                 .takes_value(false)
                 .help("Run in the background"),
         )
         .arg(
-            Arg::with_name("init")
+            Arg::new("init")
                 .long("init")
                 .takes_value(false)
                 .help("Initialize pageserver repo"),
         )
         .arg(
-            Arg::with_name("workdir")
-                .short("D")
+            Arg::new("workdir")
+                .short('D')
                 .long("workdir")
                 .takes_value(true)
                 .help("Working directory for the pageserver"),
         )
         .arg(
-            Arg::with_name("create-tenant")
+            Arg::new("create-tenant")
                 .long("create-tenant")
                 .takes_value(true)
                 .help("Create tenant during init")
@@ -55,11 +55,11 @@ fn main() -> Result<()> {
         )
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
-            Arg::with_name("config-override")
-                .short("c")
+            Arg::new("config-override")
+                .short('c')
                 .takes_value(true)
                 .number_of_values(1)
-                .multiple(true)
+                .multiple_occurrences(true)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
                 Any option has to be a valid toml document, example: `-c \"foo='hey'\"` `-c \"foo={value=1}\"`"),
         )

@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
+use clap::{App, AppSettings, Arg, ArgMatches};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env;
 use control_plane::local_env::LocalEnv;
@@ -67,45 +67,39 @@ struct BranchTreeEl {
 //   * Providing CLI api to the pageserver
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
-    let pg_node_arg = Arg::with_name("node")
-        .index(1)
-        .help("Node name")
-        .required(true);
+    let pg_node_arg = Arg::new("node").index(1).help("Node name").required(true);
 
-    let safekeeper_node_arg = Arg::with_name("node")
-        .index(1)
-        .help("Node name")
-        .required(false);
+    let safekeeper_node_arg = Arg::new("node").index(1).help("Node name").required(false);
 
-    let timeline_arg = Arg::with_name("timeline")
+    let timeline_arg = Arg::new("timeline")
         .index(2)
         .help("Branch name or a point-in time specification")
         .required(false);
 
-    let tenantid_arg = Arg::with_name("tenantid")
+    let tenantid_arg = Arg::new("tenantid")
         .long("tenantid")
         .help("Tenant id. Represented as a hexadecimal string 32 symbols length")
         .takes_value(true)
         .required(false);
 
-    let port_arg = Arg::with_name("port")
+    let port_arg = Arg::new("port")
         .long("port")
         .required(false)
         .value_name("port");
 
-    let stop_mode_arg = Arg::with_name("stop-mode")
-        .short("m")
+    let stop_mode_arg = Arg::new("stop-mode")
+        .short('m')
         .takes_value(true)
         .possible_values(&["fast", "immediate"])
         .help("If 'immediate', don't flush repository data at shutdown")
         .required(false)
         .value_name("stop-mode");
 
-    let pageserver_config_args = Arg::with_name("pageserver-config-override")
+    let pageserver_config_args = Arg::new("pageserver-config-override")
         .long("pageserver-config-override")
         .takes_value(true)
         .number_of_values(1)
-        .multiple(true)
+        .multiple_occurrences(true)
         .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
         .required(false);
 
@@ -113,88 +107,88 @@ fn main() -> Result<()> {
         .setting(AppSettings::ArgRequiredElseHelp)
         .version(GIT_VERSION)
         .subcommand(
-            SubCommand::with_name("init")
+            App::new("init")
                 .about("Initialize a new Zenith repository")
                 .arg(pageserver_config_args.clone())
                 .arg(
-                    Arg::with_name("config")
+                    Arg::new("config")
                         .long("config")
                         .required(false)
                         .value_name("config"),
                 )
         )
         .subcommand(
-            SubCommand::with_name("branch")
+            App::new("branch")
                 .about("Create a new branch")
-                .arg(Arg::with_name("branchname").required(false).index(1))
-                .arg(Arg::with_name("start-point").required(false).index(2))
+                .arg(Arg::new("branchname").required(false).index(1))
+                .arg(Arg::new("start-point").required(false).index(2))
                 .arg(tenantid_arg.clone()),
         ).subcommand(
-            SubCommand::with_name("tenant")
+            App::new("tenant")
             .setting(AppSettings::ArgRequiredElseHelp)
             .about("Manage tenants")
-            .subcommand(SubCommand::with_name("list"))
-            .subcommand(SubCommand::with_name("create").arg(Arg::with_name("tenantid").required(false).index(1)))
+            .subcommand(App::new("list"))
+            .subcommand(App::new("create").arg(Arg::new("tenantid").required(false).index(1)))
         )
         .subcommand(
-            SubCommand::with_name("pageserver")
+            App::new("pageserver")
                 .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage pageserver")
-                .subcommand(SubCommand::with_name("status"))
-                .subcommand(SubCommand::with_name("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
-                .subcommand(SubCommand::with_name("stop").about("Stop local pageserver")
+                .subcommand(App::new("status"))
+                .subcommand(App::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
+                .subcommand(App::new("stop").about("Stop local pageserver")
                             .arg(stop_mode_arg.clone()))
-                .subcommand(SubCommand::with_name("restart").about("Restart local pageserver").arg(pageserver_config_args))
+                .subcommand(App::new("restart").about("Restart local pageserver").arg(pageserver_config_args))
         )
         .subcommand(
-            SubCommand::with_name("safekeeper")
+            App::new("safekeeper")
                 .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage safekeepers")
-                .subcommand(SubCommand::with_name("start")
+                .subcommand(App::new("start")
                             .about("Start local safekeeper")
                             .arg(safekeeper_node_arg.clone())
                 )
-                .subcommand(SubCommand::with_name("stop")
+                .subcommand(App::new("stop")
                             .about("Stop local safekeeper")
                             .arg(safekeeper_node_arg.clone())
                             .arg(stop_mode_arg.clone())
                 )
-                .subcommand(SubCommand::with_name("restart")
+                .subcommand(App::new("restart")
                             .about("Restart local safekeeper")
                             .arg(safekeeper_node_arg.clone())
                             .arg(stop_mode_arg.clone())
                 )
         )
         .subcommand(
-            SubCommand::with_name("pg")
+            App::new("pg")
                 .setting(AppSettings::ArgRequiredElseHelp)
                 .about("Manage postgres instances")
-                .subcommand(SubCommand::with_name("list").arg(tenantid_arg.clone()))
-                .subcommand(SubCommand::with_name("create")
+                .subcommand(App::new("list").arg(tenantid_arg.clone()))
+                .subcommand(App::new("create")
                     .about("Create a postgres compute node")
                     .arg(pg_node_arg.clone())
                     .arg(timeline_arg.clone())
                     .arg(tenantid_arg.clone())
                     .arg(port_arg.clone())
                     .arg(
-                        Arg::with_name("config-only")
+                        Arg::new("config-only")
                             .help("Don't do basebackup, create compute node with only config files")
                             .long("config-only")
                             .required(false)
                     ))
-                .subcommand(SubCommand::with_name("start")
+                .subcommand(App::new("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
                     .arg(pg_node_arg.clone())
                     .arg(timeline_arg.clone())
                     .arg(tenantid_arg.clone())
                     .arg(port_arg.clone()))
                 .subcommand(
-                    SubCommand::with_name("stop")
+                    App::new("stop")
                         .arg(pg_node_arg.clone())
                         .arg(timeline_arg.clone())
                         .arg(tenantid_arg.clone())
                         .arg(
-                            Arg::with_name("destroy")
+                            Arg::new("destroy")
                                 .help("Also delete data directory (now optional, should be default in future)")
                                 .long("destroy")
                                 .required(false)
@@ -203,18 +197,20 @@ fn main() -> Result<()> {
 
         )
         .subcommand(
-            SubCommand::with_name("start")
+            App::new("start")
                 .about("Start page server and safekeepers")
         )
         .subcommand(
-            SubCommand::with_name("stop")
+            App::new("stop")
                 .about("Stop page server and safekeepers")
                 .arg(stop_mode_arg.clone())
         )
         .get_matches();
 
-    let (sub_name, sub_args) = matches.subcommand();
-    let sub_args = sub_args.expect("no subcommand");
+    let (sub_name, sub_args) = match matches.subcommand() {
+        Some(subcommand_data) => subcommand_data,
+        None => bail!("no subcommand provided"),
+    };
 
     // Check for 'zenith init' command first.
     let subcmd_result = if sub_name == "init" {
@@ -431,12 +427,12 @@ fn pageserver_config_overrides<'a>(init_match: &'a ArgMatches) -> Vec<&'a str> {
 fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let pageserver = PageServerNode::from_env(env);
     match tenant_match.subcommand() {
-        ("list", Some(_)) => {
+        Some(("list", _)) => {
             for t in pageserver.tenant_list()? {
                 println!("{} {}", t.id, t.state);
             }
         }
-        ("create", Some(create_match)) => {
+        Some(("create", create_match)) => {
             let tenantid = match create_match.value_of("tenantid") {
                 Some(tenantid) => ZTenantId::from_str(tenantid)?,
                 None => ZTenantId::generate(),
@@ -445,10 +441,8 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
             pageserver.tenant_create(tenantid)?;
             println!("tenant successfully created on the pageserver");
         }
-
-        (sub_name, _) => {
-            bail!("Unexpected tenant subcommand '{}'", sub_name)
-        }
+        Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
+        None => bail!("No tenant subcommand found"),
     }
     Ok(())
 }
@@ -477,8 +471,10 @@ fn handle_branch(branch_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
 }
 
 fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    let (sub_name, sub_args) = pg_match.subcommand();
-    let sub_args = sub_args.expect("no pg subcommand");
+    let (sub_name, sub_args) = match pg_match.subcommand() {
+        Some(pg_subcommand_data) => pg_subcommand_data,
+        None => bail!("no pg subcommand provided"),
+    };
 
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
@@ -589,14 +585,14 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     let pageserver = PageServerNode::from_env(env);
 
     match sub_match.subcommand() {
-        ("start", Some(start_match)) => {
+        Some(("start", start_match)) => {
             if let Err(e) = pageserver.start(&pageserver_config_overrides(start_match)) {
                 eprintln!("pageserver start failed: {}", e);
                 exit(1);
             }
         }
 
-        ("stop", Some(stop_match)) => {
+        Some(("stop", stop_match)) => {
             let immediate = stop_match.value_of("stop-mode") == Some("immediate");
 
             if let Err(e) = pageserver.stop(immediate) {
@@ -605,7 +601,7 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             }
         }
 
-        ("restart", Some(restart_match)) => {
+        Some(("restart", restart_match)) => {
             //TODO what shutdown strategy should we use here?
             if let Err(e) = pageserver.stop(false) {
                 eprintln!("pageserver stop failed: {}", e);
@@ -617,8 +613,8 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
                 exit(1);
             }
         }
-
-        (sub_name, _) => bail!("Unexpected pageserver subcommand '{}'", sub_name),
+        Some((sub_name, _)) => bail!("Unexpected pageserver subcommand '{}'", sub_name),
+        None => bail!("No pageserver subcommand given"),
     }
     Ok(())
 }
@@ -632,8 +628,10 @@ fn get_safekeeper(env: &local_env::LocalEnv, name: &str) -> Result<SafekeeperNod
 }
 
 fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    let (sub_name, sub_args) = sub_match.subcommand();
-    let sub_args = sub_args.expect("no safekeeper subcommand");
+    let (sub_name, sub_args) = match sub_match.subcommand() {
+        Some(safekeeper_command_data) => safekeeper_command_data,
+        None => bail!("no safekeeper subcommand provided"),
+    };
 
     // All the commands take an optional safekeeper name argument
     let node_name = sub_args.value_of("node").unwrap_or(DEFAULT_SAFEKEEPER_NAME);

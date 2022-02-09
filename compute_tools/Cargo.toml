@@ -1,17 +1,14 @@
 [package]
 name = "compute_tools"
 version = "0.1.0"
-authors = ["Alexey Kondratov <kondratov.aleksey@gmail.com>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 libc = "0.2"
 anyhow = "1.0"
 chrono = "0.4"
-clap = "2.33"
-env_logger = "0.8"
+clap = "3.0"
+env_logger = "0.9"
 hyper = { version = "0.14", features = ["full"] }
 log = { version = "0.4", features = ["std", "serde"] }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
