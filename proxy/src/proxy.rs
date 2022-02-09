@@ -43,8 +43,9 @@ pub async fn thread_main(
                 .set_nodelay(true)
                 .context("failed to set socket option")?;
 
+            let cplane = cplane::CPlaneApi::new("", &state.waiters);
             let tls = state.conf.ssl_config.clone();
-            handle_client(socket, tls).await
+            handle_client(socket, cplane, tls).await
         }));
     }
 }
@@ -61,6 +62,7 @@ where
 
 async fn handle_client(
     stream: impl AsyncRead + AsyncWrite + Unpin,
+    cplane: cplane::CPlaneApi<'_>,
     tls: Option<SslConfig>,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::collections::HashMap;
 
@@ -95,15 +96,15 @@ impl CPlaneApi<'_> {
         database: &str,
         md5_response: &[u8],
         salt: &[u8; 4],
-        psql_session_id: &str,
     ) -> anyhow::Result<DatabaseInfo> {
         let mut url = reqwest::Url::parse(self.auth_endpoint)?;
+        let psql_session_id = hex::encode(rand::random::<[u8; 8]>());
         url.query_pairs_mut()
             .append_pair("login", user)
             .append_pair("database", database)
             .append_pair("md5response", std::str::from_utf8(md5_response)?)
             .append_pair("salt", &hex::encode(salt))
-            .append_pair("psql_session_id", psql_session_id);
+            .append_pair("psql_session_id", &psql_session_id);
 
         let waiter = self.waiters.register(psql_session_id.to_owned());
 
@@ -122,6 +123,40 @@ impl CPlaneApi<'_> {
             Error { error } => bail!(error),
             NotReady { .. } => waiter.wait()?.map_err(|e| anyhow!(e)),
         }
+    }
+}
+
+pub struct LinkCPlaneApi<'a> {
+    redirect_uri: &'a str,
+    waiters: &'a ProxyWaiters,
+}
+
+impl<'a> LinkCPlaneApi<'a> {
+    pub fn new(redirect_uri: &'a str, waiters: &'a ProxyWaiters) -> Self {
+        Self {
+            redirect_uri,
+            waiters,
+        }
+    }
+}
+
+impl LinkCPlaneApi<'_> {
+    pub fn get_hello_message(&self) -> (String, crate::waiters::Waiter<Result<DatabaseInfo, String>>) {
+        let session_id = hex::encode(rand::random::<[u8; 8]>());
+        let message = format!(
+            concat![
+                "☀️  Welcome to Zenith!\n",
+                "To proceed with database creation, open the following link:\n\n",
+                "    {redirect_uri}{session_id}\n\n",
+                "It needs to be done once and we will send you '.pgpass' file,\n",
+                "which will allow you to access or create ",
+                "databases without opening your web browser."
+            ],
+            redirect_uri = self.redirect_uri,
+            session_id = session_id,
+        );
+        let waiter = self.waiters.register(session_id.clone());
+        (message, waiter)
     }
 }
 
