@@ -67,9 +67,17 @@ struct BranchTreeEl {
 //   * Providing CLI api to the pageserver
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
-    let pg_node_arg = Arg::new("node").index(1).help("Node name").required(true);
+    #[rustfmt::skip] // rustfmt squashes these into a single line otherwise
+    let pg_node_arg = Arg::new("node")
+        .index(1)
+        .help("Node name")
+        .required(true);
 
-    let safekeeper_node_arg = Arg::new("node").index(1).help("Node name").required(false);
+    #[rustfmt::skip]
+    let safekeeper_node_arg = Arg::new("node")
+        .index(1)
+        .help("Node name")
+        .required(false);
 
     let timeline_arg = Arg::new("timeline")
         .index(2)
@@ -442,7 +450,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
             println!("tenant successfully created on the pageserver");
         }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
-        None => bail!("No tenant subcommand found"),
+        None => bail!("no tenant subcommand provided"),
     }
     Ok(())
 }
@@ -614,7 +622,7 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             }
         }
         Some((sub_name, _)) => bail!("Unexpected pageserver subcommand '{}'", sub_name),
-        None => bail!("No pageserver subcommand given"),
+        None => bail!("no pageserver subcommand provided"),
     }
     Ok(())
 }
