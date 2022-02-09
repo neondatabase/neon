@@ -334,14 +334,26 @@ impl PostgresNode {
         if let Some(lsn) = self.lsn {
             conf.append("recovery_target_lsn", &lsn.to_string());
         }
+
         conf.append_line("");
+        // Configure backpressure
+        // - Replication write lag depends on how fast the walreceiver can process incoming WAL.
+        //   This lag determines latency of get_page_at_lsn. Speed of applying WAL is about 10MB/sec,
+        //   so to avoid expiration of 1 minute timeout, this lag should not be larger than 600MB.
+        //   Actually latency should be much smaller (better if < 1sec). But we assume that recently
+        //   updates pages are not requested from pageserver.
+        // - Replication flush lag depends on speed of persisting data by checkpointer (creation of
+        //   delta/image layers) and advancing disk_consistent_lsn. Safekeepers are able to
+        //   remove/archive WAL only beyond disk_consistent_lsn. Too large a lag can cause long
+        //   recovery time (in case of pageserver crash) and disk space overflow at safekeepers.
+        // - Replication apply lag depends on speed of uploading changes to S3 by uploader thread.
+        //   To be able to restore database in case of pageserver node crash, safekeeper should not
+        //   remove WAL beyond this point. Too large lag can cause space exhaustion in safekeepers
+        //   (if they are not able to upload WAL to S3).
+        conf.append("max_replication_write_lag", "500MB");
+        conf.append("max_replication_flush_lag", "10GB");
 
         if !self.env.safekeepers.is_empty() {
-            // Configure backpressure
-            // In setup with safekeepers apply_lag depends on
-            // speed of data checkpointing on pageserver (see disk_consistent_lsn).
-            conf.append("max_replication_apply_lag", "1500MB");
-
             // Configure the node to connect to the safekeepers
             conf.append("synchronous_standby_names", "walproposer");
 
@@ -354,11 +366,6 @@ impl PostgresNode {
                 .join(",");
             conf.append("wal_acceptors", &wal_acceptors);
         } else {
-            // Configure backpressure
-            // In setup without safekeepers, flush_lag depends on
-            // speed of of data checkpointing on pageserver (see disk_consistent_lsn)
-            conf.append("max_replication_flush_lag", "1500MB");
-
             // We only use setup without safekeepers for tests,
             // and don't care about data durability on pageserver,
             // so set more relaxed synchronous_commit.
