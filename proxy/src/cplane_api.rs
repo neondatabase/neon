@@ -75,12 +75,23 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
     }
 }
 
-pub struct CPlaneApi<'a> {
+pub struct FullApi<'a> {
+    md5_api: Md5Api<'a>,
+    link_api: LinkApi<'a>,
+}
+
+pub struct Md5Api<'a> {
     auth_endpoint: &'a str,
     waiters: &'a ProxyWaiters,
 }
 
-impl<'a> CPlaneApi<'a> {
+pub struct LinkApi<'a> {
+    redirect_uri: &'a str,
+    waiters: &'a ProxyWaiters,
+}
+
+
+impl<'a> Md5Api<'a> {
     pub fn new(auth_endpoint: &'a str, waiters: &'a ProxyWaiters) -> Self {
         Self {
             auth_endpoint,
@@ -89,7 +100,7 @@ impl<'a> CPlaneApi<'a> {
     }
 }
 
-impl CPlaneApi<'_> {
+impl Md5Api<'_> {
     pub async fn authenticate_proxy_request(
         &self,
         user: &str,
@@ -126,12 +137,7 @@ impl CPlaneApi<'_> {
     }
 }
 
-pub struct LinkCPlaneApi<'a> {
-    redirect_uri: &'a str,
-    waiters: &'a ProxyWaiters,
-}
-
-impl<'a> LinkCPlaneApi<'a> {
+impl<'a> LinkApi<'a> {
     pub fn new(redirect_uri: &'a str, waiters: &'a ProxyWaiters) -> Self {
         Self {
             redirect_uri,
@@ -140,7 +146,7 @@ impl<'a> LinkCPlaneApi<'a> {
     }
 }
 
-impl LinkCPlaneApi<'_> {
+impl LinkApi<'_> {
     pub fn get_hello_message(&self) -> (String, crate::waiters::Waiter<Result<DatabaseInfo, String>>) {
         let session_id = hex::encode(rand::random::<[u8; 8]>());
         let message = format!(

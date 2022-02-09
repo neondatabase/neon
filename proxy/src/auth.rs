@@ -1,10 +1,7 @@
-use crate::cplane_api::{DatabaseInfo, LinkCPlaneApi, CPlaneApi};
-use pin_project_lite::pin_project;
+use crate::cplane_api::{DatabaseInfo, LinkApi, Md5Api};
 use crate::stream::PqStream;
 use tokio::io::{AsyncRead, AsyncWrite};
-use crate::state::ProxyWaiters;
 use zenith_utils::pq_proto::{BeMessage as Be, *};
-use async_trait::async_trait;
 
 
 // TODO this should be a trait instead, but async_trait is a bit finicky.
@@ -36,12 +33,12 @@ pub struct ForwardAuth {
 
 /// Use password-based auth in [`AuthStream`].
 pub struct Md5Auth<'a> {
-    cplane_api: CPlaneApi<'a>
+    md5_cplane_api: Md5Api<'a>
 }
 
 /// Login via link to console
 pub struct LinkAuth<'a> {
-    link_cplane_api: LinkCPlaneApi<'a>,
+    link_cplane_api: LinkApi<'a>,
 }
 
 // #[async_trait(?Send)]
@@ -87,7 +84,7 @@ impl Md5Auth<'_> {
             .split_last()
             .ok_or_else(|| anyhow::anyhow!("unexpected password message"))?;
 
-        let db_info = self.cplane_api.authenticate_proxy_request(
+        let db_info = self.md5_cplane_api.authenticate_proxy_request(
             &creds.user,
             &creds.dbname,
             md5_response,
