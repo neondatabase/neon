@@ -195,6 +195,12 @@ def run_pgbench(pg_bin: PgBin,
 
     zenbenchmark.record("pgbench_init", init_seconds, unit="s", report=MetricReport.LOWER_IS_BETTER)
 
+    wal_init_size = get_dir_size(os.path.join(pgbench_env["PGDATA"], 'pg_wal'))
+    zenbenchmark.record('wal_init_size',
+                        wal_init_size / (1024 * 1024),
+                        'MB',
+                        report=MetricReport.LOWER_IS_BETTER)
+
     cmd = [
         "pgbench",
         "-c",
