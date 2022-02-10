@@ -1,6 +1,7 @@
 use crate::auth::Auth;
 use crate::cancellation::{self, CancelClosure};
 use crate::cplane_api as cplane;
+use crate::router::Router;
 use crate::state::SslConfig;
 use crate::stream::{PqStream, Stream};
 use crate::ProxyState;
@@ -43,10 +44,9 @@ pub async fn thread_main(
                 .set_nodelay(true)
                 .context("failed to set socket option")?;
 
-            // TODO fix this
-            let cplane = cplane::Md5Api::new("", &state.waiters);
+            let auth = crate::auth::from_router(&state.conf.router, &state.waiters);
             let tls = state.conf.ssl_config.clone();
-            handle_client(socket, cplane, tls).await
+            handle_client(socket, auth, tls).await
         }));
     }
 }
@@ -63,7 +63,7 @@ where
 
 async fn handle_client(
     stream: impl AsyncRead + AsyncWrite + Unpin,
-    cplane: cplane::Md5Api<'_>,
+    auth: Auth<'_>,
     tls: Option<SslConfig>,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
@@ -74,7 +74,7 @@ async fn handle_client(
 
     if let Some((stream, creds)) = handshake(stream, tls).await? {
         cancellation::with_session(|session| async {
-            connect_client_to_db(stream, creds, session).await
+            connect_client_to_db(stream, auth, creds, session).await
         })
         .await?;
     }
@@ -146,15 +146,10 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
 async fn connect_client_to_db(
     mut client: PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    auth: Auth<'_>,
     creds: cplane::ClientCredentials,
     session: cancellation::Session,
 ) -> anyhow::Result<()> {
-    // TODO pass auth from caller
-    let auth = crate::auth::Auth::Forward(crate::auth::ForwardAuth {
-        host: "127.0.0.1".into(),
-        port: 5432,
-    });
-
     let db_info = crate::auth::authenticate(auth, &mut client, &creds).await?;
 
     let (mut db, version, cancel_closure) = connect_to_db(db_info).await?;

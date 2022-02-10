@@ -10,6 +10,9 @@ use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
+use crate::router::{Router, StaticRouter};
+
+mod router;
 mod auth;
 mod cancellation;
 mod cplane_api;
@@ -92,12 +95,21 @@ async fn main() -> anyhow::Result<()> {
         _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
     };
 
+    // TODO read this from args
+    let listen_address = "127.0.0.1:4432".parse().unwrap();
+    let router = Router::Static(StaticRouter {
+        listen_address,
+        postgres_host: "127.0.0.1".into(),
+        postgres_port: 5432,
+    });
+
     let config = ProxyConfig {
-        proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
+        router,
+        // proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         http_address: arg_matches.value_of("http").unwrap().parse()?,
-        redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
-        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
+        // redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
+        // auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         ssl_config,
     };
     let state: &ProxyState = Box::leak(Box::new(ProxyState::new(config)));
@@ -108,8 +120,8 @@ async fn main() -> anyhow::Result<()> {
     println!("Starting http on {}", state.conf.http_address);
     let http_listener = tcp_listener::bind(state.conf.http_address)?;
 
-    println!("Starting proxy on {}", state.conf.proxy_address);
-    let proxy_listener = tokio::net::TcpListener::bind(state.conf.proxy_address).await?;
+    println!("Starting proxy on {}", listen_address);
+    let proxy_listener = tokio::net::TcpListener::bind(listen_address).await?;
 
     println!("Starting mgmt on {}", state.conf.mgmt_address);
     let mgmt_listener = tcp_listener::bind(state.conf.mgmt_address)?;

@@ -1,4 +1,6 @@
-use crate::cplane_api::{DatabaseInfo, LinkApi, Md5Api};
+use crate::cplane_api::{self, DatabaseInfo, LinkApi, Md5Api};
+use crate::router::Router;
+use crate::state::ProxyWaiters;
 use crate::stream::PqStream;
 use tokio::io::{AsyncRead, AsyncWrite};
 use zenith_utils::pq_proto::{BeMessage as Be, *};
@@ -21,6 +23,21 @@ pub async fn authenticate(
         Auth::Forward(auth) => auth.authenticate(client, creds).await,
         Auth::Md5(auth) => auth.authenticate(client, creds).await,
         Auth::Link(auth) => auth.authenticate(client, creds).await,
+    }
+}
+
+pub fn from_router<'a>(router: &'a Router, waiters: &'a ProxyWaiters) -> Auth<'a> {
+    match router {
+        Router::Default(r) => Auth::Md5(Md5Auth {
+            md5_cplane_api: cplane_api::Md5Api::new(&r.auth_endpoint, &waiters),
+        }),
+        Router::Link(r) => Auth::Link(LinkAuth {
+            link_cplane_api: cplane_api::LinkApi::new(&r.redirect_uri, &waiters),
+        }),
+        Router::Static(r) => Auth::Forward(ForwardAuth {
+            host: r.postgres_host.clone(),
+            port: r.postgres_port,
+        })
     }
 }
 

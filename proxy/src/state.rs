@@ -1,4 +1,5 @@
 use crate::cplane_api::DatabaseInfo;
+use crate::router::Router;
 use anyhow::{anyhow, ensure, Context};
 use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
 use std::net::SocketAddr;
@@ -7,8 +8,7 @@ use std::sync::Arc;
 pub type SslConfig = Arc<ServerConfig>;
 
 pub struct ProxyConfig {
-    /// main entrypoint for users to connect to
-    pub proxy_address: SocketAddr,
+    pub router: Router,
 
     /// internally used for status and prometheus metrics
     pub http_address: SocketAddr,
@@ -17,12 +17,6 @@ pub struct ProxyConfig {
     /// will notify us here, so that we can 'unfreeze' user session.
     /// TODO It uses postgres protocol over TCP but should be migrated to http.
     pub mgmt_address: SocketAddr,
-
-    /// send unauthenticated users to this URI
-    pub redirect_uri: String,
-
-    /// control plane address where we would check auth.
-    pub auth_endpoint: String,
 
     pub ssl_config: Option<SslConfig>,
 }
