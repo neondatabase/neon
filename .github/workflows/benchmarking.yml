@@ -2,8 +2,8 @@ name: benchmarking
 
 on:
   # uncomment to run on push for debugging your PR
-  push:
-    branches: [ dkr/ingest-perf-data ]
+  # push:
+  #   branches: [ your branch ]
   schedule:
     # * is a special character in YAML so you have to quote this string
     #          ┌───────────── minute (0 - 59)
