@@ -6,166 +6,117 @@ use serde::{Deserialize, Serialize};
 
 // Zenith ID is a 128-bit random ID.
 // Used to represent various identifiers. Provides handy utility methods and impls.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-struct ZId([u8; 16]);
-
-impl ZId {
-    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZId {
-        let mut arr = [0u8; 16];
-        buf.copy_to_slice(&mut arr);
-        ZId::from(arr)
-    }
-
-    pub fn as_arr(&self) -> [u8; 16] {
-        self.0
-    }
-
-    pub fn generate() -> Self {
-        let mut tli_buf = [0u8; 16];
-        rand::thread_rng().fill(&mut tli_buf);
-        ZId::from(tli_buf)
-    }
-}
-
-impl FromStr for ZId {
-    type Err = hex::FromHexError;
-
-    fn from_str(s: &str) -> Result<ZId, Self::Err> {
-        Self::from_hex(s)
-    }
-}
-
-// this is needed for pretty serialization and deserialization of ZId's using serde integration with hex crate
-impl FromHex for ZId {
-    type Error = hex::FromHexError;
-
-    fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
-        let mut buf: [u8; 16] = [0u8; 16];
-        hex::decode_to_slice(hex, &mut buf)?;
-        Ok(ZId(buf))
-    }
-}
-
-impl AsRef<[u8]> for ZId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<[u8; 16]> for ZId {
-    fn from(b: [u8; 16]) -> Self {
-        ZId(b)
-    }
-}
-
-impl fmt::Display for ZId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
-    }
-}
-
-impl fmt::Debug for ZId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
-    }
-}
-
 macro_rules! zid_newtype {
-    ($t:ident) => {
-        impl $t {
-            pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> $t {
-                $t(ZId::get_from_buf(buf))
+    // $attr meta argument is for attaching the doc string (which is in fact an
+    // attribute) to the type declaration.
+    // $typname is name of the generated type
+    ($(#[$attr:meta])* => $typname:ident) => {
+        $(#[$attr])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+        pub struct $typname([u8; 16]);
+
+        impl $typname {
+            pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> $typname {
+                let mut arr = [0u8; 16];
+                buf.copy_to_slice(&mut arr);
+                $typname::from(arr)
             }
 
             pub fn as_arr(&self) -> [u8; 16] {
-                self.0.as_arr()
+                self.0
             }
 
             pub fn generate() -> Self {
-                $t(ZId::generate())
+                let mut tli_buf = [0u8; 16];
+                rand::thread_rng().fill(&mut tli_buf);
+                $typname::from(tli_buf)
             }
 
             pub const fn from_array(b: [u8; 16]) -> Self {
-                $t(ZId(b))
+                $typname(b)
+            }
+
+            pub fn empty() -> Self {
+                $typname([0u8; 16])
             }
         }
 
-        impl FromStr for $t {
+        impl FromStr for $typname {
             type Err = hex::FromHexError;
 
-            fn from_str(s: &str) -> Result<$t, Self::Err> {
-                let value = ZId::from_str(s)?;
-                Ok($t(value))
+            fn from_str(s: &str) -> Result<$typname, Self::Err> {
+                Self::from_hex(s)
             }
         }
 
-        impl From<[u8; 16]> for $t {
-            fn from(b: [u8; 16]) -> Self {
-                $t(ZId::from(b))
-            }
-        }
-
-        impl FromHex for $t {
+        // this is needed for pretty serialization and deserialization of ZId's using serde integration with hex crate
+        impl FromHex for $typname {
             type Error = hex::FromHexError;
 
             fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
-                Ok($t(ZId::from_hex(hex)?))
+                let mut buf: [u8; 16] = [0u8; 16];
+                hex::decode_to_slice(hex, &mut buf)?;
+                Ok($typname(buf))
             }
         }
 
-        impl AsRef<[u8]> for $t {
+        impl AsRef<[u8]> for $typname {
             fn as_ref(&self) -> &[u8] {
-                &self.0 .0
+                &self.0
             }
         }
 
-        impl fmt::Display for $t {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
+        impl From<[u8; 16]> for $typname {
+            fn from(b: [u8; 16]) -> Self {
+                $typname(b)
             }
         }
 
-        impl fmt::Debug for $t {
+        impl fmt::Display for $typname {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
+                f.write_str(&hex::encode(self.0))
+            }
+        }
+
+        impl fmt::Debug for $typname {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&hex::encode(self.0))
             }
         }
     };
 }
 
-/// Zenith timeline IDs are different from PostgreSQL timeline
-/// IDs. They serve a similar purpose though: they differentiate
-/// between different "histories" of the same cluster.  However,
-/// PostgreSQL timeline IDs are a bit cumbersome, because they are only
-/// 32-bits wide, and they must be in ascending order in any given
-/// timeline history.  Those limitations mean that we cannot generate a
-/// new PostgreSQL timeline ID by just generating a random number. And
-/// that in turn is problematic for the "pull/push" workflow, where you
-/// have a local copy of a zenith repository, and you periodically sync
-/// the local changes with a remote server. When you work "detached"
-/// from the remote server, you cannot create a PostgreSQL timeline ID
-/// that's guaranteed to be different from all existing timelines in
-/// the remote server. For example, if two people are having a clone of
-/// the repository on their laptops, and they both create a new branch
-/// with different name. What timeline ID would they assign to their
-/// branches? If they pick the same one, and later try to push the
-/// branches to the same remote server, they will get mixed up.
-///
-/// To avoid those issues, Zenith has its own concept of timelines that
-/// is separate from PostgreSQL timelines, and doesn't have those
-/// limitations. A zenith timeline is identified by a 128-bit ID, which
-/// is usually printed out as a hex string.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct ZTimelineId(ZId);
+zid_newtype!(
+    /// Zenith timeline IDs are different from PostgreSQL timeline
+    /// IDs. They serve a similar purpose though: they differentiate
+    /// between different "histories" of the same cluster.  However,
+    /// PostgreSQL timeline IDs are a bit cumbersome, because they are only
+    /// 32-bits wide, and they must be in ascending order in any given
+    /// timeline history.  Those limitations mean that we cannot generate a
+    /// new PostgreSQL timeline ID by just generating a random number. And
+    /// that in turn is problematic for the "pull/push" workflow, where you
+    /// have a local copy of a zenith repository, and you periodically sync
+    /// the local changes with a remote server. When you work "detached"
+    /// from the remote server, you cannot create a PostgreSQL timeline ID
+    /// that's guaranteed to be different from all existing timelines in
+    /// the remote server. For example, if two people are having a clone of
+    /// the repository on their laptops, and they both create a new branch
+    /// with different name. What timeline ID would they assign to their
+    /// branches? If they pick the same one, and later try to push the
+    /// branches to the same remote server, they will get mixed up.
+    ///
+    /// To avoid those issues, Zenith has its own concept of timelines that
+    /// is separate from PostgreSQL timelines, and doesn't have those
+    /// limitations. A zenith timeline is identified by a 128-bit ID, which
+    /// is usually printed out as a hex string.
+    => ZTimelineId
+);
 
-zid_newtype!(ZTimelineId);
-
-// Zenith Tenant Id represents identifiar of a particular tenant.
-// Is used for distinguishing requests and data belonging to different users.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct ZTenantId(ZId);
-
-zid_newtype!(ZTenantId);
+zid_newtype!(
+    // Zenith Tenant Id represents identifier of a particular tenant.
+    // Is used for distinguishing requests and data belonging to different users.
+    => ZTenantId
+);
 
 /// Serde routines for Option<T> (de)serialization, using `T:Display` representations for inner values.
 /// Useful for Option<ZTenantId> and Option<ZTimelineId> to get their hex representations into serialized string and deserialize them back.
