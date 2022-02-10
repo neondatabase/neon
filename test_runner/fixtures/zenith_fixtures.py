@@ -184,6 +184,16 @@ def worker_base_port(worker_seq_no: int):
     return BASE_PORT + worker_seq_no * WORKER_PORT_NUM
 
 
+def get_dir_size(path: str) -> int:
+    """Return size in bytes."""
+    totalbytes = 0
+    for root, dirs, files in os.walk(path):
+        for name in files:
+            totalbytes += os.path.getsize(os.path.join(root, name))
+
+    return totalbytes
+
+
 def can_bind(host: str, port: int) -> bool:
     """
     Check whether a host:port is available to bind for listening
@@ -230,7 +240,7 @@ class PgProtocol:
     def __init__(self, host: str, port: int, username: Optional[str] = None):
         self.host = host
         self.port = port
-        self.username = username or "zenith_admin"
+        self.username = username
 
     def connstr(self,
                 *,
@@ -242,10 +252,15 @@ class PgProtocol:
         """
 
         username = username or self.username
-        res = f'host={self.host} port={self.port} user={username} dbname={dbname}'
-        if not password:
-            return res
-        return f'{res} password={password}'
+        res = f'host={self.host} port={self.port} dbname={dbname}'
+
+        if username:
+            res = f'{res} user={username}'
+
+        if password:
+            res = f'{res} password={password}'
+
+        return res
 
     # autocommit=True here by default because that's what we need most of the time
     def connect(self,
@@ -835,7 +850,7 @@ class ZenithPageserver(PgProtocol):
                  port: PageserverPort,
                  remote_storage: Optional[RemoteStorage] = None,
                  enable_auth=False):
-        super().__init__(host='localhost', port=port.pg)
+        super().__init__(host='localhost', port=port.pg, username='zenith_admin')
         self.env = env
         self.running = False
         self.service_port = port  # do not shadow PgProtocol.port which is just int
@@ -973,10 +988,54 @@ def pg_bin(test_output_dir: str) -> PgBin:
     return PgBin(test_output_dir)
 
 
+class VanillaPostgres(PgProtocol):
+    def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int):
+        super().__init__(host='localhost', port=port)
+        self.pgdatadir = pgdatadir
+        self.pg_bin = pg_bin
+        self.running = False
+        self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
+
+    def configure(self, options: List[str]) -> None:
+        """Append lines into postgresql.conf file."""
+        assert not self.running
+        with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
+            conf_file.writelines(options)
+
+    def start(self) -> None:
+        assert not self.running
+        self.running = True
+        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'start'])
+
+    def stop(self) -> None:
+        assert self.running
+        self.running = False
+        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'stop'])
+
+    def get_subdir_size(self, subdir) -> int:
+        """Return size of pgdatadir subdirectory in bytes."""
+        return get_dir_size(os.path.join(self.pgdatadir, subdir))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.running:
+            self.stop()
+
+
+@pytest.fixture(scope='function')
+def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
+    pgdatadir = os.path.join(test_output_dir, "pgdata-vanilla")
+    pg_bin = PgBin(test_output_dir)
+    with VanillaPostgres(pgdatadir, pg_bin, 5432) as vanilla_pg:
+        yield vanilla_pg
+
+
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: str, port: int):
-        super().__init__(host='localhost', port=port)
+        super().__init__(host='localhost', port=port, username='zenith_admin')
 
         self.env = env
         self.running = False

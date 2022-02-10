@@ -1,10 +1,18 @@
 from contextlib import closing
-from fixtures.zenith_fixtures import PgBin, ZenithEnv
+from fixtures.zenith_fixtures import PgBin, VanillaPostgres, ZenithEnv
 
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from fixtures.log_helper import log
 
 pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
+
+
+def pgbench_init(pg_bin: PgBin, connstr: str):
+    pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+
+
+def pgbench_run_5000_transactions(pg_bin: PgBin, connstr: str):
+    pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
 
 
 #
@@ -40,7 +48,7 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
     # Initialize pgbench database, recording the time and I/O it takes
     with zenbenchmark.record_pageserver_writes(env.pageserver, 'pageserver_writes'):
         with zenbenchmark.record_duration('init'):
-            pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+            pgbench_init(pg_bin, connstr)
 
             # Flush the layers from memory to disk. This is included in the reported
             # time and I/O
@@ -48,7 +56,7 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
 
     # Run pgbench for 5000 transactions
     with zenbenchmark.record_duration('5000_xacts'):
-        pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
+        pgbench_run_5000_transactions(pg_bin, connstr)
 
     # Flush the layers to disk again. This is *not' included in the reported time,
     # though.
@@ -58,5 +66,40 @@ def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin: PgBin, zenbenchmark: Zeni
     timeline_size = zenbenchmark.get_timeline_size(env.repo_dir, env.initial_tenant, timeline)
     zenbenchmark.record('size',
                         timeline_size / (1024 * 1024),
+                        'MB',
+                        report=MetricReport.LOWER_IS_BETTER)
+
+
+def test_pgbench_baseline(vanilla_pg: VanillaPostgres, zenbenchmark: ZenithBenchmarker):
+    vanilla_pg.configure(['shared_buffers=1MB'])
+    vanilla_pg.start()
+
+    pg_bin = vanilla_pg.pg_bin
+    connstr = vanilla_pg.connstr()
+    conn = vanilla_pg.connect()
+    cur = conn.cursor()
+
+    with zenbenchmark.record_duration('init'):
+        pgbench_init(pg_bin, connstr)
+
+        # This is roughly equivalent to flushing the layers from memory to disk with Zenith.
+        cur.execute(f"checkpoint")
+
+    # Run pgbench for 5000 transactions
+    with zenbenchmark.record_duration('5000_xacts'):
+        pgbench_run_5000_transactions(pg_bin, connstr)
+
+    # This is roughly equivalent to flush the layers from memory to disk with Zenith.
+    cur.execute(f"checkpoint")
+
+    # Report disk space used by the repository
+    data_size = vanilla_pg.get_subdir_size('base')
+    zenbenchmark.record('data_size',
+                        data_size / (1024 * 1024),
+                        'MB',
+                        report=MetricReport.LOWER_IS_BETTER)
+    wal_size = vanilla_pg.get_subdir_size('pg_wal')
+    zenbenchmark.record('wal_size',
+                        wal_size / (1024 * 1024),
                         'MB',
                         report=MetricReport.LOWER_IS_BETTER)
