@@ -7,64 +7,64 @@ use serde::{Deserialize, Serialize};
 // Zenith ID is a 128-bit random ID.
 // Used to represent various identifiers. Provides handy utility methods and impls.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-struct ZId([u8; 16]);
+struct ZId<const LENGTH: usize>(#[serde(with = "serde_const_length_array")] [u8; LENGTH]);
 
-impl ZId {
-    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZId {
-        let mut arr = [0u8; 16];
+impl<const LENGTH: usize> ZId<LENGTH> {
+    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZId<LENGTH> {
+        let mut arr = [0u8; LENGTH];
         buf.copy_to_slice(&mut arr);
         ZId::from(arr)
     }
 
-    pub fn as_arr(&self) -> [u8; 16] {
+    pub fn as_arr(&self) -> [u8; LENGTH] {
         self.0
     }
 
     pub fn generate() -> Self {
-        let mut tli_buf = [0u8; 16];
-        rand::thread_rng().fill(&mut tli_buf);
+        let mut tli_buf = [0u8; LENGTH];
+        rand::thread_rng().fill(&mut tli_buf[..]); // in 1.57+ can be tli_buf.as_mut_slice()
         ZId::from(tli_buf)
     }
 }
 
-impl FromStr for ZId {
+impl<const LENGTH: usize> FromStr for ZId<LENGTH> {
     type Err = hex::FromHexError;
 
-    fn from_str(s: &str) -> Result<ZId, Self::Err> {
+    fn from_str(s: &str) -> Result<ZId<LENGTH>, Self::Err> {
         Self::from_hex(s)
     }
 }
 
 // this is needed for pretty serialization and deserialization of ZId's using serde integration with hex crate
-impl FromHex for ZId {
+impl<const LENGTH: usize> FromHex for ZId<LENGTH> {
     type Error = hex::FromHexError;
 
     fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
-        let mut buf: [u8; 16] = [0u8; 16];
+        let mut buf: [u8; LENGTH] = [0u8; LENGTH];
         hex::decode_to_slice(hex, &mut buf)?;
         Ok(ZId(buf))
     }
 }
 
-impl AsRef<[u8]> for ZId {
+impl<const LENGTH: usize> AsRef<[u8]> for ZId<LENGTH> {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
 }
 
-impl From<[u8; 16]> for ZId {
-    fn from(b: [u8; 16]) -> Self {
+impl<const LENGTH: usize> From<[u8; LENGTH]> for ZId<LENGTH> {
+    fn from(b: [u8; LENGTH]) -> Self {
         ZId(b)
     }
 }
 
-impl fmt::Display for ZId {
+impl<const LENGTH: usize> fmt::Display for ZId<LENGTH> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(self.0))
     }
 }
 
-impl fmt::Debug for ZId {
+impl<const LENGTH: usize> fmt::Debug for ZId<LENGTH> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(self.0))
     }
@@ -156,20 +156,20 @@ macro_rules! zid_newtype {
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct ZTimelineId(ZId);
+pub struct ZTimelineId(ZId<16>);
 
 zid_newtype!(ZTimelineId);
 
 // Zenith Tenant Id represents identifiar of a particular tenant.
 // Is used for distinguishing requests and data belonging to different users.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct ZTenantId(ZId);
+pub struct ZTenantId(ZId<16>);
 
 zid_newtype!(ZTenantId);
 
 /// Serde routines for Option<T> (de)serialization, using `T:Display` representations for inner values.
 /// Useful for Option<ZTenantId> and Option<ZTimelineId> to get their hex representations into serialized string and deserialize them back.
-pub mod opt_display_serde {
+pub mod serde_opt_display {
     use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
     use std::{fmt::Display, str::FromStr};
 
@@ -192,6 +192,67 @@ pub mod opt_display_serde {
         } else {
             None
         })
+    }
+}
+
+/// Serde currently does not support serialization of arrays with length expressed as const generic
+/// See https://github.com/serde-rs/serde/issues/1937. This code comes from described workaround
+pub mod serde_const_length_array {
+    use std::{convert::TryInto, marker::PhantomData};
+
+    use serde::{
+        de::{SeqAccess, Visitor},
+        ser::SerializeTuple,
+        Deserialize, Deserializer, Serialize, Serializer,
+    };
+    pub fn serialize<S: Serializer, T: Serialize, const N: usize>(
+        data: &[T; N],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut s = ser.serialize_tuple(N)?;
+        for item in data {
+            s.serialize_element(item)?;
+        }
+        s.end()
+    }
+
+    struct ArrayVisitor<T, const N: usize>(PhantomData<T>);
+
+    impl<'de, T, const N: usize> Visitor<'de> for ArrayVisitor<T, N>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = [T; N];
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str(&format!("an array of length {}", N))
+        }
+
+        #[inline]
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            // can be optimized using MaybeUninit
+            let mut data = Vec::with_capacity(N);
+            for _ in 0..N {
+                match (seq.next_element())? {
+                    Some(val) => data.push(val),
+                    None => return Err(serde::de::Error::invalid_length(N, &self)),
+                }
+            }
+            match data.try_into() {
+                Ok(arr) => Ok(arr),
+                Err(_) => unreachable!(),
+            }
+        }
+    }
+    pub fn deserialize<'de, D, T, const N: usize>(deserializer: D) -> Result<[T; N], D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        deserializer.deserialize_tuple(N, ArrayVisitor::<T, N>(PhantomData))
     }
 }
 
@@ -223,15 +284,16 @@ impl fmt::Display for ZTenantTimelineId {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Display;
+    use std::{fmt::Display, io::Cursor};
 
     use super::*;
+    use crate::bin_ser::BeSer;
     use hex::FromHexError;
     use hex_literal::hex;
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     struct TestStruct<E: Display, T: FromStr<Err = E> + Display> {
-        #[serde(with = "opt_display_serde")]
+        #[serde(with = "serde_opt_display")]
         field: Option<T>,
     }
 
@@ -271,5 +333,17 @@ mod tests {
         let deserialized_struct: TestStruct<FromHexError, ZTimelineId> =
             serde_json::from_str(&serialized_string).unwrap();
         assert_eq!(original_struct, deserialized_struct);
+    }
+
+    #[test]
+    fn test_const_generic_workaround() {
+        let zid = ZTimelineId::generate();
+        let mut buf = Cursor::new(Vec::with_capacity(16));
+        zid.ser_into(&mut buf)
+            .expect("serialization should succeed");
+
+        buf.set_position(0);
+        let new_zid = ZTimelineId::des_from(&mut buf).expect("deserialization should succeed");
+        assert_eq!(zid, new_zid)
     }
 }

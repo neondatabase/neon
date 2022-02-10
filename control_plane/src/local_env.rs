@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{opt_display_serde, ZTenantId};
+use zenith_utils::zid::{serde_opt_display, ZTenantId};
 
 //
 // This data structures represents zenith CLI config
@@ -45,7 +45,7 @@ pub struct LocalEnv {
 
     // Default tenant ID to use with the 'zenith' command line utility, when
     // --tenantid is not explicitly specified.
-    #[serde(with = "opt_display_serde")]
+    #[serde(with = "serde_opt_display")]
     #[serde(default)]
     pub default_tenantid: Option<ZTenantId>,
 

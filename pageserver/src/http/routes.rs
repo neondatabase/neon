@@ -20,7 +20,7 @@ use zenith_utils::http::{
     request::parse_request_param,
 };
 use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{opt_display_serde, ZTimelineId};
+use zenith_utils::zid::{serde_opt_display, ZTimelineId};
 
 use super::models::BranchCreateRequest;
 use super::models::TenantCreateRequest;
@@ -198,7 +198,7 @@ enum TimelineInfo {
         timeline_id: ZTimelineId,
         #[serde(with = "hex")]
         tenant_id: ZTenantId,
-        #[serde(with = "opt_display_serde")]
+        #[serde(with = "serde_opt_display")]
         ancestor_timeline_id: Option<ZTimelineId>,
         last_record_lsn: Lsn,
         prev_record_lsn: Lsn,
