@@ -742,3 +742,47 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     env.safekeepers[1].stop(immediate=True)
     execute_payload(pg)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+
+def test_find_end_of_wal_multiple_segments(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 1
+    env = zenith_env_builder.init()
+
+    env.zenith_cli(["branch", "test_find_end_of_wal_contpage", "main"])
+
+    pg = env.postgres.create_start('test_find_end_of_wal_contpage')
+    wa = env.safekeepers[0]
+
+    log.info('flush_lsn initial: ' + pg.safe_psql('SELECT pg_current_wal_flush_lsn()')[0][0])
+
+    # Insert multiple 1MB messages so that at least one of them spans across 16MB segment boundary.
+    for i in range(17):
+        logical_lsn = pg.safe_psql(
+            f"SELECT pg_logical_emit_message(false, 'big-17mb-msg-{i}', REPEAT('ABCD', 256 * 1024))"
+        )[0][0]
+    log.info('logical_lsn of the last message: ' + logical_lsn)
+
+    # Add some data which should be preserved after restart.
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute('CREATE TABLE t(key int primary key, value text)')
+            cur.execute("INSERT INTO t SELECT generate_series(1,10), 'payload'")
+
+    log.info('Restarting safekeeper...')
+    wa.stop()
+    wa.start()
+
+    # Add new data to make sure Safekeeper is fully recovered and may accept new writes.
+    # Otherwise it's possible that all changes have been already propagated to Pageserver
+    # and reads will be successful even if Safekeeper lost data.
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute('CREATE TABLE t(key int primary key, value text)')
+            cur.execute("INSERT INTO t SELECT generate_series(11,10), 'payload'")
+
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT sum(key) FROM t')
+            assert cur.fetchone() == (210, )
+
+    log.info('flush_lsn final: ' + pg.safe_psql('SELECT pg_current_wal_flush_lsn()')[0][0])
