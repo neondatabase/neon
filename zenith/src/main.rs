@@ -146,7 +146,7 @@ fn main() -> Result<()> {
                 .subcommand(App::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
                 .subcommand(App::new("stop").about("Stop local pageserver")
                             .arg(stop_mode_arg.clone()))
-                .subcommand(App::new("restart").about("Restart local pageserver").arg(pageserver_config_args))
+                .subcommand(App::new("restart").about("Restart local pageserver").arg(pageserver_config_args.clone()))
         )
         .subcommand(
             App::new("safekeeper")
@@ -207,6 +207,7 @@ fn main() -> Result<()> {
         .subcommand(
             App::new("start")
                 .about("Start page server and safekeepers")
+                .arg(pageserver_config_args)
         )
         .subcommand(
             App::new("stop")
