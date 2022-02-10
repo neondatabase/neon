@@ -777,7 +777,6 @@ def test_find_end_of_wal_multiple_segments(zenith_env_builder: ZenithEnvBuilder)
     # and reads will be successful even if Safekeeper lost data.
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute('CREATE TABLE t(key int primary key, value text)')
             cur.execute("INSERT INTO t SELECT generate_series(11,10), 'payload'")
 
     with closing(pg.connect()) as conn:
