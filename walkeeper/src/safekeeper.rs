@@ -774,7 +774,7 @@ where
         }
 
         let resp = self.append_response();
-        info!(
+        trace!(
             "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, resp {:?}",
             msg.wal_data.len(),
             msg.h.end_lsn,

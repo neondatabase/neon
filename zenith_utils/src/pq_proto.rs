@@ -13,7 +13,7 @@ use std::io::{self, Cursor};
 use std::str;
 use std::time::{Duration, SystemTime};
 use tokio::io::AsyncReadExt;
-use tracing::info;
+use tracing::{trace, warn};
 
 pub type Oid = u32;
 pub type SystemId = u64;
@@ -956,7 +956,7 @@ impl ZenithFeedback {
                 }
                 _ => {
                     let len = buf.get_i32();
-                    info!(
+                    warn!(
                         "ZenithFeedback parse. unknown key {} of len {}. Skip it.",
                         key, len
                     );
@@ -964,7 +964,7 @@ impl ZenithFeedback {
                 }
             }
         }
-        info!("ZenithFeedback parsed is {:?}", zf);
+        trace!("ZenithFeedback parsed is {:?}", zf);
         zf
     }
 }
