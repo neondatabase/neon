@@ -18,6 +18,6 @@ echo "Uploading perf result to zenith-perf-data"
 scripts/git-upload \
     --repo=https://"$VIP_VAP_ACCESS_TOKEN"@github.com/zenithdb/zenith-perf-data.git \
     --message="add performance test result for $GITHUB_SHA zenith revision" \
-    --branch=testing `# TODO (PRIOR MERGE) replace back with master`\
+    --branch=master \
     copy "$REPORT_FROM" "data/$REPORT_TO" `# COPY FROM TO_RELATIVE`\
     --run-cmd "python $SCRIPT_DIR/generate_perf_report_page.py --input-dir data/$REPORT_TO --out reports/$REPORT_TO.html"
