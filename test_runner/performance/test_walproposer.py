@@ -89,30 +89,33 @@ def test_vanilla_pgbench(test_output_dir: str,
                               "127.0.0.1",
                               port_distributor.get_port())
 
+    common_config = [
+        "wal_keep_size=10TB\n",
+        "shared_preload_libraries=zenith\n",
+        "zenith.page_server_connstring=''\n",
+        "synchronous_commit=on\n",
+        "max_wal_senders=10\n",
+        "wal_log_hints=on\n",
+        "max_replication_slots=10\n",
+        "hot_standby=on\n",
+        "min_wal_size=20GB\n",
+        "max_wal_size=40GB\n",
+        "checkpoint_timeout=60min\n",
+        "log_checkpoints=on\n",
+        "max_connections=100\n",
+        "wal_sender_timeout=0\n",
+        "wal_level=replica\n",
+    ]
+
     master.initdb()
     mkdir_if_needed(master.pg_data_dir_path())
     with open(master.config_file_path(), "w") as f:
         cfg = [
-            "max_wal_senders=10\n",
-            "wal_log_hints=on\n",
-            "max_replication_slots=10\n",
-            "hot_standby=on\n",
-            "min_wal_size=20GB\n",
-            "max_wal_size=40GB\n",
-            "checkpoint_timeout=60min\n",
-            "log_checkpoints=on\n",
             "fsync=off\n",
-            "max_connections=100\n",
-            "wal_sender_timeout=0\n",
-            "wal_level=replica\n",
             f"listen_addresses = '{master.listen_addr}'\n",
             f"port = '{master.port}'\n",
-            "wal_keep_size=10TB\n",
-            "shared_preload_libraries=zenith\n",
-            "zenith.page_server_connstring=''\n",
             "synchronous_standby_names = 'ANY 1 (s1)'\n",
-            "synchronous_commit=on\n",
-        ]
+        ] + common_config
 
         f.writelines(cfg)
 
@@ -150,27 +153,12 @@ host    replication     all             ::1/128                 trust
 
     with open(slave.config_file_path(), "w") as f:
         cfg = [
-            "max_wal_senders=10\n",
-            "wal_log_hints=on\n",
-            "max_replication_slots=10\n",
-            "hot_standby=on\n",
-            "min_wal_size=20GB\n",
-            "max_wal_size=40GB\n",
-            "checkpoint_timeout=60min\n",
-            "log_checkpoints=on\n",
             "fsync=on\n",
-            "max_connections=100\n",
-            "wal_sender_timeout=0\n",
-            "wal_level=replica\n",
             f"listen_addresses = '{slave.listen_addr}'\n",
             f"port = '{slave.port}'\n",
-            "wal_keep_size=10TB\n",
-            "shared_preload_libraries=zenith\n",
-            "zenith.page_server_connstring=''\n",
-            "synchronous_standby_names = 'ANY 1 (s1)'\n",
             "primary_slot_name = 's1'\n",
             f"primary_conninfo = 'application_name=s1 user=zenith_admin host={master.listen_addr} channel_binding=disable port={master.port} sslmode=disable sslcompression=0 sslsni=1 ssl_min_protocol_version=TLSv1.2 gssencmode=disable krbsrvname=postgres target_session_attrs=any'\n",
-        ]
+        ] + common_config
 
         f.writelines(cfg)
 
@@ -187,7 +175,7 @@ host    replication     all             ::1/128                 trust
 
 def run_pgbench(pg_bin: PgBin,
                 zenbenchmark: ZenithBenchmarker,
-                repo_dir: str,
+                repo_dir: Path,
                 log_path: str,
                 pgbench_env: dict,
                 scale=200,
@@ -252,3 +240,18 @@ def run_pgbench(pg_bin: PgBin,
                         avg_sizes[-1],
                         unit="b",
                         report=MetricReport.HIGHER_IS_BETTER)
+
+    wal_size = get_dir_size(os.path.join(pgbench_env["PGDATA"], 'pg_wal'))
+    zenbenchmark.record('wal_size',
+                        wal_size / (1024 * 1024),
+                        'MB',
+                        report=MetricReport.LOWER_IS_BETTER)
+
+def get_dir_size(path: Path) -> int:
+    """Return size in bytes."""
+    totalbytes = 0
+    for root, dirs, files in os.walk(path):
+        for name in files:
+            totalbytes += os.path.getsize(os.path.join(root, name))
+
+    return totalbytes

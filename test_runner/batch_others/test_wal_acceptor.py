@@ -352,6 +352,10 @@ class ProposerPostgres(PgProtocol):
         mkdir_if_needed(self.pg_data_dir_path())
         with open(self.config_file_path(), "w") as f:
             cfg = [
+                "wal_keep_size=10TB\n",
+                "shared_preload_libraries=zenith\n",
+                "zenith.page_server_connstring=''\n",
+                "synchronous_commit=on\n",
                 "max_wal_senders=10\n",
                 "wal_log_hints=on\n",
                 "max_replication_slots=10\n",
@@ -360,19 +364,17 @@ class ProposerPostgres(PgProtocol):
                 "max_wal_size=40GB\n",
                 "checkpoint_timeout=60min\n",
                 "log_checkpoints=on\n",
-                "fsync=off\n",
                 "max_connections=100\n",
                 "wal_sender_timeout=0\n",
                 "wal_level=replica\n",
-                "wal_keep_size=10TB\n",
-                "synchronous_standby_names = 'walproposer'\n",
-                "shared_preload_libraries = 'zenith'\n",
                 f"zenith.zenith_timeline = '{self.timeline_id}'\n",
                 f"zenith.zenith_tenant = '{self.tenant_id}'\n",
                 f"zenith.page_server_connstring = ''\n",
                 f"wal_acceptors = '{wal_acceptors}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
                 f"port = '{self.port}'\n",
+                "synchronous_standby_names = 'walproposer'\n",
+                "fsync=off\n",
             ]
 
             f.writelines(cfg)
