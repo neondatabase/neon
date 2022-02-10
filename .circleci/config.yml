@@ -597,6 +597,7 @@ workflows:
             - build-postgres-<< matrix.build_type >>
       - run-pytest:
           name: pg_regress-tests-<< matrix.build_type >>
+          context: PERF_TEST_RESULT_CONNSTR
           matrix:
             parameters:
               build_type: ["debug", "release"]
@@ -614,6 +615,7 @@ workflows:
             - build-zenith-<< matrix.build_type >>
       - run-pytest:
           name: benchmarks
+          context: PERF_TEST_RESULT_CONNSTR
           build_type: release
           test_selection: performance
           run_in_parallel: false
