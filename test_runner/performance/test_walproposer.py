@@ -153,7 +153,7 @@ host    replication     all             ::1/128                 trust
 
     with open(slave.config_file_path(), "w") as f:
         cfg = [
-            "fsync=on\n",
+            "fsync=off\n",
             f"listen_addresses = '{slave.listen_addr}'\n",
             f"port = '{slave.port}'\n",
             "primary_slot_name = 's1'\n",

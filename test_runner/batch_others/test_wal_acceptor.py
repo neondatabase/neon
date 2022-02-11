@@ -557,7 +557,8 @@ class SafekeeperEnv:
             f"127.0.0.1:{port.http}",
             "-D",
             safekeeper_dir,
-            "--daemonize"
+            "--daemonize",
+            "--no-sync"
         ]
 
         log.info(f'Running command "{" ".join(args)}"')
