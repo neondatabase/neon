@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import shlex
 from tempfile import TemporaryDirectory
+from distutils.dir_util import copy_tree
 from pathlib import Path
 
 import argparse
@@ -111,8 +112,11 @@ def do_copy(args):
         raise FileExistsError(f"File exists: '{dst}'")
 
     if src.is_dir():
-        shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(src, dst)
+        if not args.merge:
+            shutil.rmtree(dst, ignore_errors=True)
+        # distutils is deprecated, but this is a temporary workaround before python version bump
+        # here we need dir_exists_ok=True from shutil.copytree which is available in python 3.8+
+        copy_tree(str(src), str(dst))
     else:
         shutil.copy(src, dst)
 
@@ -136,6 +140,10 @@ def main():
     p_copy.add_argument('src', type=absolute_path, help='source path')
     p_copy.add_argument('dst', type=relative_path, help='relative dest path')
     p_copy.add_argument('--forbid-overwrite', action='store_true', help='do not allow overwrites')
+    p_copy.add_argument(
+        '--merge',
+        action='store_true',
+        help='when copying a directory do not delete existing data, but add new files')
     p_copy.add_argument('--run-cmd',
                         help=textwrap.dedent('''\
                 run arbitrary cmd on top of copied files,

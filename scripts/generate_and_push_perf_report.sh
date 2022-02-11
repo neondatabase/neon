@@ -20,4 +20,5 @@ scripts/git-upload \
     --message="add performance test result for $GITHUB_SHA zenith revision" \
     --branch=master \
     copy "$REPORT_FROM" "data/$REPORT_TO" `# COPY FROM TO_RELATIVE`\
+    --merge \
     --run-cmd "python $SCRIPT_DIR/generate_perf_report_page.py --input-dir data/$REPORT_TO --out reports/$REPORT_TO.html"
