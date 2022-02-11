@@ -707,7 +707,7 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8]) -> Result<()> {
+    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8], skip_sync: bool) -> Result<()> {
         let mut bytes_left: usize = buf.len();
         let mut bytes_written: usize = 0;
         let mut partial;
@@ -718,17 +718,23 @@ impl Storage for FileStorage {
         /* Extract WAL location for this block */
         let mut xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
 
-        while bytes_left != 0 {
+        // special condition to sync in the middle of the file
+        let sync_only = bytes_left == 0 && !skip_sync && xlogoff != 0;
+
+        while bytes_left != 0 || sync_only {
             let bytes_to_write;
+            let boundary_cross;
 
             /*
              * If crossing a WAL boundary, only write up until we reach wal
              * segment size.
              */
-            if xlogoff + bytes_left > wal_seg_size {
+            if xlogoff + bytes_left >= wal_seg_size {
                 bytes_to_write = wal_seg_size - xlogoff;
+                boundary_cross = true;
             } else {
                 bytes_to_write = bytes_left;
+                boundary_cross = false;
             }
 
             /* Open file */
@@ -768,11 +774,17 @@ impl Storage for FileStorage {
                 wal_file.seek(SeekFrom::Start(xlogoff as u64))?;
                 wal_file.write_all(&buf[bytes_written..(bytes_written + bytes_to_write)])?;
 
-                // Flush file, if not said otherwise
-                if !self.conf.no_sync {
+                // Flush file, if not said otherwise. When WAL file bounary is crossed,
+                // we sync even if skip_sync is true.
+                if !self.conf.no_sync && (!skip_sync || boundary_cross) {
                     wal_file.sync_all()?;
                 }
             }
+
+            if sync_only {
+                break
+            }
+
             /* Write was successful, advance our position */
             bytes_written += bytes_to_write;
             bytes_left -= bytes_to_write;

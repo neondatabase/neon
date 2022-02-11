@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::thread;
-use std::io::{self, Write};
+use std::io::Write;
 
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
@@ -62,14 +62,6 @@ impl<'pg> ReceiveWalConn<'pg> {
     fn read_msg(&mut self) -> Result<ProposerAcceptorMessage> {
         let data = self.read_msg_bytes()?;
         ProposerAcceptorMessage::parse(data)
-    }
-
-    // Send message to the postgres
-    fn write_msg(&mut self, msg: &AcceptorProposerMessage) -> Result<()> {
-        let mut buf = BytesMut::with_capacity(128);
-        msg.serialize(&mut buf)?;
-        self.pg_backend.write_message(&BeMessage::CopyData(&buf))?;
-        Ok(())
     }
 
     /// Receive WAL from wal_proposer
@@ -145,22 +137,28 @@ impl<'pg> ReceiveWalConn<'pg> {
                 }
             }).unwrap();
 
-        let mut pending_flush = false;
         let mut pending_reply = None;
         loop {
             let msg;
             let res = request_rx.try_recv();
             if res.is_ok() && matches!(res, Ok(ProposerAcceptorMessage::AppendRequest(_))) {
+                // if we have AppendRequest right now, process it without blocking
                 msg = res.unwrap();
             } else {
-                if pending_flush {
-                    reply_tx.send(pending_reply)?;
-                    pending_flush = false;
+                // otherwise, call fsync and send pending reply
+                if let Some(AcceptorProposerMessage::AppendResponse(resp)) = pending_reply {
+                    spg
+                        .timeline
+                        .get()
+                        .process_msg(&ProposerAcceptorMessage::FsyncRequest(resp.flush_lsn))
+                        .context("failed to call fsync")?;
+                    reply_tx.send(Some(AcceptorProposerMessage::AppendResponse(resp)))?;
                     pending_reply = None;
                 }
                 if res.is_ok() {
                     msg = res.unwrap();
                 } else {
+                    // blocking wait for new message
                     msg = request_rx.recv()?;
                 }
             }
@@ -173,7 +171,6 @@ impl<'pg> ReceiveWalConn<'pg> {
 
             if let Some(AcceptorProposerMessage::AppendResponse(_)) = reply {
                 pending_reply = reply;
-                pending_flush = true;
             } else {
                 reply_tx.send(reply)?;
             }
