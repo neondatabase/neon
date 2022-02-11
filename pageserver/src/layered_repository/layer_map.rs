@@ -38,6 +38,7 @@ lazy_static! {
 struct RelishSize {
     last_segno: u32,
     lsn: Lsn,
+    is_dropped: bool,
 }
 
 ///
@@ -149,14 +150,20 @@ impl LayerMap {
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
         let tag = layer.get_seg_tag();
         let segentry = self.segs.entry(tag).or_default();
-
+        let lsn = layer.get_end_lsn();
+        let is_dropped = layer.is_dropped();
+        let last_segno = tag.segno;
         let mut e = self.last_seg.entry(tag.rel).or_insert(RelishSize {
-            lsn: layer.get_end_lsn(),
-            last_segno: tag.segno,
+            lsn,
+            last_segno,
+            is_dropped,
         });
-        if e.last_segno < tag.segno {
-            e.last_segno = tag.segno;
-            e.lsn = layer.get_end_lsn();
+        if (is_dropped && e.last_segno > last_segno && (e.lsn <= lsn || e.is_dropped))
+            || (!is_dropped && e.last_segno < last_segno && (e.lsn <= lsn || !e.is_dropped))
+        {
+            e.last_segno = last_segno;
+            e.lsn = lsn;
+            e.is_dropped = is_dropped;
         }
         segentry.insert_historic(layer);
 
@@ -190,6 +197,7 @@ impl LayerMap {
                 RelishSize {
                     lsn,
                     last_segno: tag.segno - 1,
+                    is_dropped: false,
                 },
             );
         } else {
