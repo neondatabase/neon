@@ -809,7 +809,7 @@ mod tests {
             Ok(())
         }
 
-        fn write_wal(&mut self, _server: &ServerInfo, _startpos: Lsn, _buf: &[u8], skip_sync: bool) -> Result<()> {
+        fn write_wal(&mut self, _server: &ServerInfo, _startpos: Lsn, _buf: &[u8], _skip_sync: bool) -> Result<()> {
             Ok(())
         }
 

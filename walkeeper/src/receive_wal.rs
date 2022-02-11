@@ -99,12 +99,11 @@ impl<'pg> ReceiveWalConn<'pg> {
 
         let (reply_tx, reply_rx) = channel::<Option<AcceptorProposerMessage>>();
 
-        let write_thread = thread::Builder::new()
+        let _write_thread = thread::Builder::new()
             .name("Reply feedback thread".into())
             .spawn(move|| -> Result<()> {
                 let mut buf_out = BytesMut::with_capacity(10 * 1024);
 
-                // thread code
                 while let Ok(msg) = reply_rx.recv() {
                     if let Some(reply) = msg {
                         let mut buf = BytesMut::with_capacity(128);
@@ -120,7 +119,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 
         let (request_tx, request_rx) = channel();
 
-        let read_thread = thread::Builder::new()
+        let _read_thread = thread::Builder::new()
             .name("Read WAL thread".into())
             .spawn(move|| -> Result<()> {
                 request_tx.send(msg)?;
@@ -141,7 +140,7 @@ impl<'pg> ReceiveWalConn<'pg> {
         loop {
             let msg;
             let res = request_rx.try_recv();
-            if res.is_ok() && matches!(res, Ok(ProposerAcceptorMessage::AppendRequest(_))) {
+            if let Ok(ProposerAcceptorMessage::AppendRequest(_)) = res {
                 // if we have AppendRequest right now, process it without blocking
                 msg = res.unwrap();
             } else {
@@ -155,8 +154,8 @@ impl<'pg> ReceiveWalConn<'pg> {
                     reply_tx.send(Some(AcceptorProposerMessage::AppendResponse(resp)))?;
                     pending_reply = None;
                 }
-                if res.is_ok() {
-                    msg = res.unwrap();
+                if let Ok(pam) = res {
+                    msg = pam;
                 } else {
                     // blocking wait for new message
                     msg = request_rx.recv()?;
