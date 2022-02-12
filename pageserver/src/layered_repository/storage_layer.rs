@@ -2,13 +2,14 @@
 //! Common traits and structs for layers
 //!
 
-use crate::relish::RelishTag;
+use crate::relish::{RelTag, RelishTag};
 use crate::repository::{BlockNumber, ZenithWalRecord};
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::ops::Range;
 use std::path::PathBuf;
 
 use zenith_utils::lsn::Lsn;
@@ -54,6 +55,44 @@ impl SegmentTag {
                 segno: blknum / RELISH_SEG_SIZE,
             },
             blknum % RELISH_SEG_SIZE,
+        )
+    }
+}
+
+pub struct SegmentRange(pub Range<SegmentTag>);
+
+// FIXME: these constants should probably be in relish.rs. Or we should have
+// another representation for ranges like these.
+pub const MIN_SEG_TAG: SegmentTag = SegmentTag {
+    rel: RelishTag::Relation(RelTag {
+        forknum: 0,
+        spcnode: 0,
+        dbnode: 0,
+        relnode: 0,
+    }),
+    segno: 0,
+};
+pub const MAX_SEG_TAG: SegmentTag = SegmentTag {
+    rel: RelishTag::Checkpoint,
+    segno: u32::MAX,
+};
+pub const ALL_SEG_RANGE: SegmentRange = SegmentRange(MIN_SEG_TAG..MAX_SEG_TAG);
+
+impl SegmentRange {
+    pub fn get_singleton(&self) -> Option<SegmentTag> {
+        if self.0.end.rel == self.0.start.rel && self.0.end.segno == self.0.start.segno + 1 {
+            Some(self.0.start)
+        } else {
+            None
+        }
+    }
+
+    pub const fn singleton(seg: SegmentTag) -> Self {
+        Self(
+            seg..SegmentTag {
+                rel: seg.rel,
+                segno: seg.segno + 1,
+            },
         )
     }
 }
@@ -120,8 +159,10 @@ pub trait Layer: Send + Sync {
     /// Identify the timeline this relish belongs to
     fn get_timeline_id(&self) -> ZTimelineId;
 
-    /// Identify the relish segment
-    fn get_seg_tag(&self) -> SegmentTag;
+    /// Range of segments that this layer covers
+    fn get_seg_range(&self) -> SegmentRange;
+
+    fn covers_seg(&self, seg: SegmentTag) -> bool;
 
     /// Inclusive start bound of the LSN range that this layer holds
     fn get_start_lsn(&self) -> Lsn;
@@ -132,9 +173,6 @@ pub trait Layer: Send + Sync {
     /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
     /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     fn get_end_lsn(&self) -> Lsn;
-
-    /// Is the segment represented by this layer dropped by PostgreSQL?
-    fn is_dropped(&self) -> bool;
 
     /// Filename used to store this layer on disk. (Even in-memory layers
     /// implement this, to print a handy unique identifier for the layer for
@@ -155,16 +193,17 @@ pub trait Layer: Send + Sync {
     /// collect more data.
     fn get_page_reconstruct_data(
         &self,
+        seg: SegmentTag,
         blknum: SegmentBlk,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult>;
 
     /// Return size of the segment at given LSN. (Only for blocky relations.)
-    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk>;
+    fn get_seg_size(&self, seg: SegmentTag, lsn: Lsn) -> Result<Option<SegmentBlk>>;
 
     /// Does the segment exist at given LSN? Or was it dropped before it.
-    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
+    fn get_seg_exists(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool>;
 
     /// Does this layer only contain some data for the segment (incremental),
     /// or does it contain a version of every page? This is important to know

@@ -24,12 +24,12 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, SegmentBlk, SegmentTag,
+    Layer, PageReconstructData, PageReconstructResult, SegmentBlk, SegmentRange, SegmentTag,
 };
 use crate::layered_repository::RELISH_SEG_SIZE;
 use crate::virtual_file::VirtualFile;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
@@ -123,12 +123,12 @@ impl Layer for ImageLayer {
         self.timelineid
     }
 
-    fn get_seg_tag(&self) -> SegmentTag {
-        self.seg
+    fn get_seg_range(&self) -> SegmentRange {
+        SegmentRange::singleton(self.seg)
     }
 
-    fn is_dropped(&self) -> bool {
-        false
+    fn covers_seg(&self, seg: SegmentTag) -> bool {
+        seg == self.seg
     }
 
     fn get_start_lsn(&self) -> Lsn {
@@ -143,10 +143,12 @@ impl Layer for ImageLayer {
     /// Look up given page in the file
     fn get_page_reconstruct_data(
         &self,
+        seg: SegmentTag,
         blknum: SegmentBlk,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
+        assert!(seg == self.seg);
         assert!((0..RELISH_SEG_SIZE).contains(&blknum));
         assert!(lsn >= self.lsn);
 
@@ -201,16 +203,19 @@ impl Layer for ImageLayer {
     }
 
     /// Get size of the segment
-    fn get_seg_size(&self, _lsn: Lsn) -> Result<SegmentBlk> {
+    fn get_seg_size(&self, seg: SegmentTag, _lsn: Lsn) -> Result<Option<SegmentBlk>> {
+        assert!(seg == self.seg);
         let inner = self.load()?;
         match inner.image_type {
-            ImageType::Blocky { num_blocks } => Ok(num_blocks),
-            ImageType::NonBlocky => Err(anyhow!("get_seg_size called for non-blocky segment")),
+            ImageType::Blocky { num_blocks } => Ok(Some(num_blocks)),
+            ImageType::NonBlocky => Ok(Some(1)),
         }
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, _lsn: Lsn) -> Result<bool> {
+    fn get_seg_exists(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
+        assert!(lsn >= self.lsn);
+        assert!(seg == self.seg);
         Ok(true)
     }
 

@@ -40,13 +40,13 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentTag,
-    RELISH_SEG_SIZE,
+    Layer, PageReconstructData, PageReconstructResult, PageVersion, SegmentBlk, SegmentRange,
+    SegmentTag, RELISH_SEG_SIZE,
 };
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
 use zenith_utils::vec_map::VecMap;
@@ -56,11 +56,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use bookfile::{Book, BookWriter, BoundedReader, ChapterWriter};
+use bookfile::{Book, BookWriter, ChapterWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
@@ -112,12 +111,6 @@ struct BlobRange {
     size: usize,
 }
 
-fn read_blob<F: FileExt>(reader: &BoundedReader<&'_ F>, range: &BlobRange) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; range.size];
-    reader.read_exact_at(&mut buf, range.offset)?;
-    Ok(buf)
-}
-
 ///
 /// DeltaLayer is the in-memory data structure associated with an
 /// on-disk delta file.  We keep a DeltaLayer in memory for each
@@ -161,13 +154,14 @@ pub struct DeltaLayerInner {
 }
 
 impl DeltaLayerInner {
-    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
+    fn get_seg_size(&self, lsn: Lsn) -> Result<Option<SegmentBlk>> {
         // Scan the VecMap backwards, starting from the given entry.
         let slice = self
             .seg_sizes
             .slice_range((Included(&Lsn(0)), Included(&lsn)));
+
         if let Some((_entry_lsn, entry)) = slice.last() {
-            Ok(*entry)
+            Ok(Some(*entry))
         } else {
             bail!("could not find seg size in delta layer")
         }
@@ -183,12 +177,17 @@ impl Layer for DeltaLayer {
         self.timelineid
     }
 
-    fn get_seg_tag(&self) -> SegmentTag {
-        self.seg
+    fn get_seg_range(&self) -> SegmentRange {
+        SegmentRange(
+            self.seg..SegmentTag {
+                rel: self.seg.rel,
+                segno: self.seg.segno + 1,
+            },
+        )
     }
 
-    fn is_dropped(&self) -> bool {
-        self.dropped
+    fn covers_seg(&self, seg: SegmentTag) -> bool {
+        seg == self.seg
     }
 
     fn get_start_lsn(&self) -> Lsn {
@@ -206,12 +205,14 @@ impl Layer for DeltaLayer {
     /// Look up given page in the cache.
     fn get_page_reconstruct_data(
         &self,
+        seg: SegmentTag,
         blknum: SegmentBlk,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
+        assert!(seg == self.seg);
         assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         match &reconstruct_data.page_img {
@@ -246,7 +247,9 @@ impl Layer for DeltaLayer {
                     _ => {}
                 }
 
-                let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
+                let mut buf = vec![0u8; blob_range.size];
+                page_version_reader.read_exact_at(&mut buf, blob_range.offset)?;
+                let pv = PageVersion::des(&buf)?;
 
                 match pv {
                     PageVersion::Page(img) => {
@@ -270,8 +273,7 @@ impl Layer for DeltaLayer {
             // If we didn't find any records for this, check if the request is beyond EOF
             if need_image
                 && reconstruct_data.records.is_empty()
-                && self.seg.rel.is_blocky()
-                && blknum >= inner.get_seg_size(lsn)?
+                && blknum >= inner.get_seg_size(lsn)?.unwrap_or(0)
             {
                 return Ok(PageReconstructResult::Missing(self.start_lsn));
             }
@@ -289,20 +291,23 @@ impl Layer for DeltaLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
+    fn get_seg_size(&self, seg: SegmentTag, lsn: Lsn) -> Result<Option<SegmentBlk>> {
+        assert!(seg == self.seg);
         assert!(lsn >= self.start_lsn);
-        ensure!(
-            self.seg.rel.is_blocky(),
-            "get_seg_size() called on a non-blocky rel"
-        );
 
+        if self.dropped && lsn >= self.end_lsn {
+            return Ok(None);
+        }
+
+        // Scan the BTreeMap backwards, starting from the given entry.
         let inner = self.load()?;
         inner.get_seg_size(lsn)
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
+    fn get_seg_exists(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
         // Is the requested LSN after the rel was dropped?
+        assert!(seg == self.seg);
         if self.dropped && lsn >= self.end_lsn {
             return Ok(false);
         }
@@ -364,7 +369,8 @@ impl Layer for DeltaLayer {
         for ((blk, lsn), blob_range) in inner.page_version_metas.as_slice() {
             let mut desc = String::new();
 
-            let buf = read_blob(&chapter, blob_range)?;
+            let mut buf = vec![0u8; blob_range.size];
+            chapter.read_exact_at(&mut buf, blob_range.offset)?;
             let pv = PageVersion::des(&buf)?;
 
             match pv {
@@ -651,9 +657,7 @@ impl DeltaLayerWriter {
         chapter.write_all(&buf)?;
         let book = chapter.close()?;
 
-        if self.seg.rel.is_blocky() {
-            assert!(!seg_sizes.is_empty());
-        }
+        assert!(!seg_sizes.is_empty() || self.dropped);
 
         // and seg_sizes to separate chapter
         let mut chapter = book.new_chapter(SEG_SIZES_CHAPTER);

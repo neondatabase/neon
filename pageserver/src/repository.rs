@@ -286,6 +286,8 @@ pub trait TimelineWriter: Deref<Target = dyn Timeline> {
         img: Bytes,
     ) -> Result<()>;
 
+    fn put_creation(&self, rel: RelishTag, lsn: Lsn, size: u32) -> Result<()>;
+
     /// Truncate relation
     fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: BlockNumber) -> Result<()>;
 
@@ -489,7 +491,6 @@ mod tests {
         let writer = tline.writer();
 
         writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
         writer.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
         writer.put_page_image(TESTREL_A, 1, Lsn(0x40), TEST_IMG("foo blk 1 at 4"))?;
         writer.put_page_image(TESTREL_A, 2, Lsn(0x50), TEST_IMG("foo blk 2 at 5"))?;
@@ -578,20 +579,16 @@ mod tests {
         );
 
         // Extend a lot more, leaving a big gap that spans across segments
-        // FIXME: This is currently broken, see https://github.com/zenithdb/zenith/issues/500
-        /*
-        tline.put_page_image(TESTREL_A, 1500, Lsn(0x80), TEST_IMG("foo blk 1500"))?;
-        tline.advance_last_record_lsn(Lsn(0x80));
+        writer.put_page_image(TESTREL_A, 1500, Lsn(0x80), TEST_IMG("foo blk 1500"))?;
+        writer.advance_last_record_lsn(Lsn(0x80));
         assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x80))?.unwrap(), 1501);
         for blk in 2..1500 {
-            assert_eq!(
-                tline.get_page_at_lsn(TESTREL_A, blk, Lsn(0x80))?,
-                ZERO_PAGE);
+            assert_eq!(tline.get_page_at_lsn(TESTREL_A, blk, Lsn(0x80))?, ZERO_PAGE);
         }
         assert_eq!(
             tline.get_page_at_lsn(TESTREL_A, 1500, Lsn(0x80))?,
-            TEST_IMG("foo blk 1500"));
-         */
+            TEST_IMG("foo blk 1500")
+        );
 
         Ok(())
     }
@@ -621,7 +618,7 @@ mod tests {
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
         assert!(tline.get_relish_size(TESTREL_A, Lsn(0x30))?.is_none());
 
-        // Extend it again
+        // Re-create it
         writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
         writer.advance_last_record_lsn(Lsn(0x40));
 
@@ -808,6 +805,7 @@ mod tests {
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
+        writer.put_creation(RelishTag::Checkpoint, Lsn(0x10), 1)?;
         writer.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
 
         // Create a relation on the timeline
@@ -868,6 +866,7 @@ mod tests {
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call
         // after branching fails below
+        writer.put_creation(RelishTag::Checkpoint, Lsn(0x10), 1)?;
         writer.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
 
         // Create a relation on the timeline
@@ -1029,7 +1028,6 @@ mod tests {
         let repo =
             RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-
         make_some_layers(&tline, Lsn(0x20))?;
 
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
@@ -1050,7 +1048,6 @@ mod tests {
         let harness = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?;
         let repo = harness.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-
         make_some_layers(&tline, Lsn(0x20))?;
 
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
