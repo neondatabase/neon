@@ -696,7 +696,7 @@ impl InMemoryLayer {
             if let Some(dropped_at) = dropped_at {
                 // The segment was dropped. Create just a delta layer containing all the
                 // changes up to and including the drop.
-                delta_end_lsn = Some(dropped_at);
+                delta_end_lsn = Some(Lsn(dropped_at.0));
                 image_lsn = None;
             } else if !reconstruct_pages {
                 // The caller requested to not reconstruct any pages. Just write out

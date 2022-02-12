@@ -581,6 +581,7 @@ impl DeltaLayerWriter {
         end_lsn: Lsn,
         dropped: bool,
     ) -> Result<DeltaLayerWriter> {
+        assert!(end_lsn > start_lsn);
         // Create the file
         //
         // Note: This overwrites any existing file. There shouldn't be any.
