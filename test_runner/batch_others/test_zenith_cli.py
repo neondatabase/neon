@@ -107,7 +107,6 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     assert tenant1 in tenants
     assert tenant2 in tenants
 
-
 def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
     # Start with single sk
     zenith_env_builder.num_safekeepers = 1
@@ -123,3 +122,22 @@ def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
     # Connect to ps port on v4 loopback
     # res = requests.get(f'http://127.0.0.1:{env.pageserver.service_port.http}/v1/status')
     # assert res.ok
+
+def test_cli_start_stop(zenith_env_builder: ZenithEnvBuilder):
+    # Start with single sk
+    zenith_env_builder.num_safekeepers = 1
+    env = zenith_env_builder.init()
+
+    # Stop default ps/sk
+    res = env.zenith_cli(["pageserver", "stop"])
+    res.check_returncode()
+    res = env.zenith_cli(["safekeeper", "stop"])
+    res.check_returncode()
+
+    # Default start
+    res = env.zenith_cli(["start"])
+    res.check_returncode()
+
+    # Default stop
+    res = env.zenith_cli(["stop"])
+    res.check_returncode()
