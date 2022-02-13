@@ -1,7 +1,6 @@
 from contextlib import closing
 
 import asyncio
-import asyncpg
 import random
 
 from fixtures.zenith_fixtures import ZenithEnv, Postgres, Safekeeper
@@ -55,8 +54,8 @@ async def update_and_gc(env: ZenithEnv, pg: Postgres, timeline: str):
 #
 def test_gc_aggressive(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli.create_branch("test_gc_aggressive", "empty")
-    pg = env.postgres.create_start('test_gc_aggressive')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_gc_aggressive', timeline_id=new_timeline_id)
     log.info('postgres is running on test_gc_aggressive branch')
 
     conn = pg.connect()

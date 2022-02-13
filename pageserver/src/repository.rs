@@ -107,7 +107,7 @@ impl RepositoryTimeline {
 
 /// A state of the timeline synchronization with the remote storage.
 /// Contains `disk_consistent_lsn` of the corresponding remote timeline (latest checkpoint's disk_consistent_lsn).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimelineSyncState {
     /// No further downloads from the remote storage are needed.
     /// The timeline state is up-to-date or ahead of the remote storage one,

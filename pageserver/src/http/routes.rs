@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
-use serde::Serialize;
 use tracing::*;
 use zenith_utils::auth::JwtAuth;
 use zenith_utils::http::endpoint::attach_openapi_ui;
@@ -17,15 +16,13 @@ use zenith_utils::http::{
     request::parse_request_param,
 };
 use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::HexZTimelineId;
-use zenith_utils::zid::ZTimelineId;
+use zenith_utils::zid::{HexZTimelineId, ZTimelineId};
 
 use super::models::StatusResponse;
 use super::models::TenantCreateRequest;
 use super::models::TimelineCreateRequest;
 use crate::repository::RepositoryTimeline;
-use crate::repository::TimelineSyncState;
+use crate::timelines::TimelineInfo;
 use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
 
 #[derive(Debug)]
@@ -82,6 +79,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             get_config(&request),
             request_data.tenant_id,
             request_data.timeline_id,
+            request_data.ancestor_timeline_id,
             request_data.start_lsn,
         )
     })
@@ -118,28 +116,6 @@ fn get_include_non_incremental_logical_size(request: &Request<Body>) -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum TimelineInfo {
-    Local {
-        #[serde(with = "hex")]
-        timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
-        tenant_id: ZTenantId,
-        ancestor_timeline_id: Option<HexZTimelineId>,
-        last_record_lsn: Lsn,
-        prev_record_lsn: Lsn,
-        disk_consistent_lsn: Lsn,
-        timeline_state: Option<TimelineSyncState>,
-    },
-    Remote {
-        #[serde(with = "hex")]
-        timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
-        tenant_id: ZTenantId,
-    },
-}
-
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -151,23 +127,13 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id)
                 .entered();
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        Ok::<_, anyhow::Error>(match repo.get_timeline(timeline_id)?.local_timeline() {
-            None => TimelineInfo::Remote {
-                timeline_id,
-                tenant_id,
-            },
-            Some(timeline) => TimelineInfo::Local {
-                timeline_id,
-                tenant_id,
-                ancestor_timeline_id: timeline
-                    .get_ancestor_timeline_id()
-                    .map(HexZTimelineId::from),
-                disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-                last_record_lsn: timeline.get_last_record_lsn(),
-                prev_record_lsn: timeline.get_prev_record_lsn(),
-                timeline_state: repo.get_timeline_state(timeline_id),
-            },
-        })
+        let include_non_incremental_logical_size =
+            get_include_non_incremental_logical_size(&request);
+        Ok::<_, anyhow::Error>(TimelineInfo::from_repo_timeline(
+            tenant_id,
+            repo.get_timeline(timeline_id)?,
+            include_non_incremental_logical_size,
+        ))
     })
     .await
     .map_err(ApiError::from_err)??;
@@ -247,13 +213,13 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
-    tokio::task::spawn_blocking(move || {
+    let initial_timeline_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id).entered();
         tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
     })
     .await
     .map_err(ApiError::from_err)??;
-    Ok(json_response(StatusCode::CREATED, ())?)
+    Ok(json_response(StatusCode::CREATED, initial_timeline_id)?)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {

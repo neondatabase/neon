@@ -1,8 +1,8 @@
 from contextlib import closing
 from typing import Iterator
 from uuid import UUID, uuid4
-import psycopg2
 from fixtures.zenith_fixtures import ZenithEnvBuilder, ZenithPageserverApiException
+from requests.exceptions import HTTPError
 import pytest
 
 
@@ -26,14 +26,20 @@ def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
     ps.safe_psql("set FOO", password=management_token)
 
     # tenant can create branches
-    tenant_http_client.branch_create(env.initial_tenant, 'new1', 'main')
+    tenant_http_client.timeline_create(timeline_id=uuid4(),
+                                       tenant_id=env.initial_tenant,
+                                       ancestor_timeline_id=env.initial_timeline)
     # console can create branches for tenant
-    management_http_client.branch_create(env.initial_tenant, 'new2', 'main')
+    management_http_client.timeline_create(timeline_id=uuid4(),
+                                           tenant_id=env.initial_tenant,
+                                           ancestor_timeline_id=env.initial_timeline)
 
     # fail to create branch using token with different tenant_id
     with pytest.raises(ZenithPageserverApiException,
                        match='Forbidden: Tenant id mismatch. Permission denied'):
-        invalid_tenant_http_client.branch_create(env.initial_tenant, "new3", "main")
+        invalid_tenant_http_client.timeline_create(timeline_id=uuid4(),
+                                                   tenant_id=env.initial_tenant,
+                                                   ancestor_timeline_id=env.initial_timeline)
 
     # create tenant using management token
     management_http_client.tenant_create(uuid4())
@@ -54,9 +60,8 @@ def test_compute_auth_to_pageserver(zenith_env_builder: ZenithEnvBuilder, with_w
     env = zenith_env_builder.init_start()
 
     branch = f"test_compute_auth_to_pageserver{with_wal_acceptors}"
-    env.zenith_cli.create_branch(branch, "main")
-
-    pg = env.postgres.create_start(branch)
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start(branch, timeline_id=new_timeline_id)
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:

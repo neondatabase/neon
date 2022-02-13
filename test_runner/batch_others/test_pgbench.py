@@ -4,8 +4,8 @@ from fixtures.log_helper import log
 
 def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin):
     env = zenith_simple_env
-    env.zenith_cli.create_branch("test_pgbench", "empty")
-    pg = env.postgres.create_start('test_pgbench')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_pgbench', timeline_id=new_timeline_id)
     log.info("postgres is running on 'test_pgbench' branch")
 
     connstr = pg.connstr()

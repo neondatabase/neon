@@ -15,9 +15,8 @@ def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptor
         zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_restart_compute", "main")
-
-    pg = env.postgres.create_start('test_restart_compute')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_restart_compute', timeline_id=new_timeline_id)
     log.info("postgres is running on 'test_restart_compute' branch")
 
     with closing(pg.connect()) as conn:
@@ -30,7 +29,7 @@ def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptor
             log.info(f"res = {r}")
 
     # Remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute')
+    pg.stop_and_destroy().create_start('test_restart_compute', timeline_id=new_timeline_id)
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -49,7 +48,7 @@ def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptor
             log.info(f"res = {r}")
 
     # Again remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute')
+    pg.stop_and_destroy().create_start('test_restart_compute', timeline_id=new_timeline_id)
 
     # That select causes lots of FPI's and increases probability of wakeepers
     # lagging behind after query completion
@@ -63,7 +62,7 @@ def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptor
             log.info(f"res = {r}")
 
     # And again remove data directory and restart
-    pg.stop_and_destroy().create_start('test_restart_compute')
+    pg.stop_and_destroy().create_start('test_restart_compute', timeline_id=new_timeline_id)
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
