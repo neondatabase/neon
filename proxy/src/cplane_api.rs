@@ -40,7 +40,7 @@ pub struct DatabaseInfo {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
-enum ProxyAuthResponse {
+pub enum ProxyAuthResponse {
     Ready { conn_info: DatabaseInfo },
     Error { error: String },
     NotReady { ready: bool }, // TODO: get rid of `ready`
@@ -120,12 +120,12 @@ impl Md5Api<'_> {
         let waiter = self.waiters.register(psql_session_id.to_owned());
 
         println!("cplane request: {}", url);
-        let resp = reqwest::blocking::get(url)?;
+        let resp = reqwest::get(url).await?;
         if !resp.status().is_success() {
             bail!("Auth failed: {}", resp.status())
         }
 
-        let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text()?.as_str())?;
+        let auth_info = resp.json().await?;
         println!("got auth info: #{:?}", auth_info);
 
         use ProxyAuthResponse::*;

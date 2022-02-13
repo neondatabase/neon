@@ -3,7 +3,7 @@ use std::{
     thread,
 };
 
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use zenith_utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
@@ -62,14 +62,14 @@ struct MgmtHandler<'a> {
 //
 // // to test manually by sending a query to mgmt interface:
 // psql -h 127.0.0.1 -p 9999 -c '{"session_id":"4f10dde522e14739","result":{"Success":{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"stas","password":"stas"}}}'
-#[derive(Deserialize)]
-struct PsqlSessionResponse {
-    session_id: String,
-    result: PsqlSessionResult,
+#[derive(Serialize, Deserialize)]
+pub struct PsqlSessionResponse {
+    pub session_id: String,
+    pub result: PsqlSessionResult,
 }
 
-#[derive(Deserialize)]
-enum PsqlSessionResult {
+#[derive(Serialize, Deserialize)]
+pub enum PsqlSessionResult {
     Success(DatabaseInfo),
     Failure(String),
 }
@@ -104,9 +104,10 @@ fn try_process_query(
         Failure(message) => Err(message),
     };
 
-    // XXX deal with this
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    match rt.block_on(mgmt.state.waiters.notify(&resp.session_id, msg)) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    match runtime.block_on(mgmt.state.waiters.notify(&resp.session_id, msg)) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?

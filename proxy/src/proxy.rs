@@ -156,8 +156,6 @@ async fn connect_client_to_db(
     let cancel_key_data = session.enable_cancellation(cancel_closure);
 
     client
-        .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&BeParameterStatusMessage::encoding())?
         .write_message_noflush(&BeMessage::ParameterStatus(
             BeParameterStatusMessage::ServerVersion(&version),
         ))?

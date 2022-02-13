@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 ///
 /// Postgres protocol proxy/router.
 ///
@@ -10,8 +12,9 @@ use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
-use crate::router::{Router, StaticRouter};
+use crate::router::{DefaultRouter, LinkRouter, Router, StaticRouter};
 
+mod cplane_mock;
 mod router;
 mod auth;
 mod cancellation;
@@ -103,6 +106,22 @@ async fn main() -> anyhow::Result<()> {
         postgres_port: 5432,
     });
 
+    let mock_cplane_address: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+    // TODO read this from args
+    let auth_endpoint: String = "http://127.0.0.1:9999/auth".into();
+    let router = Router::Default(DefaultRouter {
+        listen_address,
+        auth_endpoint,
+    });
+
+    // TODO read this from args
+    let redirect_uri: String = "http://127.0.0.1:9999/link/".into();
+    let router = Router::Link(LinkRouter {
+        listen_address,
+        redirect_uri,
+    });
+
     let config = ProxyConfig {
         router,
         // proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
@@ -116,6 +135,9 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Version: {}", GIT_VERSION);
 
+    println!("Starting mock cplane on {}", mock_cplane_address);
+    let cplane_mock_listener = tcp_listener::bind(mock_cplane_address)?;
+
     // Check that we can bind to address before further initialization
     println!("Starting http on {}", state.conf.http_address);
     let http_listener = tcp_listener::bind(state.conf.http_address)?;
@@ -126,11 +148,12 @@ async fn main() -> anyhow::Result<()> {
     println!("Starting mgmt on {}", state.conf.mgmt_address);
     let mgmt_listener = tcp_listener::bind(state.conf.mgmt_address)?;
 
+    let cplane_mock = tokio::spawn(cplane_mock::thread_main(cplane_mock_listener));
     let http = tokio::spawn(http::thread_main(http_listener));
     let proxy = tokio::spawn(proxy::thread_main(state, proxy_listener));
     let mgmt = tokio::task::spawn_blocking(move || mgmt::thread_main(state, mgmt_listener));
 
-    let _ = futures::future::try_join_all([http, proxy, mgmt])
+    let _ = futures::future::try_join_all([cplane_mock, http, proxy, mgmt])
         .await?
         .into_iter()
         .collect::<Result<Vec<()>, _>>()?;
