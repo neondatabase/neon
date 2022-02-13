@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use zenith_utils::connstring::connection_host_port;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
@@ -73,31 +73,6 @@ impl ComputeControlPlane {
             .unwrap_or(self.base_port)
     }
 
-    // FIXME: see also parse_point_in_time in timelines.rs.
-    fn parse_point_in_time(
-        &self,
-        tenant_id: ZTenantId,
-        s: &str,
-    ) -> Result<(ZTimelineId, Option<Lsn>)> {
-        let _strings = s.split('@');
-        // let name = strings.next().unwrap();
-
-        // let lsn = strings
-        //     .next()
-        //     .map(Lsn::from_str)
-        //     .transpose()
-        //     .context("invalid LSN in point-in-time specification")?;
-
-        // // Resolve the timeline ID, given the human-readable branch name
-        // let timeline_id = self
-        //     .pageserver
-        //     .branch_get_by_name(&tenant_id, name)?
-        //     .timeline_id;
-
-        // Ok((timeline_id, lsn))
-        todo!("TODO kb check more about the '@name' format")
-    }
-
     pub fn new_node(
         &mut self,
         tenantid: ZTenantId,
@@ -107,7 +82,7 @@ impl ComputeControlPlane {
     ) -> Result<Arc<PostgresNode>> {
         // Resolve the human-readable timeline spec into timeline ID and LSN
         let (timelineid, lsn) = match timeline_spec {
-            Some(timeline_spec) => self.parse_point_in_time(tenantid, timeline_spec)?,
+            Some(timeline_spec) => parse_point_in_time(timeline_spec)?,
             None => (ZTimelineId::generate(), None),
         };
 
@@ -132,6 +107,44 @@ impl ComputeControlPlane {
 
         Ok(node)
     }
+}
+
+// Parse user-given string that represents a point-in-time.
+//
+// Variants suported:
+//
+// Raw timeline id in hex, meaning the end of that timeline:
+//    bc62e7d612d0e6fe8f99a6dd2f281f9d
+//
+// A specific LSN on a timeline:
+//    bc62e7d612d0e6fe8f99a6dd2f281f9d@2/15D3DD8
+//
+fn parse_point_in_time(timeline_spec: &str) -> anyhow::Result<(ZTimelineId, Option<Lsn>)> {
+    let mut strings = timeline_spec.split('@');
+
+    let name = match strings.next() {
+        Some(n) => n,
+        None => bail!("invalid timeline specification: {}", timeline_spec),
+    };
+    let timeline_id = ZTimelineId::from_str(name).with_context(|| {
+        format!(
+            "failed to parse the timeline id from specification: {}",
+            timeline_spec
+        )
+    })?;
+
+    let lsn = strings
+        .next()
+        .map(Lsn::from_str)
+        .transpose()
+        .with_context(|| {
+            format!(
+                "failed to parse the Lsn from timeline specification: {}",
+                timeline_spec
+            )
+        })?;
+
+    Ok((timeline_id, lsn))
 }
 
 ///////////////////////////////////////////////////////////////////////////////

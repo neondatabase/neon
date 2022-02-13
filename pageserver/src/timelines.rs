@@ -39,7 +39,7 @@ pub struct TimelineInfo {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
-    pub timelineid: ZTimelineId,
+    pub timeline_id: ZTimelineId,
     pub lsn: Lsn,
 }
 
@@ -86,7 +86,6 @@ pub fn create_repo(
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
 
     crashsafe_dir::create_dir(conf.timelines_path(&tenantid))?;
-    crashsafe_dir::create_dir_all(conf.tags_path(&tenantid))?;
 
     info!("created directory structure in {}", repo_dir.display());
 
@@ -253,19 +252,23 @@ pub(crate) fn get_timelines(
 
 pub(crate) fn create_timeline(
     conf: &PageServerConf,
-    startpoint_str: &str,
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
+    start_lsn: Option<Lsn>,
 ) -> Result<TimelineInfo> {
-    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-
     if conf.timeline_path(&timeline_id, &tenant_id).exists() {
         bail!("timeline {} already exists", timeline_id);
     }
 
-    let mut startpoint = parse_point_in_time(conf, startpoint_str, &tenant_id)?;
+    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+
+    let mut startpoint = PointInTime {
+        timeline_id,
+        lsn: start_lsn.unwrap_or(Lsn(0)),
+    };
+
     let timeline = repo
-        .get_timeline(startpoint.timelineid)?
+        .get_timeline(startpoint.timeline_id)?
         .local_timeline()
         .context("Cannot branch off the timeline that's not present locally")?;
     if startpoint.lsn == Lsn(0) {
@@ -297,7 +300,7 @@ pub(crate) fn create_timeline(
 
     // Forward entire timeline creation routine to repository
     // backend, so it can do all needed initialization
-    repo.branch_timeline(startpoint.timelineid, new_timeline_id, startpoint.lsn)?;
+    repo.branch_timeline(startpoint.timeline_id, new_timeline_id, startpoint.lsn)?;
 
     // Remember the human-readable branch name for the new timeline.
     // FIXME: there's a race condition, if you create a branch with the same
@@ -309,59 +312,9 @@ pub(crate) fn create_timeline(
     Ok(TimelineInfo {
         timeline_id: new_timeline_id,
         latest_valid_lsn: startpoint.lsn,
-        ancestor_id: Some(startpoint.timelineid.to_string()),
+        ancestor_id: Some(startpoint.timeline_id.to_string()),
         ancestor_lsn: Some(startpoint.lsn.to_string()),
         current_logical_size: 0,
         current_logical_size_non_incremental: Some(0),
     })
-}
-
-//
-// Parse user-given string that represents a point-in-time.
-//
-// We support multiple variants:
-//
-// Raw timeline id in hex, meaning the end of that timeline:
-//    bc62e7d612d0e6fe8f99a6dd2f281f9d
-//
-// A specific LSN on a timeline:
-//    bc62e7d612d0e6fe8f99a6dd2f281f9d@2/15D3DD8
-//
-fn parse_point_in_time(
-    conf: &PageServerConf,
-    s: &str,
-    tenantid: &ZTenantId,
-) -> Result<PointInTime> {
-    let mut strings = s.split('@');
-    let name = strings.next().unwrap();
-
-    let lsn = strings
-        .next()
-        .map(Lsn::from_str)
-        .transpose()
-        .context("invalid LSN in point-in-time specification")?;
-
-    // Check if it's a tag
-    if lsn.is_none() {
-        let tagpath = conf.tag_path(name, tenantid);
-        if tagpath.exists() {
-            let pointstr = fs::read_to_string(tagpath)?;
-
-            return parse_point_in_time(conf, &pointstr, tenantid);
-        }
-    }
-
-    // Check if it's a timelineid
-    // Check if it's timelineid @ LSN
-    if let Ok(timelineid) = ZTimelineId::from_str(name) {
-        let tlipath = conf.timeline_path(&timelineid, tenantid);
-        if tlipath.exists() {
-            return Ok(PointInTime {
-                timelineid,
-                lsn: lsn.unwrap_or(Lsn(0)),
-            });
-        }
-    }
-
-    bail!("could not parse point-in-time {}", s);
 }

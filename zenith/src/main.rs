@@ -17,6 +17,7 @@ use walkeeper::defaults::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
 use zenith_utils::auth::{Claims, Scope};
+use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 use zenith_utils::GIT_VERSION;
@@ -464,14 +465,15 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
     let tenant_id = get_tenantid(timeline_match, env)?;
 
     if let Some(timeline_id) = timeline_match.value_of("timeline-id") {
-        let startpoint_str = timeline_match
-            .value_of("start-point")
-            .context("Missing start-point")?;
+        let start_lsn = timeline_match
+            .value_of("start-lsn")
+            .map(|lsn| lsn.parse::<Lsn>())
+            .transpose()
+            .context("Failed to parse start Lsn from the request")?;
         let timeline_id = timeline_id
             .parse::<ZTimelineId>()
             .context("Failed to parse timeline id from the request")?;
-        let timeline =
-            pageserver.timeline_create(timeline_id, startpoint_str.to_owned(), tenant_id)?;
+        let timeline = pageserver.timeline_create(tenant_id, timeline_id, start_lsn)?;
         println!(
             "Created timeline '{}' at {:?} for tenant: {}",
             timeline.timeline_id, timeline.latest_valid_lsn, tenant_id,
