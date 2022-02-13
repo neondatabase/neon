@@ -24,9 +24,8 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_wal_acceptors_normal_work", "main")
-
-    pg = env.postgres.create_start('test_wal_acceptors_normal_work')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_wal_acceptors_normal_work', timeline_id=new_timeline_id)
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -39,9 +38,9 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
 
 
 @dataclass
-class BranchMetrics:
-    name: str
-    latest_valid_lsn: int
+class TimelineMetrics:
+    timeline_id: str
+    last_record_lsn: int
     # One entry per each Safekeeper, order is the same
     flush_lsns: List[int] = field(default_factory=list)
     commit_lsns: List[int] = field(default_factory=list)
@@ -55,21 +54,26 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
 
     n_timelines = 3
 
-    branches = ["test_wal_acceptors_many_timelines_{}".format(tlin) for tlin in range(n_timelines)]
+    branch_names = [
+        "test_wal_acceptors_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
+    ]
+    branch_names_to_timeline_ids = {}
 
     # start postgres on each timeline
     pgs = []
-    for branch in branches:
-        env.zenith_cli.create_branch(branch, "main")
-        pgs.append(env.postgres.create_start(branch))
+    for branch_name in branch_names:
+        new_timeline_id = env.zenith_cli.branch_timeline()
+        pgs.append(env.postgres.create_start(branch_name, timeline_id=new_timeline_id))
+        branch_names_to_timeline_ids[branch_name] = new_timeline_id
 
     tenant_id = env.initial_tenant
 
-    def collect_metrics(message: str) -> List[BranchMetrics]:
+    def collect_metrics(message: str) -> List[TimelineMetrics]:
         with env.pageserver.http_client() as pageserver_http:
-            branch_details = [
-                pageserver_http.branch_detail(tenant_id=tenant_id, name=branch)
-                for branch in branches
+            timeline_details = [
+                pageserver_http.timeline_detail(
+                    tenant_id=tenant_id, timeline_id=branch_names_to_timeline_ids[branch_name])
+                for branch_name in branch_names
             ]
         # All changes visible to pageserver (latest_valid_lsn) should be
         # confirmed by safekeepers first. As we cannot atomically get
@@ -80,14 +84,15 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         # safekeepers' state, it will look contradictory.
         sk_metrics = [sk.http_client().get_metrics() for sk in env.safekeepers]
 
-        branch_metrics = []
+        timeline_metrics = []
         with env.pageserver.http_client() as pageserver_http:
-            for branch_detail in branch_details:
-                timeline_id: str = branch_detail["timeline_id"]
+            for timeline_detail in timeline_details:
+                print(f"@@@@@@@@@@@\n{timeline_detail}\n@@@@@@@@@@@")
+                timeline_id: str = timeline_detail["timeline_id"]
 
-                m = BranchMetrics(
-                    name=branch_detail["name"],
-                    latest_valid_lsn=branch_detail["latest_valid_lsn"],
+                m = TimelineMetrics(
+                    timeline_id=timeline_id,
+                    last_record_lsn=timeline_detail["last_record_lsn"],
                 )
                 for sk_m in sk_metrics:
                     m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])
@@ -99,13 +104,13 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
                 # We only call collect_metrics() after a transaction is confirmed by
                 # the compute node, which only happens after a consensus of safekeepers
                 # has confirmed the transaction. We assume majority consensus here.
-                assert (2 * sum(m.latest_valid_lsn <= lsn
+                assert (2 * sum(m.last_record_lsn <= lsn
                                 for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers)
-                assert (2 * sum(m.latest_valid_lsn <= lsn
+                assert (2 * sum(m.last_record_lsn <= lsn
                                 for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers)
-                branch_metrics.append(m)
-        log.info(f"{message}: {branch_metrics}")
-        return branch_metrics
+                timeline_metrics.append(m)
+        log.info(f"{message}: {timeline_metrics}")
+        return timeline_metrics
 
     # TODO: https://github.com/zenithdb/zenith/issues/809
     # collect_metrics("before CREATE TABLE")
@@ -117,7 +122,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
     init_m = collect_metrics("after CREATE TABLE")
 
-    # Populate data for 2/3 branches
+    # Populate data for 2/3 timelines
     class MetricsChecker(threading.Thread):
         def __init__(self) -> None:
             super().__init__(daemon=True)
@@ -155,15 +160,15 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
 
     collect_metrics("after INSERT INTO")
 
-    # Check data for 2/3 branches
+    # Check data for 2/3 timelines
     for pg in pgs[:-1]:
         res = pg.safe_psql("SELECT sum(key) FROM t")
         assert res[0] == (5000050000, )
 
     final_m = collect_metrics("after SELECT")
-    # Assume that LSNs (a) behave similarly in all branches; and (b) INSERT INTO alters LSN significantly.
+    # Assume that LSNs (a) behave similarly in all timelines; and (b) INSERT INTO alters LSN significantly.
     # Also assume that safekeepers will not be significantly out of sync in this test.
-    middle_lsn = (init_m[0].latest_valid_lsn + final_m[0].latest_valid_lsn) // 2
+    middle_lsn = (init_m[0].last_record_lsn + final_m[0].last_record_lsn) // 2
     assert max(init_m[0].flush_lsns) < middle_lsn < min(final_m[0].flush_lsns)
     assert max(init_m[0].commit_lsns) < middle_lsn < min(final_m[0].commit_lsns)
     assert max(init_m[1].flush_lsns) < middle_lsn < min(final_m[1].flush_lsns)
@@ -183,8 +188,8 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = n_acceptors
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_wal_acceptors_restarts", "main")
-    pg = env.postgres.create_start('test_wal_acceptors_restarts')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_wal_acceptors_restarts', timeline_id=new_timeline_id)
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -220,8 +225,8 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_wal_acceptors_unavailability", "main")
-    pg = env.postgres.create_start('test_wal_acceptors_unavailability')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_wal_acceptors_unavailability', timeline_id=new_timeline_id)
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -291,8 +296,9 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_wal_acceptors_race_conditions", "main")
-    pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_wal_acceptors_race_conditions',
+                                   timeline_id=new_timeline_id)
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -456,8 +462,8 @@ def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_timeline_status", "main")
-    pg = env.postgres.create_start('test_timeline_status')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_timeline_status', timeline_id=new_timeline_id)
 
     wa = env.safekeepers[0]
     wa_http_cli = wa.http_client()
@@ -630,12 +636,12 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
 
     zenith_env_builder.num_safekeepers = 4
     env = zenith_env_builder.init_start()
-    env.zenith_cli.create_branch("test_replace_safekeeper", "main")
+    new_timeline_id = env.zenith_cli.branch_timeline()
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
     active_safekeepers = [1, 2, 3]
-    pg = env.postgres.create('test_replace_safekeeper')
+    pg = env.postgres.create('test_replace_safekeeper', timeline_id=new_timeline_id)
     pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
     pg.start()
 
@@ -673,7 +679,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Recreate postgres to replace failed sk1 with new sk4")
-    pg.stop_and_destroy().create('test_replace_safekeeper')
+    pg.stop_and_destroy().create('test_replace_safekeeper', timeline_id=uuid.UUID(timeline_id))
     active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
     pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))

@@ -325,7 +325,7 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn tenant_create(&self, tenantid: ZTenantId) -> Result<()> {
+    pub fn tenant_create(&self, tenantid: ZTenantId) -> Result<ZTimelineId> {
         Ok(self
             .http_request(Method::POST, format!("{}/{}", self.http_base_url, "tenant"))
             .json(&TenantCreateRequest {
@@ -352,6 +352,7 @@ impl PageServerNode {
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         start_lsn: Option<Lsn>,
+        ancestor_timeline_id: Option<ZTimelineId>,
     ) -> Result<TimelineInfo> {
         Ok(self
             .http_request(Method::POST, format!("{}/timeline", self.http_base_url))
@@ -359,6 +360,7 @@ impl PageServerNode {
                 tenant_id,
                 timeline_id,
                 start_lsn,
+                ancestor_timeline_id,
             })
             .send()?
             .error_from_body()?

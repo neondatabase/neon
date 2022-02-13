@@ -26,18 +26,20 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
     # check its timelines
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) > 0
-    for timeline_id_str in timelines:
-        timeline_details = client.timeline_detail(tenant_id, UUID(timeline_id_str))
+    for timeline in timelines:
+        timeline_id_str = str(timeline['timeline_id'])
+        timeline_details = client.timeline_detail(tenant_id=tenant_id,
+                                                  timeline_id=UUID(timeline_id_str))
         assert timeline_details['type'] == 'Local'
         assert timeline_details['tenant_id'] == tenant_id.hex
         assert timeline_details['timeline_id'] == timeline_id_str
 
-    # create branch
-    branch_name = uuid4().hex
-    client.branch_create(tenant_id, branch_name, "main")
+    # create timeline
+    timeline_id = uuid4()
+    client.timeline_create(tenant_id=tenant_id, timeline_id=timeline_id)
 
     # check it is there
-    assert branch_name in {b['name'] for b in client.branch_list(tenant_id)}
+    assert timeline_id.hex in {b['timeline_id'] for b in client.timeline_list(tenant_id)}
 
 
 def test_pageserver_http_api_client(zenith_simple_env: ZenithEnv):

@@ -12,7 +12,7 @@ from fixtures.log_helper import log
 #
 def test_clog_truncate(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli.create_branch("test_clog_truncate", "empty")
+    test_clog_truncate_timeline_id = env.zenith_cli.branch_timeline()
 
     # set agressive autovacuum to make sure that truncation will happen
     config = [
@@ -25,7 +25,9 @@ def test_clog_truncate(zenith_simple_env: ZenithEnv):
         'autovacuum_freeze_max_age=100000'
     ]
 
-    pg = env.postgres.create_start('test_clog_truncate', config_lines=config)
+    pg = env.postgres.create_start('test_clog_truncate',
+                                   config_lines=config,
+                                   timeline_id=test_clog_truncate_timeline_id)
     log.info('postgres is running on test_clog_truncate branch')
 
     # Install extension containing function needed for test
@@ -62,10 +64,11 @@ def test_clog_truncate(zenith_simple_env: ZenithEnv):
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f'create branch at lsn_after_truncation {lsn_after_truncation}')
-    env.zenith_cli.create_branch("test_clog_truncate_new",
-                                 "test_clog_truncate@" + lsn_after_truncation)
-
-    pg2 = env.postgres.create_start('test_clog_truncate_new')
+    test_clog_truncate_new_timeline_id = env.zenith_cli.branch_timeline(
+        ancestor_timeline_id=test_clog_truncate_timeline_id,
+        ancestor_start_lsn=lsn_after_truncation)
+    pg2 = env.postgres.create_start('test_clog_truncate_new',
+                                    timeline_id=test_clog_truncate_new_timeline_id)
     log.info('postgres is running on test_clog_truncate_new branch')
 
     # check that new node doesn't contain truncated segment

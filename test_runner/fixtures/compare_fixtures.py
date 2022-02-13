@@ -64,9 +64,8 @@ class ZenithCompare(PgCompare):
         self._pg_bin = pg_bin
 
         # We only use one branch and one timeline
-        self.branch = branch_name
-        self.env.zenith_cli.create_branch(self.branch, "empty")
-        self._pg = self.env.postgres.create_start(self.branch)
+        timeline_id = self.env.zenith_cli.branch_timeline()
+        self._pg = self.env.postgres.create_start("branch", timeline_id=timeline_id)
         self.timeline = self.pg.safe_psql("SHOW zenith.zenith_timeline")[0][0]
 
         # Long-lived cursor, useful for flushing

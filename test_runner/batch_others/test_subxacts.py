@@ -10,8 +10,8 @@ from fixtures.log_helper import log
 # CLOG.
 def test_subxacts(zenith_simple_env: ZenithEnv, test_output_dir):
     env = zenith_simple_env
-    env.zenith_cli.create_branch("test_subxacts", "empty")
-    pg = env.postgres.create_start('test_subxacts')
+    new_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_subxacts', timeline_id=new_timeline_id)
 
     log.info("postgres is running on 'test_subxacts' branch")
     pg_conn = pg.connect()

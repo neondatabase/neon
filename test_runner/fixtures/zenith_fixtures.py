@@ -548,8 +548,7 @@ class ZenithEnv:
         self.s3_mock_server = config.s3_mock_server
         self.zenith_cli = ZenithCli(env=self)
 
-        self.postgres = PostgresFactory(self)
-
+        self.zenith_cli = ZenithCli(env=self)
         self.safekeepers: List[Safekeeper] = []
 
         # generate initial tenant ID here instead of letting 'zenith init' generate it,
@@ -558,7 +557,7 @@ class ZenithEnv:
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(f"""
-            default_tenantid = '{self.initial_tenant.hex}'
+            default_tenant_id = '{self.initial_tenant.hex}'
         """)
 
         # Create config for pageserver
@@ -600,8 +599,9 @@ class ZenithEnv:
             self.safekeepers.append(safekeeper)
 
         log.info(f"Config: {toml}")
-
-        self.zenith_cli.init(toml)
+        # TODO kb is this a wrong concept? will break for multiple tenant tests
+        self.initial_timeline = self.zenith_cli.init(toml)
+        self.postgres = PostgresFactory(self)
 
     def start(self):
         # Start up the page server and all the safekeepers
@@ -613,12 +613,6 @@ class ZenithEnv:
     def get_safekeeper_connstrs(self) -> str:
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
-
-    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
-        if tenant_id is None:
-            tenant_id = uuid.uuid4()
-        self.zenith_cli.create_tenant(tenant_id)
-        return tenant_id
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
@@ -643,14 +637,7 @@ def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
         shutil.rmtree(repo_dir, ignore_errors=True)
 
     with ZenithEnvBuilder(Path(repo_dir), port_distributor) as builder:
-
-        env = builder.init_start()
-
-        # For convenience in tests, create a branch from the freshly-initialized cluster.
-        env.zenith_cli.create_branch("empty", "main")
-
-        # Return the builder to the caller
-        yield env
+        yield builder.init_start()
 
 
 @pytest.fixture(scope='function')
@@ -729,29 +716,22 @@ class ZenithPageserverHttpClient(requests.Session):
             f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/detach", )
         self.verbose_error(res)
 
-    def branch_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
-    def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict[Any, Any]:
-        res = self.post(f"http://localhost:{self.port}/v1/branch",
+    def timeline_create(self,
+                        tenant_id: uuid.UUID,
+                        timeline_id: uuid.UUID,
+                        start_lsn: Optional[str] = None,
+                        ancestor_timeline_id: Optional[uuid.UUID] = None) -> Dict[Any, Any]:
+        res = self.post(f"http://localhost:{self.port}/v1/timeline",
                         json={
-                            'tenant_id': tenant_id.hex,
-                            'name': name,
-                            'start_point': start_point,
+                            'tenant_id':
+                            tenant_id.hex,
+                            'timeline_id':
+                            timeline_id.hex,
+                            'start_lsn':
+                            start_lsn,
+                            'ancestor_timeline_id':
+                            ancestor_timeline_id.hex if ancestor_timeline_id else None,
                         })
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict[Any, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}?include-non-incremental-logical-size=1",
-        )
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -774,7 +754,7 @@ class ZenithPageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return res.json()
 
-    def timeline_list(self, tenant_id: uuid.UUID) -> List[str]:
+    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}")
         self.verbose_error(res)
         res_json = res.json()
@@ -783,7 +763,8 @@ class ZenithPageserverHttpClient(requests.Session):
 
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}")
+            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}?include-non-incremental-logical-size=1"
+        )
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -827,34 +808,76 @@ class ZenithCli:
         self.env = env
         pass
 
-    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> tuple[uuid.UUID, uuid.UUID]:
+        """
+        Creates a new tenant, returns its id and its initial timeline's id.
+        """
         if tenant_id is None:
             tenant_id = uuid.uuid4()
-        self.raw_cli(['tenant', 'create', tenant_id.hex])
-        return tenant_id
+        res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+
+        initial_timeline_id_extractor = re.compile(r"initial timeline: '(?P<timeline_id>[^']+)'",
+                                                   re.MULTILINE)
+        matches = initial_timeline_id_extractor.search(res.stdout)
+
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
+
+        if created_timeline_id is None:
+            raise Exception('could not find timeline id after `zenith tenant create` invocation')
+        else:
+            return (tenant_id, uuid.UUID(created_timeline_id))
 
     def list_tenants(self) -> 'subprocess.CompletedProcess[str]':
-        return self.raw_cli(['tenant', 'list'])
+        res = self.raw_cli(['tenant', 'list'])
+        res.check_returncode()
+        return res
 
-    def create_branch(self,
-                      branch_name: str,
-                      starting_point: str,
-                      tenant_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
-        args = ['branch']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
-        args.extend([branch_name, starting_point])
+    def branch_timeline(self,
+                        tenant_id: Optional[uuid.UUID] = None,
+                        new_timeline_id: Optional[uuid.UUID] = None,
+                        ancestor_timeline_id: Optional[uuid.UUID] = None,
+                        ancestor_start_lsn: Optional[str] = None) -> uuid.UUID:
+        cmd = [
+            'timeline',
+            'branch',
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+            '--ancestor-timeline-id',
+            (ancestor_timeline_id or self.env.initial_timeline).hex,
+        ]
+        if ancestor_start_lsn is not None:
+            cmd.extend(['--ancestor-start-lsn', ancestor_start_lsn])
+        if new_timeline_id is not None:
+            cmd.extend(['--timeline-id', new_timeline_id.hex])
 
-        return self.raw_cli(args)
+        completed_process = self.raw_cli(cmd)
+        completed_process.check_returncode()
+        create_timeline_id_extractor = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
+                                                  re.MULTILINE)
+        matches = create_timeline_id_extractor.search(completed_process.stdout)
 
-    def list_branches(self,
-                      tenant_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
-        args = ['branch']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
-        return self.raw_cli(args)
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
 
-    def init(self, config_toml: str) -> 'subprocess.CompletedProcess[str]':
+        if created_timeline_id is None:
+            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+        else:
+            return uuid.UUID(created_timeline_id)
+
+    def list_timelines(self, tenant_id: Optional[uuid.UUID] = None) -> List[str]:
+        res = self.raw_cli(
+            ['timeline', 'list', '--tenant-id', (tenant_id or self.env.initial_tenant).hex])
+        branches_cli = sorted(
+            map(lambda b: b.split(') ')[-1].strip().split(':')[-1].strip(),
+                res.stdout.strip().split("\n")))
+        return branches_cli
+
+    def init(self, config_toml: str) -> uuid.UUID:
+        initial_timeline = None
+
         with tempfile.NamedTemporaryFile(mode='w+') as tmp:
             tmp.write(config_toml)
             tmp.flush()
@@ -864,7 +887,18 @@ class ZenithCli:
                                               self.env.pageserver.remote_storage,
                                               self.env.pageserver.config_override)
 
-            return self.raw_cli(cmd)
+            completed_process = self.raw_cli(cmd)
+            completed_process.check_returncode()
+            init_timeline_id_extractor = re.compile(
+                r'^created initial timeline (?P<timeline_id>[^\s]+)\s', re.MULTILINE)
+            matches = init_timeline_id_extractor.search(completed_process.stdout)
+            if matches is not None:
+                initial_timeline = matches.group('timeline_id')
+
+        if initial_timeline is None:
+            raise Exception('could not find timeline id after `zenith init` invocation')
+        else:
+            return uuid.UUID(initial_timeline)
 
     def pageserver_start(self, overrides=()) -> 'subprocess.CompletedProcess[str]':
         start_args = ['pageserver', 'start', *overrides]
@@ -898,36 +932,50 @@ class ZenithCli:
         self,
         node_name: str,
         tenant_id: Optional[uuid.UUID] = None,
-        timeline_spec: Optional[str] = None,
+        timeline_id: Optional[uuid.UUID] = None,
+        lsn: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
-        args = ['pg', 'create']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
+        args = [
+            'pg',
+            'create',
+            '--tenant-id', (tenant_id or self.env.initial_tenant).hex,
+            '--timeline-id', (timeline_id or self.env.initial_timeline).hex
+        ]
+        if lsn is not None:
+            args.append(f'--lsn={lsn}')
         if port is not None:
             args.append(f'--port={port}')
         args.append(node_name)
-        if timeline_spec is not None:
-            args.append(timeline_spec)
-        return self.raw_cli(args)
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
 
     def pg_start(
         self,
         node_name: str,
         tenant_id: Optional[uuid.UUID] = None,
-        timeline_spec: Optional[str] = None,
+        timeline_id: Optional[uuid.UUID] = None,
+        lsn: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
-        args = ['pg', 'start']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
+        args = [
+            'pg',
+            'start',
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+            '--timeline-id',
+            (timeline_id or self.env.initial_timeline).hex,
+        ]
+        if lsn is not None:
+            args.append(f'--lsn={lsn}')
         if port is not None:
             args.append(f'--port={port}')
         args.append(node_name)
-        if timeline_spec is not None:
-            args.append(timeline_spec)
 
-        return self.raw_cli(args)
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
 
     def pg_stop(
         self,
@@ -935,9 +983,7 @@ class ZenithCli:
         tenant_id: Optional[uuid.UUID] = None,
         destroy=False,
     ) -> 'subprocess.CompletedProcess[str]':
-        args = ['pg', 'stop']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
+        args = ['pg', 'stop', f'--tenant-id={(tenant_id or self.env.initial_tenant).hex}']
         if destroy:
             args.append('--destroy')
         args.append(node_name)
@@ -1044,7 +1090,6 @@ class ZenithPageserver(PgProtocol):
         if self.running:
             self.env.zenith_cli.pageserver_stop(immediate)
             self.running = False
-
         return self
 
     def __enter__(self):
@@ -1261,7 +1306,8 @@ class Postgres(PgProtocol):
     def create(
         self,
         node_name: str,
-        branch: Optional[str] = None,
+        timeline_id: uuid.UUID,
+        lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
         """
@@ -1272,13 +1318,11 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        if branch is None:
-            branch = node_name
-
         self.env.zenith_cli.pg_create(node_name,
+                                      timeline_id=timeline_id,
                                       tenant_id=self.tenant_id,
-                                      port=self.port,
-                                      timeline_spec=branch)
+                                      lsn=lsn,
+                                      port=self.port)
         self.node_name = node_name
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
@@ -1375,7 +1419,7 @@ class Postgres(PgProtocol):
 
         if self.running:
             assert self.node_name is not None
-            self.env.zenith_cli.pg_stop(self.node_name, tenant_id=self.tenant_id)
+            self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id)
             self.running = False
 
         return self
@@ -1387,7 +1431,7 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, destroy=True)
+        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
         self.node_name = None
 
         return self
@@ -1395,7 +1439,8 @@ class Postgres(PgProtocol):
     def create_start(
         self,
         node_name: str,
-        branch: Optional[str] = None,
+        timeline_id: uuid.UUID,
+        lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
         """
@@ -1406,8 +1451,9 @@ class Postgres(PgProtocol):
 
         self.create(
             node_name=node_name,
-            branch=branch,
+            timeline_id=timeline_id,
             config_lines=config_lines,
+            lsn=lsn,
         ).start()
 
         return self
@@ -1428,8 +1474,9 @@ class PostgresFactory:
 
     def create_start(self,
                      node_name: str = "main",
-                     branch: Optional[str] = None,
                      tenant_id: Optional[uuid.UUID] = None,
+                     timeline_id: Optional[uuid.UUID] = None,
+                     lsn: Optional[str] = None,
                      config_lines: Optional[List[str]] = None) -> Postgres:
 
         pg = Postgres(
@@ -1442,14 +1489,16 @@ class PostgresFactory:
 
         return pg.create_start(
             node_name=node_name,
-            branch=branch,
+            timeline_id=timeline_id or self.env.initial_timeline,
             config_lines=config_lines,
+            lsn=lsn,
         )
 
     def create(self,
                node_name: str = "main",
-               branch: Optional[str] = None,
                tenant_id: Optional[uuid.UUID] = None,
+               timeline_id: Optional[uuid.UUID] = None,
+               lsn: Optional[str] = None,
                config_lines: Optional[List[str]] = None) -> Postgres:
 
         pg = Postgres(
@@ -1463,7 +1512,8 @@ class PostgresFactory:
 
         return pg.create(
             node_name=node_name,
-            branch=branch,
+            timeline_id=timeline_id or self.env.initial_timeline,
+            lsn=lsn,
             config_lines=config_lines,
         )
 
@@ -1683,8 +1733,7 @@ def list_files_to_compare(pgdata_dir: str):
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Postgres):
-
-    # Get the timeline ID of our branch. We need it for the 'basebackup' command
+    # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("SHOW zenith.zenith_timeline")

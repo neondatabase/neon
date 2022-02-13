@@ -7,10 +7,12 @@ from fixtures.zenith_fixtures import ZenithEnv, base_dir, pg_distrib_dir
 def test_isolation(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
     env = zenith_simple_env
 
-    env.zenith_cli.create_branch("test_isolation", "empty")
+    new_timeline_id = env.zenith_cli.branch_timeline()
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    pg = env.postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])
+    pg = env.postgres.create_start('test_isolation',
+                                   config_lines=['max_prepared_transactions=100'],
+                                   timeline_id=new_timeline_id)
     pg.safe_psql('CREATE DATABASE isolation_regression')
 
     # Create some local directories for pg_isolation_regress to run in.

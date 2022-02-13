@@ -9,9 +9,10 @@ from fixtures.log_helper import log
 #
 def test_twophase(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli.create_branch("test_twophase", "empty")
-
-    pg = env.postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
+    test_twophase_timeline_id = env.zenith_cli.branch_timeline()
+    pg = env.postgres.create_start('test_twophase',
+                                   config_lines=['max_prepared_transactions=5'],
+                                   timeline_id=test_twophase_timeline_id)
     log.info("postgres is running on 'test_twophase' branch")
 
     conn = pg.connect()
@@ -56,12 +57,14 @@ def test_twophase(zenith_simple_env: ZenithEnv):
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    env.zenith_cli.create_branch("test_twophase_prepared", "test_twophase")
+    test_twophase_prepared_timeline_id = env.zenith_cli.branch_timeline(
+        ancestor_timeline_id=test_twophase_timeline_id)
 
     # Start compute on the new branch
     pg2 = env.postgres.create_start(
         'test_twophase_prepared',
         config_lines=['max_prepared_transactions=5'],
+        timeline_id=test_twophase_prepared_timeline_id,
     )
 
     # Check that we restored only needed twophase files

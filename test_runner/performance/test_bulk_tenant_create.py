@@ -30,11 +30,9 @@ def test_bulk_tenant_create(
     for i in range(tenants_count):
         start = timeit.default_timer()
 
-        tenant = env.create_tenant()
-        env.zenith_cli.create_branch(
-            f"test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}",
-            "main",
-            tenant_id=tenant)
+        (tenant, tenant_initial_timeline_id) = env.zenith_cli.create_tenant()
+        new_timeline_id = env.zenith_cli.branch_timeline(
+            tenant_id=tenant, ancestor_timeline_id=tenant_initial_timeline_id)
 
         # FIXME: We used to start new safekeepers here. Did that make sense? Should we do it now?
         #if use_wal_acceptors == 'with_wa':
@@ -42,9 +40,8 @@ def test_bulk_tenant_create(
 
         pg_tenant = env.postgres.create_start(
             f"test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}",
-            None,  # branch name, None means same as node name
             tenant,
-        )
+            timeline_id=new_timeline_id)
 
         end = timeit.default_timer()
         time_slices.append(end - start)

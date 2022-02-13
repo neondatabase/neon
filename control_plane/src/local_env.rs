@@ -5,6 +5,7 @@
 
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Write;
 use std::fs;
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId};
+use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId, ZTimelineId};
 
 use crate::safekeeper::SafekeeperNode;
 
@@ -48,7 +49,7 @@ pub struct LocalEnv {
     // Default tenant ID to use with the 'zenith' command line utility, when
     // --tenantid is not explicitly specified.
     #[serde(default)]
-    pub default_tenantid: Option<HexZTenantId>,
+    pub default_tenant_id: Option<HexZTenantId>,
 
     // used to issue tokens during e.g pg start
     #[serde(default)]
@@ -58,6 +59,13 @@ pub struct LocalEnv {
 
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
+
+    /// Every tenant has a first timeline created for it, currently the only one ancestor-less for this tenant.
+    /// It is used as a default timeline for branching, if no ancestor timeline is specified.
+    #[serde(default)]
+    // TODO kb this does not survive calls between invocations, so will have to persist it.
+    // Then it comes back to names again?
+    pub initial_timelines: HashMap<ZTenantId, ZTimelineId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -183,8 +191,8 @@ impl LocalEnv {
         }
 
         // If no initial tenant ID was given, generate it.
-        if env.default_tenantid.is_none() {
-            env.default_tenantid = Some(HexZTenantId::from(ZTenantId::generate()));
+        if env.default_tenant_id.is_none() {
+            env.default_tenant_id = Some(HexZTenantId::from(ZTenantId::generate()));
         }
 
         env.base_data_dir = base_path();

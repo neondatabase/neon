@@ -49,7 +49,7 @@ impl RelativePath {
 }
 
 /// An index to track tenant files that exist on the remote storage.
-/// Currently, timeline archives files are tracked only.
+/// Currently, timeline archive files are tracked only.
 #[derive(Debug, Clone)]
 pub struct RemoteTimelineIndex {
     timeline_files: HashMap<ZTenantTimelineId, TimelineIndexEntry>,
