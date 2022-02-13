@@ -16,6 +16,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use zenith_utils::http::error::HttpErrorBody;
+use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
@@ -348,16 +349,16 @@ impl PageServerNode {
 
     pub fn timeline_create(
         &self,
-        timeline_id: ZTimelineId,
-        start_point: String,
         tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        start_lsn: Option<Lsn>,
     ) -> Result<TimelineInfo> {
         Ok(self
             .http_request(Method::POST, format!("{}/timeline", self.http_base_url))
             .json(&TimelineCreateRequest {
                 tenant_id,
                 timeline_id,
-                start_point,
+                start_lsn,
             })
             .send()?
             .error_from_body()?

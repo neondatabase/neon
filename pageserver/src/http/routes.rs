@@ -77,12 +77,12 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     check_permission(&request, Some(request_data.tenant_id))?;
 
     let response_data = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("/timeline_create", timeline = %request_data.timeline_id, tenant = %request_data.tenant_id, startpoint=%request_data.start_point).entered();
+        let _enter = info_span!("/timeline_create", timeline = %request_data.timeline_id, tenant = %request_data.tenant_id, lsn=?request_data.start_lsn).entered();
         timelines::create_timeline(
             get_config(&request),
-            &request_data.start_point,
             request_data.tenant_id,
             request_data.timeline_id,
+            request_data.start_lsn,
         )
     })
     .await

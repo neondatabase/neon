@@ -392,24 +392,12 @@ impl PageServerConf {
         self.tenants_path().join(tenantid.to_string())
     }
 
-    pub fn tags_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenant_path(tenantid).join("refs").join("tags")
-    }
-
-    pub fn tag_path(&self, tag_name: &str, tenantid: &ZTenantId) -> PathBuf {
-        self.tags_path(tenantid).join(tag_name)
-    }
-
     pub fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
         self.tenant_path(tenantid).join(TIMELINES_SEGMENT_NAME)
     }
 
     pub fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
         self.timelines_path(tenantid).join(timelineid.to_string())
-    }
-
-    pub fn ancestor_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
-        self.timeline_path(timelineid, tenantid).join("ancestor")
     }
 
     //
