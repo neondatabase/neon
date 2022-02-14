@@ -17,7 +17,7 @@ use crate::{
             compression, index::TimelineIndexEntry, sync_queue, tenant_branch_files,
             update_index_description, SyncKind, SyncTask,
         },
-        RemoteStorage, TimelineSyncId,
+        RemoteStorage, ZTenantTimelineId,
     },
 };
 
@@ -52,13 +52,16 @@ pub(super) async fn download_timeline<
 >(
     conf: &'static PageServerConf,
     remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
-    sync_id: TimelineSyncId,
+    sync_id: ZTenantTimelineId,
     mut download: TimelineDownload,
     retries: u32,
 ) -> DownloadedTimeline {
     debug!("Downloading layers for sync id {}", sync_id);
 
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+    let ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    } = sync_id;
     let index_read = remote_assets.1.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => {
@@ -110,7 +113,8 @@ pub(super) async fn download_timeline<
         }
     };
 
-    if let Err(e) = download_missing_branches(conf, remote_assets.as_ref(), sync_id.0).await {
+    if let Err(e) = download_missing_branches(conf, remote_assets.as_ref(), sync_id.tenant_id).await
+    {
         error!(
             "Failed to download missing branches for sync id {}: {:?}",
             sync_id, e
@@ -180,7 +184,10 @@ async fn try_download_archive<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     conf: &'static PageServerConf,
-    TimelineSyncId(tenant_id, timeline_id): TimelineSyncId,
+    ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    }: ZTenantTimelineId,
     remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
     remote_timeline: &RemoteTimeline,
     archive_id: ArchiveId,
@@ -343,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_timeline() -> anyhow::Result<()> {
         let repo_harness = RepoHarness::create("test_download_timeline")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
+        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
         let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,

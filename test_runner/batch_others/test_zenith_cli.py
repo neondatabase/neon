@@ -107,6 +107,7 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     assert tenant1 in tenants
     assert tenant2 in tenants
 
+
 def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
     # Start with single sk
     zenith_env_builder.num_safekeepers = 1

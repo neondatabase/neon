@@ -22,7 +22,7 @@ use crate::{
     layered_repository::TIMELINES_SEGMENT_NAME,
     remote_storage::{
         storage_sync::compression::{parse_archive_name, FileEntry},
-        TimelineSyncId,
+        ZTenantTimelineId,
     },
 };
 
@@ -53,7 +53,7 @@ impl RelativePath {
 #[derive(Debug, Clone)]
 pub struct RemoteTimelineIndex {
     branch_files: HashMap<ZTenantId, HashSet<RelativePath>>,
-    timeline_files: HashMap<TimelineSyncId, TimelineIndexEntry>,
+    timeline_files: HashMap<ZTenantTimelineId, TimelineIndexEntry>,
 }
 
 impl RemoteTimelineIndex {
@@ -80,19 +80,22 @@ impl RemoteTimelineIndex {
         index
     }
 
-    pub fn timeline_entry(&self, id: &TimelineSyncId) -> Option<&TimelineIndexEntry> {
+    pub fn timeline_entry(&self, id: &ZTenantTimelineId) -> Option<&TimelineIndexEntry> {
         self.timeline_files.get(id)
     }
 
-    pub fn timeline_entry_mut(&mut self, id: &TimelineSyncId) -> Option<&mut TimelineIndexEntry> {
+    pub fn timeline_entry_mut(
+        &mut self,
+        id: &ZTenantTimelineId,
+    ) -> Option<&mut TimelineIndexEntry> {
         self.timeline_files.get_mut(id)
     }
 
-    pub fn add_timeline_entry(&mut self, id: TimelineSyncId, entry: TimelineIndexEntry) {
+    pub fn add_timeline_entry(&mut self, id: ZTenantTimelineId, entry: TimelineIndexEntry) {
         self.timeline_files.insert(id, entry);
     }
 
-    pub fn all_sync_ids(&self) -> impl Iterator<Item = TimelineSyncId> + '_ {
+    pub fn all_sync_ids(&self) -> impl Iterator<Item = ZTenantTimelineId> + '_ {
         self.timeline_files.keys().copied()
     }
 
@@ -348,7 +351,10 @@ fn try_parse_index_entry(
                 .to_string_lossy()
                 .to_string();
 
-            let sync_id = TimelineSyncId(tenant_id, timeline_id);
+            let sync_id = ZTenantTimelineId {
+                tenant_id,
+                timeline_id,
+            };
             let timeline_index_entry = index
                 .timeline_files
                 .entry(sync_id)

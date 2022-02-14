@@ -106,7 +106,7 @@ use self::{
     },
     upload::upload_timeline_checkpoint,
 };
-use super::{RemoteStorage, SyncStartupData, TimelineSyncId};
+use super::{RemoteStorage, SyncStartupData, ZTenantTimelineId};
 use crate::{
     config::PageServerConf, layered_repository::metadata::TimelineMetadata,
     remote_storage::storage_sync::compression::read_archive_header, repository::TimelineSyncState,
@@ -243,13 +243,13 @@ mod sync_queue {
 /// Limited by the number of retries, after certain threshold the failing task gets evicted and the timeline disabled.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct SyncTask {
-    sync_id: TimelineSyncId,
+    sync_id: ZTenantTimelineId,
     retries: u32,
     kind: SyncKind,
 }
 
 impl SyncTask {
-    fn new(sync_id: TimelineSyncId, retries: u32, kind: SyncKind) -> Self {
+    fn new(sync_id: ZTenantTimelineId, retries: u32, kind: SyncKind) -> Self {
         Self {
             sync_id,
             retries,
@@ -308,7 +308,10 @@ pub fn schedule_timeline_checkpoint_upload(
     }
 
     if !sync_queue::push(SyncTask::new(
-        TimelineSyncId(tenant_id, timeline_id),
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        },
         0,
         SyncKind::Upload(NewCheckpoint { layers, metadata }),
     )) {
@@ -339,7 +342,10 @@ pub fn schedule_timeline_download(tenant_id: ZTenantId, timeline_id: ZTimelineId
         tenant_id, timeline_id
     );
     sync_queue::push(SyncTask::new(
-        TimelineSyncId(tenant_id, timeline_id),
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        },
         0,
         SyncKind::Download(TimelineDownload {
             files_to_skip: Arc::new(BTreeSet::new()),
@@ -355,7 +361,7 @@ pub(super) fn spawn_storage_sync_thread<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     conf: &'static PageServerConf,
-    local_timeline_files: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>,
+    local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>,
     storage: S,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
@@ -511,7 +517,7 @@ async fn loop_step<
                 Err(e) => {
                     error!(
                         "Failed to process storage sync task for tenant {}, timeline {}: {:?}",
-                        sync_id.0, sync_id.1, e
+                        sync_id.tenant_id, sync_id.timeline_id, e
                     );
                     None
                 }
@@ -525,7 +531,10 @@ async fn loop_step<
     while let Some((sync_id, state_update)) = task_batch.next().await {
         debug!("Finished storage sync task for sync id {}", sync_id);
         if let Some(state_update) = state_update {
-            let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+            let ZTenantTimelineId {
+                tenant_id,
+                timeline_id,
+            } = sync_id;
             new_timeline_states
                 .entry(tenant_id)
                 .or_default()
@@ -619,7 +628,7 @@ async fn process_task<
 
 fn schedule_first_sync_tasks(
     index: &RemoteTimelineIndex,
-    local_timeline_files: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>,
+    local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>,
 ) -> HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>> {
     let mut initial_timeline_statuses: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>> =
         HashMap::new();
@@ -630,7 +639,10 @@ fn schedule_first_sync_tasks(
     for (sync_id, (local_metadata, local_files)) in local_timeline_files {
         let local_disk_consistent_lsn = local_metadata.disk_consistent_lsn();
 
-        let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+        let ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = sync_id;
         match index.timeline_entry(&sync_id) {
             Some(index_entry) => {
                 let timeline_status = compare_local_and_remote_timeline(
@@ -673,10 +685,10 @@ fn schedule_first_sync_tasks(
         }
     }
 
-    let unprocessed_remote_ids = |remote_id: &TimelineSyncId| {
+    let unprocessed_remote_ids = |remote_id: &ZTenantTimelineId| {
         initial_timeline_statuses
-            .get(&remote_id.0)
-            .and_then(|timelines| timelines.get(&remote_id.1))
+            .get(&remote_id.tenant_id)
+            .and_then(|timelines| timelines.get(&remote_id.timeline_id))
             .is_none()
     };
     for unprocessed_remote_id in index
@@ -684,7 +696,10 @@ fn schedule_first_sync_tasks(
         .filter(unprocessed_remote_ids)
         .collect::<Vec<_>>()
     {
-        let TimelineSyncId(cloud_only_tenant_id, cloud_only_timeline_id) = unprocessed_remote_id;
+        let ZTenantTimelineId {
+            tenant_id: cloud_only_tenant_id,
+            timeline_id: cloud_only_timeline_id,
+        } = unprocessed_remote_id;
         match index
             .timeline_entry(&unprocessed_remote_id)
             .and_then(TimelineIndexEntry::disk_consistent_lsn)
@@ -713,7 +728,7 @@ fn schedule_first_sync_tasks(
 
 fn compare_local_and_remote_timeline(
     new_sync_tasks: &mut VecDeque<SyncTask>,
-    sync_id: TimelineSyncId,
+    sync_id: ZTenantTimelineId,
     local_metadata: TimelineMetadata,
     local_files: Vec<PathBuf>,
     remote_entry: &TimelineIndexEntry,
@@ -770,7 +785,7 @@ async fn update_index_description<
 >(
     (storage, index): &(S, RwLock<RemoteTimelineIndex>),
     timeline_dir: &Path,
-    id: TimelineSyncId,
+    id: ZTenantTimelineId,
 ) -> anyhow::Result<RemoteTimeline> {
     let mut index_write = index.write().await;
     let full_index = match index_write.timeline_entry(&id) {
@@ -793,7 +808,7 @@ async fn update_index_description<
                         Ok((archive_id, header_size, header)) => full_index.update_archive_contents(archive_id.0, header, header_size),
                         Err((e, archive_id)) => bail!(
                             "Failed to download archive header for tenant {}, timeline {}, archive for Lsn {}: {}",
-                            id.0, id.1, archive_id.0,
+                            id.tenant_id, id.timeline_id, archive_id.0,
                             e
                         ),
                     }
@@ -871,7 +886,7 @@ mod test_utils {
         timeline_id: ZTimelineId,
         new_upload: NewCheckpoint,
     ) {
-        let sync_id = TimelineSyncId(harness.tenant_id, timeline_id);
+        let sync_id = ZTenantTimelineId::new(harness.tenant_id, timeline_id);
         upload_timeline_checkpoint(
             harness.conf,
             Arc::clone(&remote_assets),
@@ -927,7 +942,7 @@ mod test_utils {
 
     pub async fn expect_timeline(
         index: &RwLock<RemoteTimelineIndex>,
-        sync_id: TimelineSyncId,
+        sync_id: ZTenantTimelineId,
     ) -> RemoteTimeline {
         if let Some(TimelineIndexEntry::Full(remote_timeline)) =
             index.read().await.timeline_entry(&sync_id)
@@ -962,18 +977,18 @@ mod test_utils {
         let mut expected_timeline_entries = BTreeMap::new();
         for sync_id in actual_sync_ids {
             actual_branches.insert(
-                sync_id.1,
+                sync_id.tenant_id,
                 index_read
-                    .branch_files(sync_id.0)
+                    .branch_files(sync_id.tenant_id)
                     .into_iter()
                     .flat_map(|branch_paths| branch_paths.iter())
                     .cloned()
                     .collect::<BTreeSet<_>>(),
             );
             expected_branches.insert(
-                sync_id.1,
+                sync_id.tenant_id,
                 expected_index_with_descriptions
-                    .branch_files(sync_id.0)
+                    .branch_files(sync_id.tenant_id)
                     .into_iter()
                     .flat_map(|branch_paths| branch_paths.iter())
                     .cloned()

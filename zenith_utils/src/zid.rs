@@ -196,7 +196,7 @@ pub mod opt_display_serde {
 }
 
 // A pair uniquely identifying Zenith instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct ZTenantTimelineId {
     pub tenant_id: ZTenantId,
     pub timeline_id: ZTimelineId,
