@@ -454,24 +454,24 @@ struct SafeKeeperMetrics {
     write_wal_seconds: Histogram,
 }
 
-impl SafeKeeperMetrics {
-    fn new(ztli: ZTimelineId) -> SafeKeeperMetrics {
-        let ztli_str = format!("{}", ztli);
-        SafeKeeperMetrics {
+struct SafeKeeperMetricsBuilder {
+    ztli: ZTimelineId,
+    flush_lsn: Lsn,
+    commit_lsn: Lsn,
+}
+
+impl SafeKeeperMetricsBuilder {
+    fn build(self) -> SafeKeeperMetrics {
+        let ztli_str = format!("{}", self.ztli);
+        let m = SafeKeeperMetrics {
             flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&ztli_str]),
             commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
             write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&ztli_str]),
             write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&ztli_str]),
-        }
-    }
-
-    fn new_noname() -> SafeKeeperMetrics {
-        SafeKeeperMetrics {
-            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&["n/a"]),
-            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&["n/a"]),
-            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&["n/a"]),
-            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&["n/a"]),
-        }
+        };
+        m.flush_lsn.set(u64::from(self.flush_lsn) as f64);
+        m.commit_lsn.set(u64::from(self.commit_lsn) as f64);
+        m
     }
 }
 
@@ -496,10 +496,25 @@ where
     ST: Storage,
 {
     // constructor
-    pub fn new(flush_lsn: Lsn, storage: ST, state: SafeKeeperState) -> SafeKeeper<ST> {
+    pub fn new(
+        ztli: ZTimelineId,
+        flush_lsn: Lsn,
+        storage: ST,
+        state: SafeKeeperState,
+    ) -> SafeKeeper<ST> {
+        if state.server.timeline_id != ZTimelineId::from([0u8; 16])
+            && ztli != state.server.timeline_id
+        {
+            panic!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.server.timeline_id);
+        }
         SafeKeeper {
             flush_lsn,
-            metrics: SafeKeeperMetrics::new_noname(),
+            metrics: SafeKeeperMetricsBuilder {
+                ztli,
+                flush_lsn,
+                commit_lsn: state.commit_lsn,
+            }
+            .build(),
             commit_lsn: state.commit_lsn,
             truncate_lsn: state.truncate_lsn,
             storage,
@@ -565,7 +580,12 @@ where
             .persist(&self.s)
             .context("failed to persist shared state")?;
 
-        self.metrics = SafeKeeperMetrics::new(self.s.server.timeline_id);
+        self.metrics = SafeKeeperMetricsBuilder {
+            ztli: self.s.server.timeline_id,
+            flush_lsn: self.flush_lsn,
+            commit_lsn: self.commit_lsn,
+        }
+        .build();
 
         info!(
             "processed greeting from proposer {:?}, sending term {:?}",
@@ -641,6 +661,7 @@ where
         }
         // update our end of WAL pointer
         self.flush_lsn = msg.start_streaming_at;
+        self.metrics.flush_lsn.set(u64::from(self.flush_lsn) as f64);
         // and now adopt term history from proposer
         self.s.acceptor_state.term_history = msg.term_history.clone();
         self.storage.persist(&self.s)?;
@@ -753,7 +774,7 @@ where
         }
 
         let resp = self.append_response();
-        info!(
+        trace!(
             "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, resp {:?}",
             msg.wal_data.len(),
             msg.h.end_lsn,
@@ -794,7 +815,8 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: SafeKeeperState::new(),
         };
-        let mut sk = SafeKeeper::new(Lsn(0), storage, SafeKeeperState::new());
+        let ztli = ZTimelineId::from([0u8; 16]);
+        let mut sk = SafeKeeper::new(ztli, Lsn(0), storage, SafeKeeperState::new());
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -809,7 +831,7 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: state.clone(),
         };
-        sk = SafeKeeper::new(Lsn(0), storage, state);
+        sk = SafeKeeper::new(ztli, Lsn(0), storage, state);
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -824,7 +846,8 @@ mod tests {
         let storage = InMemoryStorage {
             persisted_state: SafeKeeperState::new(),
         };
-        let mut sk = SafeKeeper::new(Lsn(0), storage, SafeKeeperState::new());
+        let ztli = ZTimelineId::from([0u8; 16]);
+        let mut sk = SafeKeeper::new(ztli, Lsn(0), storage, SafeKeeperState::new());
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,

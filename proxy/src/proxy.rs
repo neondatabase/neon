@@ -2,12 +2,12 @@ use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
 use anyhow::{anyhow, bail, Context};
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Mutex;
 use std::{io, thread};
 use tokio_postgres::NoTls;
 use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
@@ -89,7 +89,7 @@ pub fn thread_main(
                 NUM_CONNECTIONS_CLOSED_COUNTER.inc();
                 THREAD_CANCEL_KEY_DATA.with(|cell| {
                     if let Some(cancel_key_data) = cell.get() {
-                        CANCEL_MAP.lock().remove(&cancel_key_data);
+                        CANCEL_MAP.lock().unwrap().remove(&cancel_key_data);
                     };
                 });
             })?;
@@ -220,7 +220,7 @@ impl ProxyConnection {
                     return Ok(Some((get_param("user")?, get_param("database")?)));
                 }
                 FeStartupPacket::CancelRequest(cancel_key_data) => {
-                    if let Some(cancel_closure) = CANCEL_MAP.lock().get(&cancel_key_data) {
+                    if let Some(cancel_closure) = CANCEL_MAP.lock().unwrap().get(&cancel_key_data) {
                         let runtime = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()
@@ -333,7 +333,10 @@ async fn connect_to_db(
         socket_addr,
         cancel_token: client.cancel_token(),
     };
-    CANCEL_MAP.lock().insert(cancel_key_data, cancel_closure);
+    CANCEL_MAP
+        .lock()
+        .unwrap()
+        .insert(cancel_key_data, cancel_closure);
     THREAD_CANCEL_KEY_DATA.with(|cell| {
         let prev_value = cell.replace(Some(cancel_key_data));
         assert!(

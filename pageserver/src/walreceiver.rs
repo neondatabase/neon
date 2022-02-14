@@ -13,13 +13,13 @@ use crate::walingest::WalIngest;
 use anyhow::{bail, Context, Error, Result};
 use bytes::BytesMut;
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
 use postgres_ffi::waldecoder::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::thread_local;
 use std::time::SystemTime;
 use tokio::pin;
@@ -51,7 +51,7 @@ thread_local! {
 }
 
 fn drop_wal_receiver(tenantid: ZTenantId, timelineid: ZTimelineId) {
-    let mut receivers = WAL_RECEIVERS.lock();
+    let mut receivers = WAL_RECEIVERS.lock().unwrap();
     receivers.remove(&(tenantid, timelineid));
 }
 
@@ -62,7 +62,7 @@ pub fn launch_wal_receiver(
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
 ) -> Result<()> {
-    let mut receivers = WAL_RECEIVERS.lock();
+    let mut receivers = WAL_RECEIVERS.lock().unwrap();
 
     match receivers.get_mut(&(tenantid, timelineid)) {
         Some(receiver) => {
@@ -95,7 +95,7 @@ pub fn launch_wal_receiver(
 
 // Look up current WAL producer connection string in the hash table
 fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> String {
-    let receivers = WAL_RECEIVERS.lock();
+    let receivers = WAL_RECEIVERS.lock().unwrap();
 
     receivers
         .get(&(tenantid, timelineid))
@@ -160,7 +160,7 @@ fn walreceiver_main(
     // This is from tokio-postgres docs, but it is a bit weird in our case because we extensively use block_on
     runtime.spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            error!("connection error: {}", e);
         }
     });
 

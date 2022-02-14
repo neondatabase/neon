@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from contextlib import contextmanager
+import shlex
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
+from typing import Optional
 
 
 def absolute_path(path):
@@ -38,13 +41,21 @@ def run(cmd, *args, **kwargs):
 
 
 class GitRepo:
-    def __init__(self, url):
+    def __init__(self, url, branch: Optional[str] = None):
         self.url = url
         self.cwd = TemporaryDirectory()
+        self.branch = branch
 
-        subprocess.check_call([
+        args = [
             'git',
             'clone',
+            '--single-branch',
+        ]
+        if self.branch:
+            args.extend(['--branch', self.branch])
+
+        subprocess.check_call([
+            *args,
             str(url),
             self.cwd.name,
         ])
@@ -105,18 +116,32 @@ def do_copy(args):
     else:
         shutil.copy(src, dst)
 
+    if args.run_cmd:
+        run(shlex.split(args.run_cmd))
+
 
 def main():
     parser = argparse.ArgumentParser(description='Git upload tool')
     parser.add_argument('--repo', type=str, metavar='URL', required=True, help='git repo url')
     parser.add_argument('--message', type=str, metavar='TEXT', help='commit message')
+    parser.add_argument('--branch', type=str, metavar='TEXT', help='target git repo branch')
 
     commands = parser.add_subparsers(title='commands', dest='subparser_name')
 
-    p_copy = commands.add_parser('copy', help='copy file into the repo')
+    p_copy = commands.add_parser(
+        'copy',
+        help='copy file into the repo',
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     p_copy.add_argument('src', type=absolute_path, help='source path')
     p_copy.add_argument('dst', type=relative_path, help='relative dest path')
     p_copy.add_argument('--forbid-overwrite', action='store_true', help='do not allow overwrites')
+    p_copy.add_argument('--run-cmd',
+                        help=textwrap.dedent('''\
+                run arbitrary cmd on top of copied files,
+                example usage is static content generation
+                based on current repository state\
+            '''))
 
     args = parser.parse_args()
 
@@ -127,7 +152,7 @@ def main():
     action = commands.get(args.subparser_name)
     if action:
         message = args.message or 'update'
-        GitRepo(args.repo).update(message, lambda: action(args))
+        GitRepo(args.repo, args.branch).update(message, lambda: action(args))
     else:
         parser.print_usage()
 

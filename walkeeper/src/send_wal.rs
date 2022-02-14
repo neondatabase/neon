@@ -167,7 +167,7 @@ impl ReplicationConn {
                             let buf = Bytes::copy_from_slice(&m[9..]);
                             let reply = ZenithFeedback::parse(buf);
 
-                            info!("ZenithFeedback is {:?}", reply);
+                            trace!("ZenithFeedback is {:?}", reply);
                             // Only pageserver sends ZenithFeedback, so set the flag.
                             // This replica is the source of information to resend to compute.
                             state.zenith_feedback = Some(reply);
@@ -385,7 +385,7 @@ impl ReplicationConn {
 
             start_pos += send_size as u64;
 
-            info!("sent WAL up to {}", start_pos);
+            trace!("sent WAL up to {}", start_pos);
 
             // Decide whether to reuse this file. If we don't set wal_file here
             // a new file will be opened next time.

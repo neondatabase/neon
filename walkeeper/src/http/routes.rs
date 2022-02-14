@@ -1,10 +1,9 @@
 use hyper::{Body, Request, Response, StatusCode};
-use routerify::ext::RequestExt;
-use routerify::RouterBuilder;
 use serde::Serialize;
 use serde::Serializer;
 use std::fmt::Display;
 use std::sync::Arc;
+use zenith_utils::http::{RequestExt, RouterBuilder};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantTimelineId;
 

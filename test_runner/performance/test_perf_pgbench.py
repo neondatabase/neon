@@ -20,6 +20,14 @@ def pgbench_run_5000_transactions(pg_bin: PgBin, connstr: str):
     pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
 
 
+def pgbench_init(pg_bin: PgBin, connstr: str):
+    pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
+
+
+def pgbench_run_5000_transactions(pg_bin: PgBin, connstr: str):
+    pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
+
+
 #
 # Run a very short pgbench test.
 #

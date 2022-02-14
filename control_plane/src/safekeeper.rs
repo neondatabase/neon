@@ -85,7 +85,7 @@ impl SafekeeperNode {
             pg_connection_config: Self::safekeeper_connection_config(conf.pg_port),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: format!("http://localhost:{}/v1", conf.http_port),
+            http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
             pageserver,
         }
     }
@@ -93,7 +93,7 @@ impl SafekeeperNode {
     /// Construct libpq connection string for connecting to this safekeeper.
     fn safekeeper_connection_config(port: u16) -> Config {
         // TODO safekeeper authentication not implemented yet
-        format!("postgresql://no_user@localhost:{}/no_db", port)
+        format!("postgresql://no_user@127.0.0.1:{}/no_db", port)
             .parse()
             .unwrap()
     }
@@ -114,8 +114,8 @@ impl SafekeeperNode {
         );
         io::stdout().flush().unwrap();
 
-        let listen_pg = format!("localhost:{}", self.conf.pg_port);
-        let listen_http = format!("localhost:{}", self.conf.http_port);
+        let listen_pg = format!("127.0.0.1:{}", self.conf.pg_port);
+        let listen_http = format!("127.0.0.1:{}", self.conf.http_port);
 
         let mut cmd = Command::new(self.env.safekeeper_bin()?);
         fill_rust_env_vars(
