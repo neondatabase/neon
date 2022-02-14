@@ -1,8 +1,9 @@
 import json
 import uuid
+import requests
 
 from psycopg2.extensions import cursor as PgCursor
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder
 from typing import cast
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -105,3 +106,19 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     assert env.initial_tenant in tenants
     assert tenant1 in tenants
     assert tenant2 in tenants
+
+def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
+    # Start with single sk
+    zenith_env_builder.num_safekeepers = 1
+    env = zenith_env_builder.init()
+
+    # Connect to sk port on v4 loopback
+    res = requests.get(f'http://127.0.0.1:{env.safekeepers[0].port.http}/v1/status')
+    assert res.ok
+
+    # FIXME Test setup is using localhost:xx in ps config.
+    # Perhaps consider switching test suite to v4 loopback.
+
+    # Connect to ps port on v4 loopback
+    # res = requests.get(f'http://127.0.0.1:{env.pageserver.service_port.http}/v1/status')
+    # assert res.ok
