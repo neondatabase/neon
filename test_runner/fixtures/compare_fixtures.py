@@ -21,6 +21,9 @@ class PgCompare:
     def flush(self) -> None:
         raise NotImplemented()
 
+    def report_peak_memory_use(self) -> None:
+        raise NotImplemented()
+
     def report_size(self) -> None:
         raise NotImplemented()
 
@@ -60,6 +63,13 @@ class ZenithCompare:
     def flush(self):
         self.pscur.execute(f"do_gc {self.env.initial_tenant} {self.timeline} 0")
 
+    def report_peak_memory_use(self) -> None:
+        self.zenbenchmark.record(
+            "peak_mem",
+            self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
+            'MB',
+            report=MetricReport.LOWER_IS_BETTER)
+
     def report_size(self) -> None:
         timeline_size = self.zenbenchmark.get_timeline_size(
             self.env.repo_dir, self.env.initial_tenant, self.timeline
@@ -97,6 +107,9 @@ class VanillaCompare:
 
     def flush(self):
         self.cur.execute("checkpoint")
+
+    def report_peak_memory_use(self) -> None:
+        pass  # TODO find something
 
     def report_size(self) -> None:
         data_size = self.pg.get_subdir_size('base')

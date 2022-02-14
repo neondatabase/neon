@@ -33,18 +33,7 @@ def test_bulk_insert(zenith_with_baseline: PgCompare):
             with env.record_pageserver_writes('pageserver_writes'):
                 with env.record_duration('insert'):
                     cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
-
-                    # Flush is included in the reported time and I/O
                     env.flush()
 
-            # TODO get a similar metric for vanilla?
-            # Record peak memory usage
-            if isinstance(env, ZenithCompare):
-                env.zenbenchmark.record(
-                    "peak_mem",
-                    env.zenbenchmark.get_peak_mem(env.env.pageserver) / 1024,
-                    'MB',
-                    report=MetricReport.LOWER_IS_BETTER)
-
-            # Report disk space used by the repository
+            env.report_peak_memory_use()
             env.report_size()
