@@ -46,7 +46,11 @@ class PgCompare(ABC):
 
 class ZenithCompare(PgCompare):
     """PgCompare interface for the zenith stack."""
-    def __init__(self, zenbenchmark: ZenithBenchmarker, zenith_simple_env: ZenithEnv, pg_bin: PgBin, branch_name):
+    def __init__(self,
+                 zenbenchmark: ZenithBenchmarker,
+                 zenith_simple_env: ZenithEnv,
+                 pg_bin: PgBin,
+                 branch_name):
         self.env = zenith_simple_env
         self.zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
@@ -73,16 +77,15 @@ class ZenithCompare(PgCompare):
         self.pscur.execute(f"do_gc {self.env.initial_tenant} {self.timeline} 0")
 
     def report_peak_memory_use(self) -> None:
-        self.zenbenchmark.record(
-            "peak_mem",
-            self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
-            'MB',
-            report=MetricReport.LOWER_IS_BETTER)
+        self.zenbenchmark.record("peak_mem",
+                                 self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
+                                 'MB',
+                                 report=MetricReport.LOWER_IS_BETTER)
 
     def report_size(self) -> None:
-        timeline_size = self.zenbenchmark.get_timeline_size(
-            self.env.repo_dir, self.env.initial_tenant, self.timeline
-        )
+        timeline_size = self.zenbenchmark.get_timeline_size(self.env.repo_dir,
+                                                            self.env.initial_tenant,
+                                                            self.timeline)
         self.zenbenchmark.record('size',
                                  timeline_size / (1024 * 1024),
                                  'MB',
