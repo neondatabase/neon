@@ -54,7 +54,8 @@ jobs:
             if [ ! -e tmp_install/bin/postgres ]; then
               # "depth 1" saves some time by not cloning the whole repo
               git submodule update --init --depth 1
-              mold -run make postgres -j$(nproc)
+              # bail out on any warnings
+              COPT='-Werror' mold -run make postgres -j$(nproc)
             fi
 
       - save_cache:
