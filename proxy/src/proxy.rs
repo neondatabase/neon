@@ -2,6 +2,7 @@ use crate::cplane_api::{CPlaneApi, DatabaseInfo};
 use crate::ProxyState;
 use anyhow::{anyhow, bail, Context};
 use lazy_static::lazy_static;
+use net2::TcpStreamExt;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use std::cell::Cell;
@@ -104,6 +105,7 @@ struct ProxyConnection {
 }
 
 pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow::Result<()> {
+    socket.set_keepalive_ms(state.conf.tcp_keepalive)?;
     let conn = ProxyConnection {
         state,
         psql_session_id: hex::encode(rand::random::<[u8; 8]>()),
@@ -126,7 +128,6 @@ pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow:
         Stream::Bidirectional(bidi_stream) => bidi_stream,
         _ => panic!("invalid stream type"),
     };
-
     proxy(client.split(), server.split())
 }
 
