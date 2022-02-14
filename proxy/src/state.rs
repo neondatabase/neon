@@ -10,6 +10,9 @@ pub type SslConfig = Arc<ServerConfig>;
 pub struct ProxyConfig {
     pub router: Router,
 
+    /// accept pg client connections here
+    pub listen_address: SocketAddr,
+
     /// internally used for status and prometheus metrics
     pub http_address: SocketAddr,
 

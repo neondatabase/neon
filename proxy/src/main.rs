@@ -12,7 +12,7 @@ use clap::{App, Arg};
 use state::{ProxyConfig, ProxyState};
 use zenith_utils::{tcp_listener, GIT_VERSION};
 
-use crate::router::{DefaultRouter, LinkRouter, Router, StaticRouter};
+use crate::router::{DefaultRouter, LinkRouter, MixedRouter, Router, StaticRouter};
 
 mod cplane_mock;
 mod router;
@@ -56,6 +56,14 @@ async fn main() -> anyhow::Result<()> {
                 .default_value("127.0.0.1:7001"),
         )
         .arg(
+            Arg::with_name("router")
+                .short("r")
+                .long("router")
+                .takes_value(true)
+                .help("Possible values: default | link | mixed | static")
+                .default_value("mixed"),
+        )
+        .arg(
             Arg::with_name("uri")
                 .short("u")
                 .long("uri")
@@ -70,6 +78,20 @@ async fn main() -> anyhow::Result<()> {
                 .takes_value(true)
                 .help("API endpoint for authenticating users")
                 .default_value("http://localhost:3000/authenticate_proxy_request/"),
+        )
+        .arg(
+            Arg::with_name("static-destination")
+                .short("s")
+                .long("static-destination")
+                .takes_value(true)
+                .help("Route all pg connections to this host:port")
+                .default_value("localhost:5432"),
+        )
+        .arg(
+            Arg::with_name("mock-cplane")
+                .long("mock-cplane")
+                .takes_value(true)
+                .help("Provide auth endpoint and redirect uri at this address"),
         )
         .arg(
             Arg::with_name("ssl-key")
@@ -98,47 +120,51 @@ async fn main() -> anyhow::Result<()> {
         _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
     };
 
-    // TODO read this from args
-    let listen_address = "127.0.0.1:4432".parse().unwrap();
-    let router = Router::Static(StaticRouter {
-        listen_address,
-        postgres_host: "127.0.0.1".into(),
-        postgres_port: 5432,
-    });
+    let router = match arg_matches.value_of("router").unwrap() {
+        "default" => Router::Default(DefaultRouter {
+            auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().to_string(),
+        }),
+        "link" => Router::Link(LinkRouter {
+            redirect_uri: arg_matches.value_of("uri").unwrap().to_string(),
+        }),
+        "mixed" => Router::Mixed(MixedRouter {
+            default: DefaultRouter {
+                auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().to_string(),
+            },
+            link: LinkRouter {
+                redirect_uri: arg_matches.value_of("uri").unwrap().to_string(),
+            },
+        }),
+        "static" => {
+            let (host, port) = arg_matches.value_of("static-destination")
+                .unwrap().split_once(":").unwrap();
+            Router::Static(StaticRouter {
+                postgres_host: host.to_string(),
+                postgres_port: port.parse().unwrap(),
+            })
+        }
+        _ => bail!("invalid option for router")
+    };
 
-    let mock_cplane_address: SocketAddr = "127.0.0.1:9999".parse().unwrap();
-
-    // TODO read this from args
-    let auth_endpoint: String = "http://127.0.0.1:9999/auth".into();
-    let router = Router::Default(DefaultRouter {
-        listen_address,
-        auth_endpoint,
-    });
-
-    // TODO read this from args
-    let redirect_uri: String = "http://127.0.0.1:9999/link/".into();
-    let router = Router::Link(LinkRouter {
-        listen_address,
-        redirect_uri,
-    });
-
+    let listen_address = arg_matches.value_of("proxy").unwrap().parse()?;
     let config = ProxyConfig {
         router,
-        // proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
+        listen_address,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         http_address: arg_matches.value_of("http").unwrap().parse()?,
-        // redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
-        // auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         ssl_config,
     };
     let state: &ProxyState = Box::leak(Box::new(ProxyState::new(config)));
 
     println!("Version: {}", GIT_VERSION);
 
-    println!("Starting mock cplane on {}", mock_cplane_address);
-    let cplane_mock_listener = tcp_listener::bind(mock_cplane_address)?;
 
     // Check that we can bind to address before further initialization
+    let cplane_mock_listener = arg_matches.value_of("mock-cplane").map(|mock_addr| {
+        println!("Starting mock cplane on {}", mock_addr);
+        tcp_listener::bind(mock_addr).unwrap()
+    });
+
     println!("Starting http on {}", state.conf.http_address);
     let http_listener = tcp_listener::bind(state.conf.http_address)?;
 
@@ -148,12 +174,16 @@ async fn main() -> anyhow::Result<()> {
     println!("Starting mgmt on {}", state.conf.mgmt_address);
     let mgmt_listener = tcp_listener::bind(state.conf.mgmt_address)?;
 
-    let cplane_mock = tokio::spawn(cplane_mock::thread_main(cplane_mock_listener));
-    let http = tokio::spawn(http::thread_main(http_listener));
-    let proxy = tokio::spawn(proxy::thread_main(state, proxy_listener));
-    let mgmt = tokio::task::spawn_blocking(move || mgmt::thread_main(state, mgmt_listener));
+    let mut servers = vec![];
+    if let Some(cplane_mock_listener) = cplane_mock_listener {
+        servers.push(tokio::spawn(cplane_mock::thread_main(cplane_mock_listener)));
+    }
 
-    let _ = futures::future::try_join_all([cplane_mock, http, proxy, mgmt])
+    servers.push(tokio::spawn(http::thread_main(http_listener)));
+    servers.push(tokio::spawn(proxy::thread_main(state, proxy_listener)));
+    servers.push(tokio::task::spawn_blocking(move || mgmt::thread_main(state, mgmt_listener)));
+
+    let _ = futures::future::try_join_all(servers)
         .await?
         .into_iter()
         .collect::<Result<Vec<()>, _>>()?;

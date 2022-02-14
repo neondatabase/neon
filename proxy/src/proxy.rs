@@ -1,7 +1,6 @@
 use crate::auth::Auth;
 use crate::cancellation::{self, CancelClosure};
 use crate::cplane_api as cplane;
-use crate::router::Router;
 use crate::state::SslConfig;
 use crate::stream::{PqStream, Stream};
 use crate::ProxyState;

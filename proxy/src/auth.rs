@@ -12,6 +12,7 @@ pub enum Auth<'a> {
     Forward(ForwardAuth),
     Md5(Md5Auth<'a>),
     Link(LinkAuth<'a>),
+    Mixed(MixedAuth<'a>),
 }
 
 pub async fn authenticate(
@@ -20,6 +21,7 @@ pub async fn authenticate(
     creds: &crate::cplane_api::ClientCredentials,
 ) -> anyhow::Result<DatabaseInfo> {
     match auth {
+        Auth::Mixed(auth) => auth.authenticate(client, creds).await,
         Auth::Forward(auth) => auth.authenticate(client, creds).await,
         Auth::Md5(auth) => auth.authenticate(client, creds).await,
         Auth::Link(auth) => auth.authenticate(client, creds).await,
@@ -33,6 +35,14 @@ pub fn from_router<'a>(router: &'a Router, waiters: &'a ProxyWaiters) -> Auth<'a
         }),
         Router::Link(r) => Auth::Link(LinkAuth {
             link_cplane_api: cplane_api::LinkApi::new(&r.redirect_uri, &waiters),
+        }),
+        Router::Mixed(r) => Auth::Mixed(MixedAuth {
+            md5_auth: Md5Auth {
+                md5_cplane_api: cplane_api::Md5Api::new(&r.default.auth_endpoint, &waiters),
+            },
+            link_auth: LinkAuth {
+                link_cplane_api: cplane_api::LinkApi::new(&r.link.redirect_uri, &waiters),
+            }
         }),
         Router::Static(r) => Auth::Forward(ForwardAuth {
             host: r.postgres_host.clone(),
@@ -56,6 +66,11 @@ pub struct Md5Auth<'a> {
 /// Login via link to console
 pub struct LinkAuth<'a> {
     link_cplane_api: LinkApi<'a>,
+}
+
+pub struct MixedAuth<'a> {
+    md5_auth: Md5Auth<'a>,
+    link_auth: LinkAuth<'a>,
 }
 
 // #[async_trait(?Send)]
@@ -116,6 +131,20 @@ impl Md5Auth<'_> {
     }
 }
 
+impl MixedAuth<'_> {
+    pub async fn authenticate(
+        &self,
+        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+        creds: &crate::cplane_api::ClientCredentials,
+    ) -> anyhow::Result<DatabaseInfo> {
+        if creds.user.ends_with("@zenith") {
+            self.md5_auth.authenticate(client, creds).await
+        } else {
+            self.link_auth.authenticate(client, creds).await
+        }
+    }
+}
+
 impl ForwardAuth {
     pub async fn authenticate(
         &self,
@@ -134,6 +163,10 @@ impl ForwardAuth {
             user: creds.user.clone(),
             password: Some(cleartext_password.into()),
         };
+
+        client
+            .write_message_noflush(&Be::AuthenticationOk)?
+            .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
         Ok(db_info)
     }

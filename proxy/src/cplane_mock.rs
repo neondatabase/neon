@@ -51,8 +51,8 @@ async fn link_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
 fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
     let router = endpoint::make_router();
     router
-        .get("/auth", auth_handler)
-        .get("/link/:sessionId", link_handler)
+        .get("/authenticate_proxy_request", auth_handler)
+        .get("/psql_session/:sessionId", link_handler)
 }
 
 pub async fn thread_main(http_listener: TcpListener) -> anyhow::Result<()> {
