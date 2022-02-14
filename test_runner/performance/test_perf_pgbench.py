@@ -12,22 +12,6 @@ pytest_plugins = (
 )
 
 
-def pgbench_init(pg_bin: PgBin, connstr: str):
-    pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
-
-
-def pgbench_run_5000_transactions(pg_bin: PgBin, connstr: str):
-    pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
-
-
-def pgbench_init(pg_bin: PgBin, connstr: str):
-    pg_bin.run_capture(['pgbench', '-s5', '-i', connstr])
-
-
-def pgbench_run_5000_transactions(pg_bin: PgBin, connstr: str):
-    pg_bin.run_capture(['pgbench', '-c1', '-t5000', connstr])
-
-
 #
 # Run a very short pgbench test.
 #
@@ -42,11 +26,11 @@ def test_pgbench(zenith_with_baseline: PgCompare):
 
     with env.record_pageserver_writes('pageserver_writes'):
         with env.record_duration('init'):
-            pgbench_init(env.pg_bin, env.pg.connstr())
+            env.pg_bin.run_capture(['pgbench', '-s5', '-i', env.pg.connstr()])
             env.flush()
 
     with env.record_duration('5000_xacts'):
-        pgbench_run_5000_transactions(env.pg_bin, env.pg.connstr())
+        env.pg_bin.run_capture(['pgbench', '-c1', '-t5000', env.pg.connstr()])
     env.flush()
 
     env.report_size()

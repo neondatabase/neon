@@ -1,5 +1,6 @@
 import pytest
 from contextlib import contextmanager
+from abc import ABC, abstractmethod
 
 from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, ZenithEnv
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
@@ -8,35 +9,43 @@ from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from typing import Iterator
 
 
-class PgCompare:
+class PgCompare(ABC):
     """Common interface of all postgres implementations, useful for benchmarks."""
     @property
+    @abstractmethod
     def pg(self) -> PgProtocol:
-        raise NotImplemented()
+        pass
 
     @property
-    def pg_bin(self) -> PgProtocol:
-        raise NotImplemented()
+    @abstractmethod
+    def pg_bin(self) -> PgBin:
+        pass
 
+    @abstractmethod
     def flush(self) -> None:
-        raise NotImplemented()
+        pass
 
+    @abstractmethod
     def report_peak_memory_use(self) -> None:
-        raise NotImplemented()
+        pass
 
+    @abstractmethod
     def report_size(self) -> None:
-        raise NotImplemented()
+        pass
 
     @contextmanager
+    @abstractmethod
     def record_pageserver_writes(self, out_name):
-        raise NotImplemented()
+        pass
 
     @contextmanager
+    @abstractmethod
     def record_duration(self, out_name):
-        raise NotImplemented()
+        pass
 
 
-class ZenithCompare:
+class ZenithCompare(PgCompare):
+    """PgCompare interface for the zenith stack."""
     def __init__(self, zenbenchmark: ZenithBenchmarker, zenith_simple_env: ZenithEnv, pg_bin: PgBin, branch_name):
         self.env = zenith_simple_env
         self.zenbenchmark = zenbenchmark
@@ -86,7 +95,8 @@ class ZenithCompare:
         return self.zenbenchmark.record_duration(out_name)
 
 
-class VanillaCompare:
+class VanillaCompare(PgCompare):
+    """PgCompare interface for vanilla postgres."""
     def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
         self._pg = vanilla_pg
         self.zenbenchmark = zenbenchmark
@@ -143,7 +153,7 @@ def vanilla_compare(zenbenchmark, vanilla_pg) -> VanillaCompare:
 
 
 @pytest.fixture(params=["vanilla_compare", "zenith_compare"], ids=["vanilla", "zenith"])
-def zenith_with_baseline(request) -> Iterator[PgCompare]:
+def zenith_with_baseline(request) -> PgCompare:
     """Parameterized fixture that helps compare zenith against vanilla postgres.
 
     A test that uses this fixture turns into a parameterized test that runs against:
@@ -152,4 +162,8 @@ def zenith_with_baseline(request) -> Iterator[PgCompare]:
 
     Both instances are configured for fair comparison.
     """
-    return request.getfixturevalue(request.param)
+    fixture = request.getfixturevalue(request.param)
+    if isinstance(fixture, PgCompare):
+        return fixture
+    else:
+        raise AssertionError(f"test error: fixture {request.param} is not PgCompare")
