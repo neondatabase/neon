@@ -5,6 +5,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use zenith_utils::http::{RequestExt, RouterBuilder};
 use zenith_utils::lsn::Lsn;
+use zenith_utils::zid::ZNodeId;
 use zenith_utils::zid::ZTenantTimelineId;
 
 use crate::safekeeper::Term;
@@ -18,9 +19,16 @@ use zenith_utils::http::json::json_response;
 use zenith_utils::http::request::parse_request_param;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
+#[derive(Debug, Serialize)]
+struct SafekeeperStatus {
+    id: ZNodeId,
+}
+
 /// Healthcheck handler.
-async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    Ok(json_response(StatusCode::OK, "")?)
+async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let conf = get_conf(&request);
+    let status = SafekeeperStatus { id: conf.my_id };
+    Ok(json_response(StatusCode::OK, status)?)
 }
 
 fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {

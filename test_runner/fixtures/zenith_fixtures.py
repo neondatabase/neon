@@ -556,19 +556,15 @@ class ZenithEnv:
                 pg=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
-
-            if config.num_safekeepers == 1:
-                name = "single"
-            else:
-                name = f"sk{i}"
+            id = i  # assign ids sequentially
             toml += f"""
 [[safekeepers]]
-name = '{name}'
+id = {id}
 pg_port = {port.pg}
 http_port = {port.http}
 sync = false # Disable fsyncs to make the tests go faster
             """
-            safekeeper = Safekeeper(env=self, name=name, port=port)
+            safekeeper = Safekeeper(env=self, id=id, port=port)
             self.safekeepers.append(safekeeper)
 
         log.info(f"Config: {toml}")
@@ -848,17 +844,17 @@ class ZenithCli:
         log.info(f"Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
-    def safekeeper_start(self, name: str) -> 'subprocess.CompletedProcess[str]':
-        return self.raw_cli(['safekeeper', 'start', name])
+    def safekeeper_start(self, id: int) -> 'subprocess.CompletedProcess[str]':
+        return self.raw_cli(['safekeeper', 'start', str(id)])
 
     def safekeeper_stop(self,
-                        name: Optional[str] = None,
+                        id: Optional[int] = None,
                         immediate=False) -> 'subprocess.CompletedProcess[str]':
         args = ['safekeeper', 'stop']
+        if id is not None:
+            args.extend(str(id))
         if immediate:
             args.extend(['-m', 'immediate'])
-        if name is not None:
-            args.append(name)
         return self.raw_cli(args)
 
     def pg_create(
@@ -1397,11 +1393,11 @@ class Safekeeper:
     """ An object representing a running safekeeper daemon. """
     env: ZenithEnv
     port: SafekeeperPort
-    name: str  # identifier for logging
+    id: int
     auth_token: Optional[str] = None
 
     def start(self) -> 'Safekeeper':
-        self.env.zenith_cli.safekeeper_start(self.name)
+        self.env.zenith_cli.safekeeper_start(self.id)
 
         # wait for wal acceptor start by checking its status
         started_at = time.time()
@@ -1420,8 +1416,8 @@ class Safekeeper:
         return self
 
     def stop(self, immediate=False) -> 'Safekeeper':
-        log.info('Stopping safekeeper {}'.format(self.name))
-        self.env.zenith_cli.safekeeper_stop(self.name, immediate)
+        log.info('Stopping safekeeper {}'.format(self.id))
+        self.env.zenith_cli.safekeeper_stop(self.id, immediate)
         return self
 
     def append_logical_message(self,

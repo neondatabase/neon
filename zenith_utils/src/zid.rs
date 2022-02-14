@@ -221,6 +221,18 @@ impl fmt::Display for ZTenantTimelineId {
     }
 }
 
+// Unique ID of a storage node (safekeeper or pageserver). Supposed to be issued
+// by the console.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ZNodeId(pub u64);
+
+impl fmt::Display for ZNodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Display;
