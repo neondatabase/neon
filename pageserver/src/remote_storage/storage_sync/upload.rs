@@ -17,7 +17,7 @@ use crate::{
             index::{RemoteTimeline, TimelineIndexEntry},
             sync_queue, tenant_branch_files, update_index_description, SyncKind, SyncTask,
         },
-        RemoteStorage, TimelineSyncId,
+        RemoteStorage, ZTenantTimelineId,
     },
 };
 
@@ -36,12 +36,13 @@ pub(super) async fn upload_timeline_checkpoint<
 >(
     config: &'static PageServerConf,
     remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
-    sync_id: TimelineSyncId,
+    sync_id: ZTenantTimelineId,
     new_checkpoint: NewCheckpoint,
     retries: u32,
 ) -> Option<bool> {
     debug!("Uploading checkpoint for sync id {}", sync_id);
-    if let Err(e) = upload_missing_branches(config, remote_assets.as_ref(), sync_id.0).await {
+    if let Err(e) = upload_missing_branches(config, remote_assets.as_ref(), sync_id.tenant_id).await
+    {
         error!(
             "Failed to upload missing branches for sync id {}: {:?}",
             sync_id, e
@@ -57,7 +58,10 @@ pub(super) async fn upload_timeline_checkpoint<
 
     let index = &remote_assets.1;
 
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+    let ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    } = sync_id;
     let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
 
     let index_read = index.read().await;
@@ -151,11 +155,14 @@ async fn try_upload_checkpoint<
 >(
     config: &'static PageServerConf,
     remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
-    sync_id: TimelineSyncId,
+    sync_id: ZTenantTimelineId,
     new_checkpoint: &NewCheckpoint,
     files_to_skip: BTreeSet<PathBuf>,
 ) -> anyhow::Result<(ArchiveHeader, u64)> {
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+    let ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    } = sync_id;
     let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
 
     let files_to_upload = new_checkpoint
@@ -288,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn reupload_timeline() -> anyhow::Result<()> {
         let repo_harness = RepoHarness::create("reupload_timeline")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
+        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
         let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,
@@ -484,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn reupload_timeline_rejected() -> anyhow::Result<()> {
         let repo_harness = RepoHarness::create("reupload_timeline_rejected")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
+        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
         let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,

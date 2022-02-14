@@ -94,7 +94,7 @@ use std::{
 use anyhow::{bail, Context};
 use tokio::io;
 use tracing::{error, info};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use self::{local_fs::LocalFs, rust_s3::S3};
@@ -105,17 +105,6 @@ use crate::{
 };
 
 pub use storage_sync::compression;
-
-/// Any timeline has its own id and its own tenant it belongs to,
-/// the sync processes group timelines by both for simplicity.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-pub struct TimelineSyncId(ZTenantId, ZTimelineId);
-
-impl std::fmt::Display for TimelineSyncId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(tenant: {}, timeline: {})", self.0, self.1)
-    }
-}
 
 /// A structure to combine all synchronization data to share with pageserver after a successful sync loop initialization.
 /// Successful initialization includes a case when sync loop is not started, in which case the startup data is returned still,
@@ -169,7 +158,7 @@ pub fn start_local_timeline_sync(
                 ZTenantId,
                 HashMap<ZTimelineId, TimelineSyncState>,
             > = HashMap::new();
-            for (TimelineSyncId(tenant_id, timeline_id), (timeline_metadata, _)) in
+            for (ZTenantTimelineId{tenant_id, timeline_id}, (timeline_metadata, _)) in
                 local_timeline_files
             {
                 initial_timeline_states
@@ -189,7 +178,7 @@ pub fn start_local_timeline_sync(
 
 fn local_tenant_timeline_files(
     config: &'static PageServerConf,
-) -> anyhow::Result<HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>> {
+) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>> {
     let mut local_tenant_timeline_files = HashMap::new();
     let tenants_dir = config.tenants_path();
     for tenants_dir_entry in fs::read_dir(&tenants_dir)
@@ -224,8 +213,9 @@ fn local_tenant_timeline_files(
 fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
-) -> anyhow::Result<HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>> {
-    let mut timelines: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)> = HashMap::new();
+) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>> {
+    let mut timelines: HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)> =
+        HashMap::new();
     let tenant_id = tenant_path
         .file_name()
         .and_then(ffi::OsStr::to_str)
@@ -246,7 +236,10 @@ fn collect_timelines_for_tenant(
                 match collect_timeline_files(&timeline_path) {
                     Ok((timeline_id, metadata, timeline_files)) => {
                         timelines.insert(
-                            TimelineSyncId(tenant_id, timeline_id),
+                            ZTenantTimelineId {
+                                tenant_id,
+                                timeline_id,
+                            },
                             (metadata, timeline_files),
                         );
                     }
