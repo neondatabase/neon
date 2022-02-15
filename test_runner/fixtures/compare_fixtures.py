@@ -10,7 +10,11 @@ from typing import Iterator
 
 
 class PgCompare(ABC):
-    """Common interface of all postgres implementations, useful for benchmarks."""
+    """Common interface of all postgres implementations, useful for benchmarks.
+
+    This class is a helper class for the zenith_with_baseline fixture. See its documentation
+    for more details.
+    """
     @property
     @abstractmethod
     def pg(self) -> PgProtocol:
@@ -162,8 +166,20 @@ def zenith_with_baseline(request) -> PgCompare:
     A test that uses this fixture turns into a parameterized test that runs against:
     1. A vanilla postgres instance
     2. A simple zenith env (see zenith_simple_env)
+    3. Possibly other postgres protocol implementations.
 
-    Both instances are configured for fair comparison.
+    The main goal of this fixture is to make it easier for people to read and write
+    performance tests. Easy test writing leads to more tests.
+
+    Perfect encapsulation of the postgres implementations is **not** a goal because
+    it's impossible. Operational and configuration differences in the different
+    implementations sometimes matter, and the writer of the test should be mindful
+    of that.
+
+    If a test requires some one-off special implementation-specific logic, use of
+    isinstance(zenith_with_baseline, ZenithCompare) is encouraged. Though if that
+    implementation-specific logic is widely useful across multiple tests, it might
+    make sense to add methods to the PgCompare class.
     """
     fixture = request.getfixturevalue(request.param)
     if isinstance(fixture, PgCompare):
