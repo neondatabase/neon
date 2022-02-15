@@ -1,11 +1,16 @@
 from io import BytesIO
 import asyncio
 import asyncpg
-from fixtures.zenith_fixtures import ZenithEnv, Postgres
+from fixtures.zenith_fixtures import ZenithEnv, Postgres, PgProtocol
 from fixtures.log_helper import log
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
+from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 
-pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
+pytest_plugins = (
+    "fixtures.zenith_fixtures",
+    "fixtures.benchmark_fixture",
+    "fixtures.compare_fixtures",
+)
 
 
 async def repeat_bytes(buf, repetitions: int):
@@ -13,7 +18,7 @@ async def repeat_bytes(buf, repetitions: int):
         yield buf
 
 
-async def copy_test_data_to_table(pg: Postgres, worker_id: int, table_name: str):
+async def copy_test_data_to_table(pg: PgProtocol, worker_id: int, table_name: str):
     buf = BytesIO()
     for i in range(1000):
         buf.write(
@@ -26,7 +31,7 @@ async def copy_test_data_to_table(pg: Postgres, worker_id: int, table_name: str)
     await pg_conn.copy_to_table(table_name, source=copy_input)
 
 
-async def parallel_load_different_tables(pg: Postgres, n_parallel: int):
+async def parallel_load_different_tables(pg: PgProtocol, n_parallel: int):
     workers = []
     for worker_id in range(n_parallel):
         worker = copy_test_data_to_table(pg, worker_id, f'copytest_{worker_id}')
@@ -37,54 +42,25 @@ async def parallel_load_different_tables(pg: Postgres, n_parallel: int):
 
 
 # Load 5 different tables in parallel with COPY TO
-def test_parallel_copy_different_tables(zenith_simple_env: ZenithEnv,
-                                        zenbenchmark: ZenithBenchmarker,
-                                        n_parallel=5):
+def test_parallel_copy_different_tables(zenith_with_baseline: PgCompare, n_parallel=5):
 
-    env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_parallel_copy_different_tables", "empty"])
-
-    pg = env.postgres.create_start('test_parallel_copy_different_tables')
-    log.info("postgres is running on 'test_parallel_copy_different_tables' branch")
-
-    # Open a connection directly to the page server that we'll use to force
-    # flushing the layers to disk
-    psconn = env.pageserver.connect()
-    pscur = psconn.cursor()
-
-    # Get the timeline ID of our branch. We need it for the 'do_gc' command
-    conn = pg.connect()
+    env = zenith_with_baseline
+    conn = env.pg.connect()
     cur = conn.cursor()
-    cur.execute("SHOW zenith.zenith_timeline")
-    timeline = cur.fetchone()[0]
 
     for worker_id in range(n_parallel):
         cur.execute(f'CREATE TABLE copytest_{worker_id} (i int, t text)')
 
-    with zenbenchmark.record_pageserver_writes(env.pageserver, 'pageserver_writes'):
-        with zenbenchmark.record_duration('load'):
-            asyncio.run(parallel_load_different_tables(pg, n_parallel))
+    with env.record_pageserver_writes('pageserver_writes'):
+        with env.record_duration('load'):
+            asyncio.run(parallel_load_different_tables(env.pg, n_parallel))
+            env.flush()
 
-            # Flush the layers from memory to disk. This is included in the reported
-            # time and I/O
-            pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
-
-    # Record peak memory usage
-    zenbenchmark.record("peak_mem",
-                        zenbenchmark.get_peak_mem(env.pageserver) / 1024,
-                        'MB',
-                        report=MetricReport.LOWER_IS_BETTER)
-
-    # Report disk space used by the repository
-    timeline_size = zenbenchmark.get_timeline_size(env.repo_dir, env.initial_tenant, timeline)
-    zenbenchmark.record('size',
-                        timeline_size / (1024 * 1024),
-                        'MB',
-                        report=MetricReport.LOWER_IS_BETTER)
+    env.report_peak_memory_use()
+    env.report_size()
 
 
-async def parallel_load_same_table(pg: Postgres, n_parallel: int):
+async def parallel_load_same_table(pg: PgProtocol, n_parallel: int):
     workers = []
     for worker_id in range(n_parallel):
         worker = copy_test_data_to_table(pg, worker_id, f'copytest')
@@ -95,46 +71,17 @@ async def parallel_load_same_table(pg: Postgres, n_parallel: int):
 
 
 # Load data into one table with COPY TO from 5 parallel connections
-def test_parallel_copy_same_table(zenith_simple_env: ZenithEnv,
-                                  zenbenchmark: ZenithBenchmarker,
-                                  n_parallel=5):
-    env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_parallel_copy_same_table", "empty"])
-
-    pg = env.postgres.create_start('test_parallel_copy_same_table')
-    log.info("postgres is running on 'test_parallel_copy_same_table' branch")
-
-    # Open a connection directly to the page server that we'll use to force
-    # flushing the layers to disk
-    psconn = env.pageserver.connect()
-    pscur = psconn.cursor()
-
-    # Get the timeline ID of our branch. We need it for the 'do_gc' command
-    conn = pg.connect()
+def test_parallel_copy_same_table(zenith_with_baseline: PgCompare, n_parallel=5):
+    env = zenith_with_baseline
+    conn = env.pg.connect()
     cur = conn.cursor()
-    cur.execute("SHOW zenith.zenith_timeline")
-    timeline = cur.fetchone()[0]
 
     cur.execute(f'CREATE TABLE copytest (i int, t text)')
 
-    with zenbenchmark.record_pageserver_writes(env.pageserver, 'pageserver_writes'):
-        with zenbenchmark.record_duration('load'):
-            asyncio.run(parallel_load_same_table(pg, n_parallel))
+    with env.record_pageserver_writes('pageserver_writes'):
+        with env.record_duration('load'):
+            asyncio.run(parallel_load_same_table(env.pg, n_parallel))
+            env.flush()
 
-            # Flush the layers from memory to disk. This is included in the reported
-            # time and I/O
-            pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
-
-    # Record peak memory usage
-    zenbenchmark.record("peak_mem",
-                        zenbenchmark.get_peak_mem(env.pageserver) / 1024,
-                        'MB',
-                        report=MetricReport.LOWER_IS_BETTER)
-
-    # Report disk space used by the repository
-    timeline_size = zenbenchmark.get_timeline_size(env.repo_dir, env.initial_tenant, timeline)
-    zenbenchmark.record('size',
-                        timeline_size / (1024 * 1024),
-                        'MB',
-                        report=MetricReport.LOWER_IS_BETTER)
+    env.report_peak_memory_use()
+    env.report_size()
