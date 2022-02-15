@@ -14,8 +14,9 @@ use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+use walkeeper::http::models::TimelineCreateRequest;
 use zenith_utils::http::error::HttpErrorBody;
-use zenith_utils::zid::ZNodeId;
+use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
@@ -260,5 +261,26 @@ impl SafekeeperNode {
             .send()?
             .error_from_body()?;
         Ok(())
+    }
+
+    pub fn timeline_create(
+        &self,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        peer_ids: Vec<ZNodeId>,
+    ) -> Result<()> {
+        Ok(self
+            .http_request(
+                Method::POST,
+                format!("{}/{}", self.http_base_url, "timeline"),
+            )
+            .json(&TimelineCreateRequest {
+                tenant_id,
+                timeline_id,
+                peer_ids,
+            })
+            .send()?
+            .error_from_body()?
+            .json()?)
     }
 }

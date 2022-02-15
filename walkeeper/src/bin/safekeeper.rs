@@ -11,7 +11,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
-use walkeeper::control_file::{self, CreateControlFile};
+use walkeeper::control_file::{self};
 use zenith_utils::http::endpoint;
 use zenith_utils::zid::ZNodeId;
 use zenith_utils::{logging, tcp_listener, GIT_VERSION};
@@ -108,10 +108,7 @@ fn main() -> Result<()> {
         .get_matches();
 
     if let Some(addr) = arg_matches.value_of("dump-control-file") {
-        let state = control_file::FileStorage::load_control_file(
-            Path::new(addr),
-            CreateControlFile::False,
-        )?;
+        let state = control_file::FileStorage::load_control_file(Path::new(addr))?;
         let json = serde_json::to_string(&state)?;
         print!("{}", json);
         return Ok(());

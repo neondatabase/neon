@@ -301,7 +301,8 @@ impl Storage for PhysicalStorage {
     /// allows to postpone its initialization.
     fn init_storage(&mut self, state: &SafeKeeperState) -> Result<()> {
         if state.server.wal_seg_size == 0 {
-            // wal_seg_size is still unknown
+            // wal_seg_size is still unknown. This is dead path normally, should
+            // be used only in tests.
             return Ok(());
         }
 
@@ -315,9 +316,13 @@ impl Storage for PhysicalStorage {
         let wal_seg_size = state.server.wal_seg_size as usize;
         self.wal_seg_size = Some(wal_seg_size);
 
-        // we need to read WAL from disk to know which LSNs are stored on disk
-        self.write_lsn =
-            Lsn(find_end_of_wal(&self.timeline_dir, wal_seg_size, true, state.wal_start_lsn)?.0);
+        // Find out where stored WAL ends, starting at commit_lsn which is a
+        // known recent record boundary (unless we don't have WAL at all).
+        self.write_lsn = if state.commit_lsn == Lsn(0) {
+            Lsn(0)
+        } else {
+            Lsn(find_end_of_wal(&self.timeline_dir, wal_seg_size, true, state.commit_lsn)?.0)
+        };
 
         self.write_record_lsn = self.write_lsn;
 
@@ -326,11 +331,13 @@ impl Storage for PhysicalStorage {
         self.update_flush_lsn();
 
         info!(
-            "initialized storage for timeline {}, flush_lsn={}, commit_lsn={}, truncate_lsn={}",
-            self.zttid.timeline_id, self.flush_record_lsn, state.commit_lsn, state.truncate_lsn,
+            "initialized storage for timeline {}, flush_lsn={}, commit_lsn={}, peer_horizon_lsn={}",
+            self.zttid.timeline_id, self.flush_record_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
-        if self.flush_record_lsn < state.commit_lsn || self.flush_record_lsn < state.truncate_lsn {
-            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or truncate_lsn from control file", self.zttid.timeline_id);
+        if self.flush_record_lsn < state.commit_lsn
+            || self.flush_record_lsn < state.peer_horizon_lsn
+        {
+            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or peer_horizon_lsn from control file", self.zttid.timeline_id);
         }
 
         Ok(())

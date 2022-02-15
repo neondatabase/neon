@@ -27,13 +27,6 @@ const CONTROL_FILE_NAME: &str = "safekeeper.control";
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
 pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 
-// A named boolean.
-#[derive(Debug)]
-pub enum CreateControlFile {
-    True,
-    False,
-}
-
 lazy_static! {
     static ref PERSIST_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_persist_control_file_seconds",
@@ -94,28 +87,22 @@ impl FileStorage {
     pub fn load_control_file_conf(
         conf: &SafeKeeperConf,
         zttid: &ZTenantTimelineId,
-        create: CreateControlFile,
     ) -> Result<SafeKeeperState> {
         let path = conf.timeline_dir(zttid).join(CONTROL_FILE_NAME);
-        Self::load_control_file(path, create)
+        Self::load_control_file(path)
     }
 
     /// Read in the control file.
     /// If create=false and file doesn't exist, bails out.
-    pub fn load_control_file<P: AsRef<Path>>(
-        control_file_path: P,
-        create: CreateControlFile,
-    ) -> Result<SafeKeeperState> {
+    pub fn load_control_file<P: AsRef<Path>>(control_file_path: P) -> Result<SafeKeeperState> {
         info!(
-            "loading control file {}, create={:?}",
+            "loading control file {}",
             control_file_path.as_ref().display(),
-            create,
         );
 
         let mut control_file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(matches!(create, CreateControlFile::True))
             .open(&control_file_path)
             .with_context(|| {
                 format!(
@@ -124,41 +111,32 @@ impl FileStorage {
                 )
             })?;
 
-        // Empty file is legit on 'create', don't try to deser from it.
-        let state = if control_file.metadata().unwrap().len() == 0 {
-            if let CreateControlFile::False = create {
-                bail!("control file is empty");
-            }
-            SafeKeeperState::new()
-        } else {
-            let mut buf = Vec::new();
-            control_file
-                .read_to_end(&mut buf)
-                .context("failed to read control file")?;
+        let mut buf = Vec::new();
+        control_file
+            .read_to_end(&mut buf)
+            .context("failed to read control file")?;
 
-            let calculated_checksum = crc32c::crc32c(&buf[..buf.len() - CHECKSUM_SIZE]);
+        let calculated_checksum = crc32c::crc32c(&buf[..buf.len() - CHECKSUM_SIZE]);
 
-            let expected_checksum_bytes: &[u8; CHECKSUM_SIZE] =
-                buf[buf.len() - CHECKSUM_SIZE..].try_into()?;
-            let expected_checksum = u32::from_le_bytes(*expected_checksum_bytes);
+        let expected_checksum_bytes: &[u8; CHECKSUM_SIZE] =
+            buf[buf.len() - CHECKSUM_SIZE..].try_into()?;
+        let expected_checksum = u32::from_le_bytes(*expected_checksum_bytes);
 
-            ensure!(
-                calculated_checksum == expected_checksum,
+        ensure!(
+            calculated_checksum == expected_checksum,
+            format!(
+                "safekeeper control file checksum mismatch: expected {} got {}",
+                expected_checksum, calculated_checksum
+            )
+        );
+
+        let state = FileStorage::deser_sk_state(&mut &buf[..buf.len() - CHECKSUM_SIZE])
+            .with_context(|| {
                 format!(
-                    "safekeeper control file checksum mismatch: expected {} got {}",
-                    expected_checksum, calculated_checksum
+                    "while reading control file {}",
+                    control_file_path.as_ref().display(),
                 )
-            );
-
-            FileStorage::deser_sk_state(&mut &buf[..buf.len() - CHECKSUM_SIZE]).with_context(
-                || {
-                    format!(
-                        "while reading control file {}",
-                        control_file_path.as_ref().display(),
-                    )
-                },
-            )?
-        };
+            })?;
         Ok(state)
     }
 }
@@ -247,13 +225,23 @@ mod test {
     fn load_from_control_file(
         conf: &SafeKeeperConf,
         zttid: &ZTenantTimelineId,
-        create: CreateControlFile,
     ) -> Result<(FileStorage, SafeKeeperState)> {
         fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
         Ok((
             FileStorage::new(zttid, conf),
-            FileStorage::load_control_file_conf(conf, zttid, create)?,
+            FileStorage::load_control_file_conf(conf, zttid)?,
         ))
+    }
+
+    fn create(
+        conf: &SafeKeeperConf,
+        zttid: &ZTenantTimelineId,
+    ) -> Result<(FileStorage, SafeKeeperState)> {
+        fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
+        let state = SafeKeeperState::empty();
+        let mut storage = FileStorage::new(zttid, conf);
+        storage.persist(&state)?;
+        Ok((storage, state))
     }
 
     #[test]
@@ -261,17 +249,14 @@ mod test {
         let conf = stub_conf();
         let zttid = ZTenantTimelineId::generate();
         {
-            let (mut storage, mut state) =
-                load_from_control_file(&conf, &zttid, CreateControlFile::True)
-                    .expect("failed to read state");
+            let (mut storage, mut state) = create(&conf, &zttid).expect("failed to create state");
             // change something
-            state.wal_start_lsn = Lsn(42);
+            state.commit_lsn = Lsn(42);
             storage.persist(&state).expect("failed to persist state");
         }
 
-        let (_, state) = load_from_control_file(&conf, &zttid, CreateControlFile::False)
-            .expect("failed to read state");
-        assert_eq!(state.wal_start_lsn, Lsn(42));
+        let (_, state) = load_from_control_file(&conf, &zttid).expect("failed to read state");
+        assert_eq!(state.commit_lsn, Lsn(42));
     }
 
     #[test]
@@ -279,11 +264,10 @@ mod test {
         let conf = stub_conf();
         let zttid = ZTenantTimelineId::generate();
         {
-            let (mut storage, mut state) =
-                load_from_control_file(&conf, &zttid, CreateControlFile::True)
-                    .expect("failed to read state");
+            let (mut storage, mut state) = create(&conf, &zttid).expect("failed to read state");
+
             // change something
-            state.wal_start_lsn = Lsn(42);
+            state.commit_lsn = Lsn(42);
             storage.persist(&state).expect("failed to persist state");
         }
         let control_path = conf.timeline_dir(&zttid).join(CONTROL_FILE_NAME);
@@ -291,7 +275,7 @@ mod test {
         data[0] += 1; // change the first byte of the file to fail checksum validation
         fs::write(&control_path, &data).expect("failed to write control file");
 
-        match load_from_control_file(&conf, &zttid, CreateControlFile::False) {
+        match load_from_control_file(&conf, &zttid) {
             Err(err) => assert!(err
                 .to_string()
                 .contains("safekeeper control file checksum mismatch")),

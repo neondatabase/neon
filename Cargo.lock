@@ -424,6 +424,7 @@ dependencies = [
  "thiserror",
  "toml",
  "url",
+ "walkeeper",
  "workspace_hack",
  "zenith_utils",
 ]
