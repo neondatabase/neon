@@ -334,6 +334,10 @@ impl ZTenantTimelineId {
     pub fn generate() -> Self {
         Self::new(ZTenantId::generate(), ZTimelineId::generate())
     }
+
+    pub fn empty() -> Self {
+        Self::new(ZTenantId::from([0u8; 16]), ZTimelineId::from([0u8; 16]))
+    }
 }
 
 impl fmt::Display for ZTenantTimelineId {

@@ -1,7 +1,7 @@
 //! This module contains timeline id -> safekeeper state map with file-backed
 //! persistence and support for interaction between sending and receiving wal.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use lazy_static::lazy_static;
 
@@ -9,22 +9,24 @@ use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self};
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 
 use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::ZTenantTimelineId;
+use zenith_utils::zid::{ZNodeId, ZTenantTimelineId};
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
-use crate::control_file::{self, CreateControlFile};
 
+use crate::control_file;
+use crate::control_file::Storage as cf_storage;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
 };
 use crate::send_wal::HotStandbyFeedback;
-use crate::wal_storage::{self, Storage};
+use crate::wal_storage;
+use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
 
 use zenith_utils::pq_proto::ZenithFeedback;
@@ -87,21 +89,39 @@ struct SharedState {
 }
 
 impl SharedState {
-    /// Restore SharedState from control file.
-    /// If create=false and file doesn't exist, bails out.
-    fn create_restore(
+    /// Initialize timeline state, creating control file
+    fn create(
         conf: &SafeKeeperConf,
         zttid: &ZTenantTimelineId,
-        create: CreateControlFile,
+        peer_ids: Vec<ZNodeId>,
     ) -> Result<Self> {
-        let state = control_file::FileStorage::load_control_file_conf(conf, zttid, create)
+        let state = SafeKeeperState::new(zttid, peer_ids);
+        let control_store = control_file::FileStorage::new(zttid, conf);
+        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
+        let mut sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state);
+        sk.control_store.persist(&sk.s)?;
+
+        Ok(Self {
+            notified_commit_lsn: Lsn(0),
+            sk,
+            replicas: Vec::new(),
+            active: false,
+            num_computes: 0,
+            pageserver_connstr: None,
+        })
+    }
+
+    /// Restore SharedState from control file.
+    /// If file doesn't exist, bails out.
+    fn restore(conf: &SafeKeeperConf, zttid: &ZTenantTimelineId) -> Result<Self> {
+        let state = control_file::FileStorage::load_control_file_conf(conf, zttid)
             .context("failed to load from control file")?;
 
         let control_store = control_file::FileStorage::new(zttid, conf);
 
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
 
-        info!("timeline {} created or restored", zttid.timeline_id);
+        info!("timeline {} restored", zttid.timeline_id);
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
@@ -418,26 +438,13 @@ impl Timeline {
 
 // Utilities needed by various Connection-like objects
 pub trait TimelineTools {
-    fn set(
-        &mut self,
-        conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
-        create: CreateControlFile,
-    ) -> Result<()>;
+    fn set(&mut self, conf: &SafeKeeperConf, zttid: ZTenantTimelineId, create: bool) -> Result<()>;
 
     fn get(&self) -> &Arc<Timeline>;
 }
 
 impl TimelineTools for Option<Arc<Timeline>> {
-    fn set(
-        &mut self,
-        conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
-        create: CreateControlFile,
-    ) -> Result<()> {
-        // We will only set the timeline once. If it were to ever change,
-        // anyone who cloned the Arc would be out of date.
-        assert!(self.is_none());
+    fn set(&mut self, conf: &SafeKeeperConf, zttid: ZTenantTimelineId, create: bool) -> Result<()> {
         *self = Some(GlobalTimelines::get(conf, zttid, create)?);
         Ok(())
     }
@@ -456,30 +463,73 @@ lazy_static! {
 pub struct GlobalTimelines;
 
 impl GlobalTimelines {
+    fn create_internal(
+        mut timelines: MutexGuard<HashMap<ZTenantTimelineId, Arc<Timeline>>>,
+        conf: &SafeKeeperConf,
+        zttid: ZTenantTimelineId,
+        peer_ids: Vec<ZNodeId>,
+    ) -> Result<Arc<Timeline>> {
+        match timelines.get(&zttid) {
+            Some(_) => bail!("timeline {} already exists", zttid),
+            None => {
+                // TODO: check directory existence
+                let dir = conf.timeline_dir(&zttid);
+                fs::create_dir_all(dir)?;
+                let shared_state = SharedState::create(conf, &zttid, peer_ids)
+                    .context("failed to create shared state")?;
+
+                let new_tli = Arc::new(Timeline::new(zttid, shared_state));
+                timelines.insert(zttid, Arc::clone(&new_tli));
+                Ok(new_tli)
+            }
+        }
+    }
+
+    pub fn create(
+        conf: &SafeKeeperConf,
+        zttid: ZTenantTimelineId,
+        peer_ids: Vec<ZNodeId>,
+    ) -> Result<Arc<Timeline>> {
+        let timelines = TIMELINES.lock().unwrap();
+        GlobalTimelines::create_internal(timelines, conf, zttid, peer_ids)
+    }
+
     /// Get a timeline with control file loaded from the global TIMELINES map.
-    /// If control file doesn't exist and create=false, bails out.
+    /// If control file doesn't exist, bails out.
     pub fn get(
         conf: &SafeKeeperConf,
         zttid: ZTenantTimelineId,
-        create: CreateControlFile,
+        create: bool,
     ) -> Result<Arc<Timeline>> {
         let mut timelines = TIMELINES.lock().unwrap();
 
         match timelines.get(&zttid) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
-                if let CreateControlFile::True = create {
-                    let dir = conf.timeline_dir(&zttid);
-                    info!(
-                        "creating timeline dir {}, create is {:?}",
-                        dir.display(),
-                        create
-                    );
-                    fs::create_dir_all(dir)?;
-                }
+                let shared_state =
+                    SharedState::restore(conf, &zttid).context("failed to restore shared state");
 
-                let shared_state = SharedState::create_restore(conf, &zttid, create)
-                    .context("failed to restore shared state")?;
+                let shared_state = match shared_state {
+                    Ok(shared_state) => shared_state,
+                    Err(error) => {
+                        // TODO: always create timeline explicitly
+                        if error
+                            .root_cause()
+                            .to_string()
+                            .contains("No such file or directory")
+                            && create
+                        {
+                            return GlobalTimelines::create_internal(
+                                timelines,
+                                conf,
+                                zttid,
+                                vec![],
+                            );
+                        } else {
+                            return Err(error);
+                        }
+                    }
+                };
 
                 let new_tli = Arc::new(Timeline::new(zttid, shared_state));
                 timelines.insert(zttid, Arc::clone(&new_tli));
