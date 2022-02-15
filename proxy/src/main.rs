@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
             Arg::new("keepalive")
                 .long("keepalive")
                 .takes_value(true)
-                .help("TCP keepalive value (msec)"),
+                .help("Enable TCP keepalive"),
         )
         .get_matches();
 
@@ -95,17 +95,13 @@ fn main() -> anyhow::Result<()> {
         (None, None) => None,
         _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
     };
-    let tcp_keepalive = match arg_matches.value_of("keepalive") {
-        Some(ms) => Some(ms.parse()?),
-        None => None,
-    };
     let config = ProxyConfig {
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         http_address: arg_matches.value_of("http").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
         auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
-        tcp_keepalive,
+        tcp_keepalive: arg_matches.value_of("keepalive").map(|enabled|std::str::FromStr::from_str(enabled)).transpose()?,
         ssl_config,
     };
     let state: &ProxyState = Box::leak(Box::new(ProxyState::new(config)));

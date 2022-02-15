@@ -18,7 +18,7 @@ tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2
 clap = "3.0"
 rustls = "0.19.1"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-net2 =  "0.2.37"
+nix = "0.23"
 
 zenith_utils = { path = "../zenith_utils" }
 zenith_metrics = { path = "../zenith_metrics" }
