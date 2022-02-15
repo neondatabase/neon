@@ -80,7 +80,7 @@ fn main() -> anyhow::Result<()> {
         .arg(
             Arg::new("keepalive")
                 .long("keepalive")
-                .takes_value(true)
+                .takes_value(false)
                 .help("Enable TCP keepalive"),
         )
         .get_matches();
@@ -101,7 +101,7 @@ fn main() -> anyhow::Result<()> {
         http_address: arg_matches.value_of("http").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
         auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
-        tcp_keepalive: arg_matches.value_of("keepalive").map(|enabled|std::str::FromStr::from_str(enabled)).transpose()?,
+        tcp_keepalive: arg_matches.is_present("keepalive"),
         ssl_config,
     };
     let state: &ProxyState = Box::leak(Box::new(ProxyState::new(config)));

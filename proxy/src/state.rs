@@ -26,7 +26,7 @@ pub struct ProxyConfig {
 
     pub ssl_config: Option<SslConfig>,
 
-    pub tcp_keepalive: Option<bool>,
+    pub tcp_keepalive: bool,
 }
 
 pub type ProxyWaiters = crate::waiters::Waiters<Result<DatabaseInfo, String>>;

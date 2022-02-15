@@ -7,6 +7,8 @@ use rand::{Rng, SeedableRng};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::sync::Mutex;
 use std::{io, thread};
 use tokio_postgres::NoTls;
@@ -14,8 +16,6 @@ use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use zenith_utils::postgres_backend::{self, PostgresBackend, ProtoState, Stream};
 use zenith_utils::pq_proto::{BeMessage as Be, FeMessage as Fe, *};
 use zenith_utils::sock_split::{ReadStream, WriteStream};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 
 struct CancelClosure {
     socket_addr: SocketAddr,
@@ -106,7 +106,7 @@ struct ProxyConnection {
 }
 
 pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow::Result<()> {
-	let fd = socket.as_raw_fd();
+    let fd = socket.as_raw_fd();
     let conn = ProxyConnection {
         state,
         psql_session_id: hex::encode(rand::random::<[u8; 8]>()),
@@ -123,10 +123,18 @@ pub fn proxy_conn_main(state: &'static ProxyState, socket: TcpStream) -> anyhow:
         None => return Ok(()),
     };
 
-	if let Some(keepalive) = state.conf.tcp_keepalive {
-		nix::sys::socket::setsockopt(fd, nix::sys::socket::sockopt::KeepAlive, &keepalive)?;
-		nix::sys::socket::setsockopt(server.as_raw_fd(), nix::sys::socket::sockopt::KeepAlive, &keepalive)?;
-	}
+    if state.conf.tcp_keepalive {
+        nix::sys::socket::setsockopt(
+            fd,
+            nix::sys::socket::sockopt::KeepAlive,
+            &state.conf.tcp_keepalive,
+        )?;
+        nix::sys::socket::setsockopt(
+            server.as_raw_fd(),
+            nix::sys::socket::sockopt::KeepAlive,
+            &state.conf.tcp_keepalive,
+        )?;
+    }
 
     let server = zenith_utils::sock_split::BidiStream::from_tcp(server);
 
