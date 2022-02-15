@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import textwrap
 from cached_property import cached_property
 import asyncpg
 import os
@@ -526,9 +527,9 @@ class ZenithEnv:
         self.initial_tenant = uuid.uuid4().hex
 
         # Create a config file corresponding to the options
-        toml = f"""
-default_tenantid = '{self.initial_tenant}'
-        """
+        toml = textwrap.dedent(f"""
+            default_tenantid = '{self.initial_tenant}'
+        """)
 
         # Create config for pageserver
         pageserver_port = PageserverPort(
@@ -537,12 +538,12 @@ default_tenantid = '{self.initial_tenant}'
         )
         pageserver_auth_type = "ZenithJWT" if config.pageserver_auth_enabled else "Trust"
 
-        toml += f"""
-[pageserver]
-listen_pg_addr = 'localhost:{pageserver_port.pg}'
-listen_http_addr = 'localhost:{pageserver_port.http}'
-auth_type = '{pageserver_auth_type}'
-        """
+        toml += textwrap.dedent(f"""
+            [pageserver]
+            listen_pg_addr = 'localhost:{pageserver_port.pg}'
+            listen_http_addr = 'localhost:{pageserver_port.http}'
+            auth_type = '{pageserver_auth_type}'
+        """)
 
         # Create a corresponding ZenithPageserver object
         self.pageserver = ZenithPageserver(self,
@@ -728,6 +729,10 @@ def zenith_env_builder(test_output_dir, port_distributor) -> Iterator[ZenithEnvB
         yield builder
 
 
+class ZenithPageserverApiException(Exception):
+    pass
+
+
 class ZenithPageserverHttpClient(requests.Session):
     def __init__(self, port: int, auth_token: Optional[str] = None) -> None:
         super().__init__()
@@ -737,22 +742,32 @@ class ZenithPageserverHttpClient(requests.Session):
         if auth_token is not None:
             self.headers['Authorization'] = f'Bearer {auth_token}'
 
+    def verbose_error(self, res: requests.Response):
+        try:
+            res.raise_for_status()
+        except requests.RequestException as e:
+            try:
+                msg = res.json()['msg']
+            except:
+                msg = ''
+            raise ZenithPageserverApiException(msg) from e
+
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
     def timeline_attach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
         res = self.post(
             f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/attach", )
-        res.raise_for_status()
+        self.verbose_error(res)
 
     def timeline_detach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
         res = self.post(
             f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/detach", )
-        res.raise_for_status()
+        self.verbose_error(res)
 
     def branch_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
-        res.raise_for_status()
+        self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
         return res_json
@@ -764,7 +779,7 @@ class ZenithPageserverHttpClient(requests.Session):
                             'name': name,
                             'start_point': start_point,
                         })
-        res.raise_for_status()
+        self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
@@ -773,14 +788,14 @@ class ZenithPageserverHttpClient(requests.Session):
         res = self.get(
             f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}?include-non-incremental-logical-size=1",
         )
-        res.raise_for_status()
+        self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
 
     def tenant_list(self) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
-        res.raise_for_status()
+        self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
         return res_json
@@ -792,12 +807,12 @@ class ZenithPageserverHttpClient(requests.Session):
                 'tenant_id': tenant_id.hex,
             },
         )
-        res.raise_for_status()
+        self.verbose_error(res)
         return res.json()
 
     def timeline_list(self, tenant_id: uuid.UUID) -> List[str]:
         res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}")
-        res.raise_for_status()
+        self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
         return res_json
@@ -805,14 +820,14 @@ class ZenithPageserverHttpClient(requests.Session):
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
         res = self.get(
             f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}")
-        res.raise_for_status()
+        self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
 
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
-        res.raise_for_status()
+        self.verbose_error(res)
         return res.text
 
 
