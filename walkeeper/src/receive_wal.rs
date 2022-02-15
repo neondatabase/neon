@@ -9,11 +9,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 
 use crate::timeline::Timeline;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::mpsc::channel;
-use std::thread;
 use std::io::Write;
+use std::net::SocketAddr;
+use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::thread;
 
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
@@ -101,7 +101,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 
         let _write_thread = thread::Builder::new()
             .name("Reply feedback thread".into())
-            .spawn(move|| -> Result<()> {
+            .spawn(move || -> Result<()> {
                 let mut buf_out = BytesMut::with_capacity(10 * 1024);
 
                 while let Ok(msg) = reply_rx.recv() {
@@ -115,26 +115,28 @@ impl<'pg> ReceiveWalConn<'pg> {
                     }
                 }
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
 
         let (request_tx, request_rx) = channel();
 
         let _read_thread = thread::Builder::new()
             .name("Read WAL thread".into())
-            .spawn(move|| -> Result<()> {
+            .spawn(move || -> Result<()> {
                 request_tx.send(msg)?;
-                
+
                 loop {
                     let copy_data = match FeMessage::read(&mut r)? {
                         Some(FeMessage::CopyData(bytes)) => bytes,
                         Some(msg) => bail!("expected `CopyData` message, found {:?}", msg),
                         None => bail!("connection closed unexpectedly"),
                     };
-            
+
                     msg = ProposerAcceptorMessage::parse(copy_data)?;
                     request_tx.send(msg)?;
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
         let mut pending_reply = None;
         loop {
@@ -146,8 +148,7 @@ impl<'pg> ReceiveWalConn<'pg> {
             } else {
                 // otherwise, call fsync and send pending reply
                 if let Some(AcceptorProposerMessage::AppendResponse(resp)) = pending_reply {
-                    spg
-                        .timeline
+                    spg.timeline
                         .get()
                         .process_msg(&ProposerAcceptorMessage::FsyncRequest(resp.flush_lsn))
                         .context("failed to call fsync")?;

@@ -412,7 +412,13 @@ pub trait Storage {
     /// Persist safekeeper state on disk.
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
     /// Write piece of wal in buf to disk and sync it.
-    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8], skip_sync: bool) -> Result<()>;
+    fn write_wal(
+        &mut self,
+        server: &ServerInfo,
+        startpos: Lsn,
+        buf: &[u8],
+        skip_sync: bool,
+    ) -> Result<()>;
     // Truncate WAL at specified LSN
     fn truncate_wal(&mut self, s: &ServerInfo, endpos: Lsn) -> Result<()>;
 }
@@ -675,7 +681,8 @@ where
 
     fn handle_fsync(&mut self, lsn: Lsn) -> Result<Option<AcceptorProposerMessage>> {
         info!("received FsyncRequest");
-        self.storage.write_wal(&self.s.server, lsn, &[0u8; 0], false)?;
+        self.storage
+            .write_wal(&self.s.server, lsn, &[0u8; 0], false)?;
         Ok(None)
     }
 
@@ -709,11 +716,12 @@ where
             self.metrics
                 .write_wal_bytes
                 .observe(msg.wal_data.len() as f64);
-            {
-                let _timer = self.metrics.write_wal_seconds.start_timer();
-                self.storage
-                    .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data, true)?;
-            }
+            self.metrics
+                .write_wal_seconds
+                .observe_closure_duration(|| {
+                    self.storage
+                        .write_wal(&self.s.server, msg.h.begin_lsn, &msg.wal_data, true)
+                })?;
 
             // figure out last record's end lsn for reporting (if we got the
             // whole record)
@@ -809,7 +817,13 @@ mod tests {
             Ok(())
         }
 
-        fn write_wal(&mut self, _server: &ServerInfo, _startpos: Lsn, _buf: &[u8], _skip_sync: bool) -> Result<()> {
+        fn write_wal(
+            &mut self,
+            _server: &ServerInfo,
+            _startpos: Lsn,
+            _buf: &[u8],
+            _skip_sync: bool,
+        ) -> Result<()> {
             Ok(())
         }
 

@@ -232,9 +232,7 @@ impl PostgresBackend {
     pub fn take_streams_io(&mut self) -> Option<(ReadStream, WriteStream)> {
         let stream = self.stream.take();
         match stream {
-            Some(Stream::Bidirectional(bidi_stream)) => {
-                Some(bidi_stream.split())
-            }
+            Some(Stream::Bidirectional(bidi_stream)) => Some(bidi_stream.split()),
             stream => {
                 self.stream = stream;
                 None

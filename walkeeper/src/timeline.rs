@@ -108,6 +108,13 @@ lazy_static! {
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec");
+    static ref WAL_FLUSH_SECONDS: HistogramVec = register_histogram_vec!(
+        "safekeeper_flush_wal_seconds",
+        "Seconds spent syncing WAL to a disk, grouped by timeline",
+        &["timeline_id"],
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_flush_wal_seconds histogram vec");
 }
 
 impl SharedState {
@@ -533,6 +540,7 @@ pub struct FileStorage {
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
     persist_control_file_seconds: Histogram,
+	wal_flush_seconds: Histogram,
 }
 
 impl FileStorage {
@@ -544,6 +552,7 @@ impl FileStorage {
             conf: conf.clone(),
             persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
                 .with_label_values(&[&timelineid_str]),
+            wal_flush_seconds: WAL_FLUSH_SECONDS.with_label_values(&[&timelineid_str]),
         }
     }
 
@@ -653,7 +662,6 @@ impl Storage for FileStorage {
     // for description see https://lwn.net/Articles/457667/
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
         let _timer = &self.persist_control_file_seconds.start_timer();
-
         // write data to safekeeper.control.partial
         let control_partial_path = self.timeline_dir.join(CONTROL_FILE_NAME_PARTIAL);
         let mut control_partial = File::create(&control_partial_path).with_context(|| {
@@ -707,7 +715,13 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    fn write_wal(&mut self, server: &ServerInfo, startpos: Lsn, buf: &[u8], skip_sync: bool) -> Result<()> {
+    fn write_wal(
+        &mut self,
+        server: &ServerInfo,
+        startpos: Lsn,
+        buf: &[u8],
+        skip_sync: bool,
+    ) -> Result<()> {
         let mut bytes_left: usize = buf.len();
         let mut bytes_written: usize = 0;
         let mut partial;
@@ -777,12 +791,13 @@ impl Storage for FileStorage {
                 // Flush file, if not said otherwise. When WAL file bounary is crossed,
                 // we sync even if skip_sync is true.
                 if !self.conf.no_sync && (!skip_sync || boundary_cross) {
-                    wal_file.sync_all()?;
+                    self.wal_flush_seconds
+                        .observe_closure_duration(|| wal_file.sync_all())?;
                 }
             }
 
             if sync_only {
-                break
+                break;
             }
 
             /* Write was successful, advance our position */
@@ -833,7 +848,8 @@ impl Storage for FileStorage {
             }
             // Flush file, if not said otherwise
             if !self.conf.no_sync {
-                wal_file.sync_all()?;
+                self.wal_flush_seconds
+                    .observe_closure_duration(|| wal_file.sync_all())?;
             }
         }
         if !partial {
