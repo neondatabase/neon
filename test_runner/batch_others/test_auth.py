@@ -1,8 +1,8 @@
 from contextlib import closing
 from typing import Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 import psycopg2
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.zenith_fixtures import ZenithEnvBuilder, ZenithPageserverApiException
 import pytest
 
 pytest_plugins = ("fixtures.zenith_fixtures")
@@ -15,31 +15,38 @@ def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
     ps = env.pageserver
 
     tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)
+    tenant_http_client = env.pageserver.http_client(tenant_token)
+
     invalid_tenant_token = env.auth_keys.generate_tenant_token(uuid4().hex)
+    invalid_tenant_http_client = env.pageserver.http_client(invalid_tenant_token)
+
     management_token = env.auth_keys.generate_management_token()
+    management_http_client = env.pageserver.http_client(management_token)
 
     # this does not invoke auth check and only decodes jwt and checks it for validity
     # check both tokens
-    ps.safe_psql("status", password=tenant_token)
-    ps.safe_psql("status", password=management_token)
+    ps.safe_psql("set FOO", password=tenant_token)
+    ps.safe_psql("set FOO", password=management_token)
 
     # tenant can create branches
-    ps.safe_psql(f"branch_create {env.initial_tenant} new1 main", password=tenant_token)
+    tenant_http_client.branch_create(UUID(env.initial_tenant), 'new1', 'main')
     # console can create branches for tenant
-    ps.safe_psql(f"branch_create {env.initial_tenant} new2 main", password=management_token)
+    management_http_client.branch_create(UUID(env.initial_tenant), 'new2', 'main')
 
-    # fail to create branch using token with different tenantid
-    with pytest.raises(psycopg2.DatabaseError, match='Tenant id mismatch. Permission denied'):
-        ps.safe_psql(f"branch_create {env.initial_tenant} new2 main", password=invalid_tenant_token)
+    # fail to create branch using token with different tenant_id
+    with pytest.raises(ZenithPageserverApiException,
+                       match='Forbidden: Tenant id mismatch. Permission denied'):
+        invalid_tenant_http_client.branch_create(UUID(env.initial_tenant), "new3", "main")
 
     # create tenant using management token
-    ps.safe_psql(f"tenant_create {uuid4().hex}", password=management_token)
+    management_http_client.tenant_create(uuid4())
 
     # fail to create tenant using tenant token
     with pytest.raises(
-            psycopg2.DatabaseError,
-            match='Attempt to access management api with tenant scope. Permission denied'):
-        ps.safe_psql(f"tenant_create {uuid4().hex}", password=tenant_token)
+            ZenithPageserverApiException,
+            match='Forbidden: Attempt to access management api with tenant scope. Permission denied'
+    ):
+        tenant_http_client.tenant_create(uuid4())
 
 
 @pytest.mark.parametrize('with_wal_acceptors', [False, True])

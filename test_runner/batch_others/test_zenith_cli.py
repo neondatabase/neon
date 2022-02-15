@@ -3,21 +3,21 @@ import uuid
 import requests
 
 from psycopg2.extensions import cursor as PgCursor
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 from typing import cast
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def helper_compare_branch_list(page_server_cur: PgCursor, env: ZenithEnv, initial_tenant: str):
+def helper_compare_branch_list(pageserver_http_client: ZenithPageserverHttpClient,
+                               env: ZenithEnv,
+                               initial_tenant: str):
     """
     Compare branches list returned by CLI and directly via API.
     Filters out branches created by other tests.
     """
-
-    page_server_cur.execute(f'branch_list {initial_tenant}')
-    branches_api = sorted(
-        map(lambda b: cast(str, b['name']), json.loads(page_server_cur.fetchone()[0])))
+    branches = pageserver_http_client.branch_list(uuid.UUID(initial_tenant))
+    branches_api = sorted(map(lambda b: cast(str, b['name']), branches))
     branches_api = [b for b in branches_api if b.startswith('test_cli_') or b in ('empty', 'main')]
 
     res = env.zenith_cli(["branch"])
@@ -38,21 +38,20 @@ def helper_compare_branch_list(page_server_cur: PgCursor, env: ZenithEnv, initia
 
 def test_cli_branch_list(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    page_server_conn = env.pageserver.connect()
-    page_server_cur = page_server_conn.cursor()
+    pageserver_http_client = env.pageserver.http_client()
 
     # Initial sanity check
-    helper_compare_branch_list(page_server_cur, env, env.initial_tenant)
+    helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a branch for us
     res = env.zenith_cli(["branch", "test_cli_branch_list_main", "empty"])
     assert res.stderr == ''
-    helper_compare_branch_list(page_server_cur, env, env.initial_tenant)
+    helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a nested branch
     res = env.zenith_cli(["branch", "test_cli_branch_list_nested", "test_cli_branch_list_main"])
     assert res.stderr == ''
-    helper_compare_branch_list(page_server_cur, env, env.initial_tenant)
+    helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI
     res = env.zenith_cli(["branch"])
@@ -63,10 +62,9 @@ def test_cli_branch_list(zenith_simple_env: ZenithEnv):
     assert 'test_cli_branch_list_nested' in branches_cli
 
 
-def helper_compare_tenant_list(page_server_cur: PgCursor, env: ZenithEnv):
-    page_server_cur.execute(f'tenant_list')
-    tenants_api = sorted(
-        map(lambda t: cast(str, t['id']), json.loads(page_server_cur.fetchone()[0])))
+def helper_compare_tenant_list(pageserver_http_client: ZenithPageserverHttpClient, env: ZenithEnv):
+    tenants = pageserver_http_client.tenant_list()
+    tenants_api = sorted(map(lambda t: cast(str, t['id']), tenants))
 
     res = env.zenith_cli(["tenant", "list"])
     assert res.stderr == ''
@@ -77,11 +75,9 @@ def helper_compare_tenant_list(page_server_cur: PgCursor, env: ZenithEnv):
 
 def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    page_server_conn = env.pageserver.connect()
-    page_server_cur = page_server_conn.cursor()
-
+    pageserver_http_client = env.pageserver.http_client()
     # Initial sanity check
-    helper_compare_tenant_list(page_server_cur, env)
+    helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
     tenant1 = uuid.uuid4().hex
@@ -89,7 +85,7 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     res.check_returncode()
 
     # check tenant1 appeared
-    helper_compare_tenant_list(page_server_cur, env)
+    helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
     tenant2 = uuid.uuid4().hex
@@ -97,7 +93,7 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     res.check_returncode()
 
     # check tenant2 appeared
-    helper_compare_tenant_list(page_server_cur, env)
+    helper_compare_tenant_list(pageserver_http_client, env)
 
     res = env.zenith_cli(["tenant", "list"])
     res.check_returncode()
@@ -106,6 +102,7 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     assert env.initial_tenant in tenants
     assert tenant1 in tenants
     assert tenant2 in tenants
+
 
 def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
     # Start with single sk
