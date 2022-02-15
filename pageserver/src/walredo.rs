@@ -363,25 +363,44 @@ impl PostgresRedoManager {
                 will_init: _,
                 rec: _,
             } => panic!("tried to pass postgres wal record to zenith WAL redo"),
-            ZenithWalRecord::ClearVisibilityMapFlags { heap_blkno, flags } => {
-                // Calculate the VM block and offset that corresponds to the heap block.
-                let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(*heap_blkno);
-                let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(*heap_blkno);
-                let map_offset = pg_constants::HEAPBLK_TO_OFFSET(*heap_blkno);
-
-                // Check that we're modifying the correct VM block.
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno,
+                old_heap_blkno,
+                flags,
+            } => {
+                // sanity check that this is modifying the correct relish
                 assert!(
                     check_forknum(&rel, pg_constants::VISIBILITYMAP_FORKNUM),
                     "ClearVisibilityMapFlags record on unexpected rel {:?}",
                     rel
                 );
-                assert!(map_block == blknum);
+                if let Some(heap_blkno) = *new_heap_blkno {
+                    // Calculate the VM block and offset that corresponds to the heap block.
+                    let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
+                    let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(heap_blkno);
+                    let map_offset = pg_constants::HEAPBLK_TO_OFFSET(heap_blkno);
 
-                // equivalent to PageGetContents(page)
-                let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+                    // Check that we're modifying the correct VM block.
+                    assert!(map_block == blknum);
 
-                let mask: u8 = flags << map_offset;
-                map[map_byte as usize] &= !mask;
+                    // equivalent to PageGetContents(page)
+                    let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+
+                    map[map_byte as usize] &= !(flags << map_offset);
+                }
+
+                // Repeat for 'old_heap_blkno', if any
+                if let Some(heap_blkno) = *old_heap_blkno {
+                    let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
+                    let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(heap_blkno);
+                    let map_offset = pg_constants::HEAPBLK_TO_OFFSET(heap_blkno);
+
+                    assert!(map_block == blknum);
+
+                    let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+
+                    map[map_byte as usize] &= !(flags << map_offset);
+                }
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.

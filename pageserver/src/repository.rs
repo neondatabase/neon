@@ -306,8 +306,12 @@ pub enum ZenithWalRecord {
     /// Native PostgreSQL WAL record
     Postgres { will_init: bool, rec: Bytes },
 
-    /// Set bits in heap visibility map. (heap blkno, flag bits to clear)
-    ClearVisibilityMapFlags { heap_blkno: u32, flags: u8 },
+    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
+    ClearVisibilityMapFlags {
+        new_heap_blkno: Option<u32>,
+        old_heap_blkno: Option<u32>,
+        flags: u8,
+    },
     /// Mark transaction IDs as committed on a CLOG page
     ClogSetCommitted { xids: Vec<TransactionId> },
     /// Mark transaction IDs as aborted on a CLOG page

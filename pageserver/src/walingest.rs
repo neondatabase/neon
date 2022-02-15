@@ -349,49 +349,25 @@ impl WalIngest {
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
+
+        // First, look at the record to determine which VM bits need
+        // to be cleared. If either of these variables is set, we
+        // need to clear the corresponding bits in the visibility map.
+        let mut new_heap_blkno: Option<u32> = None;
+        let mut old_heap_blkno: Option<u32> = None;
         if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
             let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
             if info == pg_constants::XLOG_HEAP_INSERT {
                 let xlrec = XlHeapInsert::decode(buf);
                 assert_eq!(0, buf.remaining());
-                if (xlrec.flags
-                    & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
-                        | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
-                    != 0
-                {
-                    timeline.put_wal_record(
-                        lsn,
-                        RelishTag::Relation(RelTag {
-                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
-                            spcnode: decoded.blocks[0].rnode_spcnode,
-                            dbnode: decoded.blocks[0].rnode_dbnode,
-                            relnode: decoded.blocks[0].rnode_relnode,
-                        }),
-                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
-                        ZenithWalRecord::ClearVisibilityMapFlags {
-                            heap_blkno: decoded.blocks[0].blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                        },
-                    )?;
+                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                    new_heap_blkno = Some(decoded.blocks[0].blkno);
                 }
             } else if info == pg_constants::XLOG_HEAP_DELETE {
                 let xlrec = XlHeapDelete::decode(buf);
                 assert_eq!(0, buf.remaining());
                 if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
-                    timeline.put_wal_record(
-                        lsn,
-                        RelishTag::Relation(RelTag {
-                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
-                            spcnode: decoded.blocks[0].rnode_spcnode,
-                            dbnode: decoded.blocks[0].rnode_dbnode,
-                            relnode: decoded.blocks[0].rnode_relnode,
-                        }),
-                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
-                        ZenithWalRecord::ClearVisibilityMapFlags {
-                            heap_blkno: decoded.blocks[0].blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                        },
-                    )?;
+                    new_heap_blkno = Some(decoded.blocks[0].blkno);
                 }
             } else if info == pg_constants::XLOG_HEAP_UPDATE
                 || info == pg_constants::XLOG_HEAP_HOT_UPDATE
@@ -400,39 +376,15 @@ impl WalIngest {
                 // the size of tuple data is inferred from the size of the record.
                 // we can't validate the remaining number of bytes without parsing
                 // the tuple data.
-                if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
-                    timeline.put_wal_record(
-                        lsn,
-                        RelishTag::Relation(RelTag {
-                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
-                            spcnode: decoded.blocks[0].rnode_spcnode,
-                            dbnode: decoded.blocks[0].rnode_dbnode,
-                            relnode: decoded.blocks[0].rnode_relnode,
-                        }),
-                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
-                        ZenithWalRecord::ClearVisibilityMapFlags {
-                            heap_blkno: decoded.blocks[0].blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                        },
-                    )?;
+                if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                    old_heap_blkno = Some(decoded.blocks[0].blkno);
                 }
-                if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0
-                    && decoded.blocks.len() > 1
-                {
-                    timeline.put_wal_record(
-                        lsn,
-                        RelishTag::Relation(RelTag {
-                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
-                            spcnode: decoded.blocks[1].rnode_spcnode,
-                            dbnode: decoded.blocks[1].rnode_dbnode,
-                            relnode: decoded.blocks[1].rnode_relnode,
-                        }),
-                        decoded.blocks[1].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
-                        ZenithWalRecord::ClearVisibilityMapFlags {
-                            heap_blkno: decoded.blocks[1].blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                        },
-                    )?;
+                if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                    // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                    // non-HOT update where the new tuple goes to different page than
+                    // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                    // set.
+                    new_heap_blkno = Some(decoded.blocks[1].blkno);
                 }
             }
         } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
@@ -448,31 +400,66 @@ impl WalIngest {
                 };
                 assert_eq!(offset_array_len, buf.remaining());
 
-                // FIXME: why also ALL_FROZEN_SET?
-                if (xlrec.flags
-                    & (pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED
-                        | pg_constants::XLH_INSERT_ALL_FROZEN_SET))
-                    != 0
-                {
+                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                    new_heap_blkno = Some(decoded.blocks[0].blkno);
+                }
+            }
+        }
+        // FIXME: What about XLOG_HEAP_LOCK and XLOG_HEAP2_LOCK_UPDATED?
+
+        // Clear the VM bits if required.
+        if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
+            let vm_relish = RelishTag::Relation(RelTag {
+                forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                spcnode: decoded.blocks[0].rnode_spcnode,
+                dbnode: decoded.blocks[0].rnode_dbnode,
+                relnode: decoded.blocks[0].rnode_relnode,
+            });
+
+            let new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+            let old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+            if new_vm_blk == old_vm_blk {
+                // An UPDATE record that needs to clear the bits for both old and the
+                // new page, both of which reside on the same VM page.
+                timeline.put_wal_record(
+                    lsn,
+                    vm_relish,
+                    new_vm_blk.unwrap(),
+                    ZenithWalRecord::ClearVisibilityMapFlags {
+                        new_heap_blkno,
+                        old_heap_blkno,
+                        flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                    },
+                )?;
+            } else {
+                // Clear VM bits for one heap page, or for two pages that reside on
+                // different VM pages.
+                if let Some(new_vm_blk) = new_vm_blk {
                     timeline.put_wal_record(
                         lsn,
-                        RelishTag::Relation(RelTag {
-                            forknum: pg_constants::VISIBILITYMAP_FORKNUM,
-                            spcnode: decoded.blocks[0].rnode_spcnode,
-                            dbnode: decoded.blocks[0].rnode_dbnode,
-                            relnode: decoded.blocks[0].rnode_relnode,
-                        }),
-                        decoded.blocks[0].blkno / pg_constants::HEAPBLOCKS_PER_PAGE as u32,
+                        vm_relish,
+                        new_vm_blk,
                         ZenithWalRecord::ClearVisibilityMapFlags {
-                            heap_blkno: decoded.blocks[0].blkno,
+                            new_heap_blkno,
+                            old_heap_blkno: None,
+                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                        },
+                    )?;
+                }
+                if let Some(old_vm_blk) = old_vm_blk {
+                    timeline.put_wal_record(
+                        lsn,
+                        vm_relish,
+                        old_vm_blk,
+                        ZenithWalRecord::ClearVisibilityMapFlags {
+                            new_heap_blkno: None,
+                            old_heap_blkno,
                             flags: pg_constants::VISIBILITYMAP_VALID_BITS,
                         },
                     )?;
                 }
             }
         }
-
-        // FIXME: What about XLOG_HEAP_LOCK and XLOG_HEAP2_LOCK_UPDATED?
 
         Ok(())
     }
