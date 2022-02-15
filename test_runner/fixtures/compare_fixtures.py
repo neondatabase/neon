@@ -25,6 +25,10 @@ class PgCompare(ABC):
     def pg_bin(self) -> PgBin:
         pass
 
+    @property
+    def zenbenchmark(self) -> ZenithBenchmarker:
+        pass
+
     @abstractmethod
     def flush(self) -> None:
         pass
@@ -56,7 +60,7 @@ class ZenithCompare(PgCompare):
                  pg_bin: PgBin,
                  branch_name):
         self.env = zenith_simple_env
-        self.zenbenchmark = zenbenchmark
+        self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
 
         # We only use one branch and one timeline
@@ -72,6 +76,10 @@ class ZenithCompare(PgCompare):
     @property
     def pg(self):
         return self._pg
+
+    @property
+    def zenbenchmark(self):
+        return self._zenbenchmark
 
     @property
     def pg_bin(self):
@@ -106,7 +114,7 @@ class VanillaCompare(PgCompare):
     """PgCompare interface for vanilla postgres."""
     def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
         self._pg = vanilla_pg
-        self.zenbenchmark = zenbenchmark
+        self._zenbenchmark = zenbenchmark
         vanilla_pg.configure(['shared_buffers=1MB'])
         vanilla_pg.start()
 
@@ -117,6 +125,10 @@ class VanillaCompare(PgCompare):
     @property
     def pg(self):
         return self._pg
+
+    @property
+    def zenbenchmark(self):
+        return self._zenbenchmark
 
     @property
     def pg_bin(self):
