@@ -23,7 +23,7 @@ const CHECKSUM_BASE_OFFSETS: [u32; N_SUMS] = [
  */
 fn checksum_comp(checksum: u32, value: u32) -> u32 {
     let tmp = checksum ^ value;
-    return tmp.wrapping_mul(FNV_PRIME) ^ (tmp >> 17);
+    tmp.wrapping_mul(FNV_PRIME) ^ (tmp >> 17)
 }
 
 /*
@@ -55,8 +55,8 @@ pub fn pg_checksum_page(data: &[u8], blkno: u32) -> u16 {
     }
 
     /* xor fold partial checksums together */
-    for i in 0..N_SUMS {
-        checksum ^= sums[i];
+    for sum in sums {
+        checksum ^= sum;
     }
 
     /* Mix in the block number to detect transposed pages */
@@ -66,5 +66,5 @@ pub fn pg_checksum_page(data: &[u8], blkno: u32) -> u16 {
      * Reduce to a uint16 (to fit in the pd_checksum field) with an offset of
      * one. That avoids checksums of zero, which seems like a good idea.
      */
-    return ((checksum % 65535) + 1) as u16;
+    ((checksum % 65535) + 1) as u16
 }
