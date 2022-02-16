@@ -104,7 +104,7 @@ lazy_static! {
     static ref PERSIST_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_persist_control_file_seconds",
         "Seconds to persist and sync control file, grouped by timeline",
-        &["timeline_id"],
+        &["tenant_id", "timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec");
@@ -538,12 +538,13 @@ pub struct FileStorage {
 impl FileStorage {
     fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> FileStorage {
         let timeline_dir = conf.timeline_dir(zttid);
-        let timelineid_str = format!("{}", zttid);
+        let tenant_id = zttid.tenant_id.to_string();
+        let timeline_id = zttid.timeline_id.to_string();
         FileStorage {
             timeline_dir,
             conf: conf.clone(),
             persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
-                .with_label_values(&[&timelineid_str]),
+                .with_label_values(&[&tenant_id, &timeline_id]),
         }
     }
 
