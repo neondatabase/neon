@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use utils::lsn::Lsn;
+use utils::pg_checksum_page::pg_checksum_page;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
@@ -55,4 +56,12 @@ pub fn page_get_lsn(pg: &[u8]) -> Lsn {
 pub fn page_set_lsn(pg: &mut [u8], lsn: Lsn) {
     pg[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
     pg[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+}
+
+/// Calculate page checksum and stamp it onto the page.
+/// NB: this will zero out and ignore any existing checksum.
+pub fn page_set_checksum(page: &mut [u8], blkno: u32) {
+    page[8..10].copy_from_slice(&[0u8; 2]);
+    let checksum = pg_checksum_page(page, blkno);
+    page[8..10].copy_from_slice(&checksum.to_le_bytes());
 }
