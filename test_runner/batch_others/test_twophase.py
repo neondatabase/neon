@@ -78,8 +78,8 @@ def test_twophase(zenith_simple_env: ZenithEnv):
     cur2.execute("ROLLBACK PREPARED 'insert_two'")
 
     cur2.execute('SELECT * FROM foo')
-    assert cur2.fetchall() == [('one', ), ('three', )]
+    assert cur2.fetchall() == [('one', ), ('three', )]  # type: ignore[comparison-overlap]
 
     # Only one committed insert is visible on the original branch
     cur.execute('SELECT * FROM foo')
-    assert cur.fetchall() == [('three', )]
+    assert cur.fetchall() == [('three', )]  # type: ignore[comparison-overlap]
