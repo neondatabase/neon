@@ -525,11 +525,11 @@ class ZenithEnv:
 
         # generate initial tenant ID here instead of letting 'zenith init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
-        self.initial_tenant = uuid.uuid4().hex
+        self.initial_tenant = uuid.uuid4()
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(f"""
-            default_tenantid = '{self.initial_tenant}'
+            default_tenantid = '{self.initial_tenant.hex}'
         """)
 
         # Create config for pageserver
@@ -586,9 +586,9 @@ sync = false # Disable fsyncs to make the tests go faster
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
-    def create_tenant(self, tenant_id: Optional[str] = None):
+    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
         if tenant_id is None:
-            tenant_id = uuid.uuid4().hex
+            tenant_id = uuid.uuid4()
         self.zenith_cli.create_tenant(tenant_id)
         return tenant_id
 
@@ -799,11 +799,11 @@ class ZenithCli:
         self.env = env
         pass
 
-    def create_tenant(self, tenant_id: Optional[str] = None) -> uuid.UUID:
+    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
         if tenant_id is None:
-            tenant_id = uuid.uuid4().hex
-        self.raw_cli(['tenant', 'create', tenant_id])
-        return uuid.UUID(tenant_id)
+            tenant_id = uuid.uuid4()
+        self.raw_cli(['tenant', 'create', tenant_id.hex])
+        return tenant_id
 
     def list_tenants(self) -> 'subprocess.CompletedProcess[str]':
         return self.raw_cli(['tenant', 'list'])
@@ -811,18 +811,19 @@ class ZenithCli:
     def create_branch(self,
                       branch_name: str,
                       starting_point: str,
-                      tenant_id: Optional[str] = None) -> 'subprocess.CompletedProcess[str]':
+                      tenant_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
         args = ['branch']
         if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id])
+            args.extend(['--tenantid', tenant_id.hex])
         args.extend([branch_name, starting_point])
 
         return self.raw_cli(args)
 
-    def list_branches(self, tenant_id: Optional[str] = None) -> 'subprocess.CompletedProcess[str]':
+    def list_branches(self,
+                      tenant_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
         args = ['branch']
         if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id])
+            args.extend(['--tenantid', tenant_id.hex])
         return self.raw_cli(args)
 
     def init(self, config_toml: str) -> 'subprocess.CompletedProcess[str]':
@@ -851,23 +852,26 @@ class ZenithCli:
     def safekeeper_start(self, name: str) -> 'subprocess.CompletedProcess[str]':
         return self.raw_cli(['safekeeper', 'start', name])
 
-    def safekeeper_stop(self, name: str, immediate=False) -> 'subprocess.CompletedProcess[str]':
+    def safekeeper_stop(self,
+                        name: Optional[str] = None,
+                        immediate=False) -> 'subprocess.CompletedProcess[str]':
         args = ['safekeeper', 'stop']
         if immediate:
             args.extend(['-m', 'immediate'])
-        args.append(name)
+        if name is not None:
+            args.append(name)
         return self.raw_cli(args)
 
     def pg_create(
         self,
         node_name: str,
-        tenant_id: Optional[str] = None,
+        tenant_id: Optional[uuid.UUID] = None,
         timeline_spec: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
         args = ['pg', 'create']
         if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id])
+            args.extend(['--tenantid', tenant_id.hex])
         if port is not None:
             args.append(f'--port={port}')
         args.append(node_name)
@@ -878,13 +882,13 @@ class ZenithCli:
     def pg_start(
         self,
         node_name: str,
-        tenant_id: Optional[str] = None,
+        tenant_id: Optional[uuid.UUID] = None,
         timeline_spec: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
         args = ['pg', 'start']
         if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id])
+            args.extend(['--tenantid', tenant_id.hex])
         if port is not None:
             args.append(f'--port={port}')
         args.append(node_name)
@@ -896,12 +900,12 @@ class ZenithCli:
     def pg_stop(
         self,
         node_name: str,
-        tenant_id: Optional[str] = None,
+        tenant_id: Optional[uuid.UUID] = None,
         destroy=False,
     ) -> 'subprocess.CompletedProcess[str]':
         args = ['pg', 'stop']
         if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id])
+            args.extend(['--tenantid', tenant_id.hex])
         if destroy:
             args.append('--destroy')
         args.append(node_name)
@@ -1156,7 +1160,7 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, env: ZenithEnv, tenant_id: str, port: int):
+    def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
         super().__init__(host='localhost', port=port, username='zenith_admin')
 
         self.env = env
@@ -1188,7 +1192,7 @@ class Postgres(PgProtocol):
                                       port=self.port,
                                       timeline_spec=branch)
         self.node_name = node_name
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
@@ -1219,7 +1223,7 @@ class Postgres(PgProtocol):
     def pg_data_dir_path(self) -> str:
         """ Path to data directory """
         assert self.node_name
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         return os.path.join(self.env.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
@@ -1333,7 +1337,7 @@ class PostgresFactory:
     def create_start(self,
                      node_name: str = "main",
                      branch: Optional[str] = None,
-                     tenant_id: Optional[str] = None,
+                     tenant_id: Optional[uuid.UUID] = None,
                      config_lines: Optional[List[str]] = None) -> Postgres:
 
         pg = Postgres(
@@ -1353,7 +1357,7 @@ class PostgresFactory:
     def create(self,
                node_name: str = "main",
                branch: Optional[str] = None,
-               tenant_id: Optional[str] = None,
+               tenant_id: Optional[uuid.UUID] = None,
                config_lines: Optional[List[str]] = None) -> Postgres:
 
         pg = Postgres(
@@ -1421,7 +1425,9 @@ class Safekeeper:
         self.env.zenith_cli.safekeeper_stop(self.name, immediate)
         return self
 
-    def append_logical_message(self, tenant_id: str, timeline_id: str,
+    def append_logical_message(self,
+                               tenant_id: uuid.UUID,
+                               timeline_id: uuid.UUID,
                                request: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send JSON_CTRL query to append LogicalMessage to WAL and modify
@@ -1431,7 +1437,7 @@ class Safekeeper:
 
         # "replication=0" hacks psycopg not to send additional queries
         # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
+        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id.hex} ztenantid={tenant_id.hex}'"
 
         with closing(psycopg2.connect(connstr)) as conn:
             # server doesn't support transactions
@@ -1601,7 +1607,7 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {pg.tenant_id} {timeline}'  \
+            -c 'basebackup {pg.tenant_id.hex} {timeline}'  \
          | tar -x -C {restored_dir_path}
     """
 

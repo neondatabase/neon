@@ -56,7 +56,7 @@ def test_old_request_lsn(zenith_simple_env: ZenithEnv):
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
     for i in range(10):
-        pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+        pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
         for j in range(100):
             cur.execute('UPDATE foo SET val = val + 1 WHERE id = 1;')
 

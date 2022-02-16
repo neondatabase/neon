@@ -50,7 +50,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     cur.execute("DELETE FROM foo")
 
                     log.info("Running GC before test")
-                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     # remember the number of files
@@ -63,7 +63,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     # removing the old image and delta layer.
                     log.info("Inserting one row and running GC")
                     cur.execute("INSERT INTO foo VALUES (1)")
-                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
@@ -77,7 +77,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
@@ -89,7 +89,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     cur.execute("INSERT INTO foo VALUES (2)")
                     cur.execute("INSERT INTO foo VALUES (3)")
 
-                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain + 2
@@ -98,7 +98,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
 
                     # Run GC again, with no changes in the database. Should not remove anything.
                     log.info("Run GC again, with nothing to do")
-                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
                     assert row['layer_relfiles_total'] == layer_relfiles_remain
@@ -111,7 +111,7 @@ def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
                     log.info("Drop table and run GC again")
                     cur.execute("DROP TABLE foo")
 
-                    pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+                    pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
                     row = pscur.fetchone()
                     print_gc_result(row)
 

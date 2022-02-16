@@ -11,12 +11,12 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 
 def helper_compare_branch_list(pageserver_http_client: ZenithPageserverHttpClient,
                                env: ZenithEnv,
-                               initial_tenant: str):
+                               initial_tenant: uuid.UUID):
     """
     Compare branches list returned by CLI and directly via API.
     Filters out branches created by other tests.
     """
-    branches = pageserver_http_client.branch_list(uuid.UUID(initial_tenant))
+    branches = pageserver_http_client.branch_list(initial_tenant)
     branches_api = sorted(map(lambda b: cast(str, b['name']), branches))
     branches_api = [b for b in branches_api if b.startswith('test_cli_') or b in ('empty', 'main')]
 
@@ -42,7 +42,6 @@ def test_cli_branch_list(zenith_simple_env: ZenithEnv):
     helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
     env.zenith_cli.create_branch("test_cli_branch_list_main", "empty")
     helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
-
 
     # Create a nested branch
     res = env.zenith_cli.create_branch("test_cli_branch_list_nested", "test_cli_branch_list_main")
@@ -76,14 +75,14 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant1 = uuid.uuid4().hex
+    tenant1 = uuid.uuid4()
     env.zenith_cli.create_tenant(tenant1)
 
     # check tenant1 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant2 = uuid.uuid4().hex
+    tenant2 = uuid.uuid4()
     env.zenith_cli.create_tenant(tenant2)
 
     # check tenant2 appeared
@@ -92,9 +91,9 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     res = env.zenith_cli.list_tenants()
     tenants = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
-    assert env.initial_tenant in tenants
-    assert tenant1 in tenants
-    assert tenant2 in tenants
+    assert env.initial_tenant.hex in tenants
+    assert tenant1.hex in tenants
+    assert tenant2.hex in tenants
 
 
 def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
@@ -120,15 +119,13 @@ def test_cli_start_stop(zenith_env_builder: ZenithEnvBuilder):
     env = zenith_env_builder.init()
 
     # Stop default ps/sk
-    res = env.zenith_cli(["pageserver", "stop"])
-    res.check_returncode()
-    res = env.zenith_cli(["safekeeper", "stop"])
-    res.check_returncode()
+    env.zenith_cli.pageserver_stop()
+    env.zenith_cli.safekeeper_stop()
 
     # Default start
-    res = env.zenith_cli(["start"])
+    res = env.zenith_cli.raw_cli(["start"])
     res.check_returncode()
 
     # Default stop
-    res = env.zenith_cli(["stop"])
+    res = env.zenith_cli.raw_cli(["stop"])
     res.check_returncode()

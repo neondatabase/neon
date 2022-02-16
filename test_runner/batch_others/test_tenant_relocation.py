@@ -108,8 +108,8 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     log.info('load thread stopped')
 
 
-def assert_local(pageserver_http_client: ZenithPageserverHttpClient, tenant: str, timeline: str):
-    timeline_detail = pageserver_http_client.timeline_detail(UUID(tenant), UUID(timeline))
+def assert_local(pageserver_http_client: ZenithPageserverHttpClient, tenant: UUID, timeline: str):
+    timeline_detail = pageserver_http_client.timeline_detail(tenant, UUID(timeline))
     assert timeline_detail.get('type') == "Local", timeline_detail
     return timeline_detail
 
@@ -127,7 +127,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
 
-    tenant = env.create_tenant("74ee8b079a0e437eb0afea7d26a07209")
+    tenant = env.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
 
     env.zenith_cli.create_branch("test_tenant_relocation", "main", tenant_id=tenant)
@@ -167,11 +167,11 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     # run checkpoint manually to be sure that data landed in remote storage
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor() as pscur:
-            pscur.execute(f"do_gc {tenant} {timeline}")
+            pscur.execute(f"do_gc {tenant.hex} {timeline}")
 
     # ensure upload is completed
     pageserver_http_client = env.pageserver.http_client()
-    timeline_detail = pageserver_http_client.timeline_detail(UUID(tenant), UUID(timeline))
+    timeline_detail = pageserver_http_client.timeline_detail(tenant, UUID(timeline))
     assert timeline_detail['disk_consistent_lsn'] == timeline_detail['timeline_state']['Ready']
 
     log.info("inititalizing new pageserver")
@@ -194,7 +194,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                                new_pageserver_http_port):
 
         # call to attach timeline to new pageserver
-        new_pageserver_http_client.timeline_attach(UUID(tenant), UUID(timeline))
+        new_pageserver_http_client.timeline_attach(tenant, UUID(timeline))
         # FIXME cannot handle duplicate download requests, subject to fix in https://github.com/zenithdb/zenith/issues/997
         time.sleep(5)
         # new pageserver should in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
@@ -241,7 +241,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
         # detach tenant from old pageserver before we check
         # that all the data is there to be sure that old pageserver
         # is no longer involved, and if it is, we will see the errors
-        pageserver_http_client.timeline_detach(UUID(tenant), UUID(timeline))
+        pageserver_http_client.timeline_detach(tenant, UUID(timeline))
 
         with pg_cur(tenant_pg) as cur:
             # check that data is still there

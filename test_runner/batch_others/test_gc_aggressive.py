@@ -36,7 +36,7 @@ async def gc(env: ZenithEnv, timeline: str):
     psconn = await env.pageserver.connect_async()
 
     while updates_performed < updates_to_perform:
-        await psconn.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+        await psconn.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
 
 
 # At the same time, run UPDATEs and GC

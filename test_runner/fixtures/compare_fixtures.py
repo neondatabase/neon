@@ -65,7 +65,7 @@ class ZenithCompare(PgCompare):
 
         # We only use one branch and one timeline
         self.branch = branch_name
-        self.env.zenith_cli(["branch", self.branch, "empty"])
+        self.env.zenith_cli.create_branch(self.branch, "empty")
         self._pg = self.env.postgres.create_start(self.branch)
         self.timeline = self.pg.safe_psql("SHOW zenith.zenith_timeline")[0][0]
 
@@ -86,7 +86,7 @@ class ZenithCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        self.pscur.execute(f"do_gc {self.env.initial_tenant} {self.timeline} 0")
+        self.pscur.execute(f"do_gc {self.env.initial_tenant.hex} {self.timeline} 0")
 
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record("peak_mem",
