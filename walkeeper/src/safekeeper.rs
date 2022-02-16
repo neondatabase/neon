@@ -422,26 +422,26 @@ lazy_static! {
     static ref FLUSH_LSN_GAUGE: GaugeVec = register_gauge_vec!(
         "safekeeper_flush_lsn",
         "Current flush_lsn, grouped by timeline",
-        &["ztli"]
+        &["tenant_id", "timeline_id"]
     )
     .expect("Failed to register safekeeper_flush_lsn gauge vec");
     static ref COMMIT_LSN_GAUGE: GaugeVec = register_gauge_vec!(
         "safekeeper_commit_lsn",
         "Current commit_lsn (not necessarily persisted to disk), grouped by timeline",
-        &["ztli"]
+        &["tenant_id", "timeline_id"]
     )
     .expect("Failed to register safekeeper_commit_lsn gauge vec");
     static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_bytes",
         "Bytes written to WAL in a single request, grouped by timeline",
-        &["timeline_id"],
+        &["tenant_id", "timeline_id"],
         vec![1.0, 10.0, 100.0, 1024.0, 8192.0, 128.0 * 1024.0, 1024.0 * 1024.0, 10.0 * 1024.0 * 1024.0]
     )
     .expect("Failed to register safekeeper_write_wal_bytes histogram vec");
     static ref WRITE_WAL_SECONDS: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_seconds",
         "Seconds spent writing and syncing WAL to a disk in a single request, grouped by timeline",
-        &["timeline_id"],
+        &["tenant_id", "timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_write_wal_seconds histogram vec");
@@ -455,19 +455,21 @@ struct SafeKeeperMetrics {
 }
 
 struct SafeKeeperMetricsBuilder {
-    ztli: ZTimelineId,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
     flush_lsn: Lsn,
     commit_lsn: Lsn,
 }
 
 impl SafeKeeperMetricsBuilder {
     fn build(self) -> SafeKeeperMetrics {
-        let ztli_str = format!("{}", self.ztli);
+        let tenant_id = self.tenant_id.to_string();
+        let timeline_id = self.timeline_id.to_string();
         let m = SafeKeeperMetrics {
-            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&ztli_str]),
-            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&ztli_str]),
-            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&ztli_str]),
-            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&ztli_str]),
+            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&tenant_id, &timeline_id]),
+            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&tenant_id, &timeline_id]),
+            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&tenant_id, &timeline_id]),
+            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&tenant_id, &timeline_id]),
         };
         m.flush_lsn.set(u64::from(self.flush_lsn) as f64);
         m.commit_lsn.set(u64::from(self.commit_lsn) as f64);
@@ -510,7 +512,8 @@ where
         SafeKeeper {
             flush_lsn,
             metrics: SafeKeeperMetricsBuilder {
-                ztli,
+                tenant_id: state.server.tenant_id,
+                timeline_id: ztli,
                 flush_lsn,
                 commit_lsn: state.commit_lsn,
             }
@@ -581,7 +584,8 @@ where
             .context("failed to persist shared state")?;
 
         self.metrics = SafeKeeperMetricsBuilder {
-            ztli: self.s.server.timeline_id,
+            tenant_id: self.s.server.tenant_id,
+            timeline_id: self.s.server.timeline_id,
             flush_lsn: self.flush_lsn,
             commit_lsn: self.commit_lsn,
         }
