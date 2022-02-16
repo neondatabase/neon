@@ -5,6 +5,8 @@ use std::time::Duration;
 use zenith_utils::zid::ZTenantTimelineId;
 
 pub mod callmemaybe;
+pub mod control_file;
+pub mod control_file_upgrade;
 pub mod handler;
 pub mod http;
 pub mod json_ctrl;
@@ -13,8 +15,8 @@ pub mod s3_offload;
 pub mod safekeeper;
 pub mod send_wal;
 pub mod timeline;
-pub mod upgrade;
 pub mod wal_service;
+pub mod wal_storage;
 
 pub mod defaults {
     use const_format::formatcp;

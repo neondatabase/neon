@@ -3,20 +3,16 @@
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
+use crate::wal_storage::WalReader;
 use anyhow::{bail, Context, Result};
 
-use postgres_ffi::xlog_utils::{
-    get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
-};
+use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, MAX_SEND_SIZE};
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::net::Shutdown;
-use std::path::Path;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
@@ -194,24 +190,6 @@ impl ReplicationConn {
         Ok(())
     }
 
-    /// Helper function for opening a wal file.
-    fn open_wal_file(wal_file_path: &Path) -> Result<File> {
-        // First try to open the .partial file.
-        let mut partial_path = wal_file_path.to_owned();
-        partial_path.set_extension("partial");
-        if let Ok(opened_file) = File::open(&partial_path) {
-            return Ok(opened_file);
-        }
-
-        // If that failed, try it without the .partial extension.
-        File::open(&wal_file_path)
-            .with_context(|| format!("Failed to open WAL file {:?}", wal_file_path))
-            .map_err(|e| {
-                error!("{}", e);
-                e
-            })
-    }
-
     ///
     /// Handle START_REPLICATION replication command
     ///
@@ -311,7 +289,15 @@ impl ReplicationConn {
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
         let mut end_pos = Lsn(0);
-        let mut wal_file: Option<File> = None;
+
+        let mut wal_reader = WalReader::new(
+            spg.conf.timeline_dir(&spg.timeline.get().zttid),
+            wal_seg_size,
+            start_pos,
+        );
+
+        // buffer for wal sending, limited by MAX_SEND_SIZE
+        let mut send_buf = vec![0u8; MAX_SEND_SIZE];
 
         loop {
             if let Some(stop_pos) = stop_pos {
@@ -345,53 +331,26 @@ impl ReplicationConn {
                 }
             }
 
-            // Take the `File` from `wal_file`, or open a new file.
-            let mut file = match wal_file.take() {
-                Some(file) => file,
-                None => {
-                    // Open a new file.
-                    let segno = start_pos.segment_number(wal_seg_size);
-                    let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-                    let wal_file_path = spg
-                        .conf
-                        .timeline_dir(&spg.timeline.get().zttid)
-                        .join(wal_file_name);
-                    Self::open_wal_file(&wal_file_path)?
-                }
-            };
-
-            let xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
-
-            // How much to read and send in message? We cannot cross the WAL file
-            // boundary, and we don't want send more than MAX_SEND_SIZE.
             let send_size = end_pos.checked_sub(start_pos).unwrap().0 as usize;
-            let send_size = min(send_size, wal_seg_size - xlogoff);
-            let send_size = min(send_size, MAX_SEND_SIZE);
+            let send_size = min(send_size, send_buf.len());
 
-            // Read some data from the file.
-            let mut file_buf = vec![0u8; send_size];
-            file.seek(SeekFrom::Start(xlogoff as u64))
-                .and_then(|_| file.read_exact(&mut file_buf))
-                .context("Failed to read data from WAL file")?;
+            let send_buf = &mut send_buf[..send_size];
+
+            // read wal into buffer
+            let send_size = wal_reader.read(send_buf)?;
+            let send_buf = &send_buf[..send_size];
 
             // Write some data to the network socket.
             pgb.write_message(&BeMessage::XLogData(XLogDataBody {
                 wal_start: start_pos.0,
                 wal_end: end_pos.0,
                 timestamp: get_current_timestamp(),
-                data: &file_buf,
+                data: send_buf,
             }))
             .context("Failed to send XLogData")?;
 
             start_pos += send_size as u64;
-
             trace!("sent WAL up to {}", start_pos);
-
-            // Decide whether to reuse this file. If we don't set wal_file here
-            // a new file will be opened next time.
-            if start_pos.segment_offset(wal_seg_size) != 0 {
-                wal_file = Some(file);
-            }
         }
         Ok(())
     }

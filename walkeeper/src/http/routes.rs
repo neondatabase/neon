@@ -7,9 +7,9 @@ use zenith_utils::http::{RequestExt, RouterBuilder};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::ZTenantTimelineId;
 
+use crate::control_file::CreateControlFile;
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
-use crate::timeline::CreateControlFile;
 use crate::timeline::GlobalTimelines;
 use crate::SafeKeeperConf;
 use zenith_utils::http::endpoint;
