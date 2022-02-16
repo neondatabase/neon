@@ -23,6 +23,9 @@ def test_random_writes(zenith_with_baseline: PgCompare):
     # average writes per page.
     load_factor = 1
 
+    # Not sure why but this matters in a weird way. Looking into it
+    n_iterations = 1
+
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             # Create the test table
@@ -56,7 +59,7 @@ def test_random_writes(zenith_with_baseline: PgCompare):
 
             # update random keys
             with env.record_duration('run'):
-                for it in range(3000):
+                for it in range(n_iterations):
                     for i in range(n_writes):
                         key = random.randint(1, n_rows)
                         cur.execute(f"update Big set count=count+1 where pk={key}")
