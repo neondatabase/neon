@@ -57,9 +57,7 @@ async def update_and_gc(env: ZenithEnv, pg: Postgres, timeline: str):
 #
 def test_gc_aggressive(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_gc_aggressive", "empty"])
-
+    env.zenith_cli.create_branch("test_gc_aggressive", "empty")
     pg = env.postgres.create_start('test_gc_aggressive')
     log.info('postgres is running on test_gc_aggressive branch')
 

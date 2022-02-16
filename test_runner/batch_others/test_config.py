@@ -11,8 +11,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 def test_config(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_config", "empty"])
+    env.zenith_cli.create_branch("test_config", "empty")
 
     # change config
     pg = env.postgres.create_start('test_config', config_lines=['log_min_messages=debug1'])

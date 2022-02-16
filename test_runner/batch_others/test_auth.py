@@ -57,7 +57,7 @@ def test_compute_auth_to_pageserver(zenith_env_builder: ZenithEnvBuilder, with_w
     env = zenith_env_builder.init()
 
     branch = f"test_compute_auth_to_pageserver{with_wal_acceptors}"
-    env.zenith_cli(["branch", branch, "main"])
+    env.zenith_cli.create_branch(branch, "main")
 
     pg = env.postgres.create_start(branch)
 

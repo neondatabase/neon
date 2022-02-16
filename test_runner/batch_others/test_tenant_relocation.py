@@ -130,7 +130,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     tenant = env.create_tenant("74ee8b079a0e437eb0afea7d26a07209")
     log.info("tenant to relocate %s", tenant)
 
-    env.zenith_cli(["branch", "test_tenant_relocation", "main", f"--tenantid={tenant}"])
+    env.zenith_cli.create_branch("test_tenant_relocation", "main", tenant_id=tenant)
 
     tenant_pg = env.postgres.create_start(
         "test_tenant_relocation",

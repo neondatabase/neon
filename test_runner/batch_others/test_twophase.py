@@ -11,7 +11,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 def test_twophase(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli(["branch", "test_twophase", "empty"])
+    env.zenith_cli.create_branch("test_twophase", "empty")
 
     pg = env.postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
     log.info("postgres is running on 'test_twophase' branch")
@@ -58,7 +58,7 @@ def test_twophase(zenith_simple_env: ZenithEnv):
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    env.zenith_cli(["branch", "test_twophase_prepared", "test_twophase"])
+    env.zenith_cli.create_branch("test_twophase_prepared", "test_twophase")
 
     # Start compute on the new branch
     pg2 = env.postgres.create_start(

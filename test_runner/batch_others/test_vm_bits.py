@@ -11,8 +11,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 def test_vm_bit_clear(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
 
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_vm_bit_clear", "empty"])
+    env.zenith_cli.create_branch("test_vm_bit_clear", "empty")
     pg = env.postgres.create_start('test_vm_bit_clear')
 
     log.info("postgres is running on 'test_vm_bit_clear' branch")
@@ -36,7 +35,7 @@ def test_vm_bit_clear(zenith_simple_env: ZenithEnv):
     cur.execute('UPDATE vmtest_update SET id = 5000 WHERE id = 1')
 
     # Branch at this point, to test that later
-    env.zenith_cli(["branch", "test_vm_bit_clear_new", "test_vm_bit_clear"])
+    env.zenith_cli.create_branch("test_vm_bit_clear_new", "test_vm_bit_clear")
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server
