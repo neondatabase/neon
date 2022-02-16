@@ -430,11 +430,11 @@ impl PostgresBackend {
                 trace!("got query {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string) {
-                    // ":#" uses the alternate formatting style, which makes anyhow display the
-                    // full cause of the error, not just the top-level context. We don't want to
-                    // send that in the ErrorResponse though, because it's not relevant to the
-                    // compute node logs.
-                    warn!("query handler for {} failed: {:#}", query_string, e);
+                    // ":?" uses the alternate formatting style, which makes anyhow display the
+                    // full cause of the error, not just the top-level context + its trace.
+                    // We don't want to send that in the ErrorResponse though,
+                    // because it's not relevant to the compute node logs.
+                    error!("query handler for '{}' failed: {:?}", query_string, e);
                     self.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?;
                     // TODO: untangle convoluted control flow
                     if e.to_string().contains("failed to run") {
@@ -467,7 +467,7 @@ impl PostgresBackend {
                 trace!("got execute {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string) {
-                    warn!("query handler for {:?} failed: {:#}", query_string, e);
+                    error!("query handler for '{}' failed: {:?}", query_string, e);
                     self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
