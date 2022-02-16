@@ -4,8 +4,6 @@ from contextlib import closing
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Test restarting and recreating a postgres instance

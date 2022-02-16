@@ -3,8 +3,6 @@ import os
 from fixtures.utils import mkdir_if_needed
 from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content, base_dir, pg_distrib_dir
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_pg_regress(zenith_simple_env: ZenithEnv, test_output_dir: str, pg_bin, capsys):
     env = zenith_simple_env

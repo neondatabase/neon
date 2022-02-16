@@ -3,8 +3,6 @@ import os
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Test branching, when a transaction is in prepared state
@@ -80,8 +78,8 @@ def test_twophase(zenith_simple_env: ZenithEnv):
     cur2.execute("ROLLBACK PREPARED 'insert_two'")
 
     cur2.execute('SELECT * FROM foo')
-    assert cur2.fetchall() == [('one', ), ('three', )]  # type: ignore[comparison-overlap]
+    assert cur2.fetchall() == [('one', ), ('three', )]
 
     # Only one committed insert is visible on the original branch
     cur.execute('SELECT * FROM foo')
-    assert cur.fetchall() == [('three', )]  # type: ignore[comparison-overlap]
+    assert cur.fetchall() == [('three', )]

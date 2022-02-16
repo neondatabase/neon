@@ -1,8 +1,6 @@
 from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 # Test subtransactions
 #

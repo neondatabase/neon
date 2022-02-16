@@ -7,8 +7,6 @@ import random
 from fixtures.zenith_fixtures import ZenithEnv, Postgres, Safekeeper
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 # Test configuration
 #
 # Create a table with {num_rows} rows, and perform {updates_to_perform} random

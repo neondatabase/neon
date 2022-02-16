@@ -6,8 +6,6 @@ from contextlib import closing
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Test compute node start after clog truncation

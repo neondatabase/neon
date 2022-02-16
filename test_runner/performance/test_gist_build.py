@@ -5,12 +5,6 @@ from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 from fixtures.log_helper import log
 
-pytest_plugins = (
-    "fixtures.zenith_fixtures",
-    "fixtures.benchmark_fixture",
-    "fixtures.compare_fixtures",
-)
-
 
 #
 # Test buffering GisT build. It WAL-logs the whole relation, in 32-page chunks.

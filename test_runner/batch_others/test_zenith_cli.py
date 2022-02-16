@@ -6,8 +6,6 @@ from psycopg2.extensions import cursor as PgCursor
 from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder
 from typing import cast
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def helper_compare_branch_list(page_server_cur: PgCursor, env: ZenithEnv, initial_tenant: str):
     """

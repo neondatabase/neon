@@ -5,12 +5,6 @@ from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from fixtures.log_helper import log
 
-pytest_plugins = (
-    "fixtures.zenith_fixtures",
-    "fixtures.benchmark_fixture",
-    "fixtures.compare_fixtures",
-)
-
 
 #
 # Run a very short pgbench test.

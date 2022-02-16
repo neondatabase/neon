@@ -5,8 +5,6 @@ import psycopg2
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 import pytest
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.pageserver_auth_enabled = True

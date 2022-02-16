@@ -6,12 +6,6 @@ from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 from io import BufferedReader, RawIOBase
 from itertools import repeat
 
-pytest_plugins = (
-    "fixtures.zenith_fixtures",
-    "fixtures.benchmark_fixture",
-    "fixtures.compare_fixtures",
-)
-
 
 class CopyTestData(RawIOBase):
     def __init__(self, rows: int):

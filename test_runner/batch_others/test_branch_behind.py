@@ -7,8 +7,6 @@ from fixtures.log_helper import log
 from fixtures.utils import print_gc_result
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Create a couple of branches off the main branch, at a historical point in time.

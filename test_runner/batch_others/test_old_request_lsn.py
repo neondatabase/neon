@@ -3,8 +3,6 @@ from contextlib import closing
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Test where Postgres generates a lot of WAL, and it's garbage collected away, but

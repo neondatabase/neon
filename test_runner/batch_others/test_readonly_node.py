@@ -2,8 +2,6 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.zenith_fixtures import ZenithEnv
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Create read-only compute nodes, anchored at historical points in time.

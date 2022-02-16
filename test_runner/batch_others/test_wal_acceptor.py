@@ -17,8 +17,6 @@ from fixtures.utils import lsn_to_hex, mkdir_if_needed
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 # basic test, write something in setup with wal acceptors, ensure that commits
 # succeed and data is written

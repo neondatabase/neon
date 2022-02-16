@@ -26,8 +26,6 @@ bencmark, and then record the result by calling zenbenchmark.record. For example
 import timeit
 from fixtures.zenith_fixtures import ZenithEnv
 
-pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
-
 def test_mybench(zenith_simple_env: env, zenbenchmark):
 
     # Initialize the test
@@ -40,6 +38,8 @@ def test_mybench(zenith_simple_env: env, zenbenchmark):
     # Record another measurement
     zenbenchmark.record('speed_of_light', 300000, 'km/s')
 
+There's no need to import this file to use it. It should be declared as a plugin
+inside conftest.py, and that makes it available to all tests.
 
 You can measure multiple things in one test, and record each one with a separate
 call to zenbenchmark. For example, you could time the bulk loading that happens

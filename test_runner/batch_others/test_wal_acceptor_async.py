@@ -9,7 +9,6 @@ from fixtures.utils import lsn_from_hex, lsn_to_hex
 from typing import List
 
 log = getLogger('root.wal_acceptor_async')
-pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 class BankClient(object):

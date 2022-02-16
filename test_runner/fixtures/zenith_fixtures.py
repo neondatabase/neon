@@ -44,9 +44,8 @@ the standard pytest.fixture with some extra behavior.
 There are several environment variables that can control the running of tests:
 ZENITH_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
 
-To use fixtures in a test file, add this line of code:
-
->>> pytest_plugins = ("fixtures.zenith_fixtures")
+There's no need to import this file to use it. It should be declared as a plugin
+inside conftest.py, and that makes it available to all tests.
 
 Don't import functions from this file, or pytest will emit warnings. Instead
 put directly-importable functions into utils.py or another separate file.

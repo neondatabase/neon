@@ -11,12 +11,6 @@ from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from fixtures.compare_fixtures import PgCompare
 import pytest
 
-pytest_plugins = (
-    "fixtures.zenith_fixtures",
-    "fixtures.benchmark_fixture",
-    "fixtures.compare_fixtures",
-)
-
 
 @pytest.mark.parametrize('rows', [
     pytest.param(100000),

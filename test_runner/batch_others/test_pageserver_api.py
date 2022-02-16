@@ -6,8 +6,6 @@ import requests
 from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 from typing import cast
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_status_psql(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
