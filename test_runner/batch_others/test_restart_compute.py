@@ -17,7 +17,7 @@ def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptor
         zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init()
 
-    env.zenith_cli(["branch", "test_restart_compute", "main"])
+    env.zenith_cli.create_branch("test_restart_compute", "main")
 
     pg = env.postgres.create_start('test_restart_compute')
     log.info("postgres is running on 'test_restart_compute' branch")

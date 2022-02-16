@@ -16,7 +16,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli(["branch", "test_layerfiles_gc", "empty"])
+    env.zenith_cli.create_branch("test_layerfiles_gc", "empty")
     pg = env.postgres.create_start('test_layerfiles_gc')
 
     with closing(pg.connect()) as conn:

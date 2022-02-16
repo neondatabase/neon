@@ -10,7 +10,7 @@ import time
 def test_timeline_size(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
     # Branch at the point where only 100 rows were inserted
-    env.zenith_cli(["branch", "test_timeline_size", "empty"])
+    env.zenith_cli.create_branch("test_timeline_size", "empty")
 
     client = env.pageserver.http_client()
     res = client.branch_detail(UUID(env.initial_tenant), "test_timeline_size")
@@ -68,7 +68,7 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
 def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init()
-    env.zenith_cli(["branch", "test_timeline_size_quota", "main"])
+    env.zenith_cli.create_branch("test_timeline_size_quota", "main")
 
     client = env.pageserver.http_client()
     res = client.branch_detail(UUID(env.initial_tenant), "test_timeline_size_quota")

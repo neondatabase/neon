@@ -11,7 +11,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 def test_createuser(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli(["branch", "test_createuser", "empty"])
+    env.zenith_cli.create_branch("test_createuser", "empty")
 
     pg = env.postgres.create_start('test_createuser')
     log.info("postgres is running on 'test_createuser' branch")
@@ -27,7 +27,7 @@ def test_createuser(zenith_simple_env: ZenithEnv):
             lsn = cur.fetchone()[0]
 
     # Create a branch
-    env.zenith_cli(["branch", "test_createuser2", "test_createuser@" + lsn])
+    env.zenith_cli.create_branch("test_createuser2", "test_createuser@" + lsn)
 
     pg2 = env.postgres.create_start('test_createuser2')
 

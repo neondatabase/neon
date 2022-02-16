@@ -517,6 +517,7 @@ class ZenithEnv:
         self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.s3_mock_server
+        self.zenith_cli = ZenithCli(env=self)
 
         self.postgres = PostgresFactory(self)
 
@@ -573,15 +574,7 @@ sync = false # Disable fsyncs to make the tests go faster
 
         log.info(f"Config: {toml}")
 
-        # Run 'zenith init' using the config file we constructed
-        with tempfile.NamedTemporaryFile(mode='w+') as tmp:
-            tmp.write(toml)
-            tmp.flush()
-
-            cmd = ['init', f'--config={tmp.name}']
-            append_pageserver_param_overrides(cmd, config.pageserver_remote_storage)
-
-            self.zenith_cli(cmd)
+        self.zenith_cli.init(toml)
 
         # Start up the page server and all the safekeepers
         self.pageserver.start()
@@ -596,65 +589,8 @@ sync = false # Disable fsyncs to make the tests go faster
     def create_tenant(self, tenant_id: Optional[str] = None):
         if tenant_id is None:
             tenant_id = uuid.uuid4().hex
-        res = self.zenith_cli(['tenant', 'create', tenant_id])
-        res.check_returncode()
+        self.zenith_cli.create_tenant(tenant_id)
         return tenant_id
-
-    def zenith_cli(self, arguments: List[str]) -> 'subprocess.CompletedProcess[str]':
-        """
-        Run "zenith" with the specified arguments.
-
-        Arguments must be in list form, e.g. ['pg', 'create']
-
-        Return both stdout and stderr, which can be accessed as
-
-        >>> result = env.zenith_cli(...)
-        >>> assert result.stderr == ""
-        >>> log.info(result.stdout)
-        """
-
-        assert type(arguments) == list
-
-        bin_zenith = os.path.join(str(zenith_binpath), 'zenith')
-
-        args = [bin_zenith] + arguments
-        log.info('Running command "{}"'.format(' '.join(args)))
-        log.info(f'Running in "{self.repo_dir}"')
-
-        env_vars = os.environ.copy()
-        env_vars['ZENITH_REPO_DIR'] = str(self.repo_dir)
-        env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
-
-        if self.rust_log_override is not None:
-            env_vars['RUST_LOG'] = self.rust_log_override
-
-        # Pass coverage settings
-        var = 'LLVM_PROFILE_FILE'
-        val = os.environ.get(var)
-        if val:
-            env_vars[var] = val
-
-        # Intercept CalledProcessError and print more info
-        try:
-            res = subprocess.run(args,
-                                 env=env_vars,
-                                 check=True,
-                                 universal_newlines=True,
-                                 stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE)
-            log.info(f"Run success: {res.stdout}")
-        except subprocess.CalledProcessError as exc:
-            # this way command output will be in recorded and shown in CI in failure message
-            msg = f"""\
-            Run failed: {exc}
-              stdout: {exc.stdout}
-              stderr: {exc.stderr}
-            """
-            log.info(msg)
-
-            raise Exception(msg) from exc
-
-        return res
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
@@ -683,7 +619,7 @@ def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
         env = builder.init()
 
         # For convenience in tests, create a branch from the freshly-initialized cluster.
-        env.zenith_cli(["branch", "empty", "main"])
+        env.zenith_cli.create_branch("empty", "main")
 
         # Return the builder to the caller
         yield env
@@ -817,7 +753,7 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+    def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
             f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}")
         self.verbose_error(res)
@@ -854,6 +790,185 @@ class S3Storage:
 RemoteStorage = Union[LocalFsStorage, S3Storage]
 
 
+class ZenithCli:
+    """
+    A typed wrapper around the `zenith` CLI tool.
+    Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
+    """
+    def __init__(self, env: ZenithEnv) -> None:
+        self.env = env
+        pass
+
+    def create_tenant(self, tenant_id: Optional[str] = None) -> uuid.UUID:
+        if tenant_id is None:
+            tenant_id = uuid.uuid4().hex
+        self.raw_cli(['tenant', 'create', tenant_id])
+        return uuid.UUID(tenant_id)
+
+    def list_tenants(self) -> 'subprocess.CompletedProcess[str]':
+        return self.raw_cli(['tenant', 'list'])
+
+    def create_branch(self,
+                      branch_name: str,
+                      starting_point: str,
+                      tenant_id: Optional[str] = None) -> 'subprocess.CompletedProcess[str]':
+        args = ['branch']
+        if tenant_id is not None:
+            args.extend(['--tenantid', tenant_id])
+        args.extend([branch_name, starting_point])
+
+        return self.raw_cli(args)
+
+    def list_branches(self, tenant_id: Optional[str] = None) -> 'subprocess.CompletedProcess[str]':
+        args = ['branch']
+        if tenant_id is not None:
+            args.extend(['--tenantid', tenant_id])
+        return self.raw_cli(args)
+
+    def init(self, config_toml: str) -> 'subprocess.CompletedProcess[str]':
+        with tempfile.NamedTemporaryFile(mode='w+') as tmp:
+            tmp.write(config_toml)
+            tmp.flush()
+
+            cmd = ['init', f'--config={tmp.name}']
+            append_pageserver_param_overrides(cmd, self.env.pageserver.remote_storage)
+
+            return self.raw_cli(cmd)
+
+    def pageserver_start(self) -> 'subprocess.CompletedProcess[str]':
+        start_args = ['pageserver', 'start']
+        append_pageserver_param_overrides(start_args, self.env.pageserver.remote_storage)
+        return self.raw_cli(start_args)
+
+    def pageserver_stop(self, immediate=False) -> 'subprocess.CompletedProcess[str]':
+        cmd = ['pageserver', 'stop']
+        if immediate:
+            cmd.extend(['-m', 'immediate'])
+
+        log.info(f"Stopping pageserver with {cmd}")
+        return self.raw_cli(cmd)
+
+    def safekeeper_start(self, name: str) -> 'subprocess.CompletedProcess[str]':
+        return self.raw_cli(['safekeeper', 'start', name])
+
+    def safekeeper_stop(self, name: str, immediate=False) -> 'subprocess.CompletedProcess[str]':
+        args = ['safekeeper', 'stop']
+        if immediate:
+            args.extend(['-m', 'immediate'])
+        args.append(name)
+        return self.raw_cli(args)
+
+    def pg_create(
+        self,
+        node_name: str,
+        tenant_id: Optional[str] = None,
+        timeline_spec: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> 'subprocess.CompletedProcess[str]':
+        args = ['pg', 'create']
+        if tenant_id is not None:
+            args.extend(['--tenantid', tenant_id])
+        if port is not None:
+            args.append(f'--port={port}')
+        args.append(node_name)
+        if timeline_spec is not None:
+            args.append(timeline_spec)
+        return self.raw_cli(args)
+
+    def pg_start(
+        self,
+        node_name: str,
+        tenant_id: Optional[str] = None,
+        timeline_spec: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> 'subprocess.CompletedProcess[str]':
+        args = ['pg', 'start']
+        if tenant_id is not None:
+            args.extend(['--tenantid', tenant_id])
+        if port is not None:
+            args.append(f'--port={port}')
+        args.append(node_name)
+        if timeline_spec is not None:
+            args.append(timeline_spec)
+
+        return self.raw_cli(args)
+
+    def pg_stop(
+        self,
+        node_name: str,
+        tenant_id: Optional[str] = None,
+        destroy=False,
+    ) -> 'subprocess.CompletedProcess[str]':
+        args = ['pg', 'stop']
+        if tenant_id is not None:
+            args.extend(['--tenantid', tenant_id])
+        if destroy:
+            args.append('--destroy')
+        args.append(node_name)
+
+        return self.raw_cli(args)
+
+    def raw_cli(self,
+                arguments: List[str],
+                check_return_code=True) -> 'subprocess.CompletedProcess[str]':
+        """
+        Run "zenith" with the specified arguments.
+
+        Arguments must be in list form, e.g. ['pg', 'create']
+
+        Return both stdout and stderr, which can be accessed as
+
+        >>> result = env.zenith_cli.raw_cli(...)
+        >>> assert result.stderr == ""
+        >>> log.info(result.stdout)
+        """
+
+        assert type(arguments) == list
+
+        bin_zenith = os.path.join(str(zenith_binpath), 'zenith')
+
+        args = [bin_zenith] + arguments
+        log.info('Running command "{}"'.format(' '.join(args)))
+        log.info(f'Running in "{self.env.repo_dir}"')
+
+        env_vars = os.environ.copy()
+        env_vars['ZENITH_REPO_DIR'] = str(self.env.repo_dir)
+        env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
+
+        if self.env.rust_log_override is not None:
+            env_vars['RUST_LOG'] = self.env.rust_log_override
+
+        # Pass coverage settings
+        var = 'LLVM_PROFILE_FILE'
+        val = os.environ.get(var)
+        if val:
+            env_vars[var] = val
+
+        # Intercept CalledProcessError and print more info
+        try:
+            res = subprocess.run(args,
+                                 env=env_vars,
+                                 check=True,
+                                 universal_newlines=True,
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE)
+            log.info(f"Run success: {res.stdout}")
+        except subprocess.CalledProcessError as exc:
+            # this way command output will be in recorded and shown in CI in failure message
+            msg = f"""\
+            Run failed: {exc}
+              stdout: {exc.stdout}
+              stderr: {exc.stderr}
+            """
+            log.info(msg)
+
+            raise Exception(msg) from exc
+
+        if check_return_code:
+            res.check_returncode()
+        return res
+
+
 class ZenithPageserver(PgProtocol):
     """
     An object representing a running pageserver.
@@ -878,10 +993,7 @@ class ZenithPageserver(PgProtocol):
         """
         assert self.running == False
 
-        start_args = ['pageserver', 'start']
-        append_pageserver_param_overrides(start_args, self.remote_storage)
-
-        self.env.zenith_cli(start_args)
+        self.env.zenith_cli.pageserver_start()
         self.running = True
         return self
 
@@ -890,13 +1002,8 @@ class ZenithPageserver(PgProtocol):
         Stop the page server.
         Returns self.
         """
-        cmd = ['pageserver', 'stop']
-        if immediate:
-            cmd.extend(['-m', 'immediate'])
-
-        log.info(f"Stopping pageserver with {cmd}")
         if self.running:
-            self.env.zenith_cli(cmd)
+            self.env.zenith_cli.pageserver_stop(immediate)
             self.running = False
 
         return self
@@ -1076,14 +1183,10 @@ class Postgres(PgProtocol):
         if branch is None:
             branch = node_name
 
-        self.env.zenith_cli([
-            'pg',
-            'create',
-            f'--tenantid={self.tenant_id}',
-            f'--port={self.port}',
-            node_name,
-            branch
-        ])
+        self.env.zenith_cli.pg_create(node_name,
+                                      tenant_id=self.tenant_id,
+                                      port=self.port,
+                                      timeline_spec=branch)
         self.node_name = node_name
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
@@ -1104,8 +1207,9 @@ class Postgres(PgProtocol):
 
         log.info(f"Starting postgres node {self.node_name}")
 
-        run_result = self.env.zenith_cli(
-            ['pg', 'start', f'--tenantid={self.tenant_id}', f'--port={self.port}', self.node_name])
+        run_result = self.env.zenith_cli.pg_start(self.node_name,
+                                                  tenant_id=self.tenant_id,
+                                                  port=self.port)
         self.running = True
 
         log.info(f"stdout: {run_result.stdout}")
@@ -1175,7 +1279,7 @@ class Postgres(PgProtocol):
 
         if self.running:
             assert self.node_name is not None
-            self.env.zenith_cli(['pg', 'stop', self.node_name, f'--tenantid={self.tenant_id}'])
+            self.env.zenith_cli.pg_stop(self.node_name, tenant_id=self.tenant_id)
             self.running = False
 
         return self
@@ -1187,8 +1291,7 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        self.env.zenith_cli(
-            ['pg', 'stop', '--destroy', self.node_name, f'--tenantid={self.tenant_id}'])
+        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, destroy=True)
         self.node_name = None
 
         return self
@@ -1295,7 +1398,7 @@ class Safekeeper:
     auth_token: Optional[str] = None
 
     def start(self) -> 'Safekeeper':
-        self.env.zenith_cli(['safekeeper', 'start', self.name])
+        self.env.zenith_cli.safekeeper_start(self.name)
 
         # wait for wal acceptor start by checking its status
         started_at = time.time()
@@ -1314,13 +1417,8 @@ class Safekeeper:
         return self
 
     def stop(self, immediate=False) -> 'Safekeeper':
-        cmd = ['safekeeper', 'stop']
-        if immediate:
-            cmd.extend(['-m', 'immediate'])
-        cmd.append(self.name)
-
         log.info('Stopping safekeeper {}'.format(self.name))
-        self.env.zenith_cli(cmd)
+        self.env.zenith_cli.safekeeper_stop(self.name, immediate)
         return self
 
     def append_logical_message(self, tenant_id: str, timeline_id: str,

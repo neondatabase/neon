@@ -26,7 +26,7 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init()
 
-    env.zenith_cli(["branch", "test_wal_acceptors_normal_work", "main"])
+    env.zenith_cli.create_branch("test_wal_acceptors_normal_work", "main")
 
     pg = env.postgres.create_start('test_wal_acceptors_normal_work')
 
@@ -62,7 +62,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     # start postgres on each timeline
     pgs = []
     for branch in branches:
-        env.zenith_cli(["branch", branch, "main"])
+        env.zenith_cli.create_branch(branch, "main")
         pgs.append(env.postgres.create_start(branch))
 
     tenant_id = uuid.UUID(env.initial_tenant)
@@ -185,7 +185,7 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = n_acceptors
     env = zenith_env_builder.init()
 
-    env.zenith_cli(["branch", "test_wal_acceptors_restarts", "main"])
+    env.zenith_cli.create_branch("test_wal_acceptors_restarts", "main")
     pg = env.postgres.create_start('test_wal_acceptors_restarts')
 
     # we rely upon autocommit after each statement
@@ -222,7 +222,7 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
     env = zenith_env_builder.init()
 
-    env.zenith_cli(["branch", "test_wal_acceptors_unavailability", "main"])
+    env.zenith_cli.create_branch("test_wal_acceptors_unavailability", "main")
     pg = env.postgres.create_start('test_wal_acceptors_unavailability')
 
     # we rely upon autocommit after each statement
@@ -293,7 +293,7 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init()
 
-    env.zenith_cli(["branch", "test_wal_acceptors_race_conditions", "main"])
+    env.zenith_cli.create_branch("test_wal_acceptors_race_conditions", "main")
     pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
 
     # we rely upon autocommit after each statement
@@ -458,7 +458,7 @@ def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init()
 
-    env.zenith_cli(["branch", "test_timeline_status", "main"])
+    env.zenith_cli.create_branch("test_timeline_status", "main")
     pg = env.postgres.create_start('test_timeline_status')
 
     wa = env.safekeepers[0]
@@ -636,7 +636,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
 
     zenith_env_builder.num_safekeepers = 4
     env = zenith_env_builder.init()
-    env.zenith_cli(["branch", "test_replace_safekeeper", "main"])
+    env.zenith_cli.create_branch("test_replace_safekeeper", "main")
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()

@@ -33,12 +33,10 @@ def test_bulk_tenant_create(
         start = timeit.default_timer()
 
         tenant = env.create_tenant()
-        env.zenith_cli([
-            "branch",
+        env.zenith_cli.create_branch(
             f"test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}",
             "main",
-            f"--tenantid={tenant}"
-        ])
+            tenant_id=tenant)
 
         # FIXME: We used to start new safekeepers here. Did that make sense? Should we do it now?
         #if use_wal_acceptors == 'with_wa':

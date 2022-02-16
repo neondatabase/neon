@@ -13,7 +13,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 def test_readonly_node(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli(["branch", "test_readonly_node", "empty"])
+    env.zenith_cli.create_branch("test_readonly_node", "empty")
 
     pgmain = env.postgres.create_start('test_readonly_node')
     log.info("postgres is running on 'test_readonly_node' branch")
@@ -88,4 +88,5 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     # Create node at pre-initdb lsn
     with pytest.raises(Exception, match="invalid basebackup lsn"):
         # compute node startup with invalid LSN should fail
-        env.zenith_cli(["pg", "start", "test_readonly_node_preinitdb", "test_readonly_node@0/42"])
+        env.zenith_cli.pg_start("test_readonly_node_preinitdb",
+                                timeline_spec="test_readonly_node@0/42")
