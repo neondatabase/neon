@@ -814,7 +814,7 @@ python-versions = "*"
 
 [[package]]
 name = "moto"
-version = "3.0.0"
+version = "3.0.3"
 description = "A library that allows your python tests to easily mock out the boto library"
 category = "main"
 optional = false
@@ -849,6 +849,7 @@ xmltodict = "*"
 [package.extras]
 all = ["PyYAML (>=5.1)", "python-jose[cryptography] (>=3.1.0,<4.0.0)", "ecdsa (!=0.15)", "docker (>=2.5.1)", "graphql-core", "jsondiff (>=1.1.2)", "aws-xray-sdk (>=0.93,!=0.96)", "idna (>=2.5,<4)", "cfn-lint (>=0.4.0)", "sshpubkeys (>=3.1.0)", "setuptools"]
 apigateway = ["python-jose[cryptography] (>=3.1.0,<4.0.0)", "ecdsa (!=0.15)"]
+apigatewayv2 = ["PyYAML (>=5.1)"]
 appsync = ["graphql-core"]
 awslambda = ["docker (>=2.5.1)"]
 batch = ["docker (>=2.5.1)"]
@@ -1058,6 +1059,20 @@ python-versions = ">=3.6"
 [package.dependencies]
 py = "*"
 pytest = ">=3.10"
+
+[[package]]
+name = "pytest-skip-slow"
+version = "0.0.2"
+description = "A pytest plugin to skip `@pytest.mark.slow` tests by default. "
+category = "main"
+optional = false
+python-versions = ">=3.7"
+
+[package.dependencies]
+pytest = ">=6.2.0"
+
+[package.extras]
+test = ["tox"]
 
 [[package]]
 name = "pytest-xdist"
@@ -1352,7 +1367,7 @@ testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "pytest-flake8", "pytest-
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.7"
-content-hash = "0fa6c9377fbc827240d18d8b7e3742def37e90fc3277fddf8525d82dabd13090"
+content-hash = "d59ea97fb78d13dcede2719734c55b7d6b9dcc7f86001a9228c8808ed6e58eb7"
 
 [metadata.files]
 aiopg = [
@@ -1666,8 +1681,8 @@ mccabe = [
     {file = "mccabe-0.6.1.tar.gz", hash = "sha256:dd8d182285a0fe56bace7f45b5e7d1a6ebcbf524e8f3bd87eb0f125271b8831f"},
 ]
 moto = [
-    {file = "moto-3.0.0-py2.py3-none-any.whl", hash = "sha256:762d33bbad3642c687f6495e69331318bef43f9aa662174397706ec3ad2a3578"},
-    {file = "moto-3.0.0.tar.gz", hash = "sha256:d6b00a2663290e7ebb06823d5ffcb124c8dc9bf526b878539ef7c4a377fd8255"},
+    {file = "moto-3.0.3-py2.py3-none-any.whl", hash = "sha256:445a574395b8a43a249ae0f932bf10c5cc677054198bfa1ff92e6fbd60e72c38"},
+    {file = "moto-3.0.3.tar.gz", hash = "sha256:fa3fbdc22c55d7e70b407e2f2639c48ac82b074f472b167609405c0c1e3a2ccb"},
 ]
 mypy = [
     {file = "mypy-0.910-cp35-cp35m-macosx_10_9_x86_64.whl", hash = "sha256:a155d80ea6cee511a3694b108c4494a39f42de11ee4e61e72bc424c490e46457"},
@@ -1841,6 +1856,10 @@ pytest = [
 pytest-forked = [
     {file = "pytest-forked-1.4.0.tar.gz", hash = "sha256:8b67587c8f98cbbadfdd804539ed5455b6ed03802203485dd2f53c1422d7440e"},
     {file = "pytest_forked-1.4.0-py3-none-any.whl", hash = "sha256:bbbb6717efc886b9d64537b41fb1497cfaf3c9601276be8da2cccfea5a3c8ad8"},
+]
+pytest-skip-slow = [
+    {file = "pytest-skip-slow-0.0.2.tar.gz", hash = "sha256:06b8353d8b1e2168c22b8c34172329b4f592eea648dac141099cc881fd466718"},
+    {file = "pytest_skip_slow-0.0.2-py3-none-any.whl", hash = "sha256:9029eb8c258e6c3c4b499848d864c9e9c48499d8b8bf5bb413044f59874cfd06"},
 ]
 pytest-xdist = [
     {file = "pytest-xdist-2.5.0.tar.gz", hash = "sha256:4580deca3ff04ddb2ac53eba39d76cb5dd5edeac050cb6fbc768b0dd712b4edf"},

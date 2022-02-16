@@ -21,6 +21,7 @@ types-psycopg2 = "^2.9.6"
 boto3 = "^1.20.40"
 boto3-stubs = "^1.20.40"
 moto = {version = "^3.0.0", extras = ["server"]}
+pytest-skip-slow = "^0.0.2"
 
 [tool.poetry.dev-dependencies]
 yapf = "==0.31.0"
