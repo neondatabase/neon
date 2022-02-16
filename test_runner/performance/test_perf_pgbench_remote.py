@@ -9,8 +9,6 @@ import calendar
 import timeit
 import os
 
-pytest_plugins = ("fixtures.benchmark_fixture", )
-
 
 def utc_now_timestamp() -> int:
     return calendar.timegm(datetime.utcnow().utctimetuple())

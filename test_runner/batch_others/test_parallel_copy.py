@@ -5,8 +5,6 @@ import subprocess
 from fixtures.zenith_fixtures import ZenithEnv, Postgres
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 async def repeat_bytes(buf, repetitions: int):
     for i in range(repetitions):

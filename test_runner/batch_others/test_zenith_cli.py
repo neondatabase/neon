@@ -6,8 +6,6 @@ from psycopg2.extensions import cursor as PgCursor
 from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 from typing import cast
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def helper_compare_branch_list(pageserver_http_client: ZenithPageserverHttpClient,
                                env: ZenithEnv,

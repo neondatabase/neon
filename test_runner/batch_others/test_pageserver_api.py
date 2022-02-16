@@ -4,8 +4,6 @@ from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserv
 from typing import cast
 import pytest, psycopg2
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
     client.check_status()

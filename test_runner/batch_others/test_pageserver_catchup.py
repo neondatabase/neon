@@ -7,8 +7,6 @@ from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 # Test safekeeper sync and pageserver catch up
 # while initial compute node is down and pageserver is lagging behind safekeepers.

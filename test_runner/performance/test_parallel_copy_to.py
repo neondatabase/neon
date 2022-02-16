@@ -6,12 +6,6 @@ from fixtures.log_helper import log
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 
-pytest_plugins = (
-    "fixtures.zenith_fixtures",
-    "fixtures.benchmark_fixture",
-    "fixtures.compare_fixtures",
-)
-
 
 async def repeat_bytes(buf, repetitions: int):
     for i in range(repetitions):

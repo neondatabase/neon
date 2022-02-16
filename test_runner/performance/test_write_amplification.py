@@ -17,12 +17,6 @@ from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 from fixtures.log_helper import log
 
-pytest_plugins = (
-    "fixtures.zenith_fixtures",
-    "fixtures.benchmark_fixture",
-    "fixtures.compare_fixtures",
-)
-
 
 def test_write_amplification(zenith_with_baseline: PgCompare):
     env = zenith_with_baseline

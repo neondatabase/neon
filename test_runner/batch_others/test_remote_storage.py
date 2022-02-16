@@ -9,8 +9,6 @@ from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 import pytest
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Tests that a piece of data is backed up and restored correctly:

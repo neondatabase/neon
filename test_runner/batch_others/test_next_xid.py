@@ -5,8 +5,6 @@ import time
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.

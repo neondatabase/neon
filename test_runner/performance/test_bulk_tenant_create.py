@@ -4,8 +4,6 @@ import pytest
 
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 
-pytest_plugins = ("fixtures.benchmark_fixture")
-
 # Run bulk tenant creation test.
 #
 # Collects metrics:

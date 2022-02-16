@@ -3,8 +3,6 @@ import os
 
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
-
-pytest_plugins = ("fixtures.zenith_fixtures")
 """
 Use this test to see what happens when tests fail.
 

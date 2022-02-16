@@ -1,8 +1,6 @@
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin):
     env = zenith_simple_env

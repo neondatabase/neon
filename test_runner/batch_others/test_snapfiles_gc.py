@@ -5,8 +5,6 @@ from fixtures.utils import print_gc_result
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Test Garbage Collection of old layer files

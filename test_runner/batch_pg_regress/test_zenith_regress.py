@@ -7,8 +7,6 @@ from fixtures.zenith_fixtures import (ZenithEnv,
                                       pg_distrib_dir)
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_zenith_regress(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
     env = zenith_simple_env
