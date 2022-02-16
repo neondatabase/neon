@@ -13,7 +13,7 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
     env.zenith_cli.create_branch("test_timeline_size", "empty")
 
     client = env.pageserver.http_client()
-    res = client.branch_detail(UUID(env.initial_tenant), "test_timeline_size")
+    res = client.branch_detail(env.initial_tenant, "test_timeline_size")
     assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
     pgmain = env.postgres.create_start("test_timeline_size")
@@ -31,11 +31,11 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
                     FROM generate_series(1, 10) g
             """)
 
-            res = client.branch_detail(UUID(env.initial_tenant), "test_timeline_size")
+            res = client.branch_detail(env.initial_tenant, "test_timeline_size")
             assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
             cur.execute("TRUNCATE foo")
 
-            res = client.branch_detail(UUID(env.initial_tenant), "test_timeline_size")
+            res = client.branch_detail(env.initial_tenant, "test_timeline_size")
             assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
 
@@ -71,7 +71,7 @@ def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
     env.zenith_cli.create_branch("test_timeline_size_quota", "main")
 
     client = env.pageserver.http_client()
-    res = client.branch_detail(UUID(env.initial_tenant), "test_timeline_size_quota")
+    res = client.branch_detail(env.initial_tenant, "test_timeline_size_quota")
     assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
     pgmain = env.postgres.create_start(

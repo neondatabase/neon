@@ -1,19 +1,17 @@
 import json
 from uuid import uuid4, UUID
-import pytest
-import psycopg2
-import requests
 from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 from typing import cast
+import pytest, psycopg2
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
 
-def check_client(client: ZenithPageserverHttpClient, initial_tenant: str):
+def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
     client.check_status()
 
     # check initial tenant is there
-    assert initial_tenant in {t['id'] for t in client.tenant_list()}
+    assert initial_tenant.hex in {t['id'] for t in client.tenant_list()}
 
     # create new tenant and check it is also there
     tenant_id = uuid4()

@@ -119,7 +119,7 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
             # call gc to advace latest_gc_cutoff_lsn
-            pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+            pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
             row = pscur.fetchone()
             print_gc_result(row)
 

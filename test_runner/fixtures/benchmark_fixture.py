@@ -8,6 +8,7 @@ import timeit
 import calendar
 import enum
 from datetime import datetime
+import uuid
 import pytest
 from _pytest.config import Config
 from _pytest.terminal import TerminalReporter
@@ -276,11 +277,11 @@ class ZenithBenchmarker:
         assert matches
         return int(round(float(matches.group(1))))
 
-    def get_timeline_size(self, repo_dir: Path, tenantid: str, timelineid: str):
+    def get_timeline_size(self, repo_dir: Path, tenantid: uuid.UUID, timelineid: str):
         """
         Calculate the on-disk size of a timeline
         """
-        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid, timelineid)
+        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid.hex, timelineid)
 
         totalbytes = 0
         for root, dirs, files in os.walk(path):

@@ -65,7 +65,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         env.zenith_cli.create_branch(branch, "main")
         pgs.append(env.postgres.create_start(branch))
 
-    tenant_id = uuid.UUID(env.initial_tenant)
+    tenant_id = env.initial_tenant
 
     def collect_metrics(message: str) -> List[BranchMetrics]:
         with env.pageserver.http_client() as pageserver_http:
@@ -321,16 +321,16 @@ class ProposerPostgres(PgProtocol):
     def __init__(self,
                  pgdata_dir: str,
                  pg_bin,
-                 timeline_id: str,
-                 tenant_id: str,
+                 timeline_id: uuid.UUID,
+                 tenant_id: uuid.UUID,
                  listen_addr: str,
                  port: int):
         super().__init__(host=listen_addr, port=port, username='zenith_admin')
 
         self.pgdata_dir: str = pgdata_dir
         self.pg_bin: PgBin = pg_bin
-        self.timeline_id: str = timeline_id
-        self.tenant_id: str = tenant_id
+        self.timeline_id: uuid.UUID = timeline_id
+        self.tenant_id: uuid.UUID = tenant_id
         self.listen_addr: str = listen_addr
         self.port: int = port
 
@@ -350,8 +350,8 @@ class ProposerPostgres(PgProtocol):
             cfg = [
                 "synchronous_standby_names = 'walproposer'\n",
                 "shared_preload_libraries = 'zenith'\n",
-                f"zenith.zenith_timeline = '{self.timeline_id}'\n",
-                f"zenith.zenith_tenant = '{self.tenant_id}'\n",
+                f"zenith.zenith_timeline = '{self.timeline_id.hex}'\n",
+                f"zenith.zenith_tenant = '{self.tenant_id.hex}'\n",
                 f"zenith.page_server_connstring = ''\n",
                 f"wal_acceptors = '{wal_acceptors}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
@@ -408,8 +408,8 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init()
 
-    timeline_id = uuid.uuid4().hex
-    tenant_id = uuid.uuid4().hex
+    timeline_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
 
     # write config for proposer
     pgdata_dir = os.path.join(env.repo_dir, "proposer_pgdata")
@@ -495,15 +495,15 @@ class SafekeeperEnv:
         self.bin_safekeeper = os.path.join(str(zenith_binpath), 'safekeeper')
         self.safekeepers: Optional[List[subprocess.CompletedProcess[Any]]] = None
         self.postgres: Optional[ProposerPostgres] = None
-        self.tenant_id: Optional[str] = None
-        self.timeline_id: Optional[str] = None
+        self.tenant_id: Optional[uuid.UUID] = None
+        self.timeline_id: Optional[uuid.UUID] = None
 
     def init(self) -> "SafekeeperEnv":
         assert self.postgres is None, "postgres is already initialized"
         assert self.safekeepers is None, "safekeepers are already initialized"
 
-        self.timeline_id = uuid.uuid4().hex
-        self.tenant_id = uuid.uuid4().hex
+        self.timeline_id = uuid.uuid4()
+        self.tenant_id = uuid.uuid4()
         mkdir_if_needed(str(self.repo_dir))
 
         # Create config and a Safekeeper object for each safekeeper

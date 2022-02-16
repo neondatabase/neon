@@ -14,9 +14,8 @@ def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
 
     ps = env.pageserver
 
-    tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)
+    tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant.hex)
     tenant_http_client = env.pageserver.http_client(tenant_token)
-
     invalid_tenant_token = env.auth_keys.generate_tenant_token(uuid4().hex)
     invalid_tenant_http_client = env.pageserver.http_client(invalid_tenant_token)
 
@@ -29,14 +28,14 @@ def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
     ps.safe_psql("set FOO", password=management_token)
 
     # tenant can create branches
-    tenant_http_client.branch_create(UUID(env.initial_tenant), 'new1', 'main')
+    tenant_http_client.branch_create(env.initial_tenant, 'new1', 'main')
     # console can create branches for tenant
-    management_http_client.branch_create(UUID(env.initial_tenant), 'new2', 'main')
+    management_http_client.branch_create(env.initial_tenant, 'new2', 'main')
 
     # fail to create branch using token with different tenant_id
     with pytest.raises(ZenithPageserverApiException,
                        match='Forbidden: Tenant id mismatch. Permission denied'):
-        invalid_tenant_http_client.branch_create(UUID(env.initial_tenant), "new3", "main")
+        invalid_tenant_http_client.branch_create(env.initial_tenant, "new3", "main")
 
     # create tenant using management token
     management_http_client.tenant_create(uuid4())
