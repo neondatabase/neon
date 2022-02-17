@@ -120,6 +120,7 @@ def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
     # res = requests.get(f'http://127.0.0.1:{env.pageserver.service_port.http}/v1/status')
     # assert res.ok
 
+
 def test_cli_start_stop(zenith_env_builder: ZenithEnvBuilder):
     # Start with single sk
     zenith_env_builder.num_safekeepers = 1
