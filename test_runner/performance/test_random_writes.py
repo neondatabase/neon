@@ -11,19 +11,32 @@ import time
 from fixtures.utils import print_gc_result
 
 
+# This is a clear-box test that demonstrates the worst case scenario for the
+# "1 segment per layer" implementation of the pageserver. It writes to random
+# rows, while almost never writing to the same segment twice before flushing.
+# A naive pageserver implementation would create a full image layer for each
+# dirty segment, leading to write_amplification = segment_size / page_size,
+# when compared to vanilla postgres. With segment_size = 10MB, that's 1250.
 def test_random_writes(zenith_with_baseline: PgCompare):
     env = zenith_with_baseline
 
-    # Directly impacts the effective checkpoint distance.
-    # Smaller value makes the test run faster. Larger value is more realistic.
-    # Doesn't affect the zenith / vanilla performance ratio.
+    # Number of rows in the test database. 1M rows runs quickly, but implies
+    # a small effective_checkpoint_distance, which makes the test less realistic.
+    # Using a 300 TB database would imply a 250 MB effective_checkpoint_distance,
+    # but it will take a very long time to run. From what I've seen so far,
+    # increasing n_rows doesn't have impact on the (zenith_runtime / vanilla_runtime)
+    # performance ratio.
     n_rows = 1 * 1000 * 1000  # around 36 MB table
 
-    # Relative measure of write density. Doubling the load factor doubles
-    # average writes per page.
+    # Number of writes per 3 segments. A value of 1 should produce a random
+    # workload where we almost never write to the same segment twice. Larger
+    # values of load_factor produce a larger effective_checkpoint_distance,
+    # making the test more realistic, but less effective. If you want a realistic
+    # worst case scenario and you have time to wait you should increase n_rows instead.
     load_factor = 1
 
-    # Not sure why but this matters in a weird way. Looking into it
+    # Not sure why but this matters in a weird way (up to 2x difference in perf).
+    # TODO look into it
     n_iterations = 1
 
     with closing(env.pg.connect()) as conn:
@@ -57,7 +70,7 @@ def test_random_writes(zenith_with_baseline: PgCompare):
                                     'bytes',
                                     MetricReport.TEST_PARAM)
 
-            # update random keys
+            # Update random keys
             with env.record_duration('run'):
                 for it in range(n_iterations):
                     for i in range(n_writes):
