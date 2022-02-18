@@ -234,9 +234,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/BranchInfo"
+                $ref: "#/components/schemas/BranchInfo"
         "400":
           description: Malformed branch create request
           content:
@@ -370,11 +368,14 @@ components:
           format: hex
         ancestor_id:
           type: string
+          format: hex
         ancestor_lsn:
           type: string
         current_logical_size:
           type: integer
         current_logical_size_non_incremental:
+          type: integer
+        latest_valid_lsn:
           type: integer
     TimelineInfo:
       type: object
