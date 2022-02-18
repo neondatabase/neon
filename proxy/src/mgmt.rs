@@ -95,7 +95,7 @@ impl postgres_backend::Handler for MgmtHandler {
 }
 
 fn try_process_query(pgb: &mut PostgresBackend, query_string: &str) -> anyhow::Result<()> {
-    println!("Got mgmt query [redacted]");  // Content contains password, don't print it
+    println!("Got mgmt query [redacted]"); // Content contains password, don't print it
 
     let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 

@@ -59,7 +59,7 @@ impl CPlaneApi<'_> {
             }
 
             let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text().await?.as_str())?;
-            println!("got auth info [redacted]");  // Content contains password, don't print it
+            println!("got auth info [redacted]"); // Content contains password, don't print it
 
             use ProxyAuthResponse::*;
             match auth_info {
