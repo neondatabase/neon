@@ -46,8 +46,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .arg(
             Arg::new("auth-method")
-                .short('a')
-                .long("router")
+                .long("auth-method")
                 .takes_value(true)
                 .help("Possible values: password | link | mixed")
                 .default_value("mixed"),
