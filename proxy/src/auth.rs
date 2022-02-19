@@ -1,5 +1,5 @@
 use crate::compute::DatabaseInfo;
-use crate::config::ProxyConfig;
+use crate::config::{ClientAuthMethod, ProxyConfig};
 use crate::cplane_api::{self, CPlaneApi};
 use crate::stream::PqStream;
 use anyhow::{anyhow, bail, Context};
@@ -38,10 +38,16 @@ impl ClientCredentials {
         config: &ProxyConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> anyhow::Result<DatabaseInfo> {
-        let db_info = if self.user.ends_with("@zenith") {
-            handle_existing_user(config, client, self).await
-        } else {
-            handle_new_user(config, client).await
+        let db_info = match config.client_auth_method {
+            ClientAuthMethod::Mixed => {
+                if self.user.ends_with("@zenith") {
+                    handle_existing_user(config, client, self).await
+                } else {
+                    handle_new_user(config, client).await
+                }
+            }
+            ClientAuthMethod::Password => handle_existing_user(config, client, self).await,
+            ClientAuthMethod::Link => handle_new_user(config, client).await,
         };
 
         db_info.context("failed to authenticate client")
