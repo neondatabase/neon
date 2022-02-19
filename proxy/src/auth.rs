@@ -41,7 +41,7 @@ impl ClientCredentials {
         use crate::config::ClientAuthMethod::*;
         use crate::config::RouterConfig::*;
         let db_info = match &config.router_config {
-            Static { host, port } => handle_static(host.clone(), port.clone(), client, self).await,
+            Static { host, port } => handle_static(host.clone(), *port, client, self).await,
             Dynamic(Mixed) => {
                 if self.user.ends_with("@zenith") {
                     handle_existing_user(config, client, self).await
