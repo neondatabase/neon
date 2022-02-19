@@ -15,6 +15,11 @@ pub enum ClientAuthMethod {
     Mixed,
 }
 
+pub enum RouterConfig {
+    Static { host: String, port: u16 },
+    Dynamic(ClientAuthMethod),
+}
+
 impl FromStr for ClientAuthMethod {
     type Err = anyhow::Error;
 
@@ -34,7 +39,7 @@ pub struct ProxyConfig {
     pub proxy_address: SocketAddr,
 
     /// method of assigning compute nodes
-    pub client_auth_method: ClientAuthMethod,
+    pub router_config: RouterConfig,
 
     /// internally used for status and prometheus metrics
     pub http_address: SocketAddr,

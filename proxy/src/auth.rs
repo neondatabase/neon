@@ -1,5 +1,5 @@
 use crate::compute::DatabaseInfo;
-use crate::config::{ClientAuthMethod, ProxyConfig};
+use crate::config::ProxyConfig;
 use crate::cplane_api::{self, CPlaneApi};
 use crate::stream::PqStream;
 use anyhow::{anyhow, bail, Context};
@@ -38,16 +38,19 @@ impl ClientCredentials {
         config: &ProxyConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> anyhow::Result<DatabaseInfo> {
-        let db_info = match config.client_auth_method {
-            ClientAuthMethod::Mixed => {
+        use crate::config::ClientAuthMethod::*;
+        use crate::config::RouterConfig::*;
+        let db_info = match &config.router_config {
+            Static { host, port } => handle_static(host.clone(), port.clone(), client, self).await,
+            Dynamic(Mixed) => {
                 if self.user.ends_with("@zenith") {
                     handle_existing_user(config, client, self).await
                 } else {
                     handle_new_user(config, client).await
                 }
             }
-            ClientAuthMethod::Password => handle_existing_user(config, client, self).await,
-            ClientAuthMethod::Link => handle_new_user(config, client).await,
+            Dynamic(Password) => handle_existing_user(config, client, self).await,
+            Dynamic(Link) => handle_new_user(config, client).await,
         };
 
         db_info.context("failed to authenticate client")
@@ -56,6 +59,39 @@ impl ClientCredentials {
 
 fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
+}
+
+async fn handle_static(
+    host: String,
+    port: u16,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    creds: ClientCredentials,
+) -> anyhow::Result<DatabaseInfo> {
+    client
+        .write_message(&Be::AuthenticationCleartextPassword)
+        .await?;
+
+    // Read client's password bytes
+    let msg = match client.read_message().await? {
+        Fe::PasswordMessage(msg) => msg,
+        bad => bail!("unexpected message type: {:?}", bad),
+    };
+
+    let cleartext_password = std::str::from_utf8(&msg)?.split('\0').next().unwrap();
+
+    let db_info = DatabaseInfo {
+        host,
+        port,
+        dbname: creds.dbname.clone(),
+        user: creds.user.clone(),
+        password: Some(cleartext_password.into()),
+    };
+
+    client
+        .write_message_noflush(&Be::AuthenticationOk)?
+        .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+
+    Ok(db_info)
 }
 
 async fn handle_existing_user(

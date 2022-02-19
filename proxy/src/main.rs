@@ -13,6 +13,8 @@ use std::future::Future;
 use tokio::{net::TcpListener, task::JoinError};
 use zenith_utils::GIT_VERSION;
 
+use crate::config::{ClientAuthMethod, RouterConfig};
+
 mod auth;
 mod cancellation;
 mod compute;
@@ -50,6 +52,13 @@ async fn main() -> anyhow::Result<()> {
                 .takes_value(true)
                 .help("Possible values: password | link | mixed")
                 .default_value("mixed"),
+        )
+        .arg(
+            Arg::new("static-router")
+                .short('s')
+                .long("static-router")
+                .takes_value(true)
+                .help("Route all clients to host:port"),
         )
         .arg(
             Arg::new("mgmt")
@@ -108,9 +117,25 @@ async fn main() -> anyhow::Result<()> {
         _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
     };
 
+    let auth_method = arg_matches.value_of("auth-method").unwrap().parse()?;
+    let router_config = match arg_matches.value_of("static-router") {
+        None => RouterConfig::Dynamic(auth_method),
+        Some(addr) => {
+            if let ClientAuthMethod::Password = auth_method {
+                let (host, port) = addr.split_once(":").unwrap();
+                RouterConfig::Static {
+                    host: host.to_string(),
+                    port: port.parse().unwrap(),
+                }
+            } else {
+                bail!("static-router requires --auth-method password")
+            }
+        }
+    };
+
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
+        router_config,
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
-        client_auth_method: arg_matches.value_of("auth-method").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         http_address: arg_matches.value_of("http").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
