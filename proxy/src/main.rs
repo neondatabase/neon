@@ -45,6 +45,14 @@ async fn main() -> anyhow::Result<()> {
                 .default_value("127.0.0.1:4432"),
         )
         .arg(
+            Arg::new("auth-method")
+                .short('a')
+                .long("router")
+                .takes_value(true)
+                .help("Possible values: password | link | mixed")
+                .default_value("mixed"),
+        )
+        .arg(
             Arg::new("mgmt")
                 .short('m')
                 .long("mgmt")
@@ -103,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
+        client_auth_method: arg_matches.value_of("auth-method").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         http_address: arg_matches.value_of("http").unwrap().parse()?,
         redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
