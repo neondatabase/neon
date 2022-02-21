@@ -90,8 +90,8 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
                     latest_valid_lsn=branch_detail["latest_valid_lsn"],
                 )
                 for sk_m in sk_metrics:
-                    m.flush_lsns.append(sk_m.flush_lsn_inexact[timeline_id])
-                    m.commit_lsns.append(sk_m.commit_lsn_inexact[timeline_id])
+                    m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])
+                    m.commit_lsns.append(sk_m.commit_lsn_inexact[(tenant_id.hex, timeline_id)])
 
                 for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
                     # Invariant. May be < when transaction is in progress.

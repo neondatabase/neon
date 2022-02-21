@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 import pytest
 
@@ -1465,8 +1465,8 @@ class SafekeeperTimelineStatus:
 class SafekeeperMetrics:
     # These are metrics from Prometheus which uses float64 internally.
     # As a consequence, values may differ from real original int64s.
-    flush_lsn_inexact: Dict[str, int] = field(default_factory=dict)
-    commit_lsn_inexact: Dict[str, int] = field(default_factory=dict)
+    flush_lsn_inexact: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    commit_lsn_inexact: Dict[Tuple[str, str], int] = field(default_factory=dict)
 
 
 class SafekeeperHttpClient(requests.Session):
@@ -1490,14 +1490,16 @@ class SafekeeperHttpClient(requests.Session):
         all_metrics_text = request_result.text
 
         metrics = SafekeeperMetrics()
-        for match in re.finditer(r'^safekeeper_flush_lsn{ztli="([0-9a-f]+)"} (\S+)$',
-                                 all_metrics_text,
-                                 re.MULTILINE):
-            metrics.flush_lsn_inexact[match.group(1)] = int(match.group(2))
-        for match in re.finditer(r'^safekeeper_commit_lsn{ztli="([0-9a-f]+)"} (\S+)$',
-                                 all_metrics_text,
-                                 re.MULTILINE):
-            metrics.commit_lsn_inexact[match.group(1)] = int(match.group(2))
+        for match in re.finditer(
+                r'^safekeeper_flush_lsn{tenant_id="([0-9a-f]+)",timeline_id="([0-9a-f]+)"} (\S+)$',
+                all_metrics_text,
+                re.MULTILINE):
+            metrics.flush_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
+        for match in re.finditer(
+                r'^safekeeper_commit_lsn{tenant_id="([0-9a-f]+)",timeline_id="([0-9a-f]+)"} (\S+)$',
+                all_metrics_text,
+                re.MULTILINE):
+            metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
         return metrics
 
 
