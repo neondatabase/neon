@@ -39,28 +39,28 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
             assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
 
-# wait until write_lag is 0
+# wait until received_lsn_lag is 0
 def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60):
     started_at = time.time()
 
-    write_lag = 1
-    while write_lag > 0:
+    received_lsn_lag = 1
+    while received_lsn_lag > 0:
         elapsed = time.time() - started_at
         if elapsed > timeout:
-            raise RuntimeError(f"timed out waiting for pageserver to reach pg_current_wal_lsn()")
+            raise RuntimeError(
+                f"timed out waiting for pageserver to reach pg_current_wal_flush_lsn()")
 
         with closing(pgmain.connect()) as conn:
             with conn.cursor() as cur:
+
                 cur.execute('''
                     select  pg_size_pretty(pg_cluster_size()),
-                    pg_wal_lsn_diff(pg_current_wal_lsn(),write_lsn) as write_lag,
-                    pg_wal_lsn_diff(pg_current_wal_lsn(),sent_lsn) as pending_lag
-                    FROM pg_stat_get_wal_senders();
+                    pg_wal_lsn_diff(pg_current_wal_flush_lsn(),received_lsn) as received_lsn_lag
+                    FROM backpressure_lsns();
                 ''')
                 res = cur.fetchone()
-                log.info(
-                    f"pg_cluster_size = {res[0]}, write_lag = {res[1]}, pending_lag = {res[2]}")
-                write_lag = res[1]
+                log.info(f"pg_cluster_size = {res[0]}, received_lsn_lag = {res[1]}")
+                received_lsn_lag = res[1]
 
         time.sleep(polling_interval)
 
