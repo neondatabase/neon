@@ -12,6 +12,7 @@ use crate::thread_mgr::ThreadKind;
 use crate::walingest::WalIngest;
 use anyhow::{bail, Context, Error, Result};
 use bytes::BytesMut;
+use fail::fail_point;
 use lazy_static::lazy_static;
 use postgres_ffi::waldecoder::*;
 use postgres_protocol::message::backend::ReplicationMessage;
@@ -31,6 +32,7 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::pq_proto::ZenithFeedback;
 use zenith_utils::zid::ZTenantId;
 use zenith_utils::zid::ZTimelineId;
+
 //
 // We keep one WAL Receiver active per timeline.
 //
@@ -253,6 +255,8 @@ fn walreceiver_main(
 
                     let writer = timeline.writer();
                     walingest.ingest_record(writer.as_ref(), recdata, lsn)?;
+
+                    fail_point!("walreceiver-after-ingest");
 
                     last_rec_lsn = lsn;
                 }

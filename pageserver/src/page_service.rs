@@ -663,6 +663,17 @@ impl postgres_backend::Handler for PageServerHandler {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("failpoints ") {
+            let (_, failpoints) = query_string.split_at("failpoints ".len());
+            for failpoint in failpoints.split(';') {
+                if let Some((name, actions)) = failpoint.split_once('=') {
+                    info!("cfg failpoint: {} {}", name, actions);
+                    fail::cfg(name, actions).unwrap();
+                } else {
+                    bail!("Invalid failpoints format");
+                }
+            }
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
             // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
