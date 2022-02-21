@@ -19,7 +19,7 @@ use zenith_utils::pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID
 use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
-use crate::timeline::CreateControlFile;
+use crate::control_file::CreateControlFile;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Safekeeper handler of postgres commands
