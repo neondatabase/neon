@@ -9,11 +9,11 @@ use anyhow::{bail, Context};
 use clap::{App, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
-use std::path::{Path, PathBuf};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use tokio::{net::TcpListener, task::JoinError};
-use zenith_utils::GIT_VERSION;
 use zenith_utils::shutdown::exit_now;
+use zenith_utils::GIT_VERSION;
 
 use crate::config::{ClientAuthMethod, RouterConfig};
 
@@ -129,17 +129,6 @@ fn main() -> anyhow::Result<()> {
         std::env::set_current_dir(PathBuf::from(dir))?;
     }
 
-    // Prevent running multiple proxies on the same directory
-    // let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
-    // let lock_file = File::create(&lock_file_path).context("failed to open lockfile")?;
-    // lock_file.try_lock_exclusive().with_context(|| {
-    //     format!(
-    //         "control file {} is locked by some other process",
-    //         lock_file_path.display()
-    //     )
-    // })?;
-
-    // NOTE we must daemonize before creating the tokio runtime or spawning anything
     if arg_matches.is_present("daemonize") {
         println!("daemonizing...");
 
@@ -202,10 +191,9 @@ fn main() -> anyhow::Result<()> {
 
     println!("Version: {}", GIT_VERSION);
 
+    // NOTE we must create the runtime after daemonizing
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        start_proxy(config).await
-    })?;
+    rt.block_on(async { start_proxy(config).await })?;
 
     Ok(())
 }
