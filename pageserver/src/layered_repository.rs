@@ -47,10 +47,8 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{
-    register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
-};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
+use zenith_metrics::{register_int_gauge_vec, IntGauge, IntGaugeVec};
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
@@ -87,16 +85,17 @@ lazy_static! {
     static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_storage_time",
         "Time spent on storage operations",
-        &["operation"]
+        &["operation", "tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
 }
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
-    static ref RECONSTRUCT_TIME: Histogram = register_histogram!(
+    static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_getpage_reconstruct_time",
-        "FIXME Time spent on storage operations"
+        "FIXME Time spent on storage operations",
+        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
 }
@@ -248,11 +247,19 @@ impl Repository for LayeredRepository {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        STORAGE_TIME
-            .with_label_values(&["gc"])
-            .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
-            })
+        if let Some(timeline_id) = target_timelineid {
+            STORAGE_TIME
+                .with_label_values(&["gc", &self.tenantid.to_string(), &timeline_id.to_string()])
+                .observe_closure_duration(|| {
+                    self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
+                })
+        } else {
+            STORAGE_TIME
+                .with_label_values(&["gc", &self.tenantid.to_string(), "-"])
+                .observe_closure_duration(|| {
+                    self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
+                })
+        }
     }
 
     fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()> {
@@ -859,7 +866,11 @@ impl Timeline for LayeredTimeline {
         let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
+            let tenant_id = self.tenantid.to_string();
+            let timeline_id = self.timelineid.to_string();
+
             RECONSTRUCT_TIME
+                .with_label_values(&[&tenant_id, &timeline_id])
                 .observe_closure_duration(|| self.materialize_page(seg, seg_blknum, lsn, &*layer))
         } else {
             // FIXME: This can happen if PostgreSQL extends a relation but never writes
@@ -1009,15 +1020,18 @@ impl Timeline for LayeredTimeline {
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
+        let tenant_id = self.tenantid.to_string();
+        let timeline_id = self.timelineid.to_string();
+
         match cconf {
             CheckpointConfig::Flush => STORAGE_TIME
-                .with_label_values(&["flush checkpoint"])
+                .with_label_values(&["flush checkpoint", &tenant_id, &timeline_id])
                 .observe_closure_duration(|| self.checkpoint_internal(0, false)),
             CheckpointConfig::Forced => STORAGE_TIME
-                .with_label_values(&["forced checkpoint"])
+                .with_label_values(&["forced checkpoint", &tenant_id, &timeline_id])
                 .observe_closure_duration(|| self.checkpoint_internal(0, true)),
             CheckpointConfig::Distance(distance) => STORAGE_TIME
-                .with_label_values(&["checkpoint"])
+                .with_label_values(&["checkpoint", &tenant_id, &timeline_id])
                 .observe_closure_duration(|| self.checkpoint_internal(distance, true)),
         }
     }
