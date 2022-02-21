@@ -9,9 +9,11 @@ use anyhow::{bail, Context};
 use clap::{App, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
+use std::path::{Path, PathBuf};
 use std::future::Future;
 use tokio::{net::TcpListener, task::JoinError};
 use zenith_utils::GIT_VERSION;
+use zenith_utils::shutdown::exit_now;
 
 use crate::config::{ClientAuthMethod, RouterConfig};
 
@@ -33,11 +35,24 @@ async fn flatten_err(
     f.map(|r| r.context("join error").and_then(|x| x)).await
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     zenith_metrics::set_common_metrics_prefix("zenith_proxy");
     let arg_matches = App::new("Zenith proxy/router")
         .version(GIT_VERSION)
+        .arg(
+            Arg::new("datadir")
+                .short('D')
+                .long("dir")
+                .takes_value(true)
+                .help("Path to the proxy data directory"),
+        )
+        .arg(
+            Arg::new("daemonize")
+                .short('d')
+                .long("daemonize")
+                .takes_value(false)
+                .help("Run in the background"),
+        )
         .arg(
             Arg::new("proxy")
                 .short('p')
@@ -108,6 +123,48 @@ async fn main() -> anyhow::Result<()> {
         )
         .get_matches();
 
+    if let Some(dir) = arg_matches.value_of("datadir") {
+        // change into the data directory.
+        println!("Working in {}", dir);
+        std::env::set_current_dir(PathBuf::from(dir))?;
+    }
+
+    // Prevent running multiple proxies on the same directory
+    // let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
+    // let lock_file = File::create(&lock_file_path).context("failed to open lockfile")?;
+    // lock_file.try_lock_exclusive().with_context(|| {
+    //     format!(
+    //         "control file {} is locked by some other process",
+    //         lock_file_path.display()
+    //     )
+    // })?;
+
+    // NOTE we must daemonize before creating the tokio runtime or spawning anything
+    if arg_matches.is_present("daemonize") {
+        println!("daemonizing...");
+
+        // There should'n be any logging to stdin/stdout. Redirect it to the main log so
+        // that we will see any accidental manual fprintf's or backtraces.
+        let log_file = zenith_utils::logging::init("proxy.log", true)?;
+        let stdout = log_file.try_clone().unwrap();
+        let stderr = log_file;
+
+        let daemonize = daemonize::Daemonize::new()
+            .pid_file("proxy.pid")
+            .working_directory(Path::new("."))
+            .stdout(stdout)
+            .stderr(stderr);
+
+        // XXX: The parent process should exit abruptly right after
+        // it has spawned a child to prevent coverage machinery from
+        // dumping stats into a `profraw` file now owned by the child.
+        // Otherwise, the coverage data will be damaged.
+        match daemonize.exit_action(|| exit_now(0)).start() {
+            Ok(_) => println!("Success, daemonized"),
+            Err(e) => anyhow::bail!("Error, {}", e),
+        }
+    }
+
     let tls_config = match (
         arg_matches.value_of("ssl-key"),
         arg_matches.value_of("ssl-cert"),
@@ -145,6 +202,15 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Version: {}", GIT_VERSION);
 
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        start_proxy(config).await
+    })?;
+
+    Ok(())
+}
+
+async fn start_proxy(config: &'static ProxyConfig) -> anyhow::Result<()> {
     // Check that we can bind to address before further initialization
     println!("Starting http on {}", config.http_address);
     let http_listener = TcpListener::bind(config.http_address).await?.into_std()?;

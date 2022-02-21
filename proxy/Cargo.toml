@@ -27,6 +27,7 @@ tokio-rustls = "0.22.0"
 
 zenith_utils = { path = "../zenith_utils" }
 zenith_metrics = { path = "../zenith_metrics" }
+daemonize = "0.4.1"
 
 [dev-dependencies]
 tokio-postgres-rustls = "0.8.0"

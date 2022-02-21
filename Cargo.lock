@@ -1579,6 +1579,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap 3.0.14",
+ "daemonize",
  "futures",
  "hashbrown 0.11.2",
  "hex",
