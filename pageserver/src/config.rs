@@ -110,125 +110,141 @@ pub struct PageServerConf {
     pub remote_storage_config: Option<RemoteStorageConfig>,
 }
 
+// use dedicated enum for builder to better indicate the intention
+// and avoid possible confusion with nested options
+pub enum BuilderValue<T> {
+    Set(T),
+    NotSet,
+}
+
+impl<T> BuilderValue<T> {
+    pub fn ok_or<E>(self, err: E) -> Result<T, E> {
+        match self {
+            Self::Set(v) => Ok(v),
+            Self::NotSet => Err(err),
+        }
+    }
+}
+
 // needed to simplify config construction
 struct PageServerConfigBuilder {
-    listen_pg_addr: Option<String>,
+    listen_pg_addr: BuilderValue<String>,
 
-    listen_http_addr: Option<String>,
+    listen_http_addr: BuilderValue<String>,
 
-    checkpoint_distance: Option<u64>,
-    checkpoint_period: Option<Duration>,
+    checkpoint_distance: BuilderValue<u64>,
+    checkpoint_period: BuilderValue<Duration>,
 
-    gc_horizon: Option<u64>,
-    gc_period: Option<Duration>,
-    superuser: Option<String>,
+    gc_horizon: BuilderValue<u64>,
+    gc_period: BuilderValue<Duration>,
+    superuser: BuilderValue<String>,
 
-    page_cache_size: Option<usize>,
-    max_file_descriptors: Option<usize>,
+    page_cache_size: BuilderValue<usize>,
+    max_file_descriptors: BuilderValue<usize>,
 
-    workdir: Option<PathBuf>,
+    workdir: BuilderValue<PathBuf>,
 
-    pg_distrib_dir: Option<PathBuf>,
+    pg_distrib_dir: BuilderValue<PathBuf>,
 
-    auth_type: Option<AuthType>,
+    auth_type: BuilderValue<AuthType>,
 
-    auth_validation_public_key_path: Option<Option<PathBuf>>,
-    remote_storage_config: Option<Option<RemoteStorageConfig>>,
+    //
+    auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
+    remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
-    id: Option<ZNodeId>,
+    id: BuilderValue<ZNodeId>,
 }
 
 impl Default for PageServerConfigBuilder {
     fn default() -> Self {
+        use self::BuilderValue::*;
         use defaults::*;
         Self {
-            listen_pg_addr: Some(DEFAULT_PG_LISTEN_ADDR.to_string()),
-            listen_http_addr: Some(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
-            checkpoint_distance: Some(DEFAULT_CHECKPOINT_DISTANCE),
-            checkpoint_period: Some(
-                humantime::parse_duration(DEFAULT_CHECKPOINT_PERIOD)
-                    .expect("cannot parse default checkpoint period"),
-            ),
-            gc_horizon: Some(DEFAULT_GC_HORIZON),
-            gc_period: Some(
-                humantime::parse_duration(DEFAULT_GC_PERIOD)
-                    .expect("cannot parse default gc period"),
-            ),
-            superuser: Some(DEFAULT_SUPERUSER.to_string()),
-            page_cache_size: Some(DEFAULT_PAGE_CACHE_SIZE),
-            max_file_descriptors: Some(DEFAULT_MAX_FILE_DESCRIPTORS),
-            workdir: Default::default(),
-            pg_distrib_dir: Some(PathBuf::new()),
-            auth_type: Some(AuthType::Trust),
-            auth_validation_public_key_path: Some(None),
-            remote_storage_config: Some(None),
-            id: Default::default(),
+            listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
+            listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            checkpoint_distance: Set(DEFAULT_CHECKPOINT_DISTANCE),
+            checkpoint_period: Set(humantime::parse_duration(DEFAULT_CHECKPOINT_PERIOD)
+                .expect("cannot parse default checkpoint period")),
+            gc_horizon: Set(DEFAULT_GC_HORIZON),
+            gc_period: Set(humantime::parse_duration(DEFAULT_GC_PERIOD)
+                .expect("cannot parse default gc period")),
+            superuser: Set(DEFAULT_SUPERUSER.to_string()),
+            page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
+            max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
+            workdir: Set(PathBuf::new()),
+            pg_distrib_dir: Set(env::current_dir()
+                .expect("cannot access current directory")
+                .join("tmp_install")),
+            auth_type: Set(AuthType::Trust),
+            auth_validation_public_key_path: Set(None),
+            remote_storage_config: Set(None),
+            id: NotSet,
         }
     }
 }
 
 impl PageServerConfigBuilder {
     pub fn listen_pg_addr(&mut self, listen_pg_addr: String) {
-        self.listen_pg_addr = Some(listen_pg_addr)
+        self.listen_pg_addr = BuilderValue::Set(listen_pg_addr)
     }
 
     pub fn listen_http_addr(&mut self, listen_http_addr: String) {
-        self.listen_http_addr = Some(listen_http_addr)
+        self.listen_http_addr = BuilderValue::Set(listen_http_addr)
     }
 
     pub fn checkpoint_distance(&mut self, checkpoint_distance: u64) {
-        self.checkpoint_distance = Some(checkpoint_distance)
+        self.checkpoint_distance = BuilderValue::Set(checkpoint_distance)
     }
 
     pub fn checkpoint_period(&mut self, checkpoint_period: Duration) {
-        self.checkpoint_period = Some(checkpoint_period)
+        self.checkpoint_period = BuilderValue::Set(checkpoint_period)
     }
 
     pub fn gc_horizon(&mut self, gc_horizon: u64) {
-        self.gc_horizon = Some(gc_horizon)
+        self.gc_horizon = BuilderValue::Set(gc_horizon)
     }
 
     pub fn gc_period(&mut self, gc_period: Duration) {
-        self.gc_period = Some(gc_period)
+        self.gc_period = BuilderValue::Set(gc_period)
     }
 
     pub fn superuser(&mut self, superuser: String) {
-        self.superuser = Some(superuser)
+        self.superuser = BuilderValue::Set(superuser)
     }
 
     pub fn page_cache_size(&mut self, page_cache_size: usize) {
-        self.page_cache_size = Some(page_cache_size)
+        self.page_cache_size = BuilderValue::Set(page_cache_size)
     }
 
     pub fn max_file_descriptors(&mut self, max_file_descriptors: usize) {
-        self.max_file_descriptors = Some(max_file_descriptors)
+        self.max_file_descriptors = BuilderValue::Set(max_file_descriptors)
     }
 
     pub fn workdir(&mut self, workdir: PathBuf) {
-        self.workdir = Some(workdir)
+        self.workdir = BuilderValue::Set(workdir)
     }
 
     pub fn pg_distrib_dir(&mut self, pg_distrib_dir: PathBuf) {
-        self.pg_distrib_dir = Some(pg_distrib_dir)
+        self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
     }
 
     pub fn auth_type(&mut self, auth_type: AuthType) {
-        self.auth_type = Some(auth_type)
+        self.auth_type = BuilderValue::Set(auth_type)
     }
 
     pub fn auth_validation_public_key_path(
         &mut self,
         auth_validation_public_key_path: Option<PathBuf>,
     ) {
-        self.auth_validation_public_key_path = Some(auth_validation_public_key_path)
+        self.auth_validation_public_key_path = BuilderValue::Set(auth_validation_public_key_path)
     }
 
     pub fn remote_storage_config(&mut self, remote_storage_config: Option<RemoteStorageConfig>) {
-        self.remote_storage_config = Some(remote_storage_config)
+        self.remote_storage_config = BuilderValue::Set(remote_storage_config)
     }
 
     pub fn id(&mut self, node_id: ZNodeId) {
-        self.id = Some(node_id)
+        self.id = BuilderValue::Set(node_id)
     }
 
     pub fn build(self) -> Result<PageServerConf> {
@@ -433,9 +449,6 @@ impl PageServerConf {
             );
         }
 
-        if conf.pg_distrib_dir == PathBuf::new() {
-            conf.pg_distrib_dir = env::current_dir()?.join("tmp_install")
-        };
         if !conf.pg_distrib_dir.join("bin/postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
