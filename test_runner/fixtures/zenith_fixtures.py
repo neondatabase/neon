@@ -1167,12 +1167,11 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
 class ZenithProxy(PgProtocol):
     def __init__(self, port: int):
         super().__init__(host="127.0.0.1", username="pytest", password="pytest", port=port)
-        self.running = False
         self.http_port = 7001
+        self._popen: Optional[subprocess.Popen[bytes]] = None
 
     def start_static(self, addr="127.0.0.1:5432") -> None:
-        assert not self.running
-        self.running = True
+        assert self._popen is None
 
         # Start proxy
         bin_proxy = os.path.join(str(zenith_binpath), 'proxy')
@@ -1181,27 +1180,21 @@ class ZenithProxy(PgProtocol):
         args.extend(["--proxy", f"{self.host}:{self.port}"])
         args.extend(["--auth-method", "password"])
         args.extend(["--static-router", addr])
-        self.popen = subprocess.Popen(args)
+        self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
-    def stop(self) -> None:
-        assert self.running
-        self.running = False
-
-        # NOTE the process will die when we're done with tests anyway, because
-        # it's a child process. This is mostly to clean up in between different tests.
-        self.popen.kill()
-
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if self.running:
-            self.stop()
+        if self._popen is not None:
+            # NOTE the process will die when we're done with tests anyway, because
+            # it's a child process. This is mostly to clean up in between different tests.
+            self._popen.kill()
 
 
 @pytest.fixture(scope='function')
