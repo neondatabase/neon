@@ -22,7 +22,7 @@ from typing import List, Optional, Any
 # succeed and data is written
 def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_normal_work", "main")
 
@@ -51,7 +51,7 @@ class BranchMetrics:
 # against different timelines.
 def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     n_timelines = 3
 
@@ -181,7 +181,7 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     n_acceptors = 3
 
     zenith_env_builder.num_safekeepers = n_acceptors
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_restarts", "main")
     pg = env.postgres.create_start('test_wal_acceptors_restarts')
@@ -218,7 +218,7 @@ def delayed_wal_acceptor_start(wa):
 # When majority of acceptors is offline, commits are expected to be frozen
 def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_unavailability", "main")
     pg = env.postgres.create_start('test_wal_acceptors_unavailability')
@@ -289,7 +289,7 @@ def stop_value():
 def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_race_conditions", "main")
     pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
@@ -404,7 +404,7 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
     # We don't really need the full environment for this test, just the
     # safekeepers would be enough.
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     timeline_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -454,7 +454,7 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
 def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
 
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_timeline_status", "main")
     pg = env.postgres.create_start('test_timeline_status')
@@ -629,7 +629,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
                 log.info(f"Safekeeper {sk.id} status error: {e}")
 
     zenith_env_builder.num_safekeepers = 4
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
     env.zenith_cli.create_branch("test_replace_safekeeper", "main")
 
     log.info("Use only first 3 safekeepers")

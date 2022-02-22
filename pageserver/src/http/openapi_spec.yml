@@ -17,6 +17,11 @@ paths:
             application/json:
               schema:
                 type: object
+                required:
+                - id
+                properties:
+                  id:
+                    type: integer
   /v1/timeline/{tenant_id}:
     parameters:
       - name: tenant_id

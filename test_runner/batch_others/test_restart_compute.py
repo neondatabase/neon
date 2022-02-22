@@ -13,7 +13,7 @@ def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptor
     zenith_env_builder.pageserver_auth_enabled = True
     if with_wal_acceptors:
         zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_restart_compute", "main")
 

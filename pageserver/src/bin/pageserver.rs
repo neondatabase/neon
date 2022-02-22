@@ -61,7 +61,7 @@ fn main() -> Result<()> {
                 .number_of_values(1)
                 .multiple_occurrences(true)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
-                Any option has to be a valid toml document, example: `-c \"foo='hey'\"` `-c \"foo={value=1}\"`"),
+                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .get_matches();
 
@@ -115,7 +115,14 @@ fn main() -> Result<()> {
                     option_line
                 )
             })?;
+
             for (key, item) in doc.iter() {
+                if key == "id" {
+                    anyhow::ensure!(
+                        init,
+                        "node id can only be set during pageserver init and cannot be overridden"
+                    );
+                }
                 toml.insert(key, item.clone());
             }
         }

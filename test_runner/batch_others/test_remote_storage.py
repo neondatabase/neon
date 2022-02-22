@@ -42,7 +42,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     data_secret = 'very secret secret'
 
     ##### First start, insert secret data and upload it to the remote storage
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
     pg = env.postgres.create_start()
 
     tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]

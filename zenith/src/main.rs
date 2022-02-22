@@ -25,21 +25,24 @@ use pageserver::branches::BranchInfo;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: ZNodeId = ZNodeId(1);
+const DEFAULT_PAGESERVER_ID: ZNodeId = ZNodeId(1);
 
 fn default_conf() -> String {
     format!(
         r#"
 # Default built-in configuration, defined in main.rs
 [pageserver]
+id = {pageserver_id}
 listen_pg_addr = '{pageserver_pg_addr}'
 listen_http_addr = '{pageserver_http_addr}'
 auth_type = '{pageserver_auth_type}'
 
 [[safekeepers]]
-id = '{safekeeper_id}'
+id = {safekeeper_id}
 pg_port = {safekeeper_pg_port}
 http_port = {safekeeper_http_port}
 "#,
+        pageserver_id = DEFAULT_PAGESERVER_ID,
         pageserver_pg_addr = DEFAULT_PAGESERVER_PG_ADDR,
         pageserver_http_addr = DEFAULT_PAGESERVER_HTTP_ADDR,
         pageserver_auth_type = AuthType::Trust,
