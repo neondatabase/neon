@@ -32,7 +32,7 @@ from typing_extensions import Literal
 import pytest
 
 import requests
-import backoff
+import backoff  # type: ignore
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
 from fixtures.log_helper import log
