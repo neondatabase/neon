@@ -237,7 +237,9 @@ def port_distributor(worker_base_port):
 
 class PgProtocol:
     """ Reusable connection logic """
-    def __init__(self, host: str, port: int,
+    def __init__(self,
+                 host: str,
+                 port: int,
                  username: Optional[str] = None,
                  password: Optional[str] = None):
         self.host = host
@@ -1170,6 +1172,7 @@ class ZenithProxy(PgProtocol):
         assert not self.running
         self.running = True
 
+        # Start proxy
         http_port = "7001"
         bin_proxy = os.path.join(str(zenith_binpath), 'proxy')
         args = [bin_proxy]
@@ -1181,7 +1184,6 @@ class ZenithProxy(PgProtocol):
 
         # Readiness probe
         requests.get(f"http://{self.host}:{http_port}/v1/status")
-
 
     def stop(self) -> None:
         assert self.running
