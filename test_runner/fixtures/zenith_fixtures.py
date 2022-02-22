@@ -1157,6 +1157,56 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
         yield vanilla_pg
 
 
+class ZenithProxy(PgProtocol):
+    def __init__(self, port: int):
+        super().__init__(host="127.0.0.1", username="postgres", port=port)
+        self.running = False
+
+    def start_static(self, addr="127.0.0.1:5432") -> None:
+        assert not self.running
+        self.running = True
+
+        http_port = "7001"
+        args = [
+            "cargo",
+            "run",
+            "--bin", "proxy",
+            "--",
+            "--http", http_port,
+            "--proxy", f"{self.host}:{self.port}",
+            "--auth-method", "password",
+            "--static-router", addr,
+        ]
+        self.popen = subprocess.Popen(args)
+
+        # Readiness probe
+        requests.get(f"http://{self.host}:{http_port}/v1/status")
+
+
+
+    def stop(self) -> None:
+        assert self.running
+        # print("PID: ", self.popen.pid)
+        # print(self.popen.communicate())
+        self.running = False
+
+        # NOTE the process will die when we're done with tests anyway, because
+        # it's a child process. This is mostly to clean up in between different tests.
+        self.popen.kill()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.running:
+            self.stop()
+
+@pytest.fixture(scope='function')
+def zenith_proxy() -> Iterator[ZenithProxy]:
+    with ZenithProxy(4432) as proxy:
+        yield proxy
+
+
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
