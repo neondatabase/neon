@@ -32,6 +32,7 @@ from typing_extensions import Literal
 import pytest
 
 import requests
+import backoff
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
 from fixtures.log_helper import log
@@ -1167,23 +1168,25 @@ class ZenithProxy(PgProtocol):
     def __init__(self, port: int):
         super().__init__(host="127.0.0.1", username="pytest", password="pytest", port=port)
         self.running = False
+        self.http_port = 7001
 
     def start_static(self, addr="127.0.0.1:5432") -> None:
         assert not self.running
         self.running = True
 
         # Start proxy
-        http_port = "7001"
         bin_proxy = os.path.join(str(zenith_binpath), 'proxy')
         args = [bin_proxy]
-        args.extend(["--http", f"{self.host}:{http_port}"])
+        args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.port}"])
         args.extend(["--auth-method", "password"])
         args.extend(["--static-router", addr])
         self.popen = subprocess.Popen(args)
+        self._wait_until_ready()
 
-        # Readiness probe
-        requests.get(f"http://{self.host}:{http_port}/v1/status")
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
+    def _wait_until_ready(self):
+        requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
     def stop(self) -> None:
         assert self.running
