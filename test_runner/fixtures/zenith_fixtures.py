@@ -1168,6 +1168,7 @@ class ZenithProxy(PgProtocol):
 
         http_port = "7001"
         args = [
+            # TODO is cargo run the right thing to do?
             "cargo",
             "run",
             "--bin", "proxy",
@@ -1183,11 +1184,9 @@ class ZenithProxy(PgProtocol):
         requests.get(f"http://{self.host}:{http_port}/v1/status")
 
 
-
     def stop(self) -> None:
         assert self.running
         # print("PID: ", self.popen.pid)
-        # print(self.popen.communicate())
         self.running = False
 
         # NOTE the process will die when we're done with tests anyway, because
@@ -1201,6 +1200,7 @@ class ZenithProxy(PgProtocol):
         if self.running:
             self.stop()
 
+# TODO make this static_proxy, and increase the scope?
 @pytest.fixture(scope='function')
 def zenith_proxy() -> Iterator[ZenithProxy]:
     with ZenithProxy(4432) as proxy:
