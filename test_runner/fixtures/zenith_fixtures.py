@@ -237,10 +237,13 @@ def port_distributor(worker_base_port):
 
 class PgProtocol:
     """ Reusable connection logic """
-    def __init__(self, host: str, port: int, username: Optional[str] = None):
+    def __init__(self, host: str, port: int,
+                 username: Optional[str] = None,
+                 password: Optional[str] = None):
         self.host = host
         self.port = port
         self.username = username
+        self.password = password
 
     def connstr(self,
                 *,
@@ -252,6 +255,7 @@ class PgProtocol:
         """
 
         username = username or self.username
+        password = password or self.password
         res = f'host={self.host} port={self.port} dbname={dbname}'
 
         if username:
@@ -1159,7 +1163,7 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
 
 class ZenithProxy(PgProtocol):
     def __init__(self, port: int):
-        super().__init__(host="127.0.0.1", username="postgres", port=port)
+        super().__init__(host="127.0.0.1", username="pytest", password="pytest", port=port)
         self.running = False
 
     def start_static(self, addr="127.0.0.1:5432") -> None:
@@ -1200,10 +1204,20 @@ class ZenithProxy(PgProtocol):
         if self.running:
             self.stop()
 
-# TODO make this static_proxy, and increase the scope?
+
+# TODO try to make this shared
 @pytest.fixture(scope='function')
-def zenith_proxy() -> Iterator[ZenithProxy]:
+def vanilla_pg_1mb(vanilla_pg) -> VanillaPostgres:
+    vanilla_pg.configure(['shared_buffers=1MB'])
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user pytest with password 'pytest';")
+    return vanilla_pg
+
+
+@pytest.fixture(scope='session')
+def static_proxy() -> Iterator[ZenithProxy]:
     with ZenithProxy(4432) as proxy:
+        proxy.start_static()
         yield proxy
 
 
