@@ -67,7 +67,7 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
 
 def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
     env.zenith_cli.create_branch("test_timeline_size_quota", "main")
 
     client = env.pageserver.http_client()

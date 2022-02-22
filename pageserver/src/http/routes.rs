@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use serde::Serialize;
@@ -23,6 +22,7 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{opt_display_serde, ZTimelineId};
 
 use super::models::BranchCreateRequest;
+use super::models::StatusResponse;
 use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
 use crate::repository::RepositoryTimeline;
@@ -64,12 +64,12 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 }
 
 // healthcheck handler
-async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from("{}"))
-        .map_err(ApiError::from_err)?)
+async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let config = get_config(&request);
+    Ok(json_response(
+        StatusCode::OK,
+        StatusResponse { id: config.id },
+    )?)
 }
 
 async fn branch_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {

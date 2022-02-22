@@ -122,7 +122,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     zenith_env_builder.num_safekeepers = 1
     zenith_env_builder.enable_local_fs_remote_storage()
 
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'

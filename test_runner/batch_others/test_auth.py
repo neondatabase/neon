@@ -8,7 +8,7 @@ import pytest
 
 def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.pageserver_auth_enabled = True
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     ps = env.pageserver
 
@@ -51,7 +51,7 @@ def test_compute_auth_to_pageserver(zenith_env_builder: ZenithEnvBuilder, with_w
     zenith_env_builder.pageserver_auth_enabled = True
     if with_wal_acceptors:
         zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     branch = f"test_compute_auth_to_pageserver{with_wal_acceptors}"
     env.zenith_cli.create_branch(branch, "main")

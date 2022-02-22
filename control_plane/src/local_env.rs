@@ -64,6 +64,8 @@ pub struct LocalEnv {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct PageServerConf {
+    // node id
+    pub id: ZNodeId,
     // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
@@ -78,6 +80,7 @@ pub struct PageServerConf {
 impl Default for PageServerConf {
     fn default() -> Self {
         Self {
+            id: ZNodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
             auth_type: AuthType::Trust,
