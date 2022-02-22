@@ -1190,7 +1190,6 @@ class ZenithProxy(PgProtocol):
 
     def stop(self) -> None:
         assert self.running
-        # print("PID: ", self.popen.pid)
         self.running = False
 
         # NOTE the process will die when we're done with tests anyway, because
@@ -1205,17 +1204,11 @@ class ZenithProxy(PgProtocol):
             self.stop()
 
 
-# TODO try to make this shared
 @pytest.fixture(scope='function')
-def vanilla_pg_1mb(vanilla_pg) -> VanillaPostgres:
-    vanilla_pg.configure(['shared_buffers=1MB'])
+def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user pytest with password 'pytest';")
-    return vanilla_pg
 
-
-@pytest.fixture(scope='session')
-def static_proxy() -> Iterator[ZenithProxy]:
     with ZenithProxy(4432) as proxy:
         proxy.start_static()
         yield proxy
