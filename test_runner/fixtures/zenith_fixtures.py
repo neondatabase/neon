@@ -1171,17 +1171,12 @@ class ZenithProxy(PgProtocol):
         self.running = True
 
         http_port = "7001"
-        args = [
-            # TODO is cargo run the right thing to do?
-            "cargo",
-            "run",
-            "--bin", "proxy",
-            "--",
-            "--http", http_port,
-            "--proxy", f"{self.host}:{self.port}",
-            "--auth-method", "password",
-            "--static-router", addr,
-        ]
+        bin_proxy = os.path.join(str(zenith_binpath), 'proxy')
+        args = [bin_proxy]
+        args.extend(["--http", f"{self.host}:{http_port}"])
+        args.extend(["--proxy", f"{self.host}:{self.port}"])
+        args.extend(["--auth-method", "password"])
+        args.extend(["--static-router", addr])
         self.popen = subprocess.Popen(args)
 
         # Readiness probe
@@ -1206,6 +1201,7 @@ class ZenithProxy(PgProtocol):
 
 @pytest.fixture(scope='function')
 def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
+    """Zenith proxy that routes directly to vanilla postgres."""
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user pytest with password 'pytest';")
 
