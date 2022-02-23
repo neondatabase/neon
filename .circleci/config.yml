@@ -779,7 +779,6 @@ workflows:
             branches:
               only:
                 - main
-                - release_deployment
           requires:
             - docker-image
       - deploy-staging-proxy:
@@ -788,7 +787,6 @@ workflows:
             branches:
               only:
                 - main
-                - release_deployment
           requires:
             - docker-image
 
