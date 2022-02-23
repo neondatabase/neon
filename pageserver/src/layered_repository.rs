@@ -2458,7 +2458,15 @@ mod tests {
         // Create a timeline with disk_consistent_lsn = 8000
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0x8000))?;
         let writer = tline.writer();
+
+        // FIXME: Write one image. If no page versions hav been inserted,
+        // the checkpoint won't advance 'disk_consistent_lsn'. That could
+        // spell trouble if you have a WAL stream that contains gigabytes
+        // of WAL records that don't create page images in the repository,
+        // like logical replication messages. We would not advance
+        // disk_consistent_lsn in that case.
         writer.put_page_image(TESTREL_A, 0, Lsn(0x8000), TEST_IMG("foo blk 0 at 0x8000"))?;
+
         writer.advance_last_record_lsn(Lsn(0x8000));
         drop(writer);
         repo.checkpoint_iteration(CheckpointConfig::Forced)?;
