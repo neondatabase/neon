@@ -20,12 +20,14 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use log::*;
+use std::collections::HashMap;
+use std::io::Seek;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::vec_map::VecMap;
-
-use super::page_versions::PageVersions;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -71,11 +73,15 @@ pub struct InMemoryLayerInner {
     /// The drop LSN is recorded in [`end_lsn`].
     dropped: bool,
 
-    ///
-    /// All versions of all pages in the layer are are kept here.
-    /// Indexed by block number and LSN.
-    ///
-    page_versions: PageVersions,
+    /// The PageVersion structs are stored in a serialized format in this file.
+    /// Each serialized PageVersion is preceded by a 'u32' length field.
+    /// 'page_versions' map stores offsets into this file.
+    file: EphemeralFile,
+
+    /// Metadata about all versions of all pages in the layer is kept
+    /// here.  Indexed by block number and LSN. The value is an offset
+    /// into the ephemeral file where the page version is stored.
+    page_versions: HashMap<SegmentBlk, VecMap<Lsn, u64>>,
 
     ///
     /// `seg_sizes` tracks the size of the segment at different points in time.
@@ -110,6 +116,50 @@ impl InMemoryLayerInner {
         } else {
             panic!("could not find seg size in in-memory layer");
         }
+    }
+
+    ///
+    /// Read a page version from the ephemeral file.
+    ///
+    fn read_pv(&self, off: u64) -> Result<PageVersion> {
+        let mut buf = Vec::new();
+        self.read_pv_bytes(off, &mut buf)?;
+        Ok(PageVersion::des(&buf)?)
+    }
+
+    ///
+    /// Read a page version from the ephemeral file, as raw bytes, at
+    /// the given offset.  The bytes are read into 'buf', which is
+    /// expanded if necessary. Returns the size of the page version.
+    ///
+    fn read_pv_bytes(&self, off: u64, buf: &mut Vec<u8>) -> Result<usize> {
+        // read length
+        let mut lenbuf = [0u8; 4];
+        self.file.read_exact_at(&mut lenbuf, off)?;
+        let len = u32::from_ne_bytes(lenbuf) as usize;
+
+        if buf.len() < len {
+            buf.resize(len, 0);
+        }
+        self.file.read_exact_at(&mut buf[0..len], off + 4)?;
+        Ok(len)
+    }
+
+    fn write_pv(&mut self, pv: &PageVersion) -> Result<u64> {
+        // remember starting position
+        let pos = self.file.stream_position()?;
+
+        // make room for the 'length' field by writing zeros as a placeholder.
+        self.file.seek(std::io::SeekFrom::Start(pos + 4)).unwrap();
+
+        pv.ser_into(&mut self.file).unwrap();
+
+        // write the 'length' field.
+        let len = self.file.stream_position()? - pos - 4;
+        let lenbuf = u32::to_ne_bytes(len as u32);
+        self.file.write_all_at(&lenbuf, pos)?;
+
+        Ok(pos)
     }
 }
 
@@ -185,32 +235,30 @@ impl Layer for InMemoryLayer {
             let inner = self.inner.read().unwrap();
 
             // Scan the page versions backwards, starting from `lsn`.
-            let iter = inner
-                .page_versions
-                .get_block_lsn_range(blknum, ..=lsn)
-                .iter()
-                .rev();
-            for (entry_lsn, pos) in iter {
-                match &cached_img_lsn {
-                    Some(cached_lsn) if entry_lsn <= cached_lsn => {
-                        return Ok(PageReconstructResult::Cached)
+            if let Some(vec_map) = inner.page_versions.get(&blknum) {
+                let slice = vec_map.slice_range(..=lsn);
+                for (entry_lsn, pos) in slice.iter().rev() {
+                    match &cached_img_lsn {
+                        Some(cached_lsn) if entry_lsn <= cached_lsn => {
+                            return Ok(PageReconstructResult::Cached)
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
 
-                let pv = inner.page_versions.read_pv(*pos)?;
-                match pv {
-                    PageVersion::Page(img) => {
-                        reconstruct_data.page_img = Some(img);
-                        need_image = false;
-                        break;
-                    }
-                    PageVersion::Wal(rec) => {
-                        reconstruct_data.records.push((*entry_lsn, rec.clone()));
-                        if rec.will_init() {
-                            // This WAL record initializes the page, so no need to go further back
+                    let pv = inner.read_pv(*pos)?;
+                    match pv {
+                        PageVersion::Page(img) => {
+                            reconstruct_data.page_img = Some(img);
                             need_image = false;
                             break;
+                        }
+                        PageVersion::Wal(rec) => {
+                            reconstruct_data.records.push((*entry_lsn, rec.clone()));
+                            if rec.will_init() {
+                                // This WAL record initializes the page, so no need to go further back
+                                need_image = false;
+                                break;
+                            }
                         }
                     }
                 }
@@ -317,14 +365,22 @@ impl Layer for InMemoryLayer {
             println!("seg_sizes {}: {}", k, v);
         }
 
-        for (blknum, lsn, pos) in inner.page_versions.ordered_page_version_iter(None) {
-            let pv = inner.page_versions.read_pv(pos)?;
-            let pv_description = match pv {
-                PageVersion::Page(_img) => "page",
-                PageVersion::Wal(_rec) => "wal",
-            };
+        // List the blocks in order
+        let mut page_versions: Vec<(&SegmentBlk, &VecMap<Lsn, u64>)> =
+            inner.page_versions.iter().collect();
+        page_versions.sort_by_key(|k| k.0);
 
-            println!("blk {} at {}: {}\n", blknum, lsn, pv_description);
+        for (blknum, versions) in page_versions {
+            for (lsn, off) in versions.as_slice() {
+                let pv = inner.read_pv(*off);
+                let pv_description = match pv {
+                    Ok(PageVersion::Page(_img)) => "page",
+                    Ok(PageVersion::Wal(_rec)) => "wal",
+                    Err(_err) => "INVALID",
+                };
+
+                println!("blk {} at {}: {}\n", blknum, lsn, pv_description);
+            }
         }
 
         Ok(())
@@ -385,7 +441,8 @@ impl InMemoryLayer {
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 dropped: false,
-                page_versions: PageVersions::new(file),
+                file,
+                page_versions: HashMap::new(),
                 seg_sizes,
                 latest_lsn: oldest_lsn,
             }),
@@ -427,14 +484,18 @@ impl InMemoryLayer {
         assert!(lsn >= inner.latest_lsn);
         inner.latest_lsn = lsn;
 
-        let old = inner.page_versions.append_or_update_last(blknum, lsn, pv)?;
-
-        if old.is_some() {
-            // We already had an entry for this LSN. That's odd..
-            warn!(
-                "Page version of rel {} blk {} at {} already exists",
-                self.seg.rel, blknum, lsn
-            );
+        // Write the page version to the file, and remember its offset in 'page_versions'
+        {
+            let off = inner.write_pv(&pv)?;
+            let vec_map = inner.page_versions.entry(blknum).or_default();
+            let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+            if old.is_some() {
+                // We already had an entry for this LSN. That's odd..
+                warn!(
+                    "Page version of rel {} blk {} at {} already exists",
+                    self.seg.rel, blknum, lsn
+                );
+            }
         }
 
         // Also update the relation size, if this extended the relation.
@@ -468,16 +529,19 @@ impl InMemoryLayer {
                         gapblknum,
                         blknum
                     );
-                    let old = inner
-                        .page_versions
-                        .append_or_update_last(gapblknum, lsn, zeropv)?;
-                    // We already had an entry for this LSN. That's odd..
 
-                    if old.is_some() {
-                        warn!(
-                            "Page version of seg {} blk {} at {} already exists",
-                            self.seg, blknum, lsn
-                        );
+                    // Write the page version to the file, and remember its offset in
+                    // 'page_versions'
+                    {
+                        let off = inner.write_pv(&zeropv)?;
+                        let vec_map = inner.page_versions.entry(gapblknum).or_default();
+                        let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+                        if old.is_some() {
+                            warn!(
+                                "Page version of seg {} blk {} at {} already exists",
+                                self.seg, gapblknum, lsn
+                            );
+                        }
                     }
                 }
 
@@ -570,7 +634,8 @@ impl InMemoryLayer {
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 dropped: false,
-                page_versions: PageVersions::new(file),
+                file,
+                page_versions: HashMap::new(),
                 seg_sizes,
                 latest_lsn: oldest_lsn,
             }),
@@ -599,8 +664,10 @@ impl InMemoryLayer {
                 assert!(lsn <= &end_lsn, "{:?} {:?}", lsn, end_lsn);
             }
 
-            for (_blk, lsn, _pv) in inner.page_versions.ordered_page_version_iter(None) {
-                assert!(lsn <= end_lsn);
+            for (_blk, vec_map) in inner.page_versions.iter() {
+                for (lsn, _pos) in vec_map.as_slice() {
+                    assert!(*lsn <= end_lsn);
+                }
             }
         }
     }
@@ -678,15 +745,19 @@ impl InMemoryLayer {
                 self.is_dropped(),
             )?;
 
-            // Write all page versions
+            // Write all page versions, in block + LSN order
             let mut buf: Vec<u8> = Vec::new();
 
-            let page_versions_iter = inner
-                .page_versions
-                .ordered_page_version_iter(Some(delta_end_lsn));
-            for (blknum, lsn, pos) in page_versions_iter {
-                let len = inner.page_versions.read_pv_bytes(pos, &mut buf)?;
-                delta_layer_writer.put_page_version(blknum, lsn, &buf[..len])?;
+            let pv_iter = inner.page_versions.iter();
+            let mut pages: Vec<(&SegmentBlk, &VecMap<Lsn, u64>)> = pv_iter.collect();
+            pages.sort_by_key(|(blknum, _vec_map)| *blknum);
+            for (blknum, vec_map) in pages {
+                for (lsn, pos) in vec_map.as_slice() {
+                    if *lsn < delta_end_lsn {
+                        let len = inner.read_pv_bytes(*pos, &mut buf)?;
+                        delta_layer_writer.put_page_version(*blknum, *lsn, &buf[..len])?;
+                    }
+                }
             }
 
             // Create seg_sizes
