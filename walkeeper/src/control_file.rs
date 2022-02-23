@@ -194,31 +194,35 @@ impl Storage for FileStorage {
         })?;
 
         // fsync the file
-        control_partial.sync_all().with_context(|| {
-            format!(
-                "failed to sync partial control file at {}",
-                control_partial_path.display()
-            )
-        })?;
+        if !self.conf.no_sync {
+            control_partial.sync_all().with_context(|| {
+                format!(
+                    "failed to sync partial control file at {}",
+                    control_partial_path.display()
+                )
+            })?;
+        }
 
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);
 
         // rename should be atomic
         fs::rename(&control_partial_path, &control_path)?;
         // this sync is not required by any standard but postgres does this (see durable_rename)
-        File::open(&control_path)
-            .and_then(|f| f.sync_all())
-            .with_context(|| {
-                format!(
-                    "failed to sync control file at: {}",
-                    &control_path.display()
-                )
-            })?;
+        if !self.conf.no_sync {
+            File::open(&control_path)
+                .and_then(|f| f.sync_all())
+                .with_context(|| {
+                    format!(
+                        "failed to sync control file at: {}",
+                        &control_path.display()
+                    )
+                })?;
 
-        // fsync the directory (linux specific)
-        File::open(&self.timeline_dir)
-            .and_then(|f| f.sync_all())
-            .context("failed to sync control file directory")?;
+            // fsync the directory (linux specific)
+            File::open(&self.timeline_dir)
+                .and_then(|f| f.sync_all())
+                .context("failed to sync control file directory")?;
+        }
         Ok(())
     }
 }
