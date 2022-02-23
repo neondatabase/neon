@@ -1,0 +1,33 @@
+- name: Get Zenith binaries
+  hosts: localhost
+  connection: local
+  gather_facts: False
+
+  tasks:
+
+    - name: get zenith binaries from docker image
+      tags:
+      - pageserver
+      - safekeeper
+      - binaries
+      - getbinaries
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/zenithdb/zenith/tags |jq -r -S '.[].name' | tail -1)
+          rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz .zenith_current_version
+          mkdir zenith_install
+          docker pull --quiet zenithdb/zenith:${VERSION}
+          ID=$(docker create zenithdb/zenith:${VERSION})
+          docker cp $ID:/data/postgres_install.tar.gz .
+          tar -xzf postgres_install.tar.gz -C zenith_install
+          rm postgres_install.tar.gz
+          docker cp $ID:/usr/local/bin/pageserver zenith_install/bin/
+          docker cp $ID:/usr/local/bin/safekeeper zenith_install/bin/
+          docker cp $ID:/usr/local/bin/proxy zenith_install/bin/
+          docker cp $ID:/usr/local/bin/postgres zenith_install/bin/
+          docker rm -v $ID
+          echo ${VERSION} | tee zenith_install/.zenith_current_version
+          echo ${VERSION} | tee .zenith_current_version
+          tar -czf zenith_install.tar.gz -C zenith_install .
+          rm -rf zenith_install postgres_install.tar.gz

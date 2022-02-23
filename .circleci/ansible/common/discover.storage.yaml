@@ -1,0 +1,61 @@
+- name: discover storage nodes
+  hosts: localhost
+  connection: local
+  gather_facts: False
+
+  tasks:
+
+    - name: discover pageservers
+      no_log: true
+      ec2_instance_info:
+        #profile: "{{ aws.profile_name }}"
+        region:  "{{ aws.region }}"
+        filters:
+          "tag:zenith_env":         "{{ zenith.env }}"
+          "tag:zenith_region_slug": "{{ zenith.region_slug }}"
+          "tag:zenith_observe":     "enabled"
+          "tag:zenith_service":     "pageserver"
+          "instance-state-name":    "running"
+      register: ec2_pageservers
+      tags:
+      - pageserver
+
+    - name: add pageservers to host group
+      no_log: true
+      add_host:
+        name: "{{ item.tags.Name }}"
+        ansible_host: "{{ item.private_ip_address }}"
+        groups:
+          - storage
+          - pageservers
+      with_items: "{{ ec2_pageservers.instances }}"
+      tags:
+      - pageserver
+
+    - name: discover safekeepers
+      no_log: true
+      ec2_instance_info:
+        #profile: "{{ aws.profile_name }}"
+        region:  "{{ aws.region }}"
+        filters:
+          "tag:zenith_env":         "{{ zenith.env }}"
+          "tag:zenith_region_slug": "{{ zenith.region_slug }}"
+          "tag:zenith_observe":     "enabled"
+          "tag:zenith_service":     "safekeeper"
+          "instance-state-name":    "running"
+      register: ec2_safekeepers
+      tags:
+      - safekeeper
+
+    - name: add safekeepers to host group
+      no_log: true
+      add_host:
+        name: "{{ item.tags.Name }}"
+        ansible_host: "{{ item.private_ip_address }}"
+        groups:
+          - storage
+          - safekeepers
+      with_items: "{{ ec2_safekeepers.instances }}"
+      tags:
+      - safekeeper
+

@@ -1,0 +1,18 @@
+- name: Upload Zenith binaries
+  hosts: storage
+  gather_facts: False
+  remote_user: admin
+
+  tasks:
+    - name: upload and extract Zenith binaries to /usr/local
+      ansible.builtin.unarchive:
+        owner: root
+        group: root
+        src: zenith_install.tar.gz
+        dest: /usr/local
+      become: true
+      tags:
+      - pageserver
+      - safekeeper
+      - binaries
+      - putbinaries
