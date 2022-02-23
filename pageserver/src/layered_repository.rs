@@ -29,7 +29,7 @@ use std::ops::{Bound::Included, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
@@ -82,9 +82,6 @@ use storage_layer::{
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
-
-// Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
-static TIMEOUT: Duration = Duration::from_secs(60);
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
@@ -816,7 +813,7 @@ impl Timeline for LayeredTimeline {
         );
 
         self.last_record_lsn
-            .wait_for_timeout(lsn, TIMEOUT)
+            .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
             .with_context(|| {
                 format!(
                     "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",

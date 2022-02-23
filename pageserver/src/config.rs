@@ -36,6 +36,9 @@ pub mod defaults {
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
 
+    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
+    pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
+
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
     pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 100;
     pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
@@ -58,6 +61,9 @@ pub mod defaults {
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
+
+#wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
+#wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
 
 #max_file_descriptors = {DEFAULT_MAX_FILE_DESCRIPTORS}
 
@@ -85,6 +91,12 @@ pub struct PageServerConf {
 
     pub gc_horizon: u64,
     pub gc_period: Duration,
+
+    // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
+    pub wait_lsn_timeout: Duration,
+    // How long to wait for WAL redo to complete.
+    pub wal_redo_timeout: Duration,
+
     pub superuser: String,
 
     pub page_cache_size: usize,
@@ -232,6 +244,8 @@ impl PageServerConf {
             checkpoint_period: humantime::parse_duration(DEFAULT_CHECKPOINT_PERIOD)?,
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)?,
+            wait_lsn_timeout: humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)?,
+            wal_redo_timeout: humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)?,
             page_cache_size: DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: DEFAULT_MAX_FILE_DESCRIPTORS,
 
@@ -252,6 +266,8 @@ impl PageServerConf {
                 "checkpoint_period" => conf.checkpoint_period = parse_toml_duration(key, item)?,
                 "gc_horizon" => conf.gc_horizon = parse_toml_u64(key, item)?,
                 "gc_period" => conf.gc_period = parse_toml_duration(key, item)?,
+                "wait_lsn_timeout" => conf.wait_lsn_timeout = parse_toml_duration(key, item)?,
+                "wal_redo_timeout" => conf.wal_redo_timeout = parse_toml_duration(key, item)?,
                 "initial_superuser_name" => conf.superuser = parse_toml_string(key, item)?,
                 "page_cache_size" => conf.page_cache_size = parse_toml_u64(key, item)? as usize,
                 "max_file_descriptors" => {
@@ -386,6 +402,8 @@ impl PageServerConf {
             checkpoint_period: Duration::from_secs(10),
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
+            wait_lsn_timeout: Duration::from_secs(60),
+            wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
@@ -456,6 +474,9 @@ checkpoint_period = '111 s'
 gc_period = '222 s'
 gc_horizon = 222
 
+wait_lsn_timeout = '111 s'
+wal_redo_timeout = '111 s'
+
 page_cache_size = 444
 max_file_descriptors = 333
 
@@ -486,6 +507,8 @@ initial_superuser_name = 'zzzz'
                 checkpoint_period: humantime::parse_duration(defaults::DEFAULT_CHECKPOINT_PERIOD)?,
                 gc_horizon: defaults::DEFAULT_GC_HORIZON,
                 gc_period: humantime::parse_duration(defaults::DEFAULT_GC_PERIOD)?,
+                wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
+                wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
                 page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
@@ -527,6 +550,8 @@ initial_superuser_name = 'zzzz'
                 checkpoint_period: Duration::from_secs(111),
                 gc_horizon: 222,
                 gc_period: Duration::from_secs(222),
+                wait_lsn_timeout: Duration::from_secs(111),
+                wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
                 page_cache_size: 444,
                 max_file_descriptors: 333,
