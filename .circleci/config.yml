@@ -534,7 +534,7 @@ jobs:
           command: |
             set -e
 
-            pwd; la -la; la -la .circleci
+            pwd; ls -la; ls -la .circleci; echo "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"; ls -la "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
 
             VERSION=$(git log --oneline|wc -l)
             cd "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
