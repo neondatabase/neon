@@ -525,16 +525,12 @@ jobs:
       - checkout
       - setup_remote_docker
       - run:
-          name: Setup ansible
-          command: |
-            pip install --progress-bar off --user ansible boto3
-            ansible-galaxy collection install amazon.aws
-      - run:
           name: Get Zenith binaries
           command: |
             set -e
+            pwd; cd "$(pwd)/.circleci/ansible"; pwd
+
             VERSION=$(git log --oneline|wc -l)
-            cd "$(pwd)/.circleci/ansible"
             rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz .zenith_current_version
             mkdir zenith_install
             docker pull --quiet zenithdb/zenith:${VERSION}
@@ -552,9 +548,15 @@ jobs:
             rm -rf zenith_install postgres_install.tar.gz
             ls -la
       - run:
+          name: Setup ansible
+          command: |
+            pip install --progress-bar off --user ansible boto3
+            ansible-galaxy collection install amazon.aws
+      - run:
           name: Apply re-deploy playbook
           command: |
-            cd "$(pwd)/.circleci/ansible"
+            pwd; cd "$(pwd)/.circleci/ansible"; pwd
+
             ls -la
             echo "${TELEPORT_SSH_KEY}" | base64 --decode | ssh-add -
             export AWS_ACCESS_KEY_ID=${DISCOVER_AWS_ACCESS_KEY_ID}
@@ -779,8 +781,8 @@ workflows:
               only:
                 - main
                 - release_deployment
-#          requires:
-#            - docker-image
+          requires:
+            - docker-image
       - deploy-staging-proxy:
           # deploy only for commits to main
           filters:
