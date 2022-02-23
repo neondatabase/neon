@@ -1285,6 +1285,10 @@ class Postgres(PgProtocol):
 
         if config_lines is None:
             config_lines = []
+
+        # set small 'max_replication_write_lag' to enable backpressure
+        # and make tests more stable.
+        config_lines = ['max_replication_write_lag=15MB'] + config_lines
         self.config(config_lines)
 
         return self
