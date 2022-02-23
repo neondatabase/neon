@@ -102,8 +102,6 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
     }
 }
 
-static TIMEOUT: Duration = Duration::from_secs(20);
-
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
@@ -221,7 +219,14 @@ impl WalRedoManager for PostgresRedoManager {
                 let result = if batch_zenith {
                     self.apply_batch_zenith(rel, blknum, lsn, img, &records[batch_start..i])
                 } else {
-                    self.apply_batch_postgres(rel, blknum, lsn, img, &records[batch_start..i])
+                    self.apply_batch_postgres(
+                        rel,
+                        blknum,
+                        lsn,
+                        img,
+                        &records[batch_start..i],
+                        self.conf.wal_redo_timeout,
+                    )
                 };
                 img = Some(result?);
 
@@ -233,7 +238,14 @@ impl WalRedoManager for PostgresRedoManager {
         if batch_zenith {
             self.apply_batch_zenith(rel, blknum, lsn, img, &records[batch_start..])
         } else {
-            self.apply_batch_postgres(rel, blknum, lsn, img, &records[batch_start..])
+            self.apply_batch_postgres(
+                rel,
+                blknum,
+                lsn,
+                img,
+                &records[batch_start..],
+                self.conf.wal_redo_timeout,
+            )
         }
     }
 }
@@ -261,6 +273,7 @@ impl PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
+        wal_redo_timeout: Duration,
     ) -> Result<Bytes, WalRedoError> {
         let start_time = Instant::now();
 
@@ -281,7 +294,7 @@ impl PostgresRedoManager {
         let result = if let RelishTag::Relation(rel) = rel {
             // Relational WAL records are applied using wal-redo-postgres
             let buf_tag = BufferTag { rel, blknum };
-            apply_result = process.apply_wal_records(buf_tag, base_img, records);
+            apply_result = process.apply_wal_records(buf_tag, base_img, records, wal_redo_timeout);
 
             apply_result.map_err(WalRedoError::IoError)
         } else {
@@ -603,6 +616,7 @@ impl PostgresRedoProcess {
         tag: BufferTag,
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
+        wal_redo_timeout: Duration,
     ) -> Result<Bytes, std::io::Error> {
         // Serialize all the messages to send the WAL redo process first.
         //
@@ -653,7 +667,7 @@ impl PostgresRedoProcess {
             // If we have more data to write, wake up if 'stdin' becomes writeable or
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = nix::poll::poll(&mut pollfds[0..nfds], TIMEOUT.as_millis() as i32)?;
+            let n = nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32)?;
 
             if n == 0 {
                 return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
