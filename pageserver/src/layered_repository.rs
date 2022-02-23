@@ -1384,6 +1384,7 @@ impl LayeredTimeline {
             let layer_rc = Arc::new(new_layer);
 
             layers.open_layer = Some(Arc::clone(&layer_rc));
+            layers.next_open_layer_at = None;
 
             layer = layer_rc;
         }

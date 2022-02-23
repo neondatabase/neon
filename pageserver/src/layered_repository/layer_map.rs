@@ -3,10 +3,11 @@
 //!
 //! When the timeline is first accessed, the server lists of all layer files
 //! in the timelines/<timelineid> directory, and populates this map with
-//! ImageLayer and DeltaLayer structs corresponding to each file. When new WAL
-//! is received, we create InMemoryLayers to hold the incoming records. Now and
-//! then, in the checkpoint() function, the in-memory layers are frozen, forming
-//! new image and delta layers and corresponding files are written to disk.
+//! ImageLayer and DeltaLayer structs corresponding to each file. When the first
+//! new WAL record is received, we create an InMemoryLayer to hold the incoming
+//! records. Now and then, in the checkpoint() function, the in-memory layer is
+//! are frozen, and it is split up into new image and delta layers and the
+//! corresponding files are written to disk.
 //!
 
 use crate::layered_repository::interval_tree::{IntervalItem, IntervalIter, IntervalTree};
@@ -31,12 +32,24 @@ lazy_static! {
 ///
 #[derive(Default)]
 pub struct LayerMap {
+    //
+    // 'open_layer' holds the current InMemoryLayer that is accepting new
+    // records. If it is None, 'next_open_layer_at' will be set instead, indicating
+    // where the start LSN of the next InMemoryLayer that is to be created.
+    //
+    pub open_layer: Option<Arc<InMemoryLayer>>,
+    pub next_open_layer_at: Option<Lsn>,
+
+    ///
+    /// The frozen layer, if any, contains WAL older than the current 'open_layer'
+    /// or 'next_open_layer_at', but newer than any historic layer. The frozen
+    /// layer is during checkpointing, when an InMemoryLayer is being written out
+    /// to disk.
+    ///
+    pub frozen_layer: Option<Arc<InMemoryLayer>>,
+
     /// All the layers keyed by segment tag
     historic_layers: HashMap<SegmentTag, SegEntry>,
-
-    pub next_open_layer_at: Option<Lsn>,
-    pub open_layer: Option<Arc<InMemoryLayer>>,
-    pub frozen_layer: Option<Arc<InMemoryLayer>>,
 }
 
 impl LayerMap {
@@ -47,6 +60,7 @@ impl LayerMap {
     /// you don't need to know the exact start LSN of the layer.
     ///
     pub fn get(&self, tag: &SegmentTag, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+        // Check the open and frozen in-memory layers first
         if let Some(open_layer) = &self.open_layer {
             if lsn >= open_layer.get_start_lsn() && open_layer.covers_seg(*tag) {
                 return Some(open_layer.clone());
@@ -59,7 +73,6 @@ impl LayerMap {
         }
 
         let segentry = self.historic_layers.get(tag)?;
-
         segentry.get(lsn)
     }
 
@@ -67,8 +80,11 @@ impl LayerMap {
     /// Insert an on-disk layer
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        // TODO: We currently only support singleton ranges
+        // TODO: We currently only support singleton historic ranges.
+        // In other words, a historic layer's segment range must be
+        // exactly one segment.
         let tag = layer.get_seg_range().get_singleton().unwrap();
+
         let segentry = self.historic_layers.entry(tag).or_default();
         segentry.insert_historic(layer);
 
@@ -81,7 +97,9 @@ impl LayerMap {
     /// This should be called when the corresponding file on disk has been deleted.
     ///
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
-        // TODO: We currently only support singleton ranges
+        // TODO: We currently only support singleton historic ranges.
+        // In other words, a historic layer's segment range must be
+        // exactly one segment.
         let tag = layer.get_seg_range().get_singleton().unwrap();
 
         if let Some(segentry) = self.historic_layers.get_mut(&tag) {
@@ -206,13 +224,8 @@ impl IntervalItem for dyn Layer {
 }
 
 ///
-/// Per-segment entry in the LayerMap::segs hash map. Holds all the layers
-/// associated with the segment.
+/// Per-segment entry in the LayerMap::historic_layers hash map.
 ///
-/// The last layer that is open for writes is always an InMemoryLayer,
-/// and is kept in a separate field, because there can be only one for
-/// each segment. The older layers, stored on disk, are kept in an
-/// IntervalTree.
 #[derive(Default)]
 struct SegEntry {
     historic: IntervalTree<dyn Layer>,

@@ -2,9 +2,7 @@
 //!
 //! The key space of all relishes is split into multiple Segments. As of this
 //! writing, Delta- and ImageLayers contain data about a single Segment, whereas
-//! an InMemoryLayer contains data about *all* modified segments. (FIXME: Dividing
-//! the key range into segments is a bit pointless for the InMemoryLayer, because
-//! it covers the whole range anyway)
+//! an InMemoryLayer contains data about *all* modified segments.
 //!
 //! Before InMemoryLayer can store any information about a segment, whether that's
 //! a page modification or the creation, truncation or dropping of a segment,
@@ -14,12 +12,11 @@
 //! modifications to the layer in the LSN range. If a segment is not covered by the
 //! layer, there has been no modifications to it in the layer's LSN range, and you
 //! should check the predecessor layer. You can check if a segment is covered by
-//! calling 'covers_seg', which
+//! calling 'covers_seg'.
 //!
-//! The page versions are held in a BTreeMap. To avoid OOM errors, the actual page
-//! versions or WAL records are spilled to disk into an ephemeral file.
-//!
-//! And there's another BTreeMap to track the size of the relation.
+//! The "in-memory" part of the name is a bit misleading: the actual page versions are
+//! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
+//! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
 use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
@@ -87,25 +84,23 @@ pub struct InMemoryLayerInner {
     file: EphemeralFile,
 }
 
-#[derive(Copy, Clone, Debug)]
-enum SegSizeEntry {
-    Create(SegmentBlk),
-    Size(SegmentBlk),
-    Drop,
-}
-
+///
+/// 'PerSeg' holds information about one segment that the in-memory
+/// layer covers.
+///
 #[derive(Default)]
 struct PerSeg {
     ///
-    /// All versions of all pages in the layer are kept here.
-    /// Indexed by block number and LSN. The value is an offset into the
+    /// All versions of all pages in the layer are kept here.  Indexed
+    /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
     ///
     page_versions: HashMap<SegmentBlk, VecMap<Lsn, u64>>,
 
-    /// Stores the old size of the segment, at 'start_lsn', or None if it did not
-    /// exist at that point, i.e. it was created later. (We carry over the old
-    /// size for convenience; you could dig into the predecessor layer for it, too.)
+    /// Stores the old size of the segment, at 'start_lsn', or None if
+    /// it did not exist at that point, i.e. it was created later. (We
+    /// carry over the old size for convenience; you could dig into
+    /// the predecessor layer for it, too.)
     old_size: Option<SegmentBlk>,
 
     ///
@@ -113,6 +108,17 @@ struct PerSeg {
     /// covered in this layer at different points in time.
     ///
     seg_sizes: VecMap<Lsn, SegSizeEntry>,
+}
+
+///
+/// Whenever the size of a segment changes, we store a SegSizeEntry to record
+/// the change in the 'seg_sizes' list.
+///
+#[derive(Copy, Clone, Debug)]
+enum SegSizeEntry {
+    Create(SegmentBlk),
+    Size(SegmentBlk),
+    Drop,
 }
 
 impl InMemoryLayerInner {
