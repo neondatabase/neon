@@ -401,6 +401,7 @@ class ZenithEnvBuilder:
                  repo_dir: Path,
                  port_distributor: PortDistributor,
                  pageserver_remote_storage: Optional[RemoteStorage] = None,
+                 pageserver_config_override: Optional[str] = None,
                  num_safekeepers: int = 0,
                  pageserver_auth_enabled: bool = False,
                  rust_log_override: Optional[str] = None):
@@ -408,6 +409,7 @@ class ZenithEnvBuilder:
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.pageserver_remote_storage = pageserver_remote_storage
+        self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.env: Optional[ZenithEnv] = None
@@ -548,7 +550,8 @@ class ZenithEnv:
         # Create a corresponding ZenithPageserver object
         self.pageserver = ZenithPageserver(self,
                                            port=pageserver_port,
-                                           remote_storage=config.pageserver_remote_storage)
+                                           remote_storage=config.pageserver_remote_storage,
+                                           config_override=config.pageserver_config_override)
 
         # Create config and a Safekeeper object for each safekeeper
         for i in range(1, config.num_safekeepers + 1):
@@ -831,13 +834,17 @@ class ZenithCli:
             tmp.flush()
 
             cmd = ['init', f'--config={tmp.name}']
-            append_pageserver_param_overrides(cmd, self.env.pageserver.remote_storage)
+            append_pageserver_param_overrides(cmd,
+                                              self.env.pageserver.remote_storage,
+                                              self.env.pageserver.config_override)
 
             return self.raw_cli(cmd)
 
     def pageserver_start(self) -> 'subprocess.CompletedProcess[str]':
         start_args = ['pageserver', 'start']
-        append_pageserver_param_overrides(start_args, self.env.pageserver.remote_storage)
+        append_pageserver_param_overrides(start_args,
+                                          self.env.pageserver.remote_storage,
+                                          self.env.pageserver.config_override)
         return self.raw_cli(start_args)
 
     def pageserver_stop(self, immediate=False) -> 'subprocess.CompletedProcess[str]':
@@ -982,12 +989,14 @@ class ZenithPageserver(PgProtocol):
                  env: ZenithEnv,
                  port: PageserverPort,
                  remote_storage: Optional[RemoteStorage] = None,
+                 config_override: Optional[str] = None,
                  enable_auth=False):
         super().__init__(host='localhost', port=port.pg, username='zenith_admin')
         self.env = env
         self.running = False
         self.service_port = port  # do not shadow PgProtocol.port which is just int
         self.remote_storage = remote_storage
+        self.config_override = config_override
 
     def start(self) -> 'ZenithPageserver':
         """
@@ -1024,8 +1033,11 @@ class ZenithPageserver(PgProtocol):
         )
 
 
-def append_pageserver_param_overrides(params_to_update: List[str],
-                                      pageserver_remote_storage: Optional[RemoteStorage]):
+def append_pageserver_param_overrides(
+    params_to_update: List[str],
+    pageserver_remote_storage: Optional[RemoteStorage],
+    pageserver_config_override: Optional[str] = None,
+):
     if pageserver_remote_storage is not None:
         if isinstance(pageserver_remote_storage, LocalFsStorage):
             pageserver_storage_override = f"local_path='{pageserver_remote_storage.root}'"
@@ -1049,6 +1061,12 @@ def append_pageserver_param_overrides(params_to_update: List[str],
     if env_overrides is not None:
         params_to_update += [
             f'--pageserver-config-override={o.strip()}' for o in env_overrides.split(';')
+        ]
+
+    if pageserver_config_override is not None:
+        params_to_update += [
+            f'--pageserver-config-override={o.strip()}'
+            for o in pageserver_config_override.split(';')
         ]
 
 
