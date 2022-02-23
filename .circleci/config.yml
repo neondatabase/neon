@@ -533,6 +533,9 @@ jobs:
           name: Get Zenith binaries
           command: |
             set -e
+
+            pwd; la -la; la -la .circleci
+
             VERSION=$(git log --oneline|wc -l)
             cd "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
             rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz .zenith_current_version
@@ -779,8 +782,8 @@ workflows:
               only:
                 - main
                 - release_deployment
-          requires:
-            - docker-image
+#          requires:
+#            - docker-image
       - deploy-staging-proxy:
           # deploy only for commits to main
           filters:
