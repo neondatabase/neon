@@ -108,29 +108,37 @@ impl LayerMap {
         NUM_ONDISK_LAYERS.dec();
     }
 
-    fn filter_fn(query: Option<RelTag>, seg: SegmentTag) -> bool {
-        match seg.rel {
-            RelishTag::Relation(reltag) => {
-                if let Some(request_rel) = query {
-                    (request_rel.spcnode == 0 || reltag.spcnode == request_rel.spcnode)
-                        && (request_rel.dbnode == 0 || reltag.dbnode == request_rel.dbnode)
-                } else {
-                    // FIXME: If query is None, shouldn't we return true?
-                    false
-                }
-            }
-            _ => query == None,
-        }
-    }
-
     // List relations along with a flag that marks if they exist at the given lsn.
     // spcnode 0 and dbnode 0 have special meanings and mean all tablespaces/databases.
-    // Pass Tag if we're only interested in some relations.
-    pub fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashMap<RelishTag, bool>> {
+    //
+    // If query is None, returns relishes that are *not* relations.
+    pub fn list_relishes(
+        &self,
+        query: Option<RelTag>,
+        lsn: Lsn,
+    ) -> Result<HashMap<RelishTag, bool>> {
         let mut rels: HashMap<RelishTag, bool> = HashMap::new();
 
+        // Helper function that returns true if the relish that 'seg'
+        // belongs to should be returned in the list of relations, for
+        // the given 'query' argument
+        let seg_matches_query = |seg: SegmentTag| -> bool {
+            match seg.rel {
+                RelishTag::Relation(reltag) => {
+                    if let Some(request_rel) = query {
+                        (request_rel.spcnode == 0 || reltag.spcnode == request_rel.spcnode)
+                            && (request_rel.dbnode == 0 || reltag.dbnode == request_rel.dbnode)
+                    } else {
+                        // caller requested only non-relations
+                        false
+                    }
+                }
+                _ => query == None,
+            }
+        };
+
         for (seg, segentry) in self.historic_layers.iter() {
-            if Self::filter_fn(tag, *seg) {
+            if seg_matches_query(*seg) {
                 if let Some(exists) = segentry.exists_at_lsn(*seg, lsn)? {
                     rels.insert(seg.rel, exists);
                 }
@@ -140,7 +148,7 @@ impl LayerMap {
         if let Some(frozen_layer) = &self.frozen_layer {
             if frozen_layer.get_start_lsn() <= lsn {
                 for seg in frozen_layer.list_covered_segs()? {
-                    if Self::filter_fn(tag, seg) {
+                    if seg_matches_query(seg) {
                         rels.insert(seg.rel, frozen_layer.get_seg_exists(seg, lsn)?);
                     }
                 }
@@ -149,7 +157,7 @@ impl LayerMap {
         if let Some(open_layer) = &self.open_layer {
             if open_layer.get_start_lsn() <= lsn {
                 for seg in open_layer.list_covered_segs()? {
-                    if Self::filter_fn(tag, seg) {
+                    if seg_matches_query(seg) {
                         rels.insert(seg.rel, open_layer.get_seg_exists(seg, lsn)?);
                     }
                 }
