@@ -746,8 +746,8 @@ mod tests {
 
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
-            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             lsn += 0x10;
+            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             writer.put_page_image(TESTREL_A, blknum as BlockNumber, Lsn(lsn), img)?;
         }
         writer.advance_last_record_lsn(Lsn(lsn));
