@@ -387,7 +387,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn is_incremental(&self) -> bool {
-        // FIXME: self.incremental
+        // in-memory layer is always considered incremental.
         true
     }
 
