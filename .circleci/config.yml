@@ -561,7 +561,7 @@ jobs:
             echo "${TELEPORT_SSH_KEY}" | base64 --decode | ssh-add -
             export AWS_ACCESS_KEY_ID=${DISCOVER_AWS_ACCESS_KEY_ID}
             export AWS_SECRET_ACCESS_KEY=${DISCOVER_AWS_SECRET_ACCESS_KEY}
-            echo ansible-playbook deploy.staging.yaml
+            ansible-playbook deploy.staging.yaml
             rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-staging-proxy:
