@@ -16,7 +16,7 @@ extensions = ["pageinspect", "zenith_test_utils", "pg_buffercache"]
 #
 def test_read_validation(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli(["branch", "test_read_validation", "empty"])
+    env.zenith_cli.create_branch("test_read_validation", "empty")
 
     pg = env.postgres.create_start("test_read_validation")
     log.info("postgres is running on 'test_read_validation' branch")
@@ -127,7 +127,7 @@ def test_read_validation(zenith_simple_env: ZenithEnv):
 
 def test_read_validation_neg(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli(["branch", "test_read_validation_neg", "empty"])
+    env.zenith_cli.create_branch("test_read_validation_neg", "empty")
 
     pg = env.postgres.create_start("test_read_validation_neg")
     log.info("postgres is running on 'test_read_validation_neg' branch")
