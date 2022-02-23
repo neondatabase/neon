@@ -64,7 +64,6 @@ mod inmemory_layer;
 mod interval_tree;
 mod layer_map;
 pub mod metadata;
-mod page_versions;
 mod par_fsync;
 mod storage_layer;
 
