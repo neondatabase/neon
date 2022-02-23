@@ -1,5 +1,5 @@
-- name: Get binaries
-  import_playbook: get.binaries.yaml
+#- name: Get binaries
+#  import_playbook: get.binaries.yaml
 
 - name: Compare versions
   hosts: storage
