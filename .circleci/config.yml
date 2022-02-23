@@ -533,11 +533,8 @@ jobs:
           name: Get Zenith binaries
           command: |
             set -e
-
-            pwd; ls -la; ls -la .circleci; echo "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"; ls -la "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
-
             VERSION=$(git log --oneline|wc -l)
-            cd "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
+            cd "$(pwd)/.circleci/ansible"
             rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz .zenith_current_version
             mkdir zenith_install
             docker pull --quiet zenithdb/zenith:${VERSION}
@@ -557,12 +554,12 @@ jobs:
       - run:
           name: Apply re-deploy playbook
           command: |
-            cd "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
+            cd "$(pwd)/.circleci/ansible"
             ls -la
             echo "${TELEPORT_SSH_KEY}" | base64 --decode | ssh-add -
             export AWS_ACCESS_KEY_ID=${DISCOVER_AWS_ACCESS_KEY_ID}
             export AWS_SECRET_ACCESS_KEY=${DISCOVER_AWS_SECRET_ACCESS_KEY}
-            ansible-playbook deploy.staging.yaml
+            echo ansible-playbook deploy.staging.yaml
             rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-staging-proxy:
