@@ -525,42 +525,42 @@ jobs:
       - checkout
       - setup_remote_docker
       - run:
-          name: Get Zenith binaries
-          command: |
-            set -e
-            cd .circleci/ansible
-            rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz .zenith_current_version
-            mkdir zenith_install
-            VERSION=$(git log --oneline|wc -l)
-            docker pull --quiet zenithdb/zenith:${VERSION}
-            ID=$(docker create zenithdb/zenith:${VERSION})
-            docker cp $ID:/data/postgres_install.tar.gz .
-            tar -xzf postgres_install.tar.gz -C zenith_install
-            rm postgres_install.tar.gz
-            docker cp $ID:/usr/local/bin/pageserver zenith_install/bin/
-            docker cp $ID:/usr/local/bin/safekeeper zenith_install/bin/
-            docker cp $ID:/usr/local/bin/proxy zenith_install/bin/
-            docker cp $ID:/usr/local/bin/postgres zenith_install/bin/
-            docker rm -v $ID
-            echo ${VERSION} | tee zenith_install/.zenith_current_version
-            echo ${VERSION} | tee .zenith_current_version
-            tar -czf zenith_install.tar.gz -C zenith_install .
-            rm -rf zenith_install postgres_install.tar.gz
-            ls -la zenith_install.tar.gz
-      - run:
           name: Setup ansible
           command: |
             pip install --progress-bar off --user ansible boto3
             ansible-galaxy collection install amazon.aws
       - run:
+          name: Get Zenith binaries
+          command: |
+            set -e
+            VERSION=$(git log --oneline|wc -l)
+            cd "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
+            rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz .zenith_current_version
+            mkdir zenith_install
+            docker pull --quiet zenithdb/zenith:${VERSION}
+            ID=$(docker create zenithdb/zenith:${VERSION})
+            docker cp ${ID}:/data/postgres_install.tar.gz .
+            tar -xzf postgres_install.tar.gz -C zenith_install
+            docker cp ${ID}:/usr/local/bin/pageserver zenith_install/bin/
+            docker cp ${ID}:/usr/local/bin/safekeeper zenith_install/bin/
+            docker cp ${ID}:/usr/local/bin/proxy      zenith_install/bin/
+            docker cp ${ID}:/usr/local/bin/postgres   zenith_install/bin/
+            docker rm -vf ${ID}
+            echo ${VERSION} | tee zenith_install/.zenith_current_version
+            echo ${VERSION} | tee .zenith_current_version
+            tar -czf zenith_install.tar.gz -C zenith_install .
+            rm -rf zenith_install postgres_install.tar.gz
+            ls -la
+      - run:
           name: Apply re-deploy playbook
           command: |
-            cd .circleci/ansible
+            cd "${CIRCLE_WORKING_DIRECTORY}/.circleci/ansible"
+            ls -la
             echo "${TELEPORT_SSH_KEY}" | base64 --decode | ssh-add -
             export AWS_ACCESS_KEY_ID=${DISCOVER_AWS_ACCESS_KEY_ID}
             export AWS_SECRET_ACCESS_KEY=${DISCOVER_AWS_SECRET_ACCESS_KEY}
             ansible-playbook deploy.staging.yaml
-            rm -f zenith_install.tar.gz
+            rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-staging-proxy:
     docker:
@@ -755,6 +755,7 @@ workflows:
             branches:
               only:
                 - main
+                - release_deployment
           requires:
             - pg_regress-tests-release
             - other-tests-release
@@ -777,6 +778,7 @@ workflows:
             branches:
               only:
                 - main
+                - release_deployment
           requires:
             - docker-image
       - deploy-staging-proxy:
