@@ -84,7 +84,7 @@ jobs:
           name: Get postgres cache key
           command: |
             git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
-            cat Makefile >> tmp/cache-key-postgres
+            cat Makefile >> /tmp/cache-key-postgres
 
 
       - restore_cache:
