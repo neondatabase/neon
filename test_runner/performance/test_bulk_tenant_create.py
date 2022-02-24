@@ -39,7 +39,7 @@ def test_bulk_tenant_create(
         #    wa_factory.start_n_new(3)
 
         pg_tenant = env.postgres.create_start(
-            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}', tenant)
+            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}', tenant_id=tenant)
 
         end = timeit.default_timer()
         time_slices.append(end - start)

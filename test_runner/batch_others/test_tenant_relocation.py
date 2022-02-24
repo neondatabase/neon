@@ -132,7 +132,9 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
     env.zenith_cli.create_branch('test_tenant_relocation', tenant_id=tenant)
 
-    tenant_pg = env.postgres.create_start("test_tenant_relocation", tenant_id=tenant)
+    tenant_pg = env.postgres.create_start(branch_name='main',
+                                          node_name='test_tenant_relocation',
+                                          tenant_id=tenant)
 
     # insert some data
     with closing(tenant_pg.connect()) as conn:

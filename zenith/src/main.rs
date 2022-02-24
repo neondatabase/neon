@@ -19,7 +19,7 @@ use walkeeper::defaults::{
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId};
+use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 use zenith_utils::GIT_VERSION;
 
 use pageserver::timelines::TimelineInfo;
@@ -72,11 +72,15 @@ struct TimelineTreeEl {
 //   * Providing CLI api to the pageserver
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
-    let branch_name_arg = Arg::new("name")
-        .long("name")
-        .short('n')
+    let branch_name_arg = Arg::new("branch-name")
+        .long("branch-name")
         .takes_value(true)
         .help("Name of the branch to be created or used as an alias for other services")
+        .required(false);
+
+    let pg_node_arg = Arg::new("node").help("Postgres node name").required(false);
+    let safekeeper_node_arg = Arg::new("node")
+        .help("Safekeeper node name")
         .required(false);
 
     let safekeeper_id_arg = Arg::new("id").help("safekeeper id").required(false);
@@ -199,6 +203,7 @@ fn main() -> Result<()> {
                 .subcommand(App::new("list").arg(tenant_id_arg.clone()))
                 .subcommand(App::new("create")
                     .about("Create a postgres compute node")
+                    .arg(pg_node_arg.clone())
                     .arg(branch_name_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
@@ -211,20 +216,20 @@ fn main() -> Result<()> {
                     ))
                 .subcommand(App::new("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
-                    .arg(branch_name_arg.clone())
+                    .arg(pg_node_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
                     .arg(port_arg.clone()))
                 .subcommand(
                     App::new("stop")
-                    .arg(branch_name_arg.clone())
-                        .arg(tenant_id_arg.clone())
-                        .arg(
-                            Arg::new("destroy")
-                                .help("Also delete data directory (now optional, should be default in future)")
-                                .long("destroy")
-                                .required(false)
-                        )
+                    .arg(pg_node_arg.clone())
+                    .arg(tenant_id_arg.clone())
+                    .arg(
+                        Arg::new("destroy")
+                            .help("Also delete data directory (now optional, should be default in future)")
+                            .long("destroy")
+                            .required(false)
+                    )
                     )
 
         )
@@ -483,9 +488,10 @@ fn handle_init(init_match: &ArgMatches) -> Result<LocalEnv> {
             exit(1);
         });
 
-    env.branch_name_mappings.insert(
+    env.register_branch_mapping(
         DEFAULT_BRANCH_NAME.to_owned(),
-        ZTenantTimelineId::new(initial_tenant_id, initial_timeline_id),
+        initial_tenant_id,
+        initial_timeline_id,
     );
 
     Ok(env)
@@ -508,14 +514,15 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
             }
         }
         Some(("create", create_match)) => {
-            let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(|| ZTenantId::generate());
+            let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(ZTenantId::generate);
             println!("using tenant id {}", tenant_id);
             let initial_timeline_id_argument = parse_timeline_id(create_match)?;
             let initial_timeline_id =
                 pageserver.tenant_create(tenant_id, initial_timeline_id_argument)?;
-            env.branch_name_mappings.insert(
+            env.register_branch_mapping(
                 DEFAULT_BRANCH_NAME.to_owned(),
-                ZTenantTimelineId::new(tenant_id, initial_timeline_id),
+                tenant_id,
+                initial_timeline_id,
             );
             println!(
                 "tenant {} successfully created on the pageserver, initial timeline: '{}'",
@@ -541,7 +548,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let tenant_id = get_tenant_id(create_match, env)?;
             let new_timeline_id = ZTimelineId::generate();
             let new_branch_name = create_match
-                .value_of("name")
+                .value_of("branch-name")
                 .ok_or(anyhow!("No branch name provided"))?;
             let timeline = pageserver.timeline_create(tenant_id, new_timeline_id, None, None)?;
 
@@ -556,10 +563,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                     )
                 }
             };
-            env.branch_name_mappings.insert(
-                new_branch_name.to_string(),
-                ZTenantTimelineId::new(tenant_id, new_timeline_id),
-            );
+            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id);
 
             println!(
                 "Created timeline '{}' at Lsn {} for tenant: {}",
@@ -572,19 +576,19 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let tenant_id = get_tenant_id(branch_match, env)?;
             let new_timeline_id = ZTimelineId::generate();
             let new_branch_name = branch_match
-                .value_of("name")
+                .value_of("branch-name")
                 .ok_or(anyhow!("No branch name provided"))?;
             let ancestor_branch_name = branch_match
                 .value_of("ancestor-branch-name")
                 .ok_or(anyhow!("No ancestor branch name provided"))?;
             let ancestor_timeline_id = env
-                .branch_name_mappings
-                .get(ancestor_branch_name)
-                .ok_or(anyhow!(
-                    "Found no timeline id for branch name '{}'",
-                    ancestor_branch_name
-                ))?
-                .timeline_id;
+                .get_branch_timeline_id(ancestor_branch_name, tenant_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Found no timeline id for branch name '{}'",
+                        ancestor_branch_name
+                    )
+                })?;
 
             let start_lsn = branch_match
                 .value_of("ancestor-start-lsn")
@@ -608,10 +612,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 ),
             };
 
-            env.branch_name_mappings.insert(
-                new_branch_name.to_string(),
-                ZTenantTimelineId::new(tenant_id, new_timeline_id),
-            );
+            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id);
 
             println!(
                 "Created timeline '{}' at Lsn {} for tenant: {}. Ancestor timeline: '{}'",
@@ -638,7 +639,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
     // All subcommands take an optional --tenant-id option
     let tenant_id = get_tenant_id(sub_args, env)?;
-    let node_name = sub_args.value_of("name").unwrap_or(DEFAULT_BRANCH_NAME);
 
     match sub_name {
         "list" => {
@@ -677,28 +677,37 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             }
         }
         "create" => {
+            let branch_name = sub_args
+                .value_of("branch-name")
+                .unwrap_or(DEFAULT_BRANCH_NAME);
+            let node_name = sub_args
+                .value_of("node")
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("{}_node", branch_name));
+
             let lsn = sub_args
                 .value_of("lsn")
                 .map(Lsn::from_str)
                 .transpose()
                 .context("Failed to parse Lsn from the request")?;
             let timeline_id = env
-                .branch_name_mappings
-                .get(node_name)
-                .ok_or(anyhow!("Found no timeline id for node name {}", node_name))?
-                .timeline_id;
+                .get_branch_timeline_id(branch_name, tenant_id)
+                .ok_or_else(|| anyhow!("Found no timeline id for branch name '{}'", branch_name))?;
 
             let port: Option<u16> = match sub_args.value_of("port") {
                 Some(p) => Some(p.parse()?),
                 None => None,
             };
-            cplane.new_node(tenant_id, node_name, timeline_id, lsn, port)?;
+            cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port)?;
         }
         "start" => {
             let port: Option<u16> = match sub_args.value_of("port") {
                 Some(p) => Some(p.parse()?),
                 None => None,
             };
+            let node_name = sub_args
+                .value_of("node")
+                .ok_or_else(|| anyhow!("No node name was provided to start"))?;
 
             let node = cplane.nodes.get(&(tenant_id, node_name.to_owned()));
 
@@ -714,11 +723,14 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 println!("Starting existing postgres {}...", node_name);
                 node.start(&auth_token)?;
             } else {
+                let branch_name = sub_args
+                    .value_of("branch-name")
+                    .unwrap_or(DEFAULT_BRANCH_NAME);
                 let timeline_id = env
-                    .branch_name_mappings
-                    .get(node_name)
-                    .ok_or(anyhow!("Found no timeline id for node name {}", node_name))?
-                    .timeline_id;
+                    .get_branch_timeline_id(branch_name, tenant_id)
+                    .ok_or_else(|| {
+                        anyhow!("Found no timeline id for branch name '{}'", branch_name)
+                    })?;
                 let lsn = sub_args
                     .value_of("lsn")
                     .map(Lsn::from_str)
@@ -738,6 +750,9 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             }
         }
         "stop" => {
+            let node_name = sub_args
+                .value_of("node")
+                .ok_or_else(|| anyhow!("No node name was provided to stop"))?;
             let destroy = sub_args.is_present("destroy");
 
             let node = cplane
