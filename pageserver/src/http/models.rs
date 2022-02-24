@@ -11,6 +11,7 @@ pub struct TimelineCreateRequest {
     pub tenant_id: ZTenantId,
     #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
+    #[serde(default)]
     #[serde(with = "opt_display_serde")]
     pub ancestor_timeline_id: Option<ZTimelineId>,
     pub start_lsn: Option<Lsn>,
@@ -20,6 +21,9 @@ pub struct TimelineCreateRequest {
 pub struct TenantCreateRequest {
     #[serde(with = "hex")]
     pub tenant_id: ZTenantId,
+    #[serde(default)]
+    #[serde(with = "opt_display_serde")]
+    pub initial_timeline_id: Option<ZTimelineId>,
 }
 
 #[derive(Serialize)]

@@ -179,13 +179,15 @@ pub fn shutdown_all_tenants() {
 
 pub fn create_repository_for_tenant(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
+    tenant_id: ZTenantId,
+    initial_timeline_id: Option<ZTimelineId>,
 ) -> Result<ZTimelineId> {
-    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-    let (initial_timeline_id, repo) = timelines::create_repo(conf, tenantid, wal_redo_manager)?;
+    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
+    let (initial_timeline_id, repo) =
+        timelines::create_repo(conf, tenant_id, initial_timeline_id, wal_redo_manager)?;
 
-    match access_tenants().entry(tenantid) {
-        hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenantid),
+    match access_tenants().entry(tenant_id) {
+        hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenant_id),
         hash_map::Entry::Vacant(v) => {
             v.insert(Tenant {
                 state: TenantState::Idle,
