@@ -56,10 +56,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use bookfile::{Book, BookWriter, ChapterWriter};
+use bookfile::{Book, BookWriter, BoundedReader, ChapterWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
@@ -109,6 +110,12 @@ impl From<&DeltaLayer> for Summary {
 struct BlobRange {
     offset: u64,
     size: usize,
+}
+
+fn read_blob<F: FileExt>(reader: &BoundedReader<&'_ F>, range: &BlobRange) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; range.size];
+    reader.read_exact_at(&mut buf, range.offset)?;
+    Ok(buf)
 }
 
 ///
@@ -247,9 +254,7 @@ impl Layer for DeltaLayer {
                     _ => {}
                 }
 
-                let mut buf = vec![0u8; blob_range.size];
-                page_version_reader.read_exact_at(&mut buf, blob_range.offset)?;
-                let pv = PageVersion::des(&buf)?;
+                let pv = PageVersion::des(&read_blob(&page_version_reader, blob_range)?)?;
 
                 match pv {
                     PageVersion::Page(img) => {
@@ -369,8 +374,7 @@ impl Layer for DeltaLayer {
         for ((blk, lsn), blob_range) in inner.page_version_metas.as_slice() {
             let mut desc = String::new();
 
-            let mut buf = vec![0u8; blob_range.size];
-            chapter.read_exact_at(&mut buf, blob_range.offset)?;
+            let buf = read_blob(&chapter, blob_range)?;
             let pv = PageVersion::des(&buf)?;
 
             match pv {
