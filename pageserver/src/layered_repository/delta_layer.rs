@@ -208,16 +208,15 @@ impl Layer for DeltaLayer {
         &self,
         blknum: SegmentBlk,
         lsn: Lsn,
-        cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         let mut need_image = true;
 
         assert!((0..RELISH_SEG_SIZE).contains(&blknum));
 
-        match &cached_img_lsn {
-            Some(cached_lsn) if &self.end_lsn <= cached_lsn => {
-                return Ok(PageReconstructResult::Cached)
+        match &reconstruct_data.page_img {
+            Some((cached_lsn, _)) if &self.end_lsn <= cached_lsn => {
+                return Ok(PageReconstructResult::Complete)
             }
             _ => {}
         }
@@ -240,9 +239,9 @@ impl Layer for DeltaLayer {
                 .iter()
                 .rev();
             for ((_blknum, pv_lsn), blob_range) in iter {
-                match &cached_img_lsn {
-                    Some(cached_lsn) if pv_lsn <= cached_lsn => {
-                        return Ok(PageReconstructResult::Cached)
+                match &reconstruct_data.page_img {
+                    Some((cached_lsn, _)) if pv_lsn <= cached_lsn => {
+                        return Ok(PageReconstructResult::Complete)
                     }
                     _ => {}
                 }
@@ -252,7 +251,7 @@ impl Layer for DeltaLayer {
                 match pv {
                     PageVersion::Page(img) => {
                         // Found a page image, return it
-                        reconstruct_data.page_img = Some(img);
+                        reconstruct_data.page_img = Some((*pv_lsn, img));
                         need_image = false;
                         break;
                     }

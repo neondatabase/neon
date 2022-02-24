@@ -32,6 +32,7 @@ from typing_extensions import Literal
 import pytest
 
 import requests
+import backoff  # type: ignore
 
 from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
 from fixtures.log_helper import log
@@ -237,10 +238,15 @@ def port_distributor(worker_base_port):
 
 class PgProtocol:
     """ Reusable connection logic """
-    def __init__(self, host: str, port: int, username: Optional[str] = None):
+    def __init__(self,
+                 host: str,
+                 port: int,
+                 username: Optional[str] = None,
+                 password: Optional[str] = None):
         self.host = host
         self.port = port
         self.username = username
+        self.password = password
 
     def connstr(self,
                 *,
@@ -252,6 +258,7 @@ class PgProtocol:
         """
 
         username = username or self.username
+        password = password or self.password
         res = f'host={self.host} port={self.port} dbname={dbname}'
 
         if username:
@@ -1173,6 +1180,50 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
     pg_bin = PgBin(test_output_dir)
     with VanillaPostgres(pgdatadir, pg_bin, 5432) as vanilla_pg:
         yield vanilla_pg
+
+
+class ZenithProxy(PgProtocol):
+    def __init__(self, port: int):
+        super().__init__(host="127.0.0.1", username="pytest", password="pytest", port=port)
+        self.http_port = 7001
+        self._popen: Optional[subprocess.Popen[bytes]] = None
+
+    def start_static(self, addr="127.0.0.1:5432") -> None:
+        assert self._popen is None
+
+        # Start proxy
+        bin_proxy = os.path.join(str(zenith_binpath), 'proxy')
+        args = [bin_proxy]
+        args.extend(["--http", f"{self.host}:{self.http_port}"])
+        args.extend(["--proxy", f"{self.host}:{self.port}"])
+        args.extend(["--auth-method", "password"])
+        args.extend(["--static-router", addr])
+        self._popen = subprocess.Popen(args)
+        self._wait_until_ready()
+
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
+    def _wait_until_ready(self):
+        requests.get(f"http://{self.host}:{self.http_port}/v1/status")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._popen is not None:
+            # NOTE the process will die when we're done with tests anyway, because
+            # it's a child process. This is mostly to clean up in between different tests.
+            self._popen.kill()
+
+
+@pytest.fixture(scope='function')
+def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
+    """Zenith proxy that routes directly to vanilla postgres."""
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user pytest with password 'pytest';")
+
+    with ZenithProxy(4432) as proxy:
+        proxy.start_static()
+        yield proxy
 
 
 class Postgres(PgProtocol):

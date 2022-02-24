@@ -1940,22 +1940,21 @@ impl LayeredTimeline {
         // for redo.
         let rel = seg.rel;
         let rel_blknum = seg.segno * RELISH_SEG_SIZE + seg_blknum;
-        let (cached_lsn_opt, cached_page_opt) = match self.lookup_cached_page(&rel, rel_blknum, lsn)
-        {
+        let cached_page_img = match self.lookup_cached_page(&rel, rel_blknum, lsn) {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     cmp::Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
                     cmp::Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
                     cmp::Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
                 }
-                (Some(cached_lsn), Some((cached_lsn, cached_img)))
+                Some((cached_lsn, cached_img))
             }
-            None => (None, None),
+            None => None,
         };
 
         let mut data = PageReconstructData {
             records: Vec::new(),
-            page_img: None,
+            page_img: cached_page_img,
         };
 
         // Holds an Arc reference to 'layer_ref' when iterating in the loop below.
@@ -1968,15 +1967,14 @@ impl LayeredTimeline {
         let mut curr_lsn = lsn;
         loop {
             let result = layer_ref
-                .get_page_reconstruct_data(seg_blknum, curr_lsn, cached_lsn_opt, &mut data)
+                .get_page_reconstruct_data(seg_blknum, curr_lsn, &mut data)
                 .with_context(|| {
                     format!(
-                        "Failed to get reconstruct data {} {:?} {} {} {:?}",
+                        "Failed to get reconstruct data {} {:?} {} {}",
                         layer_ref.get_seg_tag(),
                         layer_ref.filename(),
                         seg_blknum,
                         curr_lsn,
-                        cached_lsn_opt,
                     )
                 })?;
             match result {
@@ -2023,16 +2021,6 @@ impl LayeredTimeline {
                         lsn,
                     );
                 }
-                PageReconstructResult::Cached => {
-                    let (cached_lsn, cached_img) = cached_page_opt.unwrap();
-                    assert!(data.page_img.is_none());
-                    if let Some((first_rec_lsn, first_rec)) = data.records.first() {
-                        assert!(&cached_lsn < first_rec_lsn);
-                        assert!(!first_rec.will_init());
-                    }
-                    data.page_img = Some(cached_img);
-                    break;
-                }
             }
         }
 
@@ -2054,12 +2042,12 @@ impl LayeredTimeline {
 
         // If we have a page image, and no WAL, we're all set
         if data.records.is_empty() {
-            if let Some(img) = &data.page_img {
+            if let Some((img_lsn, img)) = &data.page_img {
                 trace!(
                     "found page image for blk {} in {} at {}, no WAL redo required",
                     rel_blknum,
                     rel,
-                    request_lsn
+                    img_lsn
                 );
                 Ok(img.clone())
             } else {
@@ -2086,11 +2074,13 @@ impl LayeredTimeline {
                 );
                 Ok(ZERO_PAGE.clone())
             } else {
-                if data.page_img.is_some() {
+                let base_img = if let Some((_lsn, img)) = data.page_img {
                     trace!("found {} WAL records and a base image for blk {} in {} at {}, performing WAL redo", data.records.len(), rel_blknum, rel, request_lsn);
+                    Some(img)
                 } else {
                     trace!("found {} WAL records that will init the page for blk {} in {} at {}, performing WAL redo", data.records.len(), rel_blknum, rel, request_lsn);
-                }
+                    None
+                };
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
@@ -2098,7 +2088,7 @@ impl LayeredTimeline {
                     rel,
                     rel_blknum,
                     request_lsn,
-                    data.page_img.clone(),
+                    base_img,
                     data.records,
                 )?;
 
