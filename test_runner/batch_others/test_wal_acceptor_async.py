@@ -202,9 +202,8 @@ def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load',
-                                   timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch('test_wal_acceptors_restarts_under_load')
+    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load')
 
     asyncio.run(run_restarts_under_load(pg, env.safekeepers))
 

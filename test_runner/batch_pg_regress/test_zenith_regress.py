@@ -11,9 +11,9 @@ from fixtures.log_helper import log
 def test_zenith_regress(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
     env = zenith_simple_env
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
+    env.zenith_cli.create_branch("test_zenith_regress", "empty")
     # Connect to postgres and create a database called "regression".
-    pg = env.postgres.create_start('test_zenith_regress', timeline_id=new_timeline_id)
+    pg = env.postgres.create_start('test_zenith_regress')
     pg.safe_psql('CREATE DATABASE regression')
 
     # Create some local directories for pg_regress to run in.

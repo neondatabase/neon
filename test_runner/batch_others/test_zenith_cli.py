@@ -36,11 +36,12 @@ def test_cli_timeline_list(zenith_simple_env: ZenithEnv):
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a branch for us
-    main_timeline_id = env.zenith_cli.branch_timeline()
+    main_timeline_id = env.zenith_cli.create_branch('test_cli_branch_list_main')
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a nested branch
-    nested_timeline_id = env.zenith_cli.branch_timeline(ancestor_timeline_id=main_timeline_id)
+    nested_timeline_id = env.zenith_cli.create_branch('test_cli_branch_list_nested',
+                                                      'test_cli_branch_list_main')
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI
@@ -67,15 +68,13 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant1 = uuid.uuid4()
-    env.zenith_cli.create_tenant(tenant_id=tenant1)
+    tenant1 = env.zenith_cli.create_tenant()
 
     # check tenant1 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant2 = uuid.uuid4()
-    env.zenith_cli.create_tenant(tenant_id=tenant2)
+    tenant2 = env.zenith_cli.create_tenant()
 
     # check tenant2 appeared
     helper_compare_tenant_list(pageserver_http_client, env)

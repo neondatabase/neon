@@ -14,8 +14,8 @@ from fixtures.log_helper import log
 #
 def test_layerfiles_gc(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_layerfiles_gc', timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch("test_layerfiles_gc", "empty")
+    pg = env.postgres.create_start('test_layerfiles_gc')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
