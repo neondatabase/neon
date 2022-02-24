@@ -535,8 +535,9 @@ jobs:
 
             ./get_binaries.sh
 
-            echo "${TELEPORT_SSH_KEY}"  | base64 --decode >ssh-key
-            echo "${TELEPORT_SSH_CERT}" | base64 --decode >ssh-key-cert.pub
+            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
+            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
+            chmod 0600 ssh-key
             ssh-add ssh-key
             rm -f ssh-key ssh-key-cert.pub
 
