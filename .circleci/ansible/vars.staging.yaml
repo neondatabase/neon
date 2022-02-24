@@ -1,9 +1,0 @@
-aws:
-  #profile_name: zenith
-  region:       us-east-1
-
-zenith:
-  env:          staging
-  region_slug:  virginia
-
-  #console_mgmt_base_url: http://console-staging.local

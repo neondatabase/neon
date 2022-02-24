@@ -1,57 +1,50 @@
-#- name: Get binaries
-#  import_playbook: get.binaries.yaml
-
-- name: Compare versions
-  hosts: storage
+- name: Upload Zenith binaries
+  hosts: pageservers:safekeepers
   gather_facts: False
   remote_user: admin
+  vars:
+    force_deploy: false
 
   tasks:
-    - name: get current version of binaries
+
+    - name: get latest version of Zenith binaries
+      ignore_errors: true
+      register: current_version_file
       set_fact:
-        current_version: "{{lookup('file', '../.zenith_current_version') }}"
+        current_version: "{{ lookup('file', '.zenith_current_version') | trim }}"
       tags:
       - pageserver
       - safekeeper
 
-    - name: check that file with version exists on host
-      stat:
-        path: /usr/local/.zenith_current_version
-      register: version_file
+    - name: set zero value for current_version
+      when: current_version_file is failed
+      set_fact:
+        current_version: "0"
       tags:
       - pageserver
       - safekeeper
 
-    - name: try to get version file from the host
-      when: version_file.stat.exists
-      ansible.builtin.fetch:
+    - name: get deployed version from content of remote file
+      ignore_errors: true
+      ansible.builtin.slurp:
         src: /usr/local/.zenith_current_version
-        dest: .remote_version.{{ inventory_hostname }}
-        fail_on_missing: no
-        flat: yes
+      register: remote_version_file
       tags:
       - pageserver
       - safekeeper
 
-    - name: store remote version to variable
-      when: version_file.stat.exists
+    - name: decode remote file content
+      when: remote_version_file is succeeded
       set_fact:
-        remote_version: "{{ lookup('file', '.remote_version.{{ inventory_hostname }}') }}"
+        remote_version: "{{ remote_version_file['content'] | b64decode | trim }}"
       tags:
       - pageserver
       - safekeeper
 
-    - name: store default value of remote version to variable in case when remote version file not found
-      when: not version_file.stat.exists
+    - name: set zero value for remote_version
+      when: remote_version_file is failed
       set_fact:
-        remote_version: "000"
-      tags:
-      - pageserver
-      - safekeeper
-
-    - name: delete version file
-      when: version_file.stat.exists
-      local_action: file path=.remote_version.{{ inventory_hostname }} state=absent
+        remote_version: "0"
       tags:
       - pageserver
       - safekeeper
@@ -62,25 +55,31 @@
       - pageserver
       - safekeeper
 
-    - name: inform about deployment skip
-      debug: msg="Going to skip deployment because version on the storage node the same or more recent"
-      when: current_version <= remote_version
+
+    - name: upload and extract Zenith binaries to /usr/local
+      when: current_version > remote_version or force_deploy
+      ansible.builtin.unarchive:
+        owner: root
+        group: root
+        src: zenith_install.tar.gz
+        dest: /usr/local
+      become: true
       tags:
       - pageserver
       - safekeeper
-
-- name: Upload binaries
-  import_playbook: put.binaries.yaml
-  when: current_version > remote_version
+      - binaries
+      - putbinaries
 
 - name: Deploy pageserver
   hosts: pageservers
   gather_facts: False
   remote_user: admin
+  vars:
+    force_deploy: false
 
   tasks:
     - name: init pageserver
-      when: current_version > remote_version
+      when: current_version > remote_version or force_deploy
       shell:
         cmd: sudo -u pageserver /usr/local/bin/pageserver -c "pg_distrib_dir='/usr/local'" --init -D /storage/pageserver/data
       args:
@@ -93,7 +92,7 @@
       - pageserver
 
     - name: upload systemd service definition
-      when: current_version > remote_version
+      when: current_version > remote_version or force_deploy
       ansible.builtin.template:
         src: systemd/pageserver.service
         dest: /etc/systemd/system/pageserver.service
@@ -105,7 +104,7 @@
       - pageserver
 
     - name: start systemd service
-      when: current_version > remote_version
+      when: current_version > remote_version or force_deploy
       ansible.builtin.systemd:
         daemon_reload: yes
         name: pageserver
@@ -116,31 +115,34 @@
       - pageserver
 
     - name: post version to console
-      when: current_version > remote_version and hostvars.localhost.zenith.console_mgmt_base_url is defined
+      when: current_version > remote_version or force_deploy and console_mgmt_base_url is defined
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-          curl -sfS -d '{"version": {{ current_version }} }' -X POST {{ hostvars.localhost.zenith.console_mgmt_base_url }}/api/v1/pageservers/$INSTANCE_ID
+          curl -sfS -d '{"version": {{ current_version }} }' -X POST {{ console_mgmt_base_url }}/api/v1/pageservers/$INSTANCE_ID
       tags:
       - pageserver
-
 
 - name: Deploy safekeeper
   hosts: safekeepers
   gather_facts: False
   remote_user: admin
+  vars:
+    force_deploy: false
 
   tasks:
 
     # in the future safekeepers should discover pageservers byself
     # but currently use first pageserver that was discovered
-    - name: use private IP of first pageserver
-      when: current_version > remote_version
+    - name: set first pageserver var for safekeepers
+      when: current_version > remote_version or force_deploy
       set_fact:
-        first_pageserver_private_ip: "{{ hostvars[groups['pageservers'][0]]['ansible_host'] }}"
+        first_pageserver: "{{ hostvars[groups['pageservers'][0]]['inventory_hostname'] }}"
+      tags:
+      - safekeeper
 
     - name: upload systemd service definition
-      when: current_version > remote_version
+      when: current_version > remote_version or force_deploy
       ansible.builtin.template:
         src: systemd/safekeeper.service
         dest: /etc/systemd/system/safekeeper.service
@@ -152,7 +154,7 @@
       - safekeeper
 
     - name: start systemd service
-      when: current_version > remote_version
+      when: current_version > remote_version or force_deploy
       ansible.builtin.systemd:
         daemon_reload: yes
         name: safekeeper
@@ -163,7 +165,7 @@
       - safekeeper
 
     - name: post version to console
-      when: current_version > remote_version and hostvars.localhost.zenith.console_mgmt_base_url is defined
+      when: current_version > remote_version or force_deploy and console_mgmt_base_url is defined
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)

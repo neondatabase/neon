@@ -1,9 +1,0 @@
-aws:
-  #profile_name: zenith
-  region:       us-west-2
-
-zenith:
-  env:          production
-  region_slug:  oregon
-
-  console_mgmt_base_url: http://console-release.local
