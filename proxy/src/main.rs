@@ -20,13 +20,14 @@ mod cancellation;
 mod compute;
 mod config;
 mod cplane_api;
+mod error;
 mod http;
 mod mgmt;
 mod proxy;
 mod stream;
 mod waiters;
 
-/// Flattens Result<Result<T>> into Result<T>.
+/// Flattens `Result<Result<T>>` into `Result<T>`.
 async fn flatten_err(
     f: impl Future<Output = Result<anyhow::Result<()>, JoinError>>,
 ) -> anyhow::Result<()> {

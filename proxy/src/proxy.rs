@@ -1,16 +1,17 @@
 use crate::auth;
-use crate::cancellation::{self, CancelClosure, CancelMap};
-use crate::compute::DatabaseInfo;
+use crate::cancellation::{self, CancelMap};
 use crate::config::{ProxyConfig, TlsConfig};
 use crate::stream::{MetricsStream, PqStream, Stream};
 use anyhow::{bail, Context};
+use futures::TryFutureExt;
 use lazy_static::lazy_static;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
-use tokio_postgres::NoTls;
 use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use zenith_utils::pq_proto::{BeMessage as Be, *};
+
+const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
+const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
 lazy_static! {
     static ref NUM_CONNECTIONS_ACCEPTED_COUNTER: IntCounter = register_int_counter!(
@@ -30,6 +31,7 @@ lazy_static! {
     .unwrap();
 }
 
+/// A small combinator for pluggable error logging.
 async fn log_error<R, F>(future: F) -> F::Output
 where
     F: std::future::Future<Output = anyhow::Result<R>>,
@@ -76,20 +78,21 @@ async fn handle_client(
     }
 
     let tls = config.tls_config.clone();
-    if let Some((client, creds)) = handshake(stream, tls, cancel_map).await? {
-        cancel_map
-            .with_session(|session| async {
-                connect_client_to_db(config, session, client, creds).await
-            })
-            .await?;
-    }
+    let (stream, creds) = match handshake(stream, tls, cancel_map).await? {
+        Some(x) => x,
+        None => return Ok(()), // it's a cancellation request
+    };
 
-    Ok(())
+    let client = Client::new(stream, creds);
+    cancel_map
+        .with_session(|session| client.connect_to_db(config, session))
+        .await
 }
 
-/// Handle a connection from one client.
-/// For better testing experience, `stream` can be
-/// any object satisfying the traits.
+/// Establish a (most probably, secure) connection with the client.
+/// For better testing experience, `stream` can be any object satisfying the traits.
+/// It's easier to work with owned `stream` here as we need to updgrade it to TLS;
+/// we also take an extra care of propagating only the select handshake errors to client.
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<TlsConfig>,
@@ -119,7 +122,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         stream = PqStream::new(stream.into_inner().upgrade(tls).await?);
                     }
                 }
-                _ => bail!("protocol violation"),
+                _ => bail!(ERR_PROTO_VIOLATION),
             },
             GssEncRequest => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_gss => {
@@ -128,18 +131,21 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     // Currently, we don't support GSSAPI
                     stream.write_message(&Be::EncryptionResponse(false)).await?;
                 }
-                _ => bail!("protocol violation"),
+                _ => bail!(ERR_PROTO_VIOLATION),
             },
             StartupMessage { params, .. } => {
                 // Check that the config has been consumed during upgrade
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
-                    let msg = "connection is insecure (try using `sslmode=require`)";
-                    stream.write_message(&Be::ErrorResponse(msg)).await?;
-                    bail!(msg);
+                    stream.throw_error_str(ERR_INSECURE_CONNECTION).await?;
                 }
 
-                break Ok(Some((stream, params.try_into()?)));
+                // Here and forth: `or_else` demands that we use a future here
+                let creds = async { params.try_into() }
+                    .or_else(|e| stream.throw_error(e))
+                    .await?;
+
+                break Ok(Some((stream, creds)));
             }
             CancelRequest(cancel_key_data) => {
                 cancel_map.cancel_session(cancel_key_data).await?;
@@ -150,58 +156,60 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-async fn connect_client_to_db(
-    config: &ProxyConfig,
-    session: cancellation::Session<'_>,
-    mut client: PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+/// Thin connection context.
+struct Client<S> {
+    /// The underlying libpq protocol stream.
+    stream: PqStream<S>,
+    /// Client credentials that we care about.
     creds: auth::ClientCredentials,
-) -> anyhow::Result<()> {
-    let db_info = creds.authenticate(config, &mut client).await?;
-    let (db, version, cancel_closure) = connect_to_db(db_info).await?;
-    let cancel_key_data = session.enable_cancellation(cancel_closure);
-
-    client
-        .write_message_noflush(&BeMessage::ParameterStatus(
-            BeParameterStatusMessage::ServerVersion(&version),
-        ))?
-        .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-        .write_message(&BeMessage::ReadyForQuery)
-        .await?;
-
-    // This function will be called for writes to either direction.
-    fn inc_proxied(cnt: usize) {
-        // Consider inventing something more sophisticated
-        // if this ever becomes a bottleneck (cacheline bouncing).
-        NUM_BYTES_PROXIED_COUNTER.inc_by(cnt as u64);
-    }
-
-    let mut db = MetricsStream::new(db, inc_proxied);
-    let mut client = MetricsStream::new(client.into_inner(), inc_proxied);
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
-
-    Ok(())
 }
 
-/// Connect to a corresponding compute node.
-async fn connect_to_db(
-    db_info: DatabaseInfo,
-) -> anyhow::Result<(TcpStream, String, CancelClosure)> {
-    // TODO: establish a secure connection to the DB
-    let socket_addr = db_info.socket_addr()?;
-    let mut socket = TcpStream::connect(socket_addr).await?;
+impl<S> Client<S> {
+    /// Construct a new connection context.
+    fn new(stream: PqStream<S>, creds: auth::ClientCredentials) -> Self {
+        Self { stream, creds }
+    }
+}
 
-    let (client, conn) = tokio_postgres::Config::from(db_info)
-        .connect_raw(&mut socket, NoTls)
-        .await?;
+impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+    /// Let the client authenticate and connect to the designated compute node.
+    async fn connect_to_db(
+        self,
+        config: &ProxyConfig,
+        session: cancellation::Session<'_>,
+    ) -> anyhow::Result<()> {
+        let Self { mut stream, creds } = self;
 
-    let version = conn
-        .parameter("server_version")
-        .context("failed to fetch postgres server version")?
-        .into();
+        // Authenticate and connect to a compute node.
+        let auth = creds.authenticate(config, &mut stream).await;
+        let db_info = async { auth }.or_else(|e| stream.throw_error(e)).await?;
 
-    let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
+        let (db, version, cancel_closure) =
+            db_info.connect().or_else(|e| stream.throw_error(e)).await?;
+        let cancel_key_data = session.enable_cancellation(cancel_closure);
 
-    Ok((socket, version, cancel_closure))
+        stream
+            .write_message_noflush(&BeMessage::ParameterStatus(
+                BeParameterStatusMessage::ServerVersion(&version),
+            ))?
+            .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
+            .write_message(&BeMessage::ReadyForQuery)
+            .await?;
+
+        /// This function will be called for writes to either direction.
+        fn inc_proxied(cnt: usize) {
+            // Consider inventing something more sophisticated
+            // if this ever becomes a bottleneck (cacheline bouncing).
+            NUM_BYTES_PROXIED_COUNTER.inc_by(cnt as u64);
+        }
+
+        // Starting from here we only proxy the client's traffic.
+        let mut db = MetricsStream::new(db, inc_proxied);
+        let mut client = MetricsStream::new(stream.into_inner(), inc_proxied);
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -210,7 +218,7 @@ mod tests {
 
     use tokio::io::DuplexStream;
     use tokio_postgres::config::SslMode;
-    use tokio_postgres::tls::MakeTlsConnect;
+    use tokio_postgres::tls::{MakeTlsConnect, NoTls};
     use tokio_postgres_rustls::MakeRustlsConnect;
 
     async fn dummy_proxy(
@@ -264,7 +272,7 @@ mod tests {
 
         let proxy = tokio::spawn(dummy_proxy(client, Some(server_config.into())));
 
-        tokio_postgres::Config::new()
+        let client_err = tokio_postgres::Config::new()
             .user("john_doe")
             .dbname("earth")
             .ssl_mode(SslMode::Disable)
@@ -273,10 +281,14 @@ mod tests {
             .err() // -> Option<E>
             .context("client shouldn't be able to connect")?;
 
-        proxy
+        assert!(client_err.to_string().contains(ERR_INSECURE_CONNECTION));
+
+        let server_err = proxy
             .await?
             .err() // -> Option<E>
             .context("server shouldn't accept client")?;
+
+        assert!(client_err.to_string().contains(&server_err.to_string()));
 
         Ok(())
     }
@@ -328,5 +340,31 @@ mod tests {
             .await?;
 
         proxy.await?
+    }
+
+    #[tokio::test]
+    async fn give_user_an_error_for_bad_creds() -> anyhow::Result<()> {
+        let (client, server) = tokio::io::duplex(1024);
+
+        let proxy = tokio::spawn(dummy_proxy(client, None));
+
+        let client_err = tokio_postgres::Config::new()
+            .ssl_mode(SslMode::Disable)
+            .connect_raw(server, NoTls)
+            .await
+            .err() // -> Option<E>
+            .context("client shouldn't be able to connect")?;
+
+        // TODO: this is ugly, but `format!` won't allow us to extract fmt string
+        assert!(client_err.to_string().contains("missing in startup packet"));
+
+        let server_err = proxy
+            .await?
+            .err() // -> Option<E>
+            .context("server shouldn't accept client")?;
+
+        assert!(client_err.to_string().contains(&server_err.to_string()));
+
+        Ok(())
     }
 }
