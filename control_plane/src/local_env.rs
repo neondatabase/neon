@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId, ZTenantTimelineId};
+use zenith_utils::zid::ZTimelineId;
+use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId};
 
 use crate::safekeeper::SafekeeperNode;
 
@@ -62,7 +63,10 @@ pub struct LocalEnv {
     /// Every tenant has a first timeline created for it, currently the only one ancestor-less for this tenant.
     /// It is used as a default timeline for branching, if no ancestor timeline is specified.
     #[serde(default)]
-    pub branch_name_mappings: HashMap<String, ZTenantTimelineId>,
+    // A `HashMap<String, HashMap<ZTenantId, ZTimelineId>>` would be more appropriate here,
+    // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
+    // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
+    branch_name_mappings: HashMap<String, Vec<(ZTenantId, ZTimelineId)>>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -147,6 +151,30 @@ impl LocalEnv {
 
     pub fn safekeeper_data_dir(&self, data_dir_name: &str) -> PathBuf {
         self.base_data_dir.join("safekeepers").join(data_dir_name)
+    }
+
+    pub fn register_branch_mapping(
+        &mut self,
+        branch_name: String,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+    ) {
+        self.branch_name_mappings
+            .entry(branch_name)
+            .or_default()
+            .push((tenant_id, timeline_id));
+    }
+
+    pub fn get_branch_timeline_id(
+        &self,
+        branch_name: &str,
+        tenant_id: ZTenantId,
+    ) -> Option<ZTimelineId> {
+        self.branch_name_mappings
+            .get(branch_name)?
+            .iter()
+            .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
+            .map(|&(_, timeline_id)| timeline_id)
     }
 
     /// Create a LocalEnv from a config file.

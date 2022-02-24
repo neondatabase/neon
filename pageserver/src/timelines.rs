@@ -201,7 +201,7 @@ pub fn create_repo(
     info!("created directory structure in {}", repo_dir.display());
 
     // create a new timeline directory
-    let timeline_id = init_timeline_id.unwrap_or_else(|| ZTimelineId::generate());
+    let timeline_id = init_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let timelinedir = conf.timeline_path(&timeline_id, &tenant_id);
 
     crashsafe_dir::create_dir(&timelinedir)?;

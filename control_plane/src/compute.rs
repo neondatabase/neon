@@ -37,7 +37,7 @@ impl ComputeControlPlane {
     // pgdatadirs
     // |- tenants
     // |  |- <tenant_id>
-    // |  |   |- <timeline_id>
+    // |  |   |- <node name>
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
