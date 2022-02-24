@@ -145,14 +145,15 @@ impl Layer for ImageLayer {
         &self,
         blknum: SegmentBlk,
         lsn: Lsn,
-        cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult> {
         assert!((0..RELISH_SEG_SIZE).contains(&blknum));
         assert!(lsn >= self.lsn);
 
-        match cached_img_lsn {
-            Some(cached_lsn) if self.lsn <= cached_lsn => return Ok(PageReconstructResult::Cached),
+        match reconstruct_data.page_img {
+            Some((cached_lsn, _)) if self.lsn <= cached_lsn => {
+                return Ok(PageReconstructResult::Complete)
+            }
             _ => {}
         }
 
@@ -195,7 +196,7 @@ impl Layer for ImageLayer {
             }
         };
 
-        reconstruct_data.page_img = Some(Bytes::from(buf));
+        reconstruct_data.page_img = Some((self.lsn, Bytes::from(buf)));
         Ok(PageReconstructResult::Complete)
     }
 

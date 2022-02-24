@@ -71,15 +71,26 @@ pub enum PageVersion {
 }
 
 ///
-/// Data needed to reconstruct a page version
+/// Struct used to communicate across calls to 'get_page_reconstruct_data'.
 ///
-/// 'page_img' is the old base image of the page to start the WAL replay with.
-/// It can be None, if the first WAL record initializes the page (will_init)
-/// 'records' contains the records to apply over the base image.
+/// Before first call to get_page_reconstruct_data, you can fill in 'page_img'
+/// if you have an older cached version of the page available. That can save
+/// work in 'get_page_reconstruct_data', as it can stop searching for page
+/// versions when all the WAL records going back to the cached image have been
+/// collected.
+///
+/// When get_page_reconstruct_data returns Complete, 'page_img' is set to an
+/// image of the page, or the oldest WAL record in 'records' is a will_init-type
+/// record that initializes the page without requiring a previous image.
+///
+/// If 'get_page_reconstruct_data' returns Continue, some 'records' may have
+/// been collected, but there are more records outside the current layer. Pass
+/// the same PageReconstructData struct in the next 'get_page_reconstruct_data'
+/// call, to collect more records.
 ///
 pub struct PageReconstructData {
     pub records: Vec<(Lsn, ZenithWalRecord)>,
-    pub page_img: Option<Bytes>,
+    pub page_img: Option<(Lsn, Bytes)>,
 }
 
 /// Return value from Layer::get_page_reconstruct_data
@@ -93,8 +104,6 @@ pub enum PageReconstructResult {
     /// the returned LSN. This is usually considered an error, but might be OK
     /// in some circumstances.
     Missing(Lsn),
-    /// Use the cached image at `cached_img_lsn` as the base image
-    Cached,
 }
 
 ///
@@ -138,19 +147,16 @@ pub trait Layer: Send + Sync {
     /// It is up to the caller to collect more data from previous layer and
     /// perform WAL redo, if necessary.
     ///
-    /// `cached_img_lsn` should be set to a cached page image's lsn < `lsn`.
-    /// This function will only return data after `cached_img_lsn`.
-    ///
     /// See PageReconstructResult for possible return values. The collected data
     /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call. If this returns PageReconstructResult::Continue, look up
-    /// the predecessor layer and call again with the same 'reconstruct_data'
-    /// to collect more data.
+    /// on first call, or a struct with a cached older image of the page if one
+    /// is available. If this returns PageReconstructResult::Continue, look up
+    /// the predecessor layer and call again with the same 'reconstruct_data' to
+    /// collect more data.
     fn get_page_reconstruct_data(
         &self,
         blknum: SegmentBlk,
         lsn: Lsn,
-        cached_img_lsn: Option<Lsn>,
         reconstruct_data: &mut PageReconstructData,
     ) -> Result<PageReconstructResult>;
 
