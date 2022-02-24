@@ -1,5 +1,6 @@
 from io import BytesIO
 import asyncio
+import asyncpg
 from fixtures.zenith_fixtures import ZenithEnv, Postgres, PgProtocol
 from fixtures.log_helper import log
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker

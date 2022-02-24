@@ -21,8 +21,8 @@ run_broken = pytest.mark.skipif(os.environ.get('RUN_BROKEN') is None,
 def test_broken(zenith_simple_env: ZenithEnv, pg_bin):
     env = zenith_simple_env
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    env.postgres.create_start("test_broken", timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch("test_broken", "empty")
+    env.postgres.create_start("test_broken")
     log.info('postgres is running')
 
     log.info('THIS NEXT COMMAND WILL FAIL:')

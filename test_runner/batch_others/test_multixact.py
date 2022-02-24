@@ -10,8 +10,8 @@ from fixtures.log_helper import log
 #
 def test_multixact(zenith_simple_env: ZenithEnv, test_output_dir):
     env = zenith_simple_env
-    test_multixact_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_multixact', timeline_id=test_multixact_timeline_id)
+    env.zenith_cli.create_branch('test_multixact', 'empty')
+    pg = env.postgres.create_start('test_multixact')
 
     log.info("postgres is running on 'test_multixact' branch")
     pg_conn = pg.connect()
@@ -60,10 +60,8 @@ def test_multixact(zenith_simple_env: ZenithEnv, test_output_dir):
     assert int(next_multixact_id) > int(next_multixact_id_old)
 
     # Branch at this point
-    test_multixact_new_timeline_id = env.zenith_cli.branch_timeline(
-        ancestor_timeline_id=test_multixact_timeline_id, ancestor_start_lsn=lsn)
-    pg_new = env.postgres.create_start('test_multixact_new',
-                                       timeline_id=test_multixact_new_timeline_id)
+    env.zenith_cli.create_branch('test_multixact_new', 'test_multixact', ancestor_start_lsn=lsn)
+    pg_new = env.postgres.create_start('test_multixact_new')
 
     log.info("postgres is running on 'test_multixact_new' branch")
     pg_new_conn = pg_new.connect()

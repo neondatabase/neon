@@ -3,17 +3,16 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId, ZTimelineId};
+use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId, ZTenantTimelineId};
 
 use crate::safekeeper::SafekeeperNode;
 
@@ -24,7 +23,7 @@ use crate::safekeeper::SafekeeperNode;
 // to 'zenith init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct LocalEnv {
     // Base directory for all the nodes (the pageserver, safekeepers and
     // compute nodes).
@@ -63,12 +62,10 @@ pub struct LocalEnv {
     /// Every tenant has a first timeline created for it, currently the only one ancestor-less for this tenant.
     /// It is used as a default timeline for branching, if no ancestor timeline is specified.
     #[serde(default)]
-    // TODO kb this does not survive calls between invocations, so will have to persist it.
-    // Then it comes back to names again?
-    pub initial_timelines: HashMap<ZTenantId, ZTimelineId>,
+    pub branch_name_mappings: HashMap<String, ZTenantTimelineId>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct PageServerConf {
     // node id
@@ -96,7 +93,7 @@ impl Default for PageServerConf {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct SafekeeperConf {
     pub id: ZNodeId,
@@ -222,6 +219,39 @@ impl LocalEnv {
         Ok(env)
     }
 
+    pub fn persist_config(&self, base_path: &Path) -> anyhow::Result<()> {
+        // Currently, the user first passes a config file with 'zenith init --config=<path>'
+        // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
+        // to .zenith/config. TODO: We lose any formatting and comments along the way, which is
+        // a bit sad.
+        let mut conf_content = r#"# This file describes a locale deployment of the page server
+# and safekeeeper node. It is read by the 'zenith' command-line
+# utility.
+"#
+        .to_string();
+
+        // Convert the LocalEnv to a toml file.
+        //
+        // This could be as simple as this:
+        //
+        // conf_content += &toml::to_string_pretty(env)?;
+        //
+        // But it results in a "values must be emitted before tables". I'm not sure
+        // why, AFAICS the table, i.e. 'safekeepers: Vec<SafekeeperConf>' is last.
+        // Maybe rust reorders the fields to squeeze avoid padding or something?
+        // In any case, converting to toml::Value first, and serializing that, works.
+        // See https://github.com/alexcrichton/toml-rs/issues/142
+        conf_content += &toml::to_string_pretty(&toml::Value::try_from(self)?)?;
+
+        let target_config_path = base_path.join("config");
+        fs::write(&target_config_path, conf_content).with_context(|| {
+            format!(
+                "Failed to write config file into path '{}'",
+                target_config_path.display()
+            )
+        })
+    }
+
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
         let private_key_path = if self.private_key_path.is_absolute() {
@@ -240,15 +270,15 @@ impl LocalEnv {
     pub fn init(&mut self) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
-        if base_path == Path::new("") {
-            bail!("repository base path is missing");
-        }
-        if base_path.exists() {
-            bail!(
-                "directory '{}' already exists. Perhaps already initialized?",
-                base_path.to_str().unwrap()
-            );
-        }
+        ensure!(
+            base_path != Path::new(""),
+            "repository base path is missing"
+        );
+        ensure!(
+            !base_path.exists(),
+            "directory '{}' already exists. Perhaps already initialized?",
+            base_path.display()
+        );
 
         fs::create_dir(&base_path)?;
 
@@ -300,36 +330,7 @@ impl LocalEnv {
             fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
         }
 
-        let mut conf_content = String::new();
-
-        // Currently, the user first passes a config file with 'zenith init --config=<path>'
-        // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
-        // to .zenith/config. TODO: We lose any formatting and comments along the way, which is
-        // a bit sad.
-        write!(
-            &mut conf_content,
-            r#"# This file describes a locale deployment of the page server
-# and safekeeeper node. It is read by the 'zenith' command-line
-# utility.
-"#
-        )?;
-
-        // Convert the LocalEnv to a toml file.
-        //
-        // This could be as simple as this:
-        //
-        // conf_content += &toml::to_string_pretty(env)?;
-        //
-        // But it results in a "values must be emitted before tables". I'm not sure
-        // why, AFAICS the table, i.e. 'safekeepers: Vec<SafekeeperConf>' is last.
-        // Maybe rust reorders the fields to squeeze avoid padding or something?
-        // In any case, converting to toml::Value first, and serializing that, works.
-        // See https://github.com/alexcrichton/toml-rs/issues/142
-        conf_content += &toml::to_string_pretty(&toml::Value::try_from(&self)?)?;
-
-        fs::write(base_path.join("config"), conf_content)?;
-
-        Ok(())
+        self.persist_config(base_path)
     }
 }
 

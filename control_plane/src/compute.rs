@@ -147,7 +147,7 @@ impl PostgresNode {
         // Read a few options from the config file
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
-        let timelineid: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
+        let timeline_id: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
         let tenant_id: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
         let uses_wal_proposer = conf.get("wal_acceptors").is_some();
 
@@ -162,7 +162,7 @@ impl PostgresNode {
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
             is_test: false,
-            timeline_id: timelineid,
+            timeline_id,
             lsn: recovery_target_lsn,
             tenant_id,
             uses_wal_proposer,

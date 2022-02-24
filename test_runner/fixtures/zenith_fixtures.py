@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import field
 import textwrap
 from cached_property import cached_property
 import asyncpg
@@ -29,7 +29,6 @@ from dataclasses import dataclass
 from psycopg2.extensions import connection as PgConnection
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
-import pytest
 
 import requests
 import backoff  # type: ignore
@@ -219,7 +218,7 @@ def can_bind(host: str, port: int) -> bool:
 
 
 class PortDistributor:
-    def __init__(self, base_port: int, port_number: int) -> None:
+    def __init__(self, base_port: int, port_number: int):
         self.iterator = iter(range(base_port, base_port + port_number))
 
     def get_port(self) -> int:
@@ -424,7 +423,8 @@ class ZenithEnvBuilder:
                  pageserver_config_override: Optional[str] = None,
                  num_safekeepers: int = 0,
                  pageserver_auth_enabled: bool = False,
-                 rust_log_override: Optional[str] = None):
+                 rust_log_override: Optional[str] = None,
+                 default_branch_name='main'):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
@@ -432,6 +432,7 @@ class ZenithEnvBuilder:
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
+        self.default_branch_name = default_branch_name
         self.env: Optional[ZenithEnv] = None
 
         self.s3_mock_server: Optional[MockS3Server] = None
@@ -536,7 +537,7 @@ class ZenithEnv:
 
     initial_tenant - tenant ID of the initial tenant created in the repository
 
-    zenith_cli() - zenith_cli() can be used to run the 'zenith' CLI tool
+    zenith_cli - can be used to run the 'zenith' CLI tool
 
     create_tenant() - initializes a new tenant in the page server, returns
         the tenant id
@@ -546,9 +547,9 @@ class ZenithEnv:
         self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.s3_mock_server
+        self.default_branch_name = config.default_branch_name
         self.zenith_cli = ZenithCli(env=self)
-
-        self.zenith_cli = ZenithCli(env=self)
+        self.postgres = PostgresFactory(self)
         self.safekeepers: List[Safekeeper] = []
 
         # generate initial tenant ID here instead of letting 'zenith init' generate it,
@@ -599,9 +600,7 @@ class ZenithEnv:
             self.safekeepers.append(safekeeper)
 
         log.info(f"Config: {toml}")
-        # TODO kb is this a wrong concept? will break for multiple tenant tests
-        self.initial_timeline = self.zenith_cli.init(toml)
-        self.postgres = PostgresFactory(self)
+        self.zenith_cli.init(toml)
 
     def start(self):
         # Start up the page server and all the safekeepers
@@ -637,7 +636,12 @@ def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
         shutil.rmtree(repo_dir, ignore_errors=True)
 
     with ZenithEnvBuilder(Path(repo_dir), port_distributor) as builder:
-        yield builder.init_start()
+        env = builder.init_start()
+
+        # For convenience in tests, create a branch from the freshly-initialized cluster.
+        env.zenith_cli.create_branch("empty")
+
+        yield env
 
 
 @pytest.fixture(scope='function')
@@ -685,7 +689,7 @@ class ZenithPageserverApiException(Exception):
 
 
 class ZenithPageserverHttpClient(requests.Session):
-    def __init__(self, port: int, auth_token: Optional[str] = None) -> None:
+    def __init__(self, port: int, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
@@ -804,59 +808,49 @@ class ZenithCli:
     A typed wrapper around the `zenith` CLI tool.
     Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
     """
-    def __init__(self, env: ZenithEnv) -> None:
+    def __init__(self, env: ZenithEnv):
         self.env = env
         pass
 
-    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> tuple[uuid.UUID, uuid.UUID]:
+    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
         if tenant_id is None:
             tenant_id = uuid.uuid4()
         res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
-
-        initial_timeline_id_extractor = re.compile(r"initial timeline: '(?P<timeline_id>[^']+)'",
-                                                   re.MULTILINE)
-        matches = initial_timeline_id_extractor.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group('timeline_id')
-
-        if created_timeline_id is None:
-            raise Exception('could not find timeline id after `zenith tenant create` invocation')
-        else:
-            return (tenant_id, uuid.UUID(created_timeline_id))
+        res.check_returncode()
+        return tenant_id
 
     def list_tenants(self) -> 'subprocess.CompletedProcess[str]':
         res = self.raw_cli(['tenant', 'list'])
         res.check_returncode()
         return res
 
-    def branch_timeline(self,
-                        tenant_id: Optional[uuid.UUID] = None,
-                        new_timeline_id: Optional[uuid.UUID] = None,
-                        ancestor_timeline_id: Optional[uuid.UUID] = None,
-                        ancestor_start_lsn: Optional[str] = None) -> uuid.UUID:
+    def create_branch(self,
+                      new_branch_name: str,
+                      ancestor_branch_name: Optional[str] = None,
+                      tenant_id: Optional[uuid.UUID] = None,
+                      ancestor_start_lsn: Optional[str] = None) -> uuid.UUID:
         cmd = [
             'timeline',
             'branch',
+            '--name',
+            new_branch_name,
             '--tenant-id',
             (tenant_id or self.env.initial_tenant).hex,
-            '--ancestor-timeline-id',
-            (ancestor_timeline_id or self.env.initial_timeline).hex,
+            '--ancestor-branch-name',
+            ancestor_branch_name or self.env.default_branch_name,
         ]
         if ancestor_start_lsn is not None:
             cmd.extend(['--ancestor-start-lsn', ancestor_start_lsn])
-        if new_timeline_id is not None:
-            cmd.extend(['--timeline-id', new_timeline_id.hex])
 
-        completed_process = self.raw_cli(cmd)
-        completed_process.check_returncode()
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
         create_timeline_id_extractor = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
                                                   re.MULTILINE)
-        matches = create_timeline_id_extractor.search(completed_process.stdout)
+        matches = create_timeline_id_extractor.search(res.stdout)
 
         created_timeline_id = None
         if matches is not None:
@@ -875,9 +869,7 @@ class ZenithCli:
                 res.stdout.strip().split("\n")))
         return branches_cli
 
-    def init(self, config_toml: str) -> uuid.UUID:
-        initial_timeline = None
-
+    def init(self, config_toml: str) -> 'subprocess.CompletedProcess[str]':
         with tempfile.NamedTemporaryFile(mode='w+') as tmp:
             tmp.write(config_toml)
             tmp.flush()
@@ -887,18 +879,9 @@ class ZenithCli:
                                               self.env.pageserver.remote_storage,
                                               self.env.pageserver.config_override)
 
-            completed_process = self.raw_cli(cmd)
-            completed_process.check_returncode()
-            init_timeline_id_extractor = re.compile(
-                r'^created initial timeline (?P<timeline_id>[^\s]+)\s', re.MULTILINE)
-            matches = init_timeline_id_extractor.search(completed_process.stdout)
-            if matches is not None:
-                initial_timeline = matches.group('timeline_id')
-
-        if initial_timeline is None:
-            raise Exception('could not find timeline id after `zenith init` invocation')
-        else:
-            return uuid.UUID(initial_timeline)
+            res = self.raw_cli(cmd)
+            res.check_returncode()
+            return res
 
     def pageserver_start(self, overrides=()) -> 'subprocess.CompletedProcess[str]':
         start_args = ['pageserver', 'start', *overrides]
@@ -930,9 +913,8 @@ class ZenithCli:
 
     def pg_create(
         self,
-        node_name: str,
+        branch_name: str,
         tenant_id: Optional[uuid.UUID] = None,
-        timeline_id: Optional[uuid.UUID] = None,
         lsn: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
@@ -940,22 +922,21 @@ class ZenithCli:
             'pg',
             'create',
             '--tenant-id', (tenant_id or self.env.initial_tenant).hex,
-            '--timeline-id', (timeline_id or self.env.initial_timeline).hex
+            '--name',
+            branch_name
         ]
         if lsn is not None:
             args.append(f'--lsn={lsn}')
         if port is not None:
             args.append(f'--port={port}')
-        args.append(node_name)
         res = self.raw_cli(args)
         res.check_returncode()
         return res
 
     def pg_start(
         self,
-        node_name: str,
+        branch_name: str,
         tenant_id: Optional[uuid.UUID] = None,
-        timeline_id: Optional[uuid.UUID] = None,
         lsn: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
@@ -964,14 +945,13 @@ class ZenithCli:
             'start',
             '--tenant-id',
             (tenant_id or self.env.initial_tenant).hex,
-            '--timeline-id',
-            (timeline_id or self.env.initial_timeline).hex,
+            '--name',
+            branch_name,
         ]
         if lsn is not None:
             args.append(f'--lsn={lsn}')
         if port is not None:
             args.append(f'--port={port}')
-        args.append(node_name)
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -979,14 +959,19 @@ class ZenithCli:
 
     def pg_stop(
         self,
-        node_name: str,
+        branch_name: str,
         tenant_id: Optional[uuid.UUID] = None,
         destroy=False,
     ) -> 'subprocess.CompletedProcess[str]':
-        args = ['pg', 'stop', f'--tenant-id={(tenant_id or self.env.initial_tenant).hex}']
+        args = [
+            'pg',
+            'stop',
+            f'--tenant-id={(tenant_id or self.env.initial_tenant).hex}',
+            '--name',
+            branch_name
+        ]
         if destroy:
             args.append('--destroy')
-        args.append(node_name)
 
         return self.raw_cli(args)
 
@@ -1061,8 +1046,7 @@ class ZenithPageserver(PgProtocol):
                  env: ZenithEnv,
                  port: PageserverPort,
                  remote_storage: Optional[RemoteStorage] = None,
-                 config_override: Optional[str] = None,
-                 enable_auth=False):
+                 config_override: Optional[str] = None):
         super().__init__(host='localhost', port=port.pg, username='zenith_admin')
         self.env = env
         self.running = False
@@ -1150,7 +1134,7 @@ class PgBin:
         self.env = os.environ.copy()
         self.env['LD_LIBRARY_PATH'] = os.path.join(str(pg_distrib_dir), 'lib')
 
-    def _fixpath(self, command: List[str]) -> None:
+    def _fixpath(self, command: List[str]):
         if '/' not in command[0]:
             command[0] = os.path.join(self.pg_bin_path, command[0])
 
@@ -1161,7 +1145,7 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None) -> None:
+    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None):
         """
         Run one of the postgres binaries.
 
@@ -1211,18 +1195,18 @@ class VanillaPostgres(PgProtocol):
         self.running = False
         self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
 
-    def configure(self, options: List[str]) -> None:
+    def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
         assert not self.running
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
             conf_file.writelines(options)
 
-    def start(self) -> None:
+    def start(self):
         assert not self.running
         self.running = True
         self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'start'])
 
-    def stop(self) -> None:
+    def stop(self):
         assert self.running
         self.running = False
         self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'stop'])
@@ -1298,15 +1282,14 @@ class Postgres(PgProtocol):
 
         self.env = env
         self.running = False
-        self.node_name: Optional[str] = None  # dubious, see asserts below
+        self.branch_name: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
-        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
+        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<branch_name>/postgresql.conf
 
     def create(
         self,
-        node_name: str,
-        timeline_id: uuid.UUID,
+        branch_name: str,
         lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
@@ -1318,13 +1301,12 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        self.env.zenith_cli.pg_create(node_name,
-                                      timeline_id=timeline_id,
+        self.env.zenith_cli.pg_create(branch_name,
                                       tenant_id=self.tenant_id,
                                       lsn=lsn,
                                       port=self.port)
-        self.node_name = node_name
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
+        self.branch_name = branch_name
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.branch_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
@@ -1343,11 +1325,11 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
-        assert self.node_name is not None
+        assert self.branch_name is not None
 
-        log.info(f"Starting postgres node {self.node_name}")
+        log.info(f"Starting postgres node {self.branch_name}")
 
-        run_result = self.env.zenith_cli.pg_start(self.node_name,
+        run_result = self.env.zenith_cli.pg_start(self.branch_name,
                                                   tenant_id=self.tenant_id,
                                                   port=self.port)
         self.running = True
@@ -1358,8 +1340,8 @@ class Postgres(PgProtocol):
 
     def pg_data_dir_path(self) -> str:
         """ Path to data directory """
-        assert self.node_name
-        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
+        assert self.branch_name
+        path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.branch_name
         return os.path.join(self.env.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
@@ -1418,8 +1400,8 @@ class Postgres(PgProtocol):
         """
 
         if self.running:
-            assert self.node_name is not None
-            self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id)
+            assert self.branch_name is not None
+            self.env.zenith_cli.pg_stop(self.branch_name, self.tenant_id)
             self.running = False
 
         return self
@@ -1430,16 +1412,15 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
-        assert self.node_name is not None
-        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
-        self.node_name = None
+        assert self.branch_name is not None
+        self.env.zenith_cli.pg_stop(self.branch_name, self.tenant_id, True)
+        self.branch_name = None
 
         return self
 
     def create_start(
         self,
-        node_name: str,
-        timeline_id: uuid.UUID,
+        branch_name: str,
         lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
@@ -1450,8 +1431,7 @@ class Postgres(PgProtocol):
         """
 
         self.create(
-            node_name=node_name,
-            timeline_id=timeline_id,
+            branch_name=branch_name,
             config_lines=config_lines,
             lsn=lsn,
         ).start()
@@ -1473,9 +1453,8 @@ class PostgresFactory:
         self.instances: List[Postgres] = []
 
     def create_start(self,
-                     node_name: str = "main",
+                     branch_name: Optional[str] = None,
                      tenant_id: Optional[uuid.UUID] = None,
-                     timeline_id: Optional[uuid.UUID] = None,
                      lsn: Optional[str] = None,
                      config_lines: Optional[List[str]] = None) -> Postgres:
 
@@ -1488,16 +1467,14 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create_start(
-            node_name=node_name,
-            timeline_id=timeline_id or self.env.initial_timeline,
+            branch_name=branch_name or self.env.default_branch_name,
             config_lines=config_lines,
             lsn=lsn,
         )
 
     def create(self,
-               node_name: str = "main",
+               branch_name: Optional[str] = None,
                tenant_id: Optional[uuid.UUID] = None,
-               timeline_id: Optional[uuid.UUID] = None,
                lsn: Optional[str] = None,
                config_lines: Optional[List[str]] = None) -> Postgres:
 
@@ -1511,8 +1488,7 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create(
-            node_name=node_name,
-            timeline_id=timeline_id or self.env.initial_timeline,
+            branch_name=branch_name or self.env.default_branch_name,
             lsn=lsn,
             config_lines=config_lines,
         )
@@ -1616,7 +1592,7 @@ class SafekeeperMetrics:
 
 
 class SafekeeperHttpClient(requests.Session):
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int):
         super().__init__()
         self.port = port
 
@@ -1743,7 +1719,7 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     pg.stop()
 
     # Take a basebackup from pageserver
-    restored_dir_path = os.path.join(env.repo_dir, f"{pg.node_name}_restored_datadir")
+    restored_dir_path = os.path.join(env.repo_dir, f"{pg.branch_name}_restored_datadir")
     mkdir_if_needed(restored_dir_path)
 
     pg_bin = PgBin(test_output_dir)

@@ -95,7 +95,7 @@ def test_backpressure_received_lsn_lag(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
     # Create a branch for us
-    env.zenith_cli.create_branch("test_backpressure", "main")
+    env.zenith_cli.create_branch('test_backpressure')
 
     pg = env.postgres.create_start('test_backpressure',
                                    config_lines=['max_replication_write_lag=30MB'])

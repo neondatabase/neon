@@ -24,8 +24,8 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_wal_acceptors_normal_work', timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch('test_wal_acceptors_normal_work')
+    pg = env.postgres.create_start('test_wal_acceptors_normal_work')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -62,8 +62,8 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     # start postgres on each timeline
     pgs = []
     for branch_name in branch_names:
-        new_timeline_id = env.zenith_cli.branch_timeline()
-        pgs.append(env.postgres.create_start(branch_name, timeline_id=new_timeline_id))
+        new_timeline_id = env.zenith_cli.create_branch(branch_name)
+        pgs.append(env.postgres.create_start(branch_name))
         branch_names_to_timeline_ids[branch_name] = new_timeline_id
 
     tenant_id = env.initial_tenant
@@ -87,7 +87,6 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         timeline_metrics = []
         with env.pageserver.http_client() as pageserver_http:
             for timeline_detail in timeline_details:
-                print(f"@@@@@@@@@@@\n{timeline_detail}\n@@@@@@@@@@@")
                 timeline_id: str = timeline_detail["timeline_id"]
 
                 m = TimelineMetrics(
@@ -188,8 +187,8 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = n_acceptors
     env = zenith_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_wal_acceptors_restarts', timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch('test_wal_acceptors_restarts')
+    pg = env.postgres.create_start('test_wal_acceptors_restarts')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -225,8 +224,8 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
     env = zenith_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_wal_acceptors_unavailability', timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch('test_wal_acceptors_unavailability')
+    pg = env.postgres.create_start('test_wal_acceptors_unavailability')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -296,9 +295,8 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_wal_acceptors_race_conditions',
-                                   timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch('test_wal_acceptors_race_conditions')
+    pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -462,8 +460,8 @@ def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_timeline_status', timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch('test_timeline_status')
+    pg = env.postgres.create_start('test_timeline_status')
 
     wa = env.safekeepers[0]
     wa_http_cli = wa.http_client()
@@ -636,12 +634,12 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
 
     zenith_env_builder.num_safekeepers = 4
     env = zenith_env_builder.init_start()
-    new_timeline_id = env.zenith_cli.branch_timeline()
+    env.zenith_cli.create_branch('test_replace_safekeeper')
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
     active_safekeepers = [1, 2, 3]
-    pg = env.postgres.create('test_replace_safekeeper', timeline_id=new_timeline_id)
+    pg = env.postgres.create('test_replace_safekeeper')
     pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
     pg.start()
 
@@ -679,7 +677,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Recreate postgres to replace failed sk1 with new sk4")
-    pg.stop_and_destroy().create('test_replace_safekeeper', timeline_id=uuid.UUID(timeline_id))
+    pg.stop_and_destroy().create('test_replace_safekeeper')
     active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
     pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))

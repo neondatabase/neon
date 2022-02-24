@@ -127,14 +127,12 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
 
-    (tenant, _) = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
+    tenant = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
 
-    new_timeline_id = env.zenith_cli.branch_timeline(tenant_id=tenant)
+    env.zenith_cli.create_branch('test_tenant_relocation', tenant_id=tenant)
 
-    tenant_pg = env.postgres.create_start("test_tenant_relocation",
-                                          tenant_id=tenant,
-                                          timeline_id=new_timeline_id)
+    tenant_pg = env.postgres.create_start("test_tenant_relocation", tenant_id=tenant)
 
     # insert some data
     with closing(tenant_pg.connect()) as conn:

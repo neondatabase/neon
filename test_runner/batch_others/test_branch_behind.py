@@ -22,9 +22,8 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     env = zenith_env_builder.init_start()
 
     # Branch at the point where only 100 rows were inserted
-    test_branch_behind_timeline_id = env.zenith_cli.branch_timeline()
-    pgmain = env.postgres.create_start('test_branch_behind',
-                                       timeline_id=test_branch_behind_timeline_id)
+    env.zenith_cli.create_branch('test_branch_behind')
+    pgmain = env.postgres.create_start('test_branch_behind')
     log.info("postgres is running on 'test_branch_behind' branch")
 
     main_pg_conn = pgmain.connect()
@@ -60,8 +59,9 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     log.info(f'LSN after 200100 rows: {lsn_b}')
 
     # Branch at the point where only 100 rows were inserted
-    test_branch_behind_hundred_timeline_id = env.zenith_cli.branch_timeline(
-        ancestor_timeline_id=test_branch_behind_timeline_id, ancestor_start_lsn=lsn_a)
+    env.zenith_cli.create_branch('test_branch_behind_hundred',
+                                 'test_branch_behind',
+                                 ancestor_start_lsn=lsn_a)
 
     # Insert many more rows. This generates enough WAL to fill a few segments.
     main_cur.execute('''
@@ -76,13 +76,12 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     log.info(f'LSN after 400100 rows: {lsn_c}')
 
     # Branch at the point where only 200100 rows were inserted
-    test_branch_behind_more_timeline_id = env.zenith_cli.branch_timeline(
-        ancestor_timeline_id=test_branch_behind_timeline_id, ancestor_start_lsn=lsn_b)
+    env.zenith_cli.create_branch('test_branch_behind_more',
+                                 'test_branch_behind',
+                                 ancestor_start_lsn=lsn_b)
 
-    pg_hundred = env.postgres.create_start("test_branch_behind_hundred",
-                                           timeline_id=test_branch_behind_hundred_timeline_id)
-    pg_more = env.postgres.create_start("test_branch_behind_more",
-                                        timeline_id=test_branch_behind_more_timeline_id)
+    pg_hundred = env.postgres.create_start('test_branch_behind_hundred')
+    pg_more = env.postgres.create_start('test_branch_behind_more')
 
     # On the 'hundred' branch, we should see only 100 rows
     hundred_pg_conn = pg_hundred.connect()
@@ -103,23 +102,23 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     # Check bad lsn's for branching
 
     # branch at segment boundary
-    test_branch_segment_boundary_timeline_id = env.zenith_cli.branch_timeline(
-        ancestor_timeline_id=test_branch_behind_timeline_id, ancestor_start_lsn="0/3000000")
-    pg = env.postgres.create_start("test_branch_segment_boundary",
-                                   timeline_id=test_branch_segment_boundary_timeline_id)
+    env.zenith_cli.create_branch('test_branch_segment_boundary',
+                                 'test_branch_behind',
+                                 ancestor_start_lsn="0/3000000")
+    pg = env.postgres.create_start('test_branch_segment_boundary')
     cur = pg.connect().cursor()
     cur.execute('SELECT 1')
     assert cur.fetchone() == (1, )
 
     # branch at pre-initdb lsn
     with pytest.raises(Exception, match="invalid branch start lsn"):
-        env.zenith_cli.branch_timeline(ancestor_timeline_id=env.initial_timeline,
-                                       ancestor_start_lsn="0/42")
+        env.zenith_cli.create_branch('test_branch_preinitdb', ancestor_start_lsn="0/42")
 
     # branch at pre-ancestor lsn
     with pytest.raises(Exception, match="less than timeline ancestor lsn"):
-        env.zenith_cli.branch_timeline(ancestor_timeline_id=test_branch_behind_timeline_id,
-                                       ancestor_start_lsn="0/42")
+        env.zenith_cli.create_branch('test_branch_preinitdb',
+                                     'test_branch_behind',
+                                     ancestor_start_lsn="0/42")
 
     # check that we cannot create branch based on garbage collected data
     with closing(env.pageserver.connect()) as psconn:
@@ -131,8 +130,9 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
 
     with pytest.raises(Exception, match="invalid branch start lsn"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
-        env.zenith_cli.branch_timeline(ancestor_timeline_id=test_branch_behind_timeline_id,
-                                       ancestor_start_lsn=gced_lsn)
+        env.zenith_cli.create_branch('test_branch_create_fail',
+                                     'test_branch_behind',
+                                     ancestor_start_lsn=gced_lsn)
 
     # check that after gc everything is still there
     hundred_cur.execute('SELECT count(*) FROM foo')

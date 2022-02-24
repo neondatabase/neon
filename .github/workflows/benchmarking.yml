@@ -48,7 +48,7 @@ jobs:
         echo Python
         python3 --version
         poetry run python3 --version
-        echo Pipenv
+        echo Poetry
         poetry --version
         echo Pgbench
         $PG_BIN/pgbench --version

@@ -16,9 +16,8 @@ def test_pageserver_catchup_while_compute_down(zenith_env_builder: ZenithEnvBuil
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.branch_timeline()
-    pg = env.postgres.create_start('test_pageserver_catchup_while_compute_down',
-                                   timeline_id=new_timeline_id)
+    env.zenith_cli.create_branch('test_pageserver_catchup_while_compute_down')
+    pg = env.postgres.create_start('test_pageserver_catchup_while_compute_down')
 
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
@@ -60,8 +59,7 @@ def test_pageserver_catchup_while_compute_down(zenith_env_builder: ZenithEnvBuil
     env.safekeepers[2].start()
 
     # restart compute node
-    pg.stop_and_destroy().create_start('test_pageserver_catchup_while_compute_down',
-                                       timeline_id=new_timeline_id)
+    pg.stop_and_destroy().create_start('test_pageserver_catchup_while_compute_down')
 
     # Ensure that basebackup went correct and pageserver returned all data
     pg_conn = pg.connect()

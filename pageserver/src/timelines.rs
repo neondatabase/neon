@@ -1,7 +1,5 @@
 //!
 //! Timeline management code
-//!
-// TODO: move all paths construction to conf impl
 //
 
 use anyhow::{bail, Context, Result};

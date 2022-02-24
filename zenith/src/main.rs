@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{App, AppSettings, Arg, ArgMatches};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env;
@@ -19,7 +19,7 @@ use walkeeper::defaults::{
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId};
 use zenith_utils::GIT_VERSION;
 
 use pageserver::timelines::TimelineInfo;
@@ -27,6 +27,7 @@ use pageserver::timelines::TimelineInfo;
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: ZNodeId = ZNodeId(1);
 const DEFAULT_PAGESERVER_ID: ZNodeId = ZNodeId(1);
+const DEFAULT_BRANCH_NAME: &str = "main";
 
 fn default_conf() -> String {
     format!(
@@ -57,7 +58,7 @@ http_port = {safekeeper_http_port}
 /// Timelines tree element used as a value in the HashMap.
 ///
 struct TimelineTreeEl {
-    /// `TimelineInfo` received from the `pageserver` via the `timeline_list` libpq API call.
+    /// `TimelineInfo` received from the `pageserver` via the `timeline_list` http API call.
     pub info: TimelineInfo,
     /// Holds all direct children of this timeline referenced using `timeline_id`.
     pub children: BTreeSet<ZTimelineId>,
@@ -71,15 +72,14 @@ struct TimelineTreeEl {
 //   * Providing CLI api to the pageserver
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
-    let pg_node_arg = Arg::new("node").help("Node name").required(true);
+    let branch_name_arg = Arg::new("name")
+        .long("name")
+        .short('n')
+        .takes_value(true)
+        .help("Name of the branch to be created or used as an alias for other services")
+        .required(false);
 
     let safekeeper_id_arg = Arg::new("id").help("safekeeper id").required(false);
-
-    let timeline_id_arg = Arg::new("timeline-id")
-        .long("timeline-id")
-        .help("Timeline id. Represented as a hexadecimal string 32 symbols length")
-        .takes_value(true)
-        .required(false);
 
     let tenant_id_arg = Arg::new("tenant-id")
         .long("tenant-id")
@@ -137,15 +137,15 @@ fn main() -> Result<()> {
             .subcommand(App::new("branch")
                 .about("Create a new timeline, using another timeline as a base, copying its data")
                 .arg(tenant_id_arg.clone())
-                .arg(timeline_id_arg.clone().help("Id of the new timeline, optional. If not specified, it will be generated randomly"))
-                .arg(Arg::new("ancestor-timeline-id").long("ancestor-timeline-id").takes_value(true)
-                    .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline").required(false))
+                .arg(branch_name_arg.clone())
+                .arg(Arg::new("ancestor-branch-name").long("ancestor-branch-name").takes_value(true)
+                    .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(true))
                 .arg(Arg::new("ancestor-start-lsn").long("ancestor-start-lsn").takes_value(true)
                     .help("When using another timeline as base, use a specific Lsn in it instead of the latest one").required(false)))
             .subcommand(App::new("create")
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())
-                .arg(timeline_id_arg.clone().help("Id of the new timeline, optional. If not specified, it will be generated randomly")))
+                .arg(branch_name_arg.clone()))
         ).subcommand(
             App::new("tenant")
             .setting(AppSettings::ArgRequiredElseHelp)
@@ -189,8 +189,7 @@ fn main() -> Result<()> {
                 .subcommand(App::new("list").arg(tenant_id_arg.clone()))
                 .subcommand(App::new("create")
                     .about("Create a postgres compute node")
-                    .arg(pg_node_arg.clone())
-                    .arg(timeline_id_arg.clone())
+                    .arg(branch_name_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
                     .arg(port_arg.clone())
@@ -202,14 +201,13 @@ fn main() -> Result<()> {
                     ))
                 .subcommand(App::new("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
-                    .arg(pg_node_arg.clone())
-                    .arg(timeline_id_arg.clone())
+                    .arg(branch_name_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
                     .arg(port_arg.clone()))
                 .subcommand(
                     App::new("stop")
-                        .arg(pg_node_arg.clone())
+                    .arg(branch_name_arg.clone())
                         .arg(tenant_id_arg.clone())
                         .arg(
                             Arg::new("destroy")
@@ -242,24 +240,26 @@ fn main() -> Result<()> {
         handle_init(sub_args)
     } else {
         // all other commands need an existing config
-        let mut env = match LocalEnv::load_config() {
-            Ok(conf) => conf,
-            Err(e) => {
-                eprintln!("Error loading config: {}", e);
-                exit(1);
-            }
-        };
+        let mut env = LocalEnv::load_config().context("Error loading config")?;
+        let original_env = env.clone();
 
-        match sub_name {
+        let subcommand_result = match sub_name {
             "tenant" => handle_tenant(sub_args, &mut env),
-            "timeline" => handle_timeline(sub_args, &env),
+            "timeline" => handle_timeline(sub_args, &mut env),
             "start" => handle_start_all(sub_args, &env),
             "stop" => handle_stop_all(sub_args, &env),
             "pageserver" => handle_pageserver(sub_args, &env),
             "pg" => handle_pg(sub_args, &env),
             "safekeeper" => handle_safekeeper(sub_args, &env),
             _ => bail!("unexpected subcommand {}", sub_name),
+        };
+
+        if subcommand_result.is_ok() && original_env != env {
+            eprintln!("Subcommand had changed the config, updating");
+            env.persist_config(&env.base_data_dir)?;
         }
+
+        subcommand_result
     };
     if let Err(e) = subcmd_result {
         eprintln!("command failed: {:#}", e);
@@ -423,21 +423,6 @@ fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::R
     }
 }
 
-fn get_timeline_id(
-    sub_match: &ArgMatches,
-    tenant_id: ZTenantId,
-    env: &local_env::LocalEnv,
-) -> anyhow::Result<ZTimelineId> {
-    if let Some(timeline_id) = sub_match.value_of("timeline-id") {
-        Ok(ZTimelineId::from_str(timeline_id)
-            .context("Failed to parse timeline id from arguments")?)
-    } else if let Some(&initial_timeline_id) = env.initial_timelines.get(&tenant_id) {
-        Ok(initial_timeline_id)
-    } else {
-        bail!("No timeline id, specify one in the subcommand's arguments");
-    }
-}
-
 fn handle_init(init_match: &ArgMatches) -> Result<()> {
     // Create config file
     let toml_file: String = if let Some(config_path) = init_match.value_of("config") {
@@ -491,7 +476,10 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
             };
             println!("using tenant id {}", tenant_id);
             let initial_timeline_id = pageserver.tenant_create(tenant_id)?;
-            env.initial_timelines.insert(tenant_id, initial_timeline_id);
+            env.branch_name_mappings.insert(
+                DEFAULT_BRANCH_NAME.to_owned(),
+                ZTenantTimelineId::new(tenant_id, initial_timeline_id),
+            );
             println!(
                 "tenant {} successfully created on the pageserver, initial timeline: '{}'",
                 tenant_id, initial_timeline_id
@@ -503,7 +491,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
     Ok(())
 }
 
-fn handle_timeline(timeline_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
     let pageserver = PageServerNode::from_env(env);
 
     match timeline_match.subcommand() {
@@ -514,18 +502,28 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
         }
         Some(("create", create_match)) => {
             let tenant_id = get_tenant_id(create_match, env)?;
-            let timeline_id = get_timeline_id(create_match, tenant_id, env)
-                .unwrap_or_else(|_| ZTimelineId::generate());
-            let timeline = pageserver.timeline_create(tenant_id, timeline_id, None, None)?;
+            let new_timeline_id = ZTimelineId::generate();
+            let new_branch_name = create_match
+                .value_of("name")
+                .ok_or(anyhow!("No branch name provided"))?;
+            let timeline = pageserver.timeline_create(tenant_id, new_timeline_id, None, None)?;
 
             let last_record_lsn = match timeline {
                 TimelineInfo::Local {
                     last_record_lsn, ..
                 } => last_record_lsn,
                 TimelineInfo::Remote { .. } => {
-                    bail!("Timeline {} was created as remote, not local", timeline_id)
+                    bail!(
+                        "Timeline {} was created as remote, not local",
+                        new_timeline_id
+                    )
                 }
             };
+            env.branch_name_mappings.insert(
+                new_branch_name.to_string(),
+                ZTenantTimelineId::new(tenant_id, new_timeline_id),
+            );
+
             println!(
                 "Created timeline '{}' at Lsn {} for tenant: {}",
                 timeline.timeline_id(),
@@ -535,18 +533,22 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
         }
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;
-            let timeline_id = get_timeline_id(branch_match, tenant_id, env)
-                .unwrap_or_else(|_| ZTimelineId::generate());
-            let ancestor_timeline_id = match branch_match
-                .value_of("ancestor-timeline-id")
-                .map(ZTimelineId::from_str)
-                .transpose()
-                .context("Failed to parse ancestor timeline id from the request")?
-                .or_else(|| env.initial_timelines.get(&tenant_id).copied())
-            {
-                Some(id) => id,
-                None => bail!("No ancestor timeline id provided"),
-            };
+            let new_timeline_id = ZTimelineId::generate();
+            let new_branch_name = branch_match
+                .value_of("name")
+                .ok_or(anyhow!("No branch name provided"))?;
+            let ancestor_branch_name = branch_match
+                .value_of("ancestor-branch-name")
+                .ok_or(anyhow!("No ancestor branch name provided"))?;
+            let ancestor_timeline_id = env
+                .branch_name_mappings
+                .get(ancestor_branch_name)
+                .ok_or(anyhow!(
+                    "Found no timeline id for branch name '{}'",
+                    ancestor_branch_name
+                ))?
+                .timeline_id;
+
             let start_lsn = branch_match
                 .value_of("ancestor-start-lsn")
                 .map(Lsn::from_str)
@@ -554,7 +556,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .context("Failed to parse ancestor start Lsn from the request")?;
             let timeline = pageserver.timeline_create(
                 tenant_id,
-                timeline_id,
+                new_timeline_id,
                 start_lsn,
                 Some(ancestor_timeline_id),
             )?;
@@ -563,16 +565,23 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 TimelineInfo::Local {
                     last_record_lsn, ..
                 } => last_record_lsn,
-                TimelineInfo::Remote { .. } => {
-                    bail!("Timeline {} was created as remote, not local", timeline_id)
-                }
+                TimelineInfo::Remote { .. } => bail!(
+                    "Timeline {} was created as remote, not local",
+                    new_timeline_id
+                ),
             };
+
+            env.branch_name_mappings.insert(
+                new_branch_name.to_string(),
+                ZTenantTimelineId::new(tenant_id, new_timeline_id),
+            );
+
             println!(
                 "Created timeline '{}' at Lsn {} for tenant: {}. Ancestor timeline: '{}'",
                 timeline.timeline_id(),
                 last_record_lsn,
                 tenant_id,
-                ancestor_timeline_id,
+                ancestor_branch_name,
             );
         }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
@@ -592,6 +601,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
     // All subcommands take an optional --tenant-id option
     let tenant_id = get_tenant_id(sub_args, env)?;
+    let node_name = sub_args.value_of("name").unwrap_or(DEFAULT_BRANCH_NAME);
 
     match sub_name {
         "list" => {
@@ -630,13 +640,16 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             }
         }
         "create" => {
-            let node_name = sub_args.value_of("node").unwrap_or("main");
             let lsn = sub_args
                 .value_of("lsn")
                 .map(Lsn::from_str)
                 .transpose()
                 .context("Failed to parse Lsn from the request")?;
-            let timeline_id = get_timeline_id(sub_args, tenant_id, env)?;
+            let timeline_id = env
+                .branch_name_mappings
+                .get(node_name)
+                .ok_or(anyhow!("Found no timeline id for node name {}", node_name))?
+                .timeline_id;
 
             let port: Option<u16> = match sub_args.value_of("port") {
                 Some(p) => Some(p.parse()?),
@@ -645,8 +658,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             cplane.new_node(tenant_id, node_name, timeline_id, lsn, port)?;
         }
         "start" => {
-            let node_name = sub_args.value_of("node").unwrap_or("main");
-
             let port: Option<u16> = match sub_args.value_of("port") {
                 Some(p) => Some(p.parse()?),
                 None => None,
@@ -666,7 +677,11 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 println!("Starting existing postgres {}...", node_name);
                 node.start(&auth_token)?;
             } else {
-                let timeline_id = get_timeline_id(sub_args, tenant_id, env)?;
+                let timeline_id = env
+                    .branch_name_mappings
+                    .get(node_name)
+                    .ok_or(anyhow!("Found no timeline id for node name {}", node_name))?
+                    .timeline_id;
                 let lsn = sub_args
                     .value_of("lsn")
                     .map(Lsn::from_str)
@@ -686,7 +701,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             }
         }
         "stop" => {
-            let node_name = sub_args.value_of("node").unwrap_or("main");
             let destroy = sub_args.is_present("destroy");
 
             let node = cplane
