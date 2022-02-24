@@ -9,7 +9,7 @@
   tasks:
     - name: get current version of binaries
       set_fact:
-        current_version: "{{lookup('file', '.zenith_current_version') }}"
+        current_version: "{{lookup('file', '../.zenith_current_version') }}"
       tags:
       - pageserver
       - safekeeper

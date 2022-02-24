@@ -8,7 +8,7 @@
       ansible.builtin.unarchive:
         owner: root
         group: root
-        src: zenith_install.tar.gz
+        src: ../zenith_install.tar.gz
         dest: /usr/local
       become: true
       tags:
