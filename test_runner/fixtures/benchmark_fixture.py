@@ -346,32 +346,65 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter, exitstatus: int,
 
     terminalreporter.section("Benchmark results", "-")
 
-    result = []
-    for test_report in terminalreporter.stats.get("passed", []):
-        result_entry = []
+    # TODO group by test report
+    reports = {
+        report.head_line: report
+        for report in terminalreporter.stats.get("passed", [])
+    }
 
-        for _, recorded_property in test_report.user_properties:
-            terminalreporter.write("{}.{}: ".format(test_report.head_line,
-                                                    recorded_property["name"]))
-            unit = recorded_property["unit"]
-            value = recorded_property["value"]
-            if unit == "MB":
-                terminalreporter.write("{0:,.0f}".format(value), green=True)
-            elif unit in ("s", "ms") and isinstance(value, float):
-                terminalreporter.write("{0:,.3f}".format(value), green=True)
-            elif isinstance(value, float):
-                terminalreporter.write("{0:,.4f}".format(value), green=True)
-            else:
-                terminalreporter.write(str(value), green=True)
-            terminalreporter.line(" {}".format(unit))
+    results = []
+    for name, report in reports.items():
+        terminalreporter.write(f"{name}", green=True)
+        terminalreporter.line("")
+        if "[zenith" in name:
+            vanilla_report = reports.get(name.replace("[zenith", "[vanilla"))
+            if vanilla_report:
+                for key, prop in report.user_properties:
+                    if prop["unit"] == "s":
+                        zenith_value = prop["value"]
+                        vanilla_value = dict(vanilla_report.user_properties)[key]["value"]
+                        ratio = float(zenith_value) / vanilla_value
 
-            result_entry.append(recorded_property)
+                        results.append((ratio, name.replace("[zenith", "[zenith/vanilla"), prop["name"]))
 
-        result.append({
-            "suit": test_report.nodeid,
-            "total_duration": test_report.duration,
-            "data": result_entry,
-        })
+    results.sort(reverse=True)
+    for ratio, test, prop in results:
+        terminalreporter.write("{}.{}: ".format(test, prop))
+        terminalreporter.write("{0:,.3f}".format(ratio), green=True)
+        terminalreporter.line("")
+
+    # result = []
+    # for test_report in terminalreporter.stats.get("passed", []):
+    #     result_entry = []
+
+    #     durations = [
+    #         prop
+    #         for _, prop in test_report.user_properties
+    #         if prop["unit"] == "s"
+    #     ]
+
+    #     for _, recorded_property in test_report.user_properties:
+    #         terminalreporter.write("{}.{}: ".format(test_report.head_line,
+    #                                                 recorded_property["name"]))
+    #         unit = recorded_property["unit"]
+    #         value = recorded_property["value"]
+    #         if unit == "MB":
+    #             terminalreporter.write("{0:,.0f}".format(value), green=True)
+    #         elif unit in ("s", "ms") and isinstance(value, float):
+    #             terminalreporter.write("{0:,.3f}".format(value), green=True)
+    #         elif isinstance(value, float):
+    #             terminalreporter.write("{0:,.4f}".format(value), green=True)
+    #         else:
+    #             terminalreporter.write(str(value), green=True)
+    #         terminalreporter.line(" {}".format(unit))
+
+    #         result_entry.append(recorded_property)
+
+    #     result.append({
+    #         "suit": test_report.nodeid,
+    #         "total_duration": test_report.duration,
+    #         "data": result_entry,
+    #     })
 
     out_dir = config.getoption("out_dir")
     if out_dir is None:
