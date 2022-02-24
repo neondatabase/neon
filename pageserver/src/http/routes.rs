@@ -214,8 +214,12 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
     let initial_timeline_id = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id).entered();
-        tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
+        let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id, initial_timeline = ?request_data.initial_timeline_id).entered();
+        tenant_mgr::create_repository_for_tenant(
+            get_config(&request),
+            request_data.tenant_id,
+            request_data.initial_timeline_id,
+        )
     })
     .await
     .map_err(ApiError::from_err)??;

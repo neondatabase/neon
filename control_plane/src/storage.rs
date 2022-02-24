@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::{io, result, thread};
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -99,9 +99,10 @@ impl PageServerNode {
 
     pub fn init(
         &self,
-        create_tenant: Option<&str>,
+        create_tenant: Option<ZTenantId>,
+        initial_timeline_id: Option<ZTimelineId>,
         config_overrides: &[&str],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<ZTimelineId> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
 
         let id = format!("id={}", self.env.pageserver.id);
@@ -138,19 +139,29 @@ impl PageServerNode {
             ]);
         }
 
-        if let Some(tenantid) = create_tenant {
-            args.extend(["--create-tenant", tenantid])
+        let create_tenant = create_tenant.map(|id| id.to_string());
+        if let Some(tenant_id) = create_tenant.as_deref() {
+            args.extend(["--create-tenant", tenant_id])
         }
 
-        let status = fill_rust_env_vars(cmd.args(args))
-            .status()
-            .expect("pageserver init failed");
+        let initial_timeline_id_str = initial_timeline_id.map(|id| id.to_string());
+        if let Some(timeline_id) = initial_timeline_id_str.as_deref() {
+            args.extend(["--initial-timeline-id", timeline_id])
+        }
 
-        if !status.success() {
+        let init_output = fill_rust_env_vars(cmd.args(args))
+            .output()
+            .context("pageserver init failed")?;
+
+        if !init_output.status.success() {
             bail!("pageserver init failed");
         }
 
-        Ok(())
+        if let Some(initial_timeline_id) = initial_timeline_id {
+            Ok(initial_timeline_id)
+        } else {
+            extract_initial_timeline_id(init_output.stdout)
+        }
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -325,11 +336,16 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn tenant_create(&self, tenantid: ZTenantId) -> Result<ZTimelineId> {
+    pub fn tenant_create(
+        &self,
+        tenant_id: ZTenantId,
+        initial_timeline_id: Option<ZTimelineId>,
+    ) -> Result<ZTimelineId> {
         Ok(self
             .http_request(Method::POST, format!("{}/{}", self.http_base_url, "tenant"))
             .json(&TenantCreateRequest {
-                tenant_id: tenantid,
+                tenant_id,
+                initial_timeline_id,
             })
             .send()?
             .error_from_body()?
@@ -366,4 +382,32 @@ impl PageServerNode {
             .error_from_body()?
             .json()?)
     }
+}
+
+fn extract_initial_timeline_id(init_stdout: Vec<u8>) -> anyhow::Result<ZTimelineId> {
+    let output_string =
+        String::from_utf8(init_stdout).context("Init stdout is not a valid unicode")?;
+
+    let string_with_timeline_id = match output_string.split_once("created initial timeline ") {
+        Some((_, string_with_timeline_id)) => string_with_timeline_id,
+        None => bail!(
+            "Found no line with timeline id in the init output: '{}'",
+            output_string
+        ),
+    };
+
+    let timeline_id_str = match string_with_timeline_id.split_once(' ') {
+        Some((timeline_id_str, _)) => timeline_id_str,
+        None => bail!(
+            "Found no timeline id in the init output: '{}'",
+            output_string
+        ),
+    };
+
+    timeline_id_str.parse().with_context(|| {
+        format!(
+            "Failed to parse timeline id from string, extracted from the init output: '{}'",
+            timeline_id_str
+        )
+    })
 }

@@ -2,7 +2,14 @@
 
 use std::{env, path::Path, str::FromStr};
 use tracing::*;
-use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
+use zenith_utils::{
+    auth::JwtAuth,
+    logging,
+    postgres_backend::AuthType,
+    tcp_listener,
+    zid::{ZTenantId, ZTimelineId},
+    GIT_VERSION,
+};
 
 use anyhow::{bail, Context, Result};
 
@@ -52,6 +59,13 @@ fn main() -> Result<()> {
                 .help("Create tenant during init")
                 .requires("init"),
         )
+        .arg(
+            Arg::new("initial-timeline-id")
+                .long("initial-timeline-id")
+                .takes_value(true)
+                .help("Use a specific timeline id during init and tenant creation")
+                .requires("create-tenant"),
+        )
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
             Arg::new("config-override")
@@ -71,7 +85,16 @@ fn main() -> Result<()> {
     let cfg_file_path = workdir.join("pageserver.toml");
 
     let init = arg_matches.is_present("init");
-    let create_tenant = arg_matches.value_of("create-tenant");
+    let create_tenant = arg_matches
+        .value_of("create-tenant")
+        .map(ZTenantId::from_str)
+        .transpose()
+        .context("Failed to parse tenant id from the arguments")?;
+    let initial_timeline_id = arg_matches
+        .value_of("initial-timeline-id")
+        .map(ZTimelineId::from_str)
+        .transpose()
+        .context("Failed to parse timeline id from the arguments")?;
 
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir).with_context(|| {
@@ -142,7 +165,8 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        timelines::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
+        timelines::init_pageserver(conf, create_tenant, initial_timeline_id)
+            .context("Failed to init pageserver")?;
         // write the config file
         std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
             format!(

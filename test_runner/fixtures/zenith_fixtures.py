@@ -869,12 +869,16 @@ class ZenithCli:
                 res.stdout.strip().split("\n")))
         return branches_cli
 
-    def init(self, config_toml: str) -> 'subprocess.CompletedProcess[str]':
+    def init(self,
+             config_toml: str,
+             initial_timeline_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
         with tempfile.NamedTemporaryFile(mode='w+') as tmp:
             tmp.write(config_toml)
             tmp.flush()
 
             cmd = ['init', f'--config={tmp.name}']
+            if initial_timeline_id:
+                cmd.extend(['--timeline-id', initial_timeline_id.hex])
             append_pageserver_param_overrides(cmd,
                                               self.env.pageserver.remote_storage,
                                               self.env.pageserver.config_override)

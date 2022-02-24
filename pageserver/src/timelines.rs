@@ -9,7 +9,6 @@ use std::{
     fs,
     path::Path,
     process::{Command, Stdio},
-    str::FromStr,
     sync::Arc,
 };
 use tracing::*;
@@ -150,7 +149,11 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str>) -> Result<()> {
+pub fn init_pageserver(
+    conf: &'static PageServerConf,
+    create_tenant: Option<ZTenantId>,
+    initial_timeline_id: Option<ZTimelineId>,
+) -> Result<()> {
     // Initialize logger
     // use true as daemonize parameter because otherwise we pollute zenith cli output with a few pages long output of info messages
     let _log_file = logging::init(LOG_FILE_NAME, true)?;
@@ -167,10 +170,10 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
     // anymore, but I think that could still happen.
     let dummy_redo_mgr = Arc::new(crate::walredo::DummyRedoManager {});
 
-    if let Some(tenantid) = create_tenant {
-        let tenantid = ZTenantId::from_str(tenantid)?;
-        println!("initializing tenantid {}", tenantid);
-        create_repo(conf, tenantid, dummy_redo_mgr).context("failed to create repo")?;
+    if let Some(tenant_id) = create_tenant {
+        println!("initializing tenantid {}", tenant_id);
+        create_repo(conf, tenant_id, initial_timeline_id, dummy_redo_mgr)
+            .context("failed to create repo")?;
     }
     crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
@@ -180,39 +183,40 @@ pub fn init_pageserver(conf: &'static PageServerConf, create_tenant: Option<&str
 
 pub fn create_repo(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
+    tenant_id: ZTenantId,
+    init_timeline_id: Option<ZTimelineId>,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
 ) -> Result<(ZTimelineId, Arc<dyn Repository>)> {
-    let repo_dir = conf.tenant_path(&tenantid);
+    let repo_dir = conf.tenant_path(&tenant_id);
     if repo_dir.exists() {
-        bail!("repo for {} already exists", tenantid)
+        bail!("repo for {} already exists", tenant_id)
     }
 
     // top-level dir may exist if we are creating it through CLI
     crashsafe_dir::create_dir_all(&repo_dir)
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
 
-    crashsafe_dir::create_dir(conf.timelines_path(&tenantid))?;
+    crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
 
     info!("created directory structure in {}", repo_dir.display());
 
     // create a new timeline directory
-    let timeline_id = ZTimelineId::generate();
-    let timelinedir = conf.timeline_path(&timeline_id, &tenantid);
+    let timeline_id = init_timeline_id.unwrap_or_else(|| ZTimelineId::generate());
+    let timelinedir = conf.timeline_path(&timeline_id, &tenant_id);
 
     crashsafe_dir::create_dir(&timelinedir)?;
 
     let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
         conf,
         wal_redo_manager,
-        tenantid,
+        tenant_id,
         conf.remote_storage_config.is_some(),
     ));
 
     // Load data into pageserver
     // TODO To implement zenith import we need to
     //      move data loading out of create_repo()
-    bootstrap_timeline(conf, tenantid, timeline_id, repo.as_ref())?;
+    bootstrap_timeline(conf, tenant_id, timeline_id, repo.as_ref())?;
 
     Ok((timeline_id, repo))
 }
