@@ -3,6 +3,7 @@
 
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 use crate::receive_wal::ReceiveWalConn;
+use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
 use crate::send_wal::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::SafeKeeperConf;
@@ -158,6 +159,17 @@ impl SafekeeperPostgresHandler {
             pageserver_connstr: None,
             tx,
         }
+    }
+
+    /// Shortcut for calling `process_msg` in the timeline.
+    pub fn process_safekeeper_msg(
+        &self,
+        msg: &ProposerAcceptorMessage,
+    ) -> Result<Option<AcceptorProposerMessage>> {
+        self.timeline
+            .get()
+            .process_msg(msg)
+            .context("failed to process ProposerAcceptorMessage")
     }
 
     ///

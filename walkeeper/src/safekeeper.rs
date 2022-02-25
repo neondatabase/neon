@@ -301,6 +301,8 @@ pub enum ProposerAcceptorMessage {
     VoteRequest(VoteRequest),
     Elected(ProposerElected),
     AppendRequest(AppendRequest),
+    NoFlushAppendRequest(AppendRequest),
+    FlushWAL,
 }
 
 impl ProposerAcceptorMessage {
@@ -499,7 +501,11 @@ where
             ProposerAcceptorMessage::Greeting(msg) => self.handle_greeting(msg),
             ProposerAcceptorMessage::VoteRequest(msg) => self.handle_vote_request(msg),
             ProposerAcceptorMessage::Elected(msg) => self.handle_elected(msg),
-            ProposerAcceptorMessage::AppendRequest(msg) => self.handle_append_request(msg),
+            ProposerAcceptorMessage::AppendRequest(msg) => self.handle_append_request(msg, true),
+            ProposerAcceptorMessage::NoFlushAppendRequest(msg) => {
+                self.handle_append_request(msg, false)
+            }
+            ProposerAcceptorMessage::FlushWAL => self.handle_flush(),
         }
     }
 
@@ -605,7 +611,10 @@ where
             return Ok(None);
         }
 
-        // truncate wal, update the lsns
+        // TODO: cross check divergence point, check if msg.start_streaming_at corresponds to
+        // intersection of our history and history from msg
+
+        // truncate wal, update the LSNs
         self.wal_store.truncate_wal(msg.start_streaming_at)?;
 
         // and now adopt term history from proposer
@@ -622,6 +631,7 @@ where
     fn handle_append_request(
         &mut self,
         msg: &AppendRequest,
+        mut require_flush: bool,
     ) -> Result<Option<AcceptorProposerMessage>> {
         if self.s.acceptor_state.term < msg.h.term {
             bail!("got AppendRequest before ProposerElected");
@@ -650,7 +660,13 @@ where
             if self.s.wal_start_lsn == Lsn(0) {
                 self.s.wal_start_lsn = msg.h.begin_lsn;
                 sync_control_file = true;
+                require_flush = true;
             }
+        }
+
+        // flush wal to the disk, if required
+        if require_flush {
+            self.wal_store.flush_wal()?;
         }
 
         // Advance commit_lsn taking into account what we have locally.
@@ -670,11 +686,9 @@ where
         }
 
         self.truncate_lsn = msg.h.truncate_lsn;
-        /*
-         * Update truncate and commit LSN in control file.
-         * To avoid negative impact on performance of extra fsync, do it only
-         * when truncate_lsn delta exceeds WAL segment size.
-         */
+        // Update truncate and commit LSN in control file.
+        // To avoid negative impact on performance of extra fsync, do it only
+        // when truncate_lsn delta exceeds WAL segment size.
         sync_control_file |=
             self.s.truncate_lsn + (self.s.server.wal_seg_size as u64) < self.truncate_lsn;
         if sync_control_file {
@@ -684,6 +698,11 @@ where
 
         if sync_control_file {
             self.control_store.persist(&self.s)?;
+        }
+
+        // If flush_lsn hasn't updated, AppendResponse is not very useful.
+        if !require_flush {
+            return Ok(None);
         }
 
         let resp = self.append_response();
@@ -696,6 +715,14 @@ where
             &resp,
         );
         Ok(Some(AcceptorProposerMessage::AppendResponse(resp)))
+    }
+
+    /// Flush WAL to disk. Return AppendResponse with latest LSNs.
+    fn handle_flush(&mut self) -> Result<Option<AcceptorProposerMessage>> {
+        self.wal_store.flush_wal()?;
+        Ok(Some(AcceptorProposerMessage::AppendResponse(
+            self.append_response(),
+        )))
     }
 }
 
@@ -736,6 +763,10 @@ mod tests {
 
         fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
             self.lsn = end_pos;
+            Ok(())
+        }
+
+        fn flush_wal(&mut self) -> Result<()> {
             Ok(())
         }
     }
