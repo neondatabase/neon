@@ -25,6 +25,11 @@ pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<ZTenantId>,
+    pub checkpoint_distance: Option<u64>,
+    pub compaction_period: Option<String>,
+    pub gc_horizon: Option<u64>,
+    pub gc_period: Option<String>,
+    pub pitr_interval: Option<String>,
 }
 
 #[serde_as]
@@ -35,4 +40,17 @@ pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub ZTenantId
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: ZNodeId,
+}
+
+impl TenantCreateRequest {
+    pub fn new(new_tenant_id: ZTenantId) -> TenantCreateRequest {
+        TenantCreateRequest {
+            new_tenant_id,
+            checkpoint_distance: None,
+            compaction_period: None,
+            gc_horizon: None,
+            gc_period: None,
+            pitr_interval: None,
+        }
+    }
 }

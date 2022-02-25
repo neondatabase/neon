@@ -333,6 +333,16 @@ paths:
                 new_tenant_id:
                   type: string
                   format: hex
+                gc_period:
+                  type: string
+                gc_horizon:
+                  type: integer
+                pitr_interval:
+                  type: string
+                checkpoint_distance:
+                  type: integer
+                compaction_period:
+                  type: string
       responses:
         "201":
           description: New tenant created successfully

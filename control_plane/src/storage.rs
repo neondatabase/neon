@@ -345,7 +345,7 @@ impl PageServerNode {
     ) -> anyhow::Result<Option<ZTenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest { new_tenant_id })
+            .json(&TenantCreateRequest::new(tenantid))
             .send()?
             .error_from_body()?
             .json::<Option<String>>()?;

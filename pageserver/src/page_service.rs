@@ -19,6 +19,7 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
+use std::time::Duration;
 use tracing::*;
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
@@ -695,10 +696,11 @@ impl postgres_backend::Handler for PageServerHandler {
                 .unwrap_or(Ok(self.conf.gc_horizon))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
+            let result = repo.gc_iteration(Some(timelineid), gc_horizon, Duration::ZERO, true)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layers_total"),
                 RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layers_needed_by_pitr"),
                 RowDescriptor::int8_col(b"layers_needed_by_branches"),
                 RowDescriptor::int8_col(b"layers_not_updated"),
                 RowDescriptor::int8_col(b"layers_removed"),
@@ -707,6 +709,7 @@ impl postgres_backend::Handler for PageServerHandler {
             .write_message_noflush(&BeMessage::DataRow(&[
                 Some(result.layers_total.to_string().as_bytes()),
                 Some(result.layers_needed_by_cutoff.to_string().as_bytes()),
+                Some(result.layers_needed_by_pitr.to_string().as_bytes()),
                 Some(result.layers_needed_by_branches.to_string().as_bytes()),
                 Some(result.layers_not_updated.to_string().as_bytes()),
                 Some(result.layers_removed.to_string().as_bytes()),

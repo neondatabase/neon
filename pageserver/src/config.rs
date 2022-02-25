@@ -41,6 +41,7 @@ pub mod defaults {
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
+    pub const DEFAULT_PITR_INTERVAL: &str = "30 days";
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -68,6 +69,7 @@ pub mod defaults {
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
+#pitr_interval = '{DEFAULT_PITR_INTERVAL}'
 
 #wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
 #wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
@@ -109,6 +111,7 @@ pub struct PageServerConf {
 
     pub gc_horizon: u64,
     pub gc_period: Duration,
+    pub pitr_interval: Duration,
 
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
@@ -134,6 +137,27 @@ pub struct PageServerConf {
 
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantConf {
+    pub checkpoint_distance: u64,
+    pub compaction_period: Duration,
+    pub gc_horizon: u64,
+    pub gc_period: Duration,
+    pub pitr_interval: Duration,
+}
+
+impl TenantConf {
+    pub fn from(conf: &PageServerConf) -> TenantConf {
+        TenantConf {
+            gc_period: conf.gc_period,
+            gc_horizon: conf.gc_horizon,
+            pitr_interval: conf.pitr_interval,
+            checkpoint_distance: conf.checkpoint_distance,
+            compaction_period: conf.compaction_period,
+		}
+	}
 }
 
 // use dedicated enum for builder to better indicate the intention
@@ -165,6 +189,7 @@ struct PageServerConfigBuilder {
 
     gc_horizon: BuilderValue<u64>,
     gc_period: BuilderValue<Duration>,
+    pitr_interval: BuilderValue<Duration>,
 
     wait_lsn_timeout: BuilderValue<Duration>,
     wal_redo_timeout: BuilderValue<Duration>,
@@ -201,6 +226,8 @@ impl Default for PageServerConfigBuilder {
             gc_horizon: Set(DEFAULT_GC_HORIZON),
             gc_period: Set(humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period")),
+            pitr_interval: Set(humantime::parse_duration(DEFAULT_PITR_INTERVAL)
+                .expect("cannot parse default PITR interval")),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
@@ -247,6 +274,10 @@ impl PageServerConfigBuilder {
 
     pub fn gc_period(&mut self, gc_period: Duration) {
         self.gc_period = BuilderValue::Set(gc_period)
+    }
+
+    pub fn pitr_interval(&mut self, gc_period: Duration) {
+        self.pitr_interval = BuilderValue::Set(pitr_interval)
     }
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
@@ -317,6 +348,7 @@ impl PageServerConfigBuilder {
                 .gc_horizon
                 .ok_or(anyhow::anyhow!("missing gc_horizon"))?,
             gc_period: self.gc_period.ok_or(anyhow::anyhow!("missing gc_period"))?,
+            pitr_interval: self.pitr_interval.ok_or(anyhow::anyhow!("missing pitr_interval"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow::anyhow!("missing wait_lsn_timeout"))?,
@@ -455,6 +487,7 @@ impl PageServerConf {
                 "compaction_period" => builder.compaction_period(parse_toml_duration(key, item)?),
                 "gc_horizon" => builder.gc_horizon(parse_toml_u64(key, item)?),
                 "gc_period" => builder.gc_period(parse_toml_duration(key, item)?),
+                "pitr_interval" => builder.pitr_interval(parse_toml_duration(key, item)?),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
                 "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
@@ -592,6 +625,7 @@ impl PageServerConf {
             compaction_period: Duration::from_secs(10),
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
+            pitr_interval: Duration::from_secs(60 * 60),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
@@ -666,6 +700,8 @@ compaction_period = '111 s'
 gc_period = '222 s'
 gc_horizon = 222
 
+pitr_interval = '30 days'
+
 wait_lsn_timeout = '111 s'
 wal_redo_timeout = '111 s'
 
@@ -702,6 +738,7 @@ id = 10
                 compaction_period: humantime::parse_duration(defaults::DEFAULT_COMPACTION_PERIOD)?,
                 gc_horizon: defaults::DEFAULT_GC_HORIZON,
                 gc_period: humantime::parse_duration(defaults::DEFAULT_GC_PERIOD)?,
+                pitr_interval: humantime::parse_duration(defaults::DEFAULT_PITR_INTERVAL)?,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
@@ -749,6 +786,7 @@ id = 10
                 gc_period: Duration::from_secs(222),
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
+                pitr_interval: Duration::from_secs(30 * 24 * 60 * 60),
                 superuser: "zzzz".to_string(),
                 page_cache_size: 444,
                 max_file_descriptors: 333,

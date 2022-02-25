@@ -1,7 +1,8 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use crate::config::PageServerConf;
+use crate::branches;
+use crate::config::{PageServerConf, TenantConf};
 use crate::layered_repository::LayeredRepository;
 use crate::remote_storage::RemoteIndex;
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
@@ -174,9 +175,13 @@ pub fn shutdown_all_tenants() {
 
 pub fn create_tenant_repository(
     conf: &'static PageServerConf,
+    tenant_conf: TenantConf,
     tenantid: ZTenantId,
     remote_index: RemoteIndex,
 ) -> Result<Option<ZTenantId>> {
+    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
+    let repo = branches::create_repo(conf, tenant_conf, tenantid, wal_redo_manager)?;
+
     match access_tenants().entry(tenantid) {
         Entry::Occupied(_) => {
             debug!("tenant {} already exists", tenantid);
@@ -184,8 +189,10 @@ pub fn create_tenant_repository(
         }
         Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
+			let tenant_conf = match TenantConf::load(conf, tenant_id)?;
             let repo = timelines::create_repo(
                 conf,
+				tenant_conf,
                 tenantid,
                 CreateRepo::Real {
                     wal_redo_manager,
@@ -210,7 +217,7 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 /// Change the state of a tenant to Active and launch its compactor and GC
 /// threads. If the tenant was already in Active state or Stopping, does nothing.
 ///
-pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> Result<()> {
+pub fn activate_tenant(tenantid: ZTenantId) -> Result<()> {
     let mut m = access_tenants();
     let tenant = m
         .get_mut(&tenant_id)
@@ -230,7 +237,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                 None,
                 "Compactor thread",
                 true,
-                move || crate::tenant_threads::compact_loop(tenant_id, conf),
+                move || crate::tenant_threads::compact_loop(tenant_id),
             )?;
 
             let gc_spawn_result = thread_mgr::spawn(
@@ -239,7 +246,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                 None,
                 "GC thread",
                 true,
-                move || crate::tenant_threads::gc_loop(tenant_id, conf),
+                move || crate::tenant_threads::gc_loop(tenant_id),
             )
             .with_context(|| format!("Failed to launch GC thread for tenant {}", tenant_id));
 
@@ -251,7 +258,6 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                 thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
                 return gc_spawn_result;
             }
-
             tenant.state = TenantState::Active;
         }
 

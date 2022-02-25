@@ -1,6 +1,7 @@
 use crate::layered_repository::metadata::TimelineMetadata;
 use crate::remote_storage::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
+use crate::config::TenantConf;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
 use bytes::Bytes;
@@ -237,6 +238,7 @@ pub trait Repository: Send + Sync {
         &self,
         timelineid: Option<ZTimelineId>,
         horizon: u64,
+        pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
 
@@ -249,6 +251,8 @@ pub trait Repository: Send + Sync {
 
     // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
     fn get_remote_index(&self) -> &RemoteIndex;
+
+    fn get_tenant_conf(&self) -> TenantConf;
 }
 
 /// A timeline, that belongs to the current repository.
@@ -291,6 +295,7 @@ impl<'a, T> From<&'a RepositoryTimeline<T>> for LocalTimelineState {
 pub struct GcResult {
     pub layers_total: u64,
     pub layers_needed_by_cutoff: u64,
+    pub layers_needed_by_pitr: u64,
     pub layers_needed_by_branches: u64,
     pub layers_not_updated: u64,
     pub layers_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
@@ -301,6 +306,7 @@ pub struct GcResult {
 impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
         self.layers_total += other.layers_total;
+        self.layers_needed_by_pitr += other.layers_needed_by_pitr;
         self.layers_needed_by_cutoff += other.layers_needed_by_cutoff;
         self.layers_needed_by_branches += other.layers_needed_by_branches;
         self.layers_not_updated += other.layers_not_updated;
@@ -493,6 +499,7 @@ pub mod repo_harness {
 
             let repo = LayeredRepository::new(
                 self.conf,
+                TenantConf::from(self.conf),
                 walredo_mgr,
                 self.tenant_id,
                 RemoteIndex::empty(),
@@ -708,7 +715,7 @@ mod tests {
         // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10,  Duration::ZERO, false)?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
@@ -759,7 +766,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
         assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
         match tline.get(*TEST_KEY, Lsn(0x25)) {
@@ -782,7 +789,7 @@ mod tests {
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
 
         Ok(())
@@ -801,7 +808,7 @@ mod tests {
         make_some_layers(newtline.as_ref(), Lsn(0x60))?;
 
         // run gc on parent
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // Check that the data is still accessible on the branch.
         assert_eq!(
