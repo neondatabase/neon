@@ -246,11 +246,12 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
 
     for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
         // initialize local tenant
-        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index);
+        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index)
+            .with_context(|| format!("Failed to load repo for tenant {}", tenant_id))?;
         for (timeline_id, init_status) in local_timeline_init_statuses {
             match init_status {
                 remote_storage::LocalTimelineInitStatus::LocallyComplete => {
-                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", tenant_id, timeline_id);
+                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", timeline_id, tenant_id);
                     // Lets fail here loudly to be on the safe side.
                     // XXX: It may be a better api to actually distinguish between repository startup
                     //   and processing of newly downloaded timelines.

@@ -6,13 +6,15 @@ use hyper::{Body, Request, Response, Uri};
 use tracing::*;
 
 use super::models::{
-    StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
+    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse,
+    TimelineCreateRequest,
 };
 use crate::config::RemoteStorageKind;
 use crate::remote_storage::{
     download_index_part, schedule_timeline_download, LocalFs, RemoteIndex, RemoteTimeline, S3Bucket,
 };
 use crate::repository::Repository;
+use crate::tenant_config::TenantConfOpt;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
 use crate::{config::PageServerConf, tenant_mgr, timelines};
 use utils::{
@@ -375,6 +377,27 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
     let remote_index = get_state(&request).remote_index.clone();
 
+    let mut tenant_conf: TenantConfOpt = Default::default();
+    if let Some(gc_period) = request_data.gc_period {
+        tenant_conf.gc_period =
+            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?);
+    }
+    tenant_conf.gc_horizon = request_data.gc_horizon;
+
+    if let Some(pitr_interval) = request_data.pitr_interval {
+        tenant_conf.pitr_interval =
+            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?);
+    }
+
+    tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
+    tenant_conf.compaction_target_size = request_data.compaction_target_size;
+    tenant_conf.compaction_threshold = request_data.compaction_threshold;
+
+    if let Some(compaction_period) = request_data.compaction_period {
+        tenant_conf.compaction_period =
+            Some(humantime::parse_duration(&compaction_period).map_err(ApiError::from_err)?);
+    }
+
     let target_tenant_id = request_data
         .new_tenant_id
         .map(ZTenantId::from)
@@ -382,8 +405,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
+        let conf = get_config(&request);
 
-        tenant_mgr::create_tenant_repository(get_config(&request), target_tenant_id, remote_index)
+        tenant_mgr::create_tenant_repository(conf, tenant_conf, target_tenant_id, remote_index)
     })
     .await
     .map_err(ApiError::from_err)??;
@@ -392,6 +416,44 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
         None => json_response(StatusCode::CONFLICT, ())?,
     })
+}
+
+async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let request_data: TenantConfigRequest = json_request(&mut request).await?;
+    let tenant_id = request_data.tenant_id;
+    // check for management permission
+    check_permission(&request, Some(tenant_id))?;
+
+    let mut tenant_conf: TenantConfOpt = Default::default();
+    if let Some(gc_period) = request_data.gc_period {
+        tenant_conf.gc_period =
+            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?);
+    }
+    tenant_conf.gc_horizon = request_data.gc_horizon;
+
+    if let Some(pitr_interval) = request_data.pitr_interval {
+        tenant_conf.pitr_interval =
+            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?);
+    }
+
+    tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
+    tenant_conf.compaction_target_size = request_data.compaction_target_size;
+    tenant_conf.compaction_threshold = request_data.compaction_threshold;
+
+    if let Some(compaction_period) = request_data.compaction_period {
+        tenant_conf.compaction_period =
+            Some(humantime::parse_duration(&compaction_period).map_err(ApiError::from_err)?);
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_config", tenant = ?tenant_id).entered();
+
+        tenant_mgr::update_tenant_config(tenant_conf, tenant_id)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
+    Ok(json_response(StatusCode::OK, ())?)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -426,6 +488,7 @@ pub fn make_router(
         .get("/v1/status", status_handler)
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
+        .put("/v1/tenant/config", tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .get(

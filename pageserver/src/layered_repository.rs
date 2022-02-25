@@ -29,11 +29,13 @@ use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
 use crate::keyspace::KeySpace;
+use crate::tenant_config::{TenantConf, TenantConfOpt};
+
 use crate::page_cache;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteIndex};
 use crate::repository::{
@@ -51,6 +53,7 @@ use metrics::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
     Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
 };
+use toml_edit;
 use utils::{
     crashsafe_dir,
     lsn::{AtomicLsn, Lsn, RecordLsn},
@@ -149,7 +152,15 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 /// Repository consists of multiple timelines. Keep them in a hash table.
 ///
 pub struct LayeredRepository {
+    // Global pageserver config parameters
     pub conf: &'static PageServerConf,
+
+    // Overridden tenant-specific config parameters.
+    // We keep TenantConfOpt sturct here to preserve the information
+    // about parameters that are not set.
+    // This is necessary to allow global config updates.
+    tenant_conf: Arc<RwLock<TenantConfOpt>>,
+
     tenantid: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     // This mutex prevents creation of new timelines during GC.
@@ -219,6 +230,7 @@ impl Repository for LayeredRepository {
 
         let timeline = LayeredTimeline::new(
             self.conf,
+            Arc::clone(&self.tenant_conf),
             metadata,
             None,
             timelineid,
@@ -302,6 +314,7 @@ impl Repository for LayeredRepository {
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
+        pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let timeline_str = target_timelineid
@@ -311,7 +324,7 @@ impl Repository for LayeredRepository {
         STORAGE_TIME
             .with_label_values(&["gc", &self.tenantid.to_string(), &timeline_str])
             .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
+                self.gc_iteration_internal(target_timelineid, horizon, pitr, checkpoint_before_gc)
             })
     }
 
@@ -480,6 +493,64 @@ impl From<LayeredTimelineEntry> for RepositoryTimeline<LayeredTimeline> {
 
 /// Private functions
 impl LayeredRepository {
+    pub fn get_checkpoint_distance(&self) -> u64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .checkpoint_distance
+            .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
+    }
+
+    pub fn get_compaction_target_size(&self) -> u64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .compaction_target_size
+            .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
+    }
+
+    pub fn get_compaction_period(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .compaction_period
+            .unwrap_or(self.conf.default_tenant_conf.compaction_period)
+    }
+
+    pub fn get_compaction_threshold(&self) -> usize {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .compaction_threshold
+            .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
+    pub fn get_gc_horizon(&self) -> u64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .gc_horizon
+            .unwrap_or(self.conf.default_tenant_conf.gc_horizon)
+    }
+
+    pub fn get_gc_period(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .gc_period
+            .unwrap_or(self.conf.default_tenant_conf.gc_period)
+    }
+
+    pub fn get_pitr_interval(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .pitr_interval
+            .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
+    }
+
+    pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) -> Result<()> {
+        let mut tenant_conf = self.tenant_conf.write().unwrap();
+
+        tenant_conf.update(&new_tenant_conf);
+
+        LayeredRepository::persist_tenant_config(self.conf, self.tenantid, *tenant_conf)?;
+        Ok(())
+    }
+
     // Implementation of the public `get_timeline` function.
     // Differences from the public:
     //  * interface in that the caller must already hold the mutex on the 'timelines' hashmap.
@@ -553,8 +624,10 @@ impl LayeredRepository {
             .flatten()
             .map(LayeredTimelineEntry::Loaded);
         let _enter = info_span!("loading local timeline").entered();
+
         let timeline = LayeredTimeline::new(
             self.conf,
+            Arc::clone(&self.tenant_conf),
             metadata,
             ancestor,
             timelineid,
@@ -571,6 +644,7 @@ impl LayeredRepository {
 
     pub fn new(
         conf: &'static PageServerConf,
+        tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenantid: ZTenantId,
         remote_index: RemoteIndex,
@@ -579,12 +653,78 @@ impl LayeredRepository {
         LayeredRepository {
             tenantid,
             conf,
+            tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
             gc_cs: Mutex::new(()),
             walredo_mgr,
             remote_index,
             upload_layers,
         }
+    }
+
+    /// Locate and load config
+    pub fn load_tenant_config(
+        conf: &'static PageServerConf,
+        tenantid: ZTenantId,
+    ) -> anyhow::Result<TenantConfOpt> {
+        let target_config_path = TenantConf::path(conf, tenantid);
+
+        info!("load tenantconf from {}", target_config_path.display());
+
+        // FIXME If the config file is not found, assume that we're attaching
+        // a detached tenant and config is passed via attach command.
+        // https://github.com/neondatabase/neon/issues/1555
+        if !target_config_path.exists() {
+            info!(
+                "Zenith tenant config is not found in {}",
+                target_config_path.display()
+            );
+            return Ok(Default::default());
+        }
+
+        // load and parse file
+        let config = fs::read_to_string(target_config_path)?;
+
+        let toml = config.parse::<toml_edit::Document>()?;
+
+        let mut tenant_conf: TenantConfOpt = Default::default();
+        for (key, item) in toml.iter() {
+            match key {
+                "tenant_conf" => {
+                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item)?;
+                }
+                _ => bail!("unrecognized pageserver option '{}'", key),
+            }
+        }
+
+        Ok(tenant_conf)
+    }
+
+    pub fn persist_tenant_config(
+        conf: &'static PageServerConf,
+        tenantid: ZTenantId,
+        tenant_conf: TenantConfOpt,
+    ) -> anyhow::Result<()> {
+        let _enter = info_span!("saving tenantconf").entered();
+        let target_config_path = TenantConf::path(conf, tenantid);
+        info!("save tenantconf to {}", target_config_path.display());
+
+        let mut conf_content = r#"# This file contains a specific per-tenant's config.
+#  It is read in case of pageserver restart.
+
+# [tenant_config]
+"#
+        .to_string();
+
+        // Convert the config to a toml file.
+        conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
+
+        fs::write(&target_config_path, conf_content).with_context(|| {
+            format!(
+                "Failed to write config file into path '{}'",
+                target_config_path.display()
+            )
+        })
     }
 
     /// Save timeline metadata to file
@@ -662,6 +802,7 @@ impl LayeredRepository {
         &self,
         target_timelineid: Option<ZTimelineId>,
         horizon: u64,
+        pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let _span_guard =
@@ -738,7 +879,7 @@ impl LayeredRepository {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
-                timeline.update_gc_info(branchpoints, cutoff);
+                timeline.update_gc_info(branchpoints, cutoff, pitr);
                 let result = timeline.gc()?;
 
                 totals += result;
@@ -753,6 +894,7 @@ impl LayeredRepository {
 
 pub struct LayeredTimeline {
     conf: &'static PageServerConf,
+    tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
@@ -857,6 +999,11 @@ struct GcInfo {
     ///
     /// FIXME: is this inclusive or exclusive?
     cutoff: Lsn,
+
+    /// In addition to 'retain_lsns', keep everything newer than 'SystemTime::now()'
+    /// minus 'pitr_interval'
+    ///
+    pitr: Duration,
 }
 
 /// Public interface functions
@@ -987,12 +1134,34 @@ impl Timeline for LayeredTimeline {
 }
 
 impl LayeredTimeline {
+    fn get_checkpoint_distance(&self) -> u64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .checkpoint_distance
+            .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
+    }
+
+    fn get_compaction_target_size(&self) -> u64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .compaction_target_size
+            .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
+    }
+
+    fn get_compaction_threshold(&self) -> usize {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .compaction_threshold
+            .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
     #[allow(clippy::too_many_arguments)]
     fn new(
         conf: &'static PageServerConf,
+        tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
         ancestor: Option<LayeredTimelineEntry>,
         timelineid: ZTimelineId,
@@ -1036,6 +1205,7 @@ impl LayeredTimeline {
 
         LayeredTimeline {
             conf,
+            tenant_conf,
             timelineid,
             tenantid,
             layers: RwLock::new(LayerMap::default()),
@@ -1071,6 +1241,7 @@ impl LayeredTimeline {
             gc_info: RwLock::new(GcInfo {
                 retain_lsns: Vec::new(),
                 cutoff: Lsn(0),
+                pitr: Duration::ZERO,
             }),
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
@@ -1431,7 +1602,7 @@ impl LayeredTimeline {
         let last_lsn = self.get_last_record_lsn();
 
         let distance = last_lsn.widening_sub(self.last_freeze_at.load());
-        if distance >= self.conf.checkpoint_distance.into() {
+        if distance >= self.get_checkpoint_distance().into() {
             self.freeze_inmem_layer(true);
             self.last_freeze_at.store(last_lsn);
         }
@@ -1640,13 +1811,15 @@ impl LayeredTimeline {
         // above. Rewrite it.
         let _compaction_cs = self.compaction_cs.lock().unwrap();
 
-        let target_file_size = self.conf.checkpoint_distance;
+        let target_file_size = self.get_checkpoint_distance();
 
         // Define partitioning schema if needed
         if let Ok(pgdir) = tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)
         {
-            let (partitioning, lsn) =
-                pgdir.repartition(self.get_last_record_lsn(), self.conf.compaction_target_size)?;
+            let (partitioning, lsn) = pgdir.repartition(
+                self.get_last_record_lsn(),
+                self.get_compaction_target_size(),
+            )?;
             let timer = self.create_images_time_histo.start_timer();
             // 2. Create new image layers for partitions that have been modified
             // "enough".
@@ -1747,7 +1920,7 @@ impl LayeredTimeline {
 
         // We compact or "shuffle" the level-0 delta layers when they've
         // accumulated over the compaction threshold.
-        if level0_deltas.len() < self.conf.compaction_threshold {
+        if level0_deltas.len() < self.get_compaction_threshold() {
             return Ok(());
         }
         drop(layers);
@@ -1870,10 +2043,11 @@ impl LayeredTimeline {
     /// the latest LSN subtracted by a constant, and doesn't do anything smart
     /// to figure out what read-only nodes might actually need.)
     ///
-    fn update_gc_info(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) {
+    fn update_gc_info(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn, pitr: Duration) {
         let mut gc_info = self.gc_info.write().unwrap();
         gc_info.retain_lsns = retain_lsns;
         gc_info.cutoff = cutoff;
+        gc_info.pitr = pitr;
     }
 
     ///
@@ -1884,7 +2058,7 @@ impl LayeredTimeline {
     /// obsolete.
     ///
     fn gc(&self) -> Result<GcResult> {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut result: GcResult = Default::default();
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
 
@@ -1893,6 +2067,7 @@ impl LayeredTimeline {
         let gc_info = self.gc_info.read().unwrap();
         let retain_lsns = &gc_info.retain_lsns;
         let cutoff = gc_info.cutoff;
+        let pitr = gc_info.pitr;
 
         let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
 
@@ -1910,8 +2085,9 @@ impl LayeredTimeline {
         //
         // Garbage collect the layer if all conditions are satisfied:
         // 1. it is older than cutoff LSN;
-        // 2. it doesn't need to be retained for 'retain_lsns';
-        // 3. newer on-disk image layers cover the layer's whole key range
+        // 2. it is older than PITR interval;
+        // 3. it doesn't need to be retained for 'retain_lsns';
+        // 4. newer on-disk image layers cover the layer's whole key range
         //
         let mut layers = self.layers.write().unwrap();
         'outer: for l in layers.iter_historic_layers() {
@@ -1937,8 +2113,31 @@ impl LayeredTimeline {
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
             }
-
-            // 2. Is it needed by a child branch?
+            // 2. It is newer than PiTR interval?
+            // We use modification time of layer file to estimate update time.
+            // This estimation is not quite precise but maintaining LSN->timestamp map seems to be overkill.
+            // It is not expected that users will need high precision here. And this estimation
+            // is conservative: modification time of file is always newer than actual time of version
+            // creation. So it is safe for users.
+            // TODO A possible "bloat" issue still persists here.
+            // If modification time changes because of layer upload/download, we will keep these files
+            // longer than necessary.
+            // https://github.com/neondatabase/neon/issues/1554
+            //
+            if let Ok(metadata) = fs::metadata(&l.filename()) {
+                let last_modified = metadata.modified()?;
+                if now.duration_since(last_modified)? < pitr {
+                    debug!(
+                        "keeping {} because it's modification time {:?} is newer than PITR {:?}",
+                        l.filename().display(),
+                        last_modified,
+                        pitr
+                    );
+                    result.layers_needed_by_pitr += 1;
+                    continue 'outer;
+                }
+            }
+            // 3. Is it needed by a child branch?
             // NOTE With that wee would keep data that
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
@@ -1957,7 +2156,7 @@ impl LayeredTimeline {
                 }
             }
 
-            // 3. Is there a later on-disk layer for this relation?
+            // 4. Is there a later on-disk layer for this relation?
             //
             // The end-LSN is exclusive, while disk_consistent_lsn is
             // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -1998,7 +2197,7 @@ impl LayeredTimeline {
             result.layers_removed += 1;
         }
 
-        result.elapsed = now.elapsed();
+        result.elapsed = now.elapsed()?;
         Ok(result)
     }
 
@@ -2275,7 +2474,8 @@ pub mod tests {
             }
 
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff);
+
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
@@ -2345,7 +2545,7 @@ pub mod tests {
             // Perform a cycle of checkpoint, compaction, and GC
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff);
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
@@ -2422,7 +2622,7 @@ pub mod tests {
             // Perform a cycle of checkpoint, compaction, and GC
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff);
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
