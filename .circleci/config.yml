@@ -719,7 +719,6 @@ workflows:
             branches:
               only:
                 - main
-                - release_deployment
           requires:
             - pg_regress-tests-release
             - other-tests-release
@@ -742,7 +741,6 @@ workflows:
             branches:
               only:
                 - main
-                - release_deployment
           requires:
             - docker-image
       - deploy-staging-proxy:
