@@ -47,7 +47,7 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{register_histogram_vec, HistogramVec};
+use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec};
 use zenith_metrics::{register_int_gauge_vec, IntGauge, IntGaugeVec};
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
@@ -247,19 +247,15 @@ impl Repository for LayeredRepository {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        if let Some(timeline_id) = target_timelineid {
-            STORAGE_TIME
-                .with_label_values(&["gc", &self.tenantid.to_string(), &timeline_id.to_string()])
-                .observe_closure_duration(|| {
-                    self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
-                })
-        } else {
-            STORAGE_TIME
-                .with_label_values(&["gc", &self.tenantid.to_string(), "-"])
-                .observe_closure_duration(|| {
-                    self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
-                })
-        }
+        let timeline_str = target_timelineid
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        STORAGE_TIME
+            .with_label_values(&["gc", &self.tenantid.to_string(), &timeline_str])
+            .observe_closure_duration(|| {
+                self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
+            })
     }
 
     fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()> {
@@ -788,6 +784,12 @@ pub struct LayeredTimeline {
     // ordering for its operations, but involves private modules, and macro trickery
     current_logical_size_gauge: IntGauge,
 
+    // Metrics histograms
+    reconstruct_time_histo: Histogram,
+    checkpoint_time_histo: Histogram,
+    flush_checkpoint_time_histo: Histogram,
+    forced_checkpoint_time_histo: Histogram,
+
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_relishes: AtomicBool,
 
@@ -866,11 +868,7 @@ impl Timeline for LayeredTimeline {
         let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            let tenant_id = self.tenantid.to_string();
-            let timeline_id = self.timelineid.to_string();
-
-            RECONSTRUCT_TIME
-                .with_label_values(&[&tenant_id, &timeline_id])
+            self.reconstruct_time_histo
                 .observe_closure_duration(|| self.materialize_page(seg, seg_blknum, lsn, &*layer))
         } else {
             // FIXME: This can happen if PostgreSQL extends a relation but never writes
@@ -1020,18 +1018,15 @@ impl Timeline for LayeredTimeline {
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
-        let tenant_id = self.tenantid.to_string();
-        let timeline_id = self.timelineid.to_string();
-
         match cconf {
-            CheckpointConfig::Flush => STORAGE_TIME
-                .with_label_values(&["flush checkpoint", &tenant_id, &timeline_id])
+            CheckpointConfig::Flush => self
+                .flush_checkpoint_time_histo
                 .observe_closure_duration(|| self.checkpoint_internal(0, false)),
-            CheckpointConfig::Forced => STORAGE_TIME
-                .with_label_values(&["forced checkpoint", &tenant_id, &timeline_id])
+            CheckpointConfig::Forced => self
+                .forced_checkpoint_time_histo
                 .observe_closure_duration(|| self.checkpoint_internal(0, true)),
-            CheckpointConfig::Distance(distance) => STORAGE_TIME
-                .with_label_values(&["checkpoint", &tenant_id, &timeline_id])
+            CheckpointConfig::Distance(distance) => self
+                .checkpoint_time_histo
                 .observe_closure_duration(|| self.checkpoint_internal(distance, true)),
         }
     }
@@ -1130,6 +1125,31 @@ impl LayeredTimeline {
         let current_logical_size_gauge = LOGICAL_TIMELINE_SIZE
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
+        let reconstruct_time_histo = RECONSTRUCT_TIME
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
+            .unwrap();
+        let checkpoint_time_histo = STORAGE_TIME
+            .get_metric_with_label_values(&[
+                "checkpoint",
+                &tenantid.to_string(),
+                &timelineid.to_string(),
+            ])
+            .unwrap();
+        let flush_checkpoint_time_histo = STORAGE_TIME
+            .get_metric_with_label_values(&[
+                "flush checkpoint",
+                &tenantid.to_string(),
+                &timelineid.to_string(),
+            ])
+            .unwrap();
+        let forced_checkpoint_time_histo = STORAGE_TIME
+            .get_metric_with_label_values(&[
+                "forced checkpoint",
+                &tenantid.to_string(),
+                &timelineid.to_string(),
+            ])
+            .unwrap();
+
         LayeredTimeline {
             conf,
             timelineid,
@@ -1149,6 +1169,10 @@ impl LayeredTimeline {
             ancestor_lsn: metadata.ancestor_lsn(),
             current_logical_size: AtomicUsize::new(current_logical_size),
             current_logical_size_gauge,
+            reconstruct_time_histo,
+            checkpoint_time_histo,
+            flush_checkpoint_time_histo,
+            forced_checkpoint_time_histo,
             upload_relishes: AtomicBool::new(upload_relishes),
 
             write_lock: Mutex::new(()),
