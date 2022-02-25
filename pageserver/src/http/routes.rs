@@ -24,7 +24,7 @@ use super::models::{
 use crate::remote_storage::{schedule_timeline_download, RemoteIndex};
 use crate::repository::Repository;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
-use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
+use crate::{config::PageServerConf, config::TenantConf, tenant_mgr, timelines, ZTenantId};
 
 struct State {
     conf: &'static PageServerConf,
@@ -290,6 +290,26 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
     let remote_index = get_state(&request).remote_index.clone();
 
+    let conf = get_config(&request);
+    let mut tenant_conf = TenantConf::from(conf);
+    if let Some(gc_period) = request_data.gc_period {
+        tenant_conf.gc_period =
+            humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?;
+    }
+    if let Some(gc_horizon) = request_data.gc_horizon {
+        tenant_conf.gc_horizon = gc_horizon;
+    }
+    if let Some(pitr_interval) = request_data.pitr_interval {
+        tenant_conf.pitr_interval =
+            humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?;
+    }
+    if let Some(checkpoint_distance) = request_data.checkpoint_distance {
+        tenant_conf.checkpoint_distance = checkpoint_distance;
+    }
+    if let Some(compaction_period) = request_data.compaction_period {
+        tenant_conf.compaction_period =
+            humantime::parse_duration(&compaction_period).map_err(ApiError::from_err)?;
+    }
     let target_tenant_id = request_data
         .new_tenant_id
         .map(ZTenantId::from)
@@ -298,7 +318,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
 
-        tenant_mgr::create_tenant_repository(get_config(&request), target_tenant_id, remote_index)
+        tenant_mgr::create_tenant_repository(conf, tenant_conf,target_tenant_id, remote_index)
     })
     .await
     .map_err(ApiError::from_err)??;
