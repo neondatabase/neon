@@ -115,7 +115,7 @@
       - pageserver
 
     - name: post version to console
-      when: current_version > remote_version or force_deploy and console_mgmt_base_url is defined
+      when: (current_version > remote_version or force_deploy) and console_mgmt_base_url is defined
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
@@ -165,7 +165,7 @@
       - safekeeper
 
     - name: post version to console
-      when: current_version > remote_version or force_deploy and console_mgmt_base_url is defined
+      when: (current_version > remote_version or force_deploy) and console_mgmt_base_url is defined
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)

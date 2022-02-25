@@ -4,6 +4,7 @@ set -e
 
 RELEASE=${RELEASE:-false}
 
+# look at docker hub for latest tag fo zenith docker image
 if [ "${RELEASE}" = "true" ]; then
     echo "search latest relase tag"
     VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/zenithdb/zenith/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | tail -1)

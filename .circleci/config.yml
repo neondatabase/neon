@@ -583,14 +583,15 @@ jobs:
           command: |
             cd "$(pwd)/.circleci/ansible"
 
-            RELEASE=true ./get_binaries.sh
+            ./get_binaries.sh
 
-            echo "${TELEPORT_SSH_KEY}"  | base64 --decode >ssh-key
-            echo "${TELEPORT_SSH_CERT}" | base64 --decode >ssh-key-cert.pub
+            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
+            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
+            chmod 0600 ssh-key
             ssh-add ssh-key
             rm -f ssh-key ssh-key-cert.pub
 
-            ansible-playbook deploy.yaml -i production.hosts
+            ansible-playbook deploy.yaml -i production.hosts -e console_mgmt_base_url=http://console-release.local
             rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-release-proxy:
