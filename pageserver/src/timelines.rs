@@ -25,6 +25,7 @@ use crate::{
     layered_repository::metadata::TimelineMetadata,
     remote_storage::RemoteIndex,
     repository::{LocalTimelineState, Repository},
+    tenant_config::TenantConfOpt,
     DatadirTimeline, RepositoryImpl,
 };
 use crate::{import_datadir, LOG_FILE_NAME};
@@ -151,8 +152,8 @@ pub fn init_pageserver(
 
     if let Some(tenant_id) = create_tenant {
         println!("initializing tenantid {}", tenant_id);
-        let repo =
-            create_repo(conf, tenant_id, CreateRepo::Dummy).context("failed to create repo")?;
+        let repo = create_repo(conf, Default::default(), tenant_id, CreateRepo::Dummy)
+            .context("failed to create repo")?;
         let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
         bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())
             .context("failed to create initial timeline")?;
@@ -175,6 +176,7 @@ pub enum CreateRepo {
 
 pub fn create_repo(
     conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
     tenant_id: ZTenantId,
     create_repo: CreateRepo,
 ) -> Result<Arc<RepositoryImpl>> {
@@ -211,8 +213,12 @@ pub fn create_repo(
     crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
     info!("created directory structure in {}", repo_dir.display());
 
+    // Save tenant's config
+    LayeredRepository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
+
     Ok(Arc::new(LayeredRepository::new(
         conf,
+        tenant_conf,
         wal_redo_manager,
         tenant_id,
         remote_index,

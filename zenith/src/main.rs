@@ -166,7 +166,12 @@ fn main() -> Result<()> {
             .subcommand(App::new("create")
                 .arg(tenant_id_arg.clone())
                 .arg(timeline_id_arg.clone().help("Use a specific timeline id when creating a tenant and its initial timeline"))
-        )
+				.arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
+				)
+            .subcommand(App::new("config")
+                .arg(tenant_id_arg.clone())
+				.arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
+				)
         )
         .subcommand(
             App::new("pageserver")
@@ -523,14 +528,39 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
         }
         Some(("create", create_match)) => {
             let initial_tenant_id = parse_tenant_id(create_match)?;
+            let tenant_conf: HashMap<_, _> = create_match
+                .values_of("config")
+                .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
+                .unwrap_or_default();
             let new_tenant_id = pageserver
-                .tenant_create(initial_tenant_id)?
+                .tenant_create(initial_tenant_id, tenant_conf)?
                 .ok_or_else(|| {
                     anyhow!("Tenant with id {:?} was already created", initial_tenant_id)
                 })?;
             println!(
                 "tenant {} successfully created on the pageserver",
                 new_tenant_id
+            );
+        }
+        Some(("config", create_match)) => {
+            let tenant_id = get_tenant_id(create_match, env)?;
+            let tenant_conf: HashMap<_, _> = create_match
+                .values_of("config")
+                .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
+                .unwrap_or_default();
+
+            pageserver
+                .tenant_config(tenant_id, tenant_conf)
+                .unwrap_or_else(|e| {
+                    anyhow!(
+                        "Tenant config failed for tenant with id {} : {}",
+                        tenant_id,
+                        e
+                    );
+                });
+            println!(
+                "tenant {} successfully configured on the pageserver",
+                tenant_id
             );
         }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),

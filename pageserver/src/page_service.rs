@@ -19,6 +19,7 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
+use std::time::Duration;
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
@@ -676,6 +677,37 @@ impl postgres_backend::Handler for PageServerHandler {
                 }
             }
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("show ") {
+            // show <tenant_id>
+            let (_, params_raw) = query_string.split_at("show ".len());
+            let params = params_raw.split(' ').collect::<Vec<_>>();
+            ensure!(params.len() == 1, "invalid param number for config command");
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                RowDescriptor::int8_col(b"checkpoint_distance"),
+                RowDescriptor::int8_col(b"compaction_target_size"),
+                RowDescriptor::int8_col(b"compaction_period"),
+                RowDescriptor::int8_col(b"compaction_threshold"),
+                RowDescriptor::int8_col(b"gc_horizon"),
+                RowDescriptor::int8_col(b"gc_period"),
+                RowDescriptor::int8_col(b"pitr_interval"),
+            ]))?
+            .write_message_noflush(&BeMessage::DataRow(&[
+                Some(repo.get_checkpoint_distance().to_string().as_bytes()),
+                Some(repo.get_compaction_target_size().to_string().as_bytes()),
+                Some(
+                    repo.get_compaction_period()
+                        .as_secs()
+                        .to_string()
+                        .as_bytes(),
+                ),
+                Some(repo.get_compaction_threshold().to_string().as_bytes()),
+                Some(repo.get_gc_horizon().to_string().as_bytes()),
+                Some(repo.get_gc_period().as_secs().to_string().as_bytes()),
+                Some(repo.get_pitr_interval().as_secs().to_string().as_bytes()),
+            ]))?
+            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
             // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
@@ -693,16 +725,20 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+
+            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+
             let gc_horizon: u64 = caps
                 .get(4)
                 .map(|h| h.as_str().parse())
-                .unwrap_or(Ok(self.conf.gc_horizon))?;
+                .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
+            let result = repo.gc_iteration(Some(timelineid), gc_horizon, Duration::ZERO, true)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layers_total"),
                 RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layers_needed_by_pitr"),
                 RowDescriptor::int8_col(b"layers_needed_by_branches"),
                 RowDescriptor::int8_col(b"layers_not_updated"),
                 RowDescriptor::int8_col(b"layers_removed"),
@@ -711,6 +747,7 @@ impl postgres_backend::Handler for PageServerHandler {
             .write_message_noflush(&BeMessage::DataRow(&[
                 Some(result.layers_total.to_string().as_bytes()),
                 Some(result.layers_needed_by_cutoff.to_string().as_bytes()),
+                Some(result.layers_needed_by_pitr.to_string().as_bytes()),
                 Some(result.layers_needed_by_branches.to_string().as_bytes()),
                 Some(result.layers_not_updated.to_string().as_bytes()),
                 Some(result.layers_removed.to_string().as_bytes()),

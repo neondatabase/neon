@@ -249,6 +249,7 @@ pub trait Repository: Send + Sync {
         &self,
         timelineid: Option<ZTimelineId>,
         horizon: u64,
+        pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
 
@@ -305,6 +306,7 @@ impl<'a, T> From<&'a RepositoryTimeline<T>> for LocalTimelineState {
 pub struct GcResult {
     pub layers_total: u64,
     pub layers_needed_by_cutoff: u64,
+    pub layers_needed_by_pitr: u64,
     pub layers_needed_by_branches: u64,
     pub layers_not_updated: u64,
     pub layers_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
@@ -315,6 +317,7 @@ pub struct GcResult {
 impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
         self.layers_total += other.layers_total;
+        self.layers_needed_by_pitr += other.layers_needed_by_pitr;
         self.layers_needed_by_cutoff += other.layers_needed_by_cutoff;
         self.layers_needed_by_branches += other.layers_needed_by_branches;
         self.layers_not_updated += other.layers_not_updated;
@@ -432,6 +435,7 @@ pub mod repo_harness {
     };
 
     use super::*;
+    use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
     use utils::zid::ZTenantId;
 
@@ -454,8 +458,23 @@ pub mod repo_harness {
         static ref LOCK: RwLock<()> = RwLock::new(());
     }
 
+    impl From<TenantConf> for TenantConfOpt {
+        fn from(tenant_conf: TenantConf) -> Self {
+            Self {
+                checkpoint_distance: Some(tenant_conf.checkpoint_distance),
+                compaction_target_size: Some(tenant_conf.compaction_target_size),
+                compaction_period: Some(tenant_conf.compaction_period),
+                compaction_threshold: Some(tenant_conf.compaction_threshold),
+                gc_horizon: Some(tenant_conf.gc_horizon),
+                gc_period: Some(tenant_conf.gc_period),
+                pitr_interval: Some(tenant_conf.pitr_interval),
+            }
+        }
+    }
+
     pub struct RepoHarness<'a> {
         pub conf: &'static PageServerConf,
+        pub tenant_conf: TenantConf,
         pub tenant_id: ZTenantId,
 
         pub lock_guard: (
@@ -487,12 +506,15 @@ pub mod repo_harness {
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
+            let tenant_conf = TenantConf::dummy_conf();
+
             let tenant_id = ZTenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
             Ok(Self {
                 conf,
+                tenant_conf,
                 tenant_id,
                 lock_guard,
             })
@@ -507,6 +529,7 @@ pub mod repo_harness {
 
             let repo = LayeredRepository::new(
                 self.conf,
+                TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
                 self.tenant_id,
                 RemoteIndex::empty(),
@@ -722,7 +745,7 @@ mod tests {
         // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
@@ -773,7 +796,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
         assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
         match tline.get(*TEST_KEY, Lsn(0x25)) {
@@ -796,7 +819,7 @@ mod tests {
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
 
         Ok(())
@@ -815,7 +838,7 @@ mod tests {
         make_some_layers(newtline.as_ref(), Lsn(0x60))?;
 
         // run gc on parent
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // Check that the data is still accessible on the branch.
         assert_eq!(

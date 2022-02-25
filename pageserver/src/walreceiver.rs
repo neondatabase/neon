@@ -93,7 +93,7 @@ pub fn launch_wal_receiver(
             receivers.insert((tenantid, timelineid), receiver);
 
             // Update tenant state and start tenant threads, if they are not running yet.
-            tenant_mgr::activate_tenant(conf, tenantid)?;
+            tenant_mgr::activate_tenant(tenantid)?;
         }
     };
     Ok(())

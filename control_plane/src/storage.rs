@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver::http::models::{TenantConfigRequest, TenantCreateRequest, TimelineCreateRequest};
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -344,10 +345,32 @@ impl PageServerNode {
     pub fn tenant_create(
         &self,
         new_tenant_id: Option<ZTenantId>,
+        settings: HashMap<&str, &str>,
     ) -> anyhow::Result<Option<ZTenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest { new_tenant_id })
+            .json(&TenantCreateRequest {
+                new_tenant_id,
+                checkpoint_distance: settings
+                    .get("checkpoint_distance")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                compaction_target_size: settings
+                    .get("compaction_target_size")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                compaction_threshold: settings
+                    .get("compaction_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()?,
+                gc_horizon: settings
+                    .get("gc_horizon")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+            })
             .send()?
             .error_from_body()?
             .json::<Option<String>>()?;
@@ -362,6 +385,32 @@ impl PageServerNode {
                 })
             })
             .transpose()
+    }
+
+    pub fn tenant_config(&self, tenant_id: ZTenantId, settings: HashMap<&str, &str>) -> Result<()> {
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))
+            .json(&TenantConfigRequest {
+                tenant_id,
+                checkpoint_distance: settings
+                    .get("checkpoint_distance")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                compaction_target_size: settings
+                    .get("compaction_target_size")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                compaction_threshold: settings
+                    .get("compaction_threshold")
+                    .map(|x| x.parse::<usize>().unwrap()),
+                gc_horizon: settings
+                    .get("gc_horizon")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+            })
+            .send()?
+            .error_from_body()?;
+
+        Ok(())
     }
 
     pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {

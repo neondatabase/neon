@@ -5,6 +5,12 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{bail, ensure, Context, Result};
+use std::convert::TryInto;
+use std::env;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
 use utils::{
@@ -12,37 +18,17 @@ use utils::{
     zid::{ZNodeId, ZTenantId, ZTimelineId},
 };
 
-use std::convert::TryInto;
-use std::env;
-use std::num::{NonZeroU32, NonZeroUsize};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::time::Duration;
-
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
+use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 pub mod defaults {
+    use crate::tenant_config::defaults::*;
     use const_format::formatcp;
 
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
     pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
-
-    // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
-    // would be more appropriate. But a low value forces the code to be exercised more,
-    // which is good for now to trigger bugs.
-    // This parameter actually determines L0 layer file size.
-    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
-
-    // Target file size, when creating image and delta layers.
-    // This parameter determines L1 layer file size.
-    pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
-    pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
-    pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
-
-    pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-    pub const DEFAULT_GC_PERIOD: &str = "100 s";
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -64,14 +50,6 @@ pub mod defaults {
 #listen_pg_addr = '{DEFAULT_PG_LISTEN_ADDR}'
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
 
-#checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
-#compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
-#compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
-#compaction_threshold = '{DEFAULT_COMPACTION_THRESHOLD}'
-
-#gc_period = '{DEFAULT_GC_PERIOD}'
-#gc_horizon = {DEFAULT_GC_HORIZON}
-
 #wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
 #wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
 
@@ -79,6 +57,16 @@ pub mod defaults {
 
 # initial superuser role name to use when creating a new tenant
 #initial_superuser_name = '{DEFAULT_SUPERUSER}'
+
+# [tenant_config]
+#checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
+#compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
+#compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
+#compaction_threshold = '{DEFAULT_COMPACTION_THRESHOLD}'
+
+#gc_period = '{DEFAULT_GC_PERIOD}'
+#gc_horizon = {DEFAULT_GC_HORIZON}
+#pitr_interval = '{DEFAULT_PITR_INTERVAL}'
 
 # [remote_storage]
 
@@ -96,25 +84,6 @@ pub struct PageServerConf {
     pub listen_pg_addr: String,
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
-
-    // Flush out an inmemory layer, if it's holding WAL older than this
-    // This puts a backstop on how much WAL needs to be re-digested if the
-    // page server crashes.
-    // This parameter actually determines L0 layer file size.
-    pub checkpoint_distance: u64,
-
-    // Target file size, when creating image and delta layers.
-    // This parameter determines L1 layer file size.
-    pub compaction_target_size: u64,
-
-    // How often to check if there's compaction work to be done.
-    pub compaction_period: Duration,
-
-    // Level0 delta layer threshold for compaction.
-    pub compaction_threshold: usize,
-
-    pub gc_horizon: u64,
-    pub gc_period: Duration,
 
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
@@ -142,6 +111,7 @@ pub struct PageServerConf {
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
     pub profiling: ProfilingConfig,
+    pub default_tenant_conf: TenantConf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,15 +155,6 @@ struct PageServerConfigBuilder {
 
     listen_http_addr: BuilderValue<String>,
 
-    checkpoint_distance: BuilderValue<u64>,
-
-    compaction_target_size: BuilderValue<u64>,
-    compaction_period: BuilderValue<Duration>,
-    compaction_threshold: BuilderValue<usize>,
-
-    gc_horizon: BuilderValue<u64>,
-    gc_period: BuilderValue<Duration>,
-
     wait_lsn_timeout: BuilderValue<Duration>,
     wal_redo_timeout: BuilderValue<Duration>,
 
@@ -224,14 +185,6 @@ impl Default for PageServerConfigBuilder {
         Self {
             listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
-            checkpoint_distance: Set(DEFAULT_CHECKPOINT_DISTANCE),
-            compaction_target_size: Set(DEFAULT_COMPACTION_TARGET_SIZE),
-            compaction_period: Set(humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
-                .expect("cannot parse default compaction period")),
-            compaction_threshold: Set(DEFAULT_COMPACTION_THRESHOLD),
-            gc_horizon: Set(DEFAULT_GC_HORIZON),
-            gc_period: Set(humantime::parse_duration(DEFAULT_GC_PERIOD)
-                .expect("cannot parse default gc period")),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
@@ -259,30 +212,6 @@ impl PageServerConfigBuilder {
 
     pub fn listen_http_addr(&mut self, listen_http_addr: String) {
         self.listen_http_addr = BuilderValue::Set(listen_http_addr)
-    }
-
-    pub fn checkpoint_distance(&mut self, checkpoint_distance: u64) {
-        self.checkpoint_distance = BuilderValue::Set(checkpoint_distance)
-    }
-
-    pub fn compaction_target_size(&mut self, compaction_target_size: u64) {
-        self.compaction_target_size = BuilderValue::Set(compaction_target_size)
-    }
-
-    pub fn compaction_period(&mut self, compaction_period: Duration) {
-        self.compaction_period = BuilderValue::Set(compaction_period)
-    }
-
-    pub fn compaction_threshold(&mut self, compaction_threshold: usize) {
-        self.compaction_threshold = BuilderValue::Set(compaction_threshold)
-    }
-
-    pub fn gc_horizon(&mut self, gc_horizon: u64) {
-        self.gc_horizon = BuilderValue::Set(gc_horizon)
-    }
-
-    pub fn gc_period(&mut self, gc_period: Duration) {
-        self.gc_period = BuilderValue::Set(gc_period)
     }
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
@@ -344,22 +273,6 @@ impl PageServerConfigBuilder {
             listen_http_addr: self
                 .listen_http_addr
                 .ok_or(anyhow::anyhow!("missing listen_http_addr"))?,
-            checkpoint_distance: self
-                .checkpoint_distance
-                .ok_or(anyhow::anyhow!("missing checkpoint_distance"))?,
-            compaction_target_size: self
-                .compaction_target_size
-                .ok_or(anyhow::anyhow!("missing compaction_target_size"))?,
-            compaction_period: self
-                .compaction_period
-                .ok_or(anyhow::anyhow!("missing compaction_period"))?,
-            compaction_threshold: self
-                .compaction_threshold
-                .ok_or(anyhow::anyhow!("missing compaction_threshold"))?,
-            gc_horizon: self
-                .gc_horizon
-                .ok_or(anyhow::anyhow!("missing gc_horizon"))?,
-            gc_period: self.gc_period.ok_or(anyhow::anyhow!("missing gc_period"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow::anyhow!("missing wait_lsn_timeout"))?,
@@ -386,6 +299,8 @@ impl PageServerConfigBuilder {
                 .ok_or(anyhow::anyhow!("missing remote_storage_config"))?,
             id: self.id.ok_or(anyhow::anyhow!("missing id"))?,
             profiling: self.profiling.ok_or(anyhow::anyhow!("missing profiling"))?,
+            // TenantConf is handled separately
+            default_tenant_conf: TenantConf::default(),
         })
     }
 }
@@ -488,20 +403,12 @@ impl PageServerConf {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
+        let mut t_conf: TenantConfOpt = Default::default();
+
         for (key, item) in toml.iter() {
             match key {
                 "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
                 "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
-                "checkpoint_distance" => builder.checkpoint_distance(parse_toml_u64(key, item)?),
-                "compaction_target_size" => {
-                    builder.compaction_target_size(parse_toml_u64(key, item)?)
-                }
-                "compaction_period" => builder.compaction_period(parse_toml_duration(key, item)?),
-                "compaction_threshold" => {
-                    builder.compaction_threshold(parse_toml_u64(key, item)? as usize)
-                }
-                "gc_horizon" => builder.gc_horizon(parse_toml_u64(key, item)?),
-                "gc_period" => builder.gc_period(parse_toml_duration(key, item)?),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
                 "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
@@ -518,6 +425,9 @@ impl PageServerConf {
                 "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
                     builder.remote_storage_config(Some(Self::parse_remote_storage_config(item)?))
+                }
+                "tenant_conf" => {
+                    t_conf = Self::parse_toml_tenant_conf(item)?;
                 }
                 "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
                 "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
@@ -547,7 +457,40 @@ impl PageServerConf {
             );
         }
 
+        conf.default_tenant_conf = t_conf.merge(TenantConf::default());
+
         Ok(conf)
+    }
+
+    // subroutine of parse_and_validate to parse `[tenant_conf]` section
+
+    pub fn parse_toml_tenant_conf(item: &toml_edit::Item) -> Result<TenantConfOpt> {
+        let mut t_conf: TenantConfOpt = Default::default();
+        for (key, item) in item
+            .as_table()
+            .ok_or(anyhow::anyhow!("invalid tenant config"))?
+            .iter()
+        {
+            match key {
+                "checkpoint_distance" => {
+                    t_conf.checkpoint_distance = Some(parse_toml_u64(key, item)?)
+                }
+                "compaction_target_size" => {
+                    t_conf.compaction_target_size = Some(parse_toml_u64(key, item)?)
+                }
+                "compaction_period" => {
+                    t_conf.compaction_period = Some(parse_toml_duration(key, item)?)
+                }
+                "compaction_threshold" => {
+                    t_conf.compaction_threshold = Some(parse_toml_u64(key, item)? as usize)
+                }
+                "gc_horizon" => t_conf.gc_horizon = Some(parse_toml_u64(key, item)?),
+                "gc_period" => t_conf.gc_period = Some(parse_toml_duration(key, item)?),
+                "pitr_interval" => t_conf.pitr_interval = Some(parse_toml_duration(key, item)?),
+                _ => bail!("unrecognized tenant config option '{}'", key),
+            }
+        }
+        Ok(t_conf)
     }
 
     /// subroutine of parse_config(), to parse the `[remote_storage]` table.
@@ -635,12 +578,6 @@ impl PageServerConf {
     pub fn dummy_conf(repo_dir: PathBuf) -> Self {
         PageServerConf {
             id: ZNodeId(0),
-            checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-            compaction_target_size: 4 * 1024 * 1024,
-            compaction_period: Duration::from_secs(10),
-            compaction_threshold: defaults::DEFAULT_COMPACTION_THRESHOLD,
-            gc_horizon: defaults::DEFAULT_GC_HORIZON,
-            gc_period: Duration::from_secs(10),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
@@ -654,6 +591,7 @@ impl PageServerConf {
             auth_validation_public_key_path: None,
             remote_storage_config: None,
             profiling: ProfilingConfig::Disabled,
+            default_tenant_conf: TenantConf::dummy_conf(),
         }
     }
 }
@@ -711,15 +649,6 @@ mod tests {
 listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
 
-checkpoint_distance = 111 # in bytes
-
-compaction_target_size = 111 # in bytes
-compaction_period = '111 s'
-compaction_threshold = 2
-
-gc_period = '222 s'
-gc_horizon = 222
-
 wait_lsn_timeout = '111 s'
 wal_redo_timeout = '111 s'
 
@@ -751,12 +680,6 @@ id = 10
                 id: ZNodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-                checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-                compaction_target_size: defaults::DEFAULT_COMPACTION_TARGET_SIZE,
-                compaction_period: humantime::parse_duration(defaults::DEFAULT_COMPACTION_PERIOD)?,
-                compaction_threshold: defaults::DEFAULT_COMPACTION_THRESHOLD,
-                gc_horizon: defaults::DEFAULT_GC_HORIZON,
-                gc_period: humantime::parse_duration(defaults::DEFAULT_GC_PERIOD)?,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
@@ -768,6 +691,7 @@ id = 10
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 profiling: ProfilingConfig::Disabled,
+                default_tenant_conf: TenantConf::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -798,12 +722,6 @@ id = 10
                 id: ZNodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
-                checkpoint_distance: 111,
-                compaction_target_size: 111,
-                compaction_period: Duration::from_secs(111),
-                compaction_threshold: 2,
-                gc_horizon: 222,
-                gc_period: Duration::from_secs(222),
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
@@ -815,6 +733,7 @@ id = 10
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 profiling: ProfilingConfig::Disabled,
+                default_tenant_conf: TenantConf::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
