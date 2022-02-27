@@ -9,7 +9,7 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver::http::models::{TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest};
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -322,7 +322,7 @@ impl PageServerNode {
     }
 
     pub fn check_status(&self) -> Result<()> {
-        self.http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
+        self.http_request(Method::GET, format!("{}/status", self.http_base_url))
             .send()?
             .error_from_body()?;
         Ok(())
@@ -330,7 +330,7 @@ impl PageServerNode {
 
     pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
-            .http_request(Method::GET, format!("{}/{}", self.http_base_url, "tenant"))
+            .http_request(Method::GET, format!("{}/tenant", self.http_base_url))
             .send()?
             .error_from_body()?
             .json()?)
@@ -338,13 +338,13 @@ impl PageServerNode {
 
     pub fn tenant_create(
         &self,
-        tenant_id: ZTenantId,
+        new_tenant_id: Option<ZTenantId>,
         initial_timeline_id: Option<ZTimelineId>,
-    ) -> Result<ZTimelineId> {
+    ) -> Result<TenantCreateResponse> {
         Ok(self
-            .http_request(Method::POST, format!("{}/{}", self.http_base_url, "tenant"))
+            .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
             .json(&TenantCreateRequest {
-                tenant_id,
+                new_tenant_id,
                 initial_timeline_id,
             })
             .send()?
@@ -352,11 +352,11 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn timeline_list(&self, tenantid: &ZTenantId) -> Result<Vec<TimelineInfo>> {
+    pub fn timeline_list(&self, tenant_id: &ZTenantId) -> Result<Vec<TimelineInfo>> {
         Ok(self
             .http_request(
                 Method::GET,
-                format!("{}/timeline/{}", self.http_base_url, tenantid),
+                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
             )
             .send()?
             .error_from_body()?
@@ -366,16 +366,18 @@ impl PageServerNode {
     pub fn timeline_create(
         &self,
         tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
-        start_lsn: Option<Lsn>,
+        new_timeline_id: Option<ZTimelineId>,
+        ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<ZTimelineId>,
     ) -> Result<TimelineInfo> {
         Ok(self
-            .http_request(Method::POST, format!("{}/timeline", self.http_base_url))
+            .http_request(
+                Method::POST,
+                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
+            )
             .json(&TimelineCreateRequest {
-                tenant_id,
-                timeline_id,
-                start_lsn,
+                new_timeline_id,
+                ancestor_start_lsn,
                 ancestor_timeline_id,
             })
             .send()?

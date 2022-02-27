@@ -125,6 +125,13 @@ impl TimelineInfo {
             TimelineInfo::Remote { timeline_id, .. } => timeline_id,
         }
     }
+
+    pub fn tenant_id(&self) -> ZTenantId {
+        match *self {
+            TimelineInfo::Local { tenant_id, .. } => tenant_id,
+            TimelineInfo::Remote { tenant_id, .. } => tenant_id,
+        }
+    }
 }
 
 fn get_current_logical_size_non_incremental(
@@ -335,10 +342,12 @@ pub(crate) fn get_timelines(
 pub(crate) fn create_timeline(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
-    new_timeline_id: ZTimelineId,
+    new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     ancestor_start_lsn: Option<Lsn>,
 ) -> Result<TimelineInfo> {
+    let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
+
     if conf.timeline_path(&new_timeline_id, &tenant_id).exists() {
         bail!("timeline {} already exists", new_timeline_id);
     }

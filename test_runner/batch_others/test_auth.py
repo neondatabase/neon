@@ -29,30 +29,27 @@ def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
                                                    tenant_id=env.initial_tenant)
 
     # tenant can create branches
-    tenant_http_client.timeline_create(timeline_id=uuid4(),
-                                       tenant_id=env.initial_tenant,
+    tenant_http_client.timeline_create(tenant_id=env.initial_tenant,
                                        ancestor_timeline_id=new_timeline_id)
     # console can create branches for tenant
-    management_http_client.timeline_create(timeline_id=uuid4(),
-                                           tenant_id=env.initial_tenant,
+    management_http_client.timeline_create(tenant_id=env.initial_tenant,
                                            ancestor_timeline_id=new_timeline_id)
 
     # fail to create branch using token with different tenant_id
     with pytest.raises(ZenithPageserverApiException,
                        match='Forbidden: Tenant id mismatch. Permission denied'):
-        invalid_tenant_http_client.timeline_create(timeline_id=uuid4(),
-                                                   tenant_id=env.initial_tenant,
+        invalid_tenant_http_client.timeline_create(tenant_id=env.initial_tenant,
                                                    ancestor_timeline_id=new_timeline_id)
 
     # create tenant using management token
-    management_http_client.tenant_create(uuid4())
+    management_http_client.tenant_create()
 
     # fail to create tenant using tenant token
     with pytest.raises(
             ZenithPageserverApiException,
             match='Forbidden: Attempt to access management api with tenant scope. Permission denied'
     ):
-        tenant_http_client.tenant_create(uuid4())
+        tenant_http_client.tenant_create()
 
 
 @pytest.mark.parametrize('with_wal_acceptors', [False, True])

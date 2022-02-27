@@ -712,27 +712,29 @@ class ZenithPageserverHttpClient(requests.Session):
 
     def timeline_attach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
         res = self.post(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/attach", )
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/attach",
+        )
         self.verbose_error(res)
 
     def timeline_detach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
         res = self.post(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/detach", )
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/detach",
+        )
         self.verbose_error(res)
 
-    def timeline_create(self,
-                        tenant_id: uuid.UUID,
-                        timeline_id: uuid.UUID,
-                        start_lsn: Optional[str] = None,
-                        ancestor_timeline_id: Optional[uuid.UUID] = None) -> Dict[Any, Any]:
-        res = self.post(f"http://localhost:{self.port}/v1/timeline",
+    def timeline_create(
+        self,
+        tenant_id: uuid.UUID,
+        timeline_id: Optional[uuid.UUID] = None,
+        ancestor_timeline_id: Optional[uuid.UUID] = None,
+        ancestor_start_lsn: Optional[str] = None,
+    ) -> Dict[Any, Any]:
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline",
                         json={
-                            'tenant_id':
-                            tenant_id.hex,
-                            'timeline_id':
-                            timeline_id.hex,
-                            'start_lsn':
-                            start_lsn,
+                            'new_timeline_id':
+                            timeline_id.hex if timeline_id else None,
+                            'ancestor_start_lsn':
+                            ancestor_start_lsn,
                             'ancestor_timeline_id':
                             ancestor_timeline_id.hex if ancestor_timeline_id else None,
                         })
@@ -748,18 +750,23 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self, tenant_id: uuid.UUID):
+    def tenant_create(self,
+                      tenant_id: Optional[uuid.UUID] = None,
+                      new_timeline_id: Optional[uuid.UUID] = None) -> Dict[Any, Any]:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
-                'tenant_id': tenant_id.hex,
+                'new_tenant_id': tenant_id.hex if tenant_id else None,
+                'initial_timeline_id': new_timeline_id.hex if new_timeline_id else None,
             },
         )
         self.verbose_error(res)
-        return res.json()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
 
     def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}")
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
@@ -767,7 +774,7 @@ class ZenithPageserverHttpClient(requests.Session):
 
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}?include-non-incremental-logical-size=1"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -861,13 +868,21 @@ class ZenithCli:
         else:
             return uuid.UUID(created_timeline_id)
 
-    def list_timelines(self, tenant_id: Optional[uuid.UUID] = None) -> List[str]:
+    def list_timelines(self, tenant_id: Optional[uuid.UUID] = None) -> List[Tuple[str, str]]:
+        """
+        Returns a list of (branch_name, timeline_id) tuples out of parsed `zenith timeline list` CLI output.
+        """
+
+        # (L) main [b49f7954224a0ad25cc0013ea107b54b]
+        # (L) ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
+        timeline_data_extractor = re.compile(
+            r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE)
         res = self.raw_cli(
             ['timeline', 'list', '--tenant-id', (tenant_id or self.env.initial_tenant).hex])
-        branches_cli = sorted(
-            map(lambda b: b.split(') ')[-1].strip().split(':')[-1].strip(),
-                res.stdout.strip().split("\n")))
-        return branches_cli
+        timelines_cli = sorted(
+            map(lambda branch_and_id: (branch_and_id[0], branch_and_id[1]),
+                timeline_data_extractor.findall(res.stdout)))
+        return timelines_cli
 
     def init(self,
              config_toml: str,
