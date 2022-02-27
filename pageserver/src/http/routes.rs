@@ -20,6 +20,7 @@ use zenith_utils::zid::{HexZTimelineId, ZTimelineId};
 
 use super::models::StatusResponse;
 use super::models::TenantCreateRequest;
+use super::models::TenantCreateResponse;
 use super::models::TimelineCreateRequest;
 use crate::repository::RepositoryTimeline;
 use crate::timelines::TimelineInfo;
@@ -69,18 +70,19 @@ async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiErr
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
-    check_permission(&request, Some(request_data.tenant_id))?;
+    check_permission(&request, Some(tenant_id))?;
 
     let response_data = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("/timeline_create", timeline = %request_data.timeline_id, tenant = %request_data.tenant_id, lsn=?request_data.start_lsn).entered();
+        let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
         timelines::create_timeline(
             get_config(&request),
-            request_data.tenant_id,
-            request_data.timeline_id,
+            tenant_id,
+            request_data.new_timeline_id,
             request_data.ancestor_timeline_id,
-            request_data.start_lsn,
+            request_data.ancestor_start_lsn,
         )
     })
     .await
@@ -214,12 +216,15 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
     let initial_timeline_id = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id, initial_timeline = ?request_data.initial_timeline_id).entered();
+        let _enter = info_span!("tenant_create", tenant = ?request_data.new_tenant_id, initial_timeline = ?request_data.initial_timeline_id).entered();
         tenant_mgr::create_repository_for_tenant(
             get_config(&request),
-            request_data.tenant_id,
+            request_data.new_tenant_id,
             request_data.initial_timeline_id,
-        )
+        ).map(|new_ids| TenantCreateResponse {
+            tenant_id: new_ids.tenant_id,
+            timeline_id: new_ids.timeline_id,
+        })
     })
     .await
     .map_err(ApiError::from_err)??;
@@ -253,21 +258,21 @@ pub fn make_router(
     router
         .data(Arc::new(State::new(conf, auth)))
         .get("/v1/status", status_handler)
-        .get("/v1/timeline/:tenant_id", timeline_list_handler)
+        .get("/v1/tenant", tenant_list_handler)
+        .post("/v1/tenant", tenant_create_handler)
+        .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
+        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .get(
-            "/v1/timeline/:tenant_id/:timeline_id",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,
         )
         .post(
-            "/v1/timeline/:tenant_id/:timeline_id/attach",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/attach",
             timeline_attach_handler,
         )
         .post(
-            "/v1/timeline/:tenant_id/:timeline_id/detach",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
             timeline_detach_handler,
         )
-        .post("/v1/timeline", timeline_create_handler)
-        .get("/v1/tenant", tenant_list_handler)
-        .post("/v1/tenant", tenant_create_handler)
         .any(handler_404)
 }

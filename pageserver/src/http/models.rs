@@ -7,23 +7,31 @@ use zenith_utils::{
 
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
-    #[serde(with = "hex")]
-    pub timeline_id: ZTimelineId,
+    #[serde(default)]
+    #[serde(with = "opt_display_serde")]
+    pub new_timeline_id: Option<ZTimelineId>,
     #[serde(default)]
     #[serde(with = "opt_display_serde")]
     pub ancestor_timeline_id: Option<ZTimelineId>,
-    pub start_lsn: Option<Lsn>,
+    pub ancestor_start_lsn: Option<Lsn>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateRequest {
-    #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
+    #[serde(default)]
+    #[serde(with = "opt_display_serde")]
+    pub new_tenant_id: Option<ZTenantId>,
     #[serde(default)]
     #[serde(with = "opt_display_serde")]
     pub initial_timeline_id: Option<ZTimelineId>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TenantCreateResponse {
+    #[serde(with = "hex")]
+    pub tenant_id: ZTenantId,
+    #[serde(with = "hex")]
+    pub timeline_id: ZTimelineId,
 }
 
 #[derive(Serialize)]

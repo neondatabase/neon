@@ -15,17 +15,15 @@ def helper_compare_timeline_list(pageserver_http_client: ZenithPageserverHttpCli
     Filters out timelines created by other tests.
     """
 
+    timelines_api = sorted(
+        map(lambda t: cast(str, t['timeline_id']),
+            pageserver_http_client.timeline_list(initial_tenant)))
+
     timelines_cli = env.zenith_cli.list_timelines()
-    timelines_cli = [
-        b for b in timelines_cli if b.startswith('test_cli_') or b in ('empty', 'main')
-    ]
+    assert timelines_cli == env.zenith_cli.list_timelines(initial_tenant)
 
-    timelines_cli_with_tenant_arg = env.zenith_cli.list_timelines(initial_tenant)
-    timelines_cli_with_tenant_arg = [
-        b for b in timelines_cli if b.startswith('test_cli_') or b in ('empty', 'main')
-    ]
-
-    assert timelines_cli == timelines_cli_with_tenant_arg
+    cli_timeline_ids = sorted([timeline_id for (_, timeline_id) in timelines_cli])
+    assert timelines_api == cli_timeline_ids
 
 
 def test_cli_timeline_list(zenith_simple_env: ZenithEnv):
@@ -45,7 +43,7 @@ def test_cli_timeline_list(zenith_simple_env: ZenithEnv):
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI
-    timelines_cli = env.zenith_cli.list_timelines()
+    timelines_cli = [timeline_id for (_, timeline_id) in env.zenith_cli.list_timelines()]
 
     assert main_timeline_id.hex in timelines_cli
     assert nested_timeline_id.hex in timelines_cli

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 lazy_static! {
     static ref TENANTS: Mutex<HashMap<ZTenantId, Tenant>> = Mutex::new(HashMap::new());
@@ -179,9 +179,10 @@ pub fn shutdown_all_tenants() {
 
 pub fn create_repository_for_tenant(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
+    new_tenant_id: Option<ZTenantId>,
     initial_timeline_id: Option<ZTimelineId>,
-) -> Result<ZTimelineId> {
+) -> Result<ZTenantTimelineId> {
+    let tenant_id = new_tenant_id.unwrap_or_else(ZTenantId::generate);
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
     let (initial_timeline_id, repo) =
         timelines::create_repo(conf, tenant_id, initial_timeline_id, wal_redo_manager)?;
@@ -196,7 +197,7 @@ pub fn create_repository_for_tenant(
         }
     }
 
-    Ok(initial_timeline_id)
+    Ok(ZTenantTimelineId::new(tenant_id, initial_timeline_id))
 }
 
 pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {

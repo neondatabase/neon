@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
+use zenith_utils::zid::ZTenantTimelineId;
 use zenith_utils::zid::ZTimelineId;
 use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId};
 
@@ -60,8 +61,7 @@ pub struct LocalEnv {
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    /// Every tenant has a first timeline created for it, currently the only one ancestor-less for this tenant.
-    /// It is used as a default timeline for branching, if no ancestor timeline is specified.
+    /// Keep human-readable aliases in memory (and persist them to config), to hind ZId hex strings from the user.
     #[serde(default)]
     // A `HashMap<String, HashMap<ZTenantId, ZTimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
@@ -158,11 +158,31 @@ impl LocalEnv {
         branch_name: String,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-    ) {
-        self.branch_name_mappings
-            .entry(branch_name)
-            .or_default()
-            .push((tenant_id, timeline_id));
+    ) -> anyhow::Result<()> {
+        let existing_values = self
+            .branch_name_mappings
+            .entry(branch_name.clone())
+            .or_default();
+
+        let existing_ids = existing_values
+            .iter()
+            .find(|(existing_tenant_id, _)| existing_tenant_id == &tenant_id);
+
+        if let Some((_, old_timeline_id)) = existing_ids {
+            if old_timeline_id == &timeline_id {
+                Ok(())
+            } else {
+                bail!(
+                    "branch '{}' is already mapped to timeline {}, cannot map to another timeline {}",
+                    branch_name,
+                    old_timeline_id,
+                    timeline_id
+                );
+            }
+        } else {
+            existing_values.push((tenant_id, timeline_id));
+            Ok(())
+        }
     }
 
     pub fn get_branch_timeline_id(
@@ -175,6 +195,18 @@ impl LocalEnv {
             .iter()
             .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
             .map(|&(_, timeline_id)| timeline_id)
+    }
+
+    pub fn timeline_name_mappings(&self) -> HashMap<ZTenantTimelineId, String> {
+        self.branch_name_mappings
+            .iter()
+            .map(|(name, tenant_timelines)| {
+                tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
+                    (ZTenantTimelineId::new(tenant_id, timeline_id), name.clone())
+                })
+            })
+            .flatten()
+            .collect()
     }
 
     /// Create a LocalEnv from a config file.
