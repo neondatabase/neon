@@ -265,11 +265,15 @@ impl PageServerHandler {
         &self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline_ids: Vec<TimelineId>,
     ) -> anyhow::Result<()> {
+        let dummy_timeline_id = *timeline_ids
+            .get(0)
+            .ok_or_else(|| anyhow::anyhow!("List of timeline ids must not be empty"))?;
+
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
+        task_mgr::associate_with(Some(tenant_id), Some(dummy_timeline_id));
 
         // Make request tracer if needed
         let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
@@ -284,13 +288,17 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timelines = timeline_ids
+            .into_iter()
+            .map(|tlid| get_local_timeline(tenant_id, tlid))
+            .collect::<Result<Vec<_>, _>>()
+            .context("Cannot load local timeline")?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
         pgb.flush().await?;
 
-        let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
+        let metrics = PageRequestMetrics::new(&tenant_id, &dummy_timeline_id);
 
         loop {
             let msg = tokio::select! {
@@ -325,19 +333,19 @@ impl PageServerHandler {
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(&timeline, &req).await
+                    self.handle_get_rel_exists_request(&timelines[req.region as usize], &req).await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(&timeline, &req).await
+                    self.handle_get_nblocks_request(&timelines[req.region as usize], &req).await
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(&timeline, &req).await
+                    self.handle_get_page_at_lsn_request(&timelines[req.region as usize], &req).await
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(&timeline, &req).await
+                    self.handle_db_size_request(&timelines[0], &req).await
                 }
             };
 
@@ -718,8 +726,25 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            self.handle_pagerequests(pgb, tenant_id, timeline_id)
-                .await?;
+            self.handle_pagerequests(pgb, tenant_id, vec![timeline_id]).await?;
+        } else if query_string.starts_with("multipagestream ") {
+            // multipagestream <tenant id as hex string> <timelineid>,<timelineid>,...
+            let (_, params_raw) = query_string.split_at("multipagestream ".len());
+            let params: Vec<_> = params_raw.split(' ').collect();
+            ensure!(
+                params.len() == 2,
+                "invalid param number for multipagestream command"
+            );
+
+            let tenant_id = TenantId::from_str(params[0])?;
+            self.check_permission(Some(tenant_id))?;
+
+            let timeline_ids = params[1]
+                .split(',')
+                .map(TimelineId::from_str)
+                .collect::<Result<_, _>>()?;
+
+            self.handle_pagerequests(pgb, tenant_id, timeline_ids).await?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
