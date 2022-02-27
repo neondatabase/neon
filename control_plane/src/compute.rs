@@ -81,8 +81,26 @@ impl ComputeControlPlane {
         lsn: Option<Lsn>,
         port: Option<u16>,
         pg_version: u32,
+        region_timeline_ids: Option<Vec<TimelineId>>,
     ) -> Result<Arc<PostgresNode>> {
         let port = port.unwrap_or_else(|| self.get_port());
+        let multi_region = region_timeline_ids
+            .map(|timeline_ids| -> Result<_> {
+                let current_region = timeline_ids
+                    .iter()
+                    .position(|&id| id == timeline_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Found no timeline id '{}' in the list of region timeline ids",
+                            timeline_id
+                        )
+                    })?;
+                Ok(MultiRegion {
+                    timeline_ids,
+                    current_region,
+                })
+            })
+            .transpose()?;
         let node = Arc::new(PostgresNode {
             name: name.to_owned(),
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
@@ -94,6 +112,7 @@ impl ComputeControlPlane {
             tenant_id,
             uses_wal_proposer: false,
             pg_version,
+            multi_region,
         });
 
         node.create_pgdata()?;
@@ -109,6 +128,12 @@ impl ComputeControlPlane {
 ///////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug)]
+struct MultiRegion {
+    timeline_ids: Vec<TimelineId>,
+    current_region: usize,
+}
+
+#[derive(Debug)]
 pub struct PostgresNode {
     pub address: SocketAddr,
     name: String,
@@ -120,6 +145,7 @@ pub struct PostgresNode {
     pub tenant_id: TenantId,
     uses_wal_proposer: bool,
     pg_version: u32,
+    multi_region: Option<MultiRegion>,
 }
 
 impl PostgresNode {
@@ -152,6 +178,8 @@ impl PostgresNode {
         let port: u16 = conf.parse_field("port", &context)?;
         let timeline_id: TimelineId = conf.parse_field("neon.timeline_id", &context)?;
         let tenant_id: TenantId = conf.parse_field("neon.tenant_id", &context)?;
+        let region_timelines = conf.parse_field("neon.region_timelines", &context);
+        let current_region = conf.parse_field("current_region", &context);
         let uses_wal_proposer = conf.get("neon.safekeepers").is_some();
 
         // Read postgres version from PG_VERSION file to determine which postgres version binary to use.
@@ -166,6 +194,22 @@ impl PostgresNode {
         let recovery_target_lsn: Option<Lsn> =
             conf.parse_field_optional("recovery_target_lsn", &context)?;
 
+        let multi_region = current_region
+            .and_then(|current_region| {
+                region_timelines.and_then(|timelines: String| {
+                    Ok(MultiRegion {
+                        current_region,
+                        timeline_ids: timelines
+                            .split(',')
+                            .map(|s| -> Result<_> {
+                                TimelineId::from_str(s).map_err(anyhow::Error::from)
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    })
+                })
+            })
+            .ok();
+
         // ok now
         Ok(PostgresNode {
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
@@ -178,6 +222,7 @@ impl PostgresNode {
             tenant_id,
             uses_wal_proposer,
             pg_version,
+            multi_region,
         })
     }
 
@@ -371,6 +416,17 @@ impl PostgresNode {
             // This isn't really a supported configuration, but can be useful for
             // testing.
             conf.append("synchronous_standby_names", "pageserver");
+        }
+
+        if let Some(multi_region) = &self.multi_region {
+            let region_timelines = multi_region
+                .timeline_ids
+                .iter()
+                .map(TimelineId::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            conf.append("neon.region_timelines", &region_timelines);
+            conf.append("current_region", &multi_region.current_region.to_string());
         }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
