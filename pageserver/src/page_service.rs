@@ -66,6 +66,7 @@ struct PagestreamExistsRequest {
     latest: bool,
     lsn: Lsn,
     rel: RelTag,
+    region: u32,
 }
 
 #[derive(Debug)]
@@ -73,6 +74,7 @@ struct PagestreamNblocksRequest {
     latest: bool,
     lsn: Lsn,
     rel: RelTag,
+    region: u32,
 }
 
 #[derive(Debug)]
@@ -81,6 +83,7 @@ struct PagestreamGetPageRequest {
     lsn: Lsn,
     rel: RelTag,
     blkno: u32,
+    region: u32,
 }
 
 #[derive(Debug)]
@@ -134,6 +137,7 @@ impl PagestreamFeMessage {
                     relnode: body.get_u32(),
                     forknum: body.get_u8(),
                 },
+                region: body.get_u32(),
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
                 latest: body.get_u8() != 0,
@@ -144,6 +148,7 @@ impl PagestreamFeMessage {
                     relnode: body.get_u32(),
                     forknum: body.get_u8(),
                 },
+                region: body.get_u32(),
             })),
             2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
                 latest: body.get_u8() != 0,
@@ -155,6 +160,7 @@ impl PagestreamFeMessage {
                     forknum: body.get_u8(),
                 },
                 blkno: body.get_u32(),
+                region: body.get_u32(),
             })),
             3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
                 latest: body.get_u8() != 0,
@@ -438,9 +444,13 @@ impl PageServerHandler {
     fn handle_pagerequests(
         &self,
         pgb: &mut PostgresBackend,
-        timeline_id: ZTimelineId,
+        timeline_ids: Vec<ZTimelineId>,
         tenant_id: ZTenantId,
     ) -> anyhow::Result<()> {
+        let timeline_id = *timeline_ids
+            .get(0)
+            .ok_or_else(|| anyhow::anyhow!("List of timeline ids must not be empty"))?;
+
         let _enter =
             info_span!("pagestream", timeline = %timeline_id, tenant = %tenant_id).entered();
 
@@ -449,7 +459,11 @@ impl PageServerHandler {
         thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timelines = timeline_ids
+            .into_iter()
+            .map(|tlid| get_local_timeline(tenant_id, tlid))
+            .collect::<Result<Vec<_>, _>>()
+            .context("Cannot load local timeline")?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -476,22 +490,32 @@ impl PageServerHandler {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_rel_exists", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_get_rel_exists_request(&timeline, &req)
+                                    self.handle_get_rel_exists_request(
+                                        timelines[req.region as usize].as_ref(),
+                                        &req,
+                                    )
                                 }),
                             PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_rel_size", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_get_nblocks_request(&timeline, &req)
+                                    self.handle_get_nblocks_request(
+                                        &timelines[req.region as usize],
+                                        &req,
+                                    )
                                 }),
                             PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_get_page_at_lsn_request(&timeline, &req)
+                                    self.handle_get_page_at_lsn_request(
+                                        &timelines[req.region as usize],
+                                        &req,
+                                    )
                                 }),
                             PagestreamFeMessage::DbSize(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_db_size", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_db_size_request(&timeline, &req)
+                                    // TODO(ctring): make this region-aware
+                                    self.handle_db_size_request(&timelines[0], &req)
                                 }),
                         };
 
@@ -854,7 +878,25 @@ impl postgres_backend::Handler for PageServerHandler {
 
             self.check_permission(Some(tenantid))?;
 
-            self.handle_pagerequests(pgb, timelineid, tenantid)?;
+            self.handle_pagerequests(pgb, vec![timelineid], tenantid)?;
+        } else if query_string.starts_with("multipagestream ") {
+            // multipagestream <tenant id as hex string> <timelineid>,<timelineid>,...
+            let (_, params_raw) = query_string.split_at("multipagestream ".len());
+            let params: Vec<_> = params_raw.split(' ').collect();
+            ensure!(
+                params.len() == 2,
+                "invalid param number for multipagestream command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            self.check_permission(Some(tenantid))?;
+
+            let timelineids = params[1]
+                .split(',')
+                .map(ZTimelineId::from_str)
+                .collect::<Result<_, _>>()?;
+
+            self.handle_pagerequests(pgb, timelineids, tenantid)?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
