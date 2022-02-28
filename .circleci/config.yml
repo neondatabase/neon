@@ -653,7 +653,7 @@ jobs:
             --user "$CI_ACCESS_TOKEN" \
             --data \
               "{
-                \"ref\": \"main\",
+                \"ref\": \"feature/668-coverage-report\",
                 \"inputs\": {
                   \"ci_job_name\": \"zenith-remote-ci\",
                   \"commit_hash\": \"$CIRCLE_SHA1\",
