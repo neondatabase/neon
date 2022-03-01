@@ -19,7 +19,8 @@ use zenith_utils::http::{
 };
 use zenith_utils::http::{RequestExt, RouterBuilder};
 use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{opt_display_serde, ZTimelineId};
+use zenith_utils::zid::HexZTimelineId;
+use zenith_utils::zid::ZTimelineId;
 
 use super::models::BranchCreateRequest;
 use super::models::StatusResponse;
@@ -198,8 +199,7 @@ enum TimelineInfo {
         timeline_id: ZTimelineId,
         #[serde(with = "hex")]
         tenant_id: ZTenantId,
-        #[serde(with = "opt_display_serde")]
-        ancestor_timeline_id: Option<ZTimelineId>,
+        ancestor_timeline_id: Option<HexZTimelineId>,
         last_record_lsn: Lsn,
         prev_record_lsn: Lsn,
         disk_consistent_lsn: Lsn,
@@ -232,7 +232,9 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             Some(timeline) => TimelineInfo::Local {
                 timeline_id,
                 tenant_id,
-                ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+                ancestor_timeline_id: timeline
+                    .get_ancestor_timeline_id()
+                    .map(HexZTimelineId::from),
                 disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
                 last_record_lsn: timeline.get_last_record_lsn(),
                 prev_record_lsn: timeline.get_prev_record_lsn(),

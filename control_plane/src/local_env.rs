@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{opt_display_serde, ZNodeId, ZTenantId};
+use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId};
 
 use crate::safekeeper::SafekeeperNode;
 
@@ -47,9 +47,8 @@ pub struct LocalEnv {
 
     // Default tenant ID to use with the 'zenith' command line utility, when
     // --tenantid is not explicitly specified.
-    #[serde(with = "opt_display_serde")]
     #[serde(default)]
-    pub default_tenantid: Option<ZTenantId>,
+    pub default_tenantid: Option<HexZTenantId>,
 
     // used to issue tokens during e.g pg start
     #[serde(default)]
@@ -185,7 +184,7 @@ impl LocalEnv {
 
         // If no initial tenant ID was given, generate it.
         if env.default_tenantid.is_none() {
-            env.default_tenantid = Some(ZTenantId::generate());
+            env.default_tenantid = Some(HexZTenantId::from(ZTenantId::generate()));
         }
 
         env.base_data_dir = base_path();
